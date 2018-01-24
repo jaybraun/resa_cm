@@ -1,0 +1,670 @@
+include "ascii.inc"
+include "bbctl.inc"         
+include "bbcode.inc" 
+include "bbdeq.inc"          
+include "bbshc.inc"                  
+include "bbunt.inc"         
+        
+define (err, -3)   # alsp.inc undefines it - who_am_i uses it
+
+define (number_args, 3)
+define (output_unit, 10)
+
+define ($maxweap,300)				# Maximum types of weapons loaded on ships
+define ($maxruns,2)                 # Maximum number of runs(counts at a given time)
+define ($shipsOnHeader,15)			# Number of ships on header line. Atually one more.
+
+define (Weapon$common,
+	integer    Weapon_index
+	integer    Weapon_count
+	vmschar*34 Weapon_name[$maxweap]
+	common /weapon_common/ Weapon_index, weapon_count, weapon_name
+)
+
+define (ship$find,
+	{
+	for (ship_index = 1; ship_index <= ship_count; ship_index = ship_index + 1)
+	{
+		if (ship_name[ship_index] == @1) break
+	}
+	if (ship_index > ship_count)
+	{
+		ship_count = ship_count + 1
+		ship_name[ship_count] = @1
+	}
+	@2 = ship_index
+	}
+)
+
+define (weapon$find,
+	{
+	for (weapon_index = 1; weapon_index <= weapon_count; weapon_index = weapon_index + 1)
+	{
+		if (weapon_name[weapon_index] == @1) break
+	}
+	if (weapon_index > weapon_count)
+	{
+		weapon_count = weapon_count + 1
+		weapon_name[weapon_count] = @1
+	}
+	@2 = weapon_index
+	}
+)
+define (Ship$common,
+	integer    Ship_index
+	integer    Ship_count
+	literal    Ship_name[unt$slots]
+    character  ship_name_c[$$maxlit,unt$slots]
+	equivalence (ship_name, ship_name_c)
+	common /ship_common/ship_index, ship_count, ship_name
+)
+
+define (ShipWeapon$common,
+	integer    run_index, ShipWeapon_count[$maxweap, unt$slots,$maxruns]		# Weapons on board ships at run times
+	integer	   weapon_total[$maxweap]
+    real save1_gm, save2_gm
+	common /shipweapon_common/ run_index, ShipWeapon_count, weapon_total, save1_gm, save2_gm
+
+)
+
+define (ShipWeapon$Increment,
+	{
+	if (shipWeapon_count[weapon_index, ship_index, run_index] < 0) shipWeapon_count[weapon_index, ship_index, run_index] = 0
+	shipWeapon_count[weapon_index, ship_index, run_index] = shipWeapon_count[weapon_index, ship_index, run_index] + @1
+	}
+)
+
+define (BBImplicit, Implicit None)
+
+undefine write   # use the standard fortran write statement
+
+program weaponstate
+#########################################################################
+#$%
+#$% Purpose:    This program is intended to tap into the RESA blackboard
+#$%             to report weapons state for all ships in blue 4
+#$% Calls:      initr4         <rlib.olb>
+#$%             read_arguments
+#$%             ctoi
+#$%             who_am_i
+#$%             bbmap
+#$%             check_version
+#$%             remark
+#$%             exit
+#$%             Init_Collection_File
+#$%             delay
+#$%             Game_DTG
+#$%             smov..
+#$%             echo..
+#$%             write
+#$%             close
+#$%
+#$% Tables:     global variables
+#$%
+#$% Date:       Aug 2015
+#$%
+#$% Author:     James O. Allen
+#$%
+#########################################################################
+BBcommon
+weapon$common
+ship$common
+shipweapon$common
+
+data weapon_total/$maxweap*0/
+
+integer   ctoi        # integer function
+integer   Game_DTG    # integer function
+
+integer          arg_len[number_args], k
+vaxcharacter*80  args[number_args], params
+
+integer   copy_file
+character  msg[ARB]
+VMSCHAR*ARB bbname
+integer   error
+integer   next_cycle, delay_time, next_record_interval
+integer nl
+integer result2
+integer len
+
+integer   msg1_len
+character msg1[80]
+vaxcharacter*80  v_msg1
+Equivalence  (msg1, v_msg1)
+
+integer getarg3
+integer irc, delete_file_version
+ integer NARG,
+         ISTAT, JSTAT,
+         JJ,
+         M                       
+character scenario[20]
+character gm1[20]
+character gm2[20]
+character copyfrom[ARB]
+character copyto[ARB]
+
+ character cfile[20]
+ vaxcharacter*20 v_cfile
+ equivalence (cfile, v_cfile)
+  
+ character xfile[20]
+ vaxcharacter*20 v_Xfile
+ equivalence (xfile, v_xfile)
+ 
+ vaxcharacter*7 bbname_v
+
+call initR4
+
+call help_pgm(2,
+              "pgaweap2: Delta ship weapon state between saves",
+              "pgaweap2 Tags: pga, blackboard, weapons",
+              "Usage: pgaweap2",
+              "scenario",
+              "save 1 game minute",
+              "save 2 game minute",
+              "",
+              "Example: pgaweap2 demo 60 120")
+
+narg = 1 
+istat = getarg3(narg, scenario, 20)		# scenario name
+
+narg = 2 
+istat = getarg3(narg, gm1, 20)		# game minute
+
+narg = 3 
+istat = getarg3(narg, gm2, 20)		# game minute
+
+k = 1
+save1_gm = ctoi(gm1,k)
+k = 1
+save2_gm = ctoi(gm2,k)
+ 
+
+    # copy alsp save file to temporary file
+    len = 0
+    call smovv  ("*", copyfrom, len)
+    call smovhn (scenario, $$MaxLit, copyfrom, len)
+    call smovv  ("_", copyfrom, len)
+    call smovhn (gm1, ARB, copyfrom, len)
+    call smovv  ("h.sve", copyfrom, len)
+    call smov   (EOS, copyfrom, len)
+
+    len = 0
+    call smovv  ("h_0.sve",copyto,len)
+    call smov   (EOS, copyto, len)
+    result2 = copy_file (copyfrom, copyto)
+
+    if (result2 != 0)
+    {
+        # save file not found. ask for another save file
+        jstat = 0
+        call exit
+    } 
+
+bbname_v = "h_0.sve"
+    
+BBmap(bbname_v)
+
+
+
+# Neagtive number means not part of ship inventory
+for (ship_index = 1; ship_index <= unt$slots; ship_index = ship_index + 1)
+{
+	for (weapon_index = 1; weapon_index <= $maxweap; weapon_index = weapon_index + 1)
+	{
+		for (run_index = 1; run_index <= $maxruns; run_index = run_index + 1)
+			shipweapon_count[weapon_index, ship_index, run_index] = -1
+	}
+}
+
+ship_index = 0
+weapon_index = 0
+run_index = 1
+
+call Init_Collection_File
+
+call get_ship_weap_state
+
+    # copy alsp save file to temporary file
+    len = 0
+    call smovv  ("*", copyfrom, len)
+    call smovhn (scenario, $$MaxLit, copyfrom, len)
+    call smovv  ("*", copyfrom, len)
+    call smovhn (gm2, ARB, copyfrom, len)
+    call smovv  ("*h.sve", copyfrom, len)
+    call smov   (EOS, copyfrom, len)
+
+    len = 0
+    call smovv  ("h_0.sve",copyto,len)
+    call smov   (EOS, copyto, len)
+    result2 = copy_file (copyfrom, copyto)
+
+    if (result2 != 0)
+    {
+        # save file not found. ask for another save file
+        jstat = 0
+        call exit
+    } 
+
+run_index = 2
+ 
+call get_ship_weap_state
+
+call write_ship_weap_state
+
+call write_weap_state
+  
+close (output_unit)
+
+end
+
+
+
+
+Subroutine Init_Collection_File
+#########################################################################
+#$%
+#$% Purpose:    Init_Collection_File will open the data collection file
+#$%             and write the scenario information.
+#$%
+#$% Called By:  collect_load_stats
+#$%
+#$% Calls:      smov..
+#$%             open
+#$%             echo..
+#$%             exit
+#$%             write
+#$%
+#$% Tables:     global variables
+#$%
+#$% Date:       Aug 2015
+#$%
+#$% Author:     James O. Allen
+#$%
+#########################################################################
+BBcommon
+
+integer  interval    # interval at which data is to be collected
+integer  Game_DTG    # integer function
+integer  record_interval # Interval at which data is to be recorded 
+integer    name_len
+character  file_name[ARB]
+vmschar*ARB file_name_v
+equivalence (file_name, file_name_v)
+integer    return_val, msg_len
+character  msg[80]
+vaxcharacter*80 v_msg
+
+Equivalence  (msg, v_msg)
+
+name_len = 0
+call smovhn (Scenario$Name, $$MaxLit, file_name, name_len)
+call smovv  ("_shipdeltaweap.dat", file_name, name_len)
+call smov   (EOS, file_name, name_len)
+open (unit   = output_unit,  file   = file_name_v, 
+      iostat = return_val, recl = 200*4,   status = 'unknown')
+if (return_val != 0)
+{
+	call echov ("Output file not opened")
+	call echor
+	call exit
+}
+
+call echov ("Output file is ")
+call echohn (file_name, 30)
+call echor
+
+return
+end
+
+Subroutine get_ship_weap_state
+BBcommon
+weapon$common
+ship$common
+shipweapon$common
+
+literal cstrip8, reportcode2text
+vmschar vstrip*ARB
+BBDeclare (unt$pointer, unt$fullname$v, unt$type$i, shc$pointer, wet$pointer)
+BBDeclare (shc$tnk$index, unt$tnk$index)
+integer Game_dtg
+integer iview
+integer course
+integer msg_len
+integer i, kk
+integer isexp
+integer expendable_code, nfound
+integer kkh, klen, length, itrp
+integer exp_qty[100]
+literal EQCode2Str
+VMSchar*34 exp_name[100]
+character expendables_msg[ARB]
+BBDeclare (deq$remaining$i, deq$ident$i, deq$pointer,
+           tbl$pointer,tbl$FullName$v)
+
+for (UNT$Pointer$First; UNT$Pointer$OK; UNT$Pointer$Next)
+{
+	if (Xunt$Status$i == $BeingDeleted$Code) next
+
+	# Select Blue 3 and 4
+	if (Xunt$View$i != $FirstBlue$View + 2 & Xunt$View$i != $FirstBlue$View + 3) next
+
+	# Select Ships
+	UNT$Type$i = xUNT$Type$i
+	if (UNT$Type$i != $Surface$code & UNT$Type$i != $SurfaceWithAC$code) next
+
+	Ship$find(Xunt$name$c,ship_index)
+
+	expendable_code = $CruiseMissile$Code
+	call get_expendables(unt$pointer, expendable_code, exp_name, exp_qty, nfound)
+	for(i=1; i<=nfound; i=i+1)
+	{
+		Weapon$find(exp_name[i],weapon_index)
+    	ShipWeapon$increment (exp_qty[i])
+	}
+
+	expendable_code = $ASM$Code
+	call get_expendables(unt$pointer, expendable_code, exp_name, exp_qty, nfound)
+	for(i=1; i<=nfound; i=i+1)
+	{
+		Weapon$find(exp_name[i], weapon_index)
+    	ShipWeapon$increment (exp_qty[i])
+	}
+
+	expendable_code = $BOMB$Code
+	call get_expendables(unt$pointer, expendable_code, exp_name, exp_qty, nfound)
+	for(i=1; i<=nfound; i=i+1)
+	{
+		Weapon$find(exp_name[i], weapon_index)
+    	ShipWeapon$increment (exp_qty[i])
+	}
+
+	expendable_code = $AAM$Code
+	call get_expendables(unt$pointer, expendable_code, exp_name, exp_qty, nfound)
+	for(i=1; i<=nfound; i=i+1)
+	{
+		Weapon$find(exp_name[i], weapon_index)
+    	ShipWeapon$increment (exp_qty[i])
+	}
+
+	expendable_code = $SAM$Code
+	call get_expendables(unt$pointer, expendable_code, exp_name, exp_qty, nfound)
+	for(i=1; i<=nfound; i=i+1)
+	{
+		Weapon$find(exp_name[i], weapon_index)
+    	ShipWeapon$increment (exp_qty[i])
+	}
+ 
+	expendable_code = $SmartTorpedo$Code
+	call get_expendables(unt$pointer, expendable_code, exp_name, exp_qty, nfound)
+	for(i=1; i<=nfound; i=i+1)
+	{
+		Weapon$find(exp_name[i], weapon_index)
+    	ShipWeapon$increment (exp_qty[i])
+	}
+
+	expendable_code = $Gun$Code
+	call get_expendables(unt$pointer, expendable_code, exp_name, exp_qty, nfound)
+	for(i=1; i<=nfound; i=i+1)
+	{
+		Weapon$find(exp_name[i], weapon_index)
+    	ShipWeapon$increment (exp_qty[i])
+	}
+
+	expendable_code = $Sonobuoy$Code
+	call get_expendables(unt$pointer, expendable_code, exp_name, exp_qty, nfound)
+	for(i=1; i<=nfound; i=i+1)
+	{
+		Weapon$find(exp_name[i], weapon_index)
+    	ShipWeapon$increment (exp_qty[i])
+	}
+}
+ 
+return
+end
+
+
+Subroutine write_ship_weap_state
+BBcommon
+weapon$common
+ship$common
+shipweapon$common
+character msg[200]
+vaxcharacter*200  v_msg
+Equivalence  (msg, v_msg)
+integer msg_len
+integer   Game_DTG    # integer function
+integer start_ship_index, end_ship_index
+integer run1_index, run2_index, idiff
+
+msg_len = 0
+call smovv ("Blue Weapon Delta between ", msg, msg_len)
+call smoviz(Game_DTG(save1_gm), 6, msg, msg_len)
+call smovv ("Z and ", msg, msg_len)
+call smoviz(Game_DTG(save2_gm), 6, msg, msg_len)
+call smovv ("Z during exercise ", msg, msg_len)
+call smovhn (Scenario$Name, $$MaxLit, msg, msg_len)
+write (output_unit, fmt=*) v_msg[1:msg_len]
+
+# weapon name, unit names(3 letter)
+
+start_ship_index = 1
+run1_index = 1
+run2_index = 2
+
+while (1==1)
+{
+	msg_len = 0
+	call smovv ("  ", msg, msg_len)
+	write (output_unit, fmt=*) v_msg[1:msg_len]
+	write (output_unit, fmt=*) v_msg[1:msg_len]
+	write (output_unit, fmt=*) v_msg[1:msg_len]
+
+	msg_len = 0
+	call smovv ("        Weapon         ", msg, msg_len)
+	call smovv ("            Ship", msg, msg_len)
+	write (output_unit, fmt=*) v_msg[1:msg_len]
+
+	msg_len = 0
+#                         1         2         3         4         5
+#                12345678901234567890123456789012345678901234567890
+	call smovv ("                                  ", msg, msg_len)
+	end_ship_index = min(start_ship_index + $shipsOnHeader, ship_count)
+	for (ship_index = start_ship_index; ship_index <= end_ship_index; ship_index = ship_index + 1)
+	{
+		call smovv ("  ", msg, msg_len)
+		if (ship_name_c[1,ship_index] == $LETN)
+			call smovhn(ship_name_c[2,ship_index], 3, msg, msg_len)
+		else
+			call smovhn(ship_name_c[1,ship_index], 3, msg, msg_len)
+
+	}
+	write (output_unit, fmt=*) v_msg[1:msg_len]
+		
+	msg_len = 0
+#                         1         2         3         4         5
+#                12345678901234567890123456789012345678901234567890
+	call smovv ("----------------------------------", msg, msg_len)
+	call smovv (" ---- ---- ---- ---- ---- ---- ---- ---- ---- ----", msg, msg_len)
+	call smovv (" ---- ---- ---- ---- ---- ----", msg, msg_len)
+	write (output_unit, fmt=*) v_msg[1:msg_len]
+
+	for (weapon_index = 1; weapon_index <= weapon_count; weapon_index = weapon_index + 1)
+	{
+		msg_len = 0
+		call smovv (weapon_name[weapon_index], msg, msg_len)
+		#call smovv (" ", msg, msg_len)
+
+		for (ship_index = start_ship_index; ship_index <= end_ship_index; ship_index = ship_index + 1)
+		{
+			if      (ShipWeapon_count[weapon_index, ship_index,run1_index] < 0 &		# Not part of inventory
+                     ShipWeapon_count[weapon_index, ship_index,run2_index] < 0)
+				call smovv ("     ", msg, msg_len)
+
+			else if (ShipWeapon_count[weapon_index, ship_index,run1_index] < 0 &		# New ship or weapon
+                     ShipWeapon_count[weapon_index, ship_index,run2_index] >= 0)
+				call smovib(ShipWeapon_count[weapon_index, ship_index,run2_index], 5, msg, msg_len)	
+
+			else if (ShipWeapon_count[weapon_index, ship_index,run1_index] >= 0 &		# Deleted ship
+                     ShipWeapon_count[weapon_index, ship_index,run2_index] < 0)
+				call smovib(-ShipWeapon_count[weapon_index, ship_index,run1_index], 5, msg, msg_len)
+						
+			else 																		# Update
+			{
+				idiff = ShipWeapon_count[weapon_index, ship_index,run2_index] -_
+                        ShipWeapon_count[weapon_index, ship_index,run1_index]
+				if (idiff == 0)
+					call smovv ("     ", msg, msg_len)
+				else				
+					call smovib(idiff, 5, msg, msg_len)
+			}
+		}
+		write (output_unit, fmt=*) v_msg[1:msg_len]
+	}
+	start_ship_index = start_ship_index + $shipsOnHeader + 1
+	if (start_ship_index > ship_count) break
+}
+
+return
+end
+
+
+Subroutine write_weap_state
+BBcommon
+weapon$common
+ship$common
+shipweapon$common
+character msg[200]
+vaxcharacter*200  v_msg
+Equivalence  (msg, v_msg)
+integer msg_len
+integer   Game_DTG    # integer function
+integer start_ship_index, end_ship_index
+integer run1_index, run2_index, idiff
+
+run1_index = 1
+run2_index = 2
+
+msg_len = 0
+call smovv ("     ", msg, msg_len)
+write (output_unit, fmt=*) v_msg[1:msg_len]
+
+msg_len = 0
+call smovv ("Blue Weapon Delta between ", msg, msg_len)
+call smoviz(Game_DTG(save1_gm), 6, msg, msg_len)
+call smovv ("Z and ", msg, msg_len)
+call smoviz(Game_DTG(save2_gm), 6, msg, msg_len)
+call smovv ("Z during exercise ", msg, msg_len)
+call smovhn (Scenario$Name, $$MaxLit, msg, msg_len)
+write (output_unit, fmt=*) v_msg[1:msg_len]
+
+# weapon name
+
+	msg_len = 0
+	call smovv ("  ", msg, msg_len)
+	write (output_unit, fmt=*) v_msg[1:msg_len]
+	write (output_unit, fmt=*) v_msg[1:msg_len]
+	write (output_unit, fmt=*) v_msg[1:msg_len]
+
+	msg_len = 0
+	call smovv ("        Weapon         ", msg, msg_len)
+	call smovv ("            Delta", msg, msg_len)
+	write (output_unit, fmt=*) v_msg[1:msg_len]
+		
+	msg_len = 0
+#                         1         2         3         4         5
+#                12345678901234567890123456789012345678901234567890
+	call smovv ("----------------------------------", msg, msg_len)
+	call smovv (" -----", msg, msg_len)
+	write (output_unit, fmt=*) v_msg[1:msg_len]
+
+	for (weapon_index = 1; weapon_index <= weapon_count; weapon_index = weapon_index + 1)
+	{
+
+		for (ship_index = 1; ship_index <= ship_count; ship_index = ship_index + 1)
+		{
+			if      (ShipWeapon_count[weapon_index, ship_index,run1_index] < 0 &		# Not part of inventory
+                     ShipWeapon_count[weapon_index, ship_index,run2_index] < 0) next
+
+			else if (ShipWeapon_count[weapon_index, ship_index,run1_index] < 0 &		# New ship or weapon
+                     ShipWeapon_count[weapon_index, ship_index,run2_index] >= 0)
+				weapon_total[weapon_index] = weapon_total[weapon_index] + 
+											ShipWeapon_count[weapon_index, ship_index,run2_index]
+
+			else if (ShipWeapon_count[weapon_index, ship_index,run1_index] >= 0 &		# Deleted ship
+                     ShipWeapon_count[weapon_index, ship_index,run2_index] < 0)
+				weapon_total[weapon_index] = weapon_total[weapon_index] -_ 
+											ShipWeapon_count[weapon_index, ship_index,run1_index]
+						
+			else 																		# Update
+			{
+				idiff = ShipWeapon_count[weapon_index, ship_index,run2_index] -_
+                        ShipWeapon_count[weapon_index, ship_index,run1_index]
+				weapon_total[weapon_index] = weapon_total[weapon_index] + idiff
+			}
+		}
+		msg_len = 0
+		call smovv (weapon_name[weapon_index], msg, msg_len)
+		call smovv (" ", msg, msg_len)
+		call smovib(Weapon_total[weapon_index], 5, msg, msg_len)	
+		write (output_unit, fmt=*) v_msg[1:msg_len]
+	}
+
+
+return
+end
+
+
+# Copied from wssitrep.rat
+subroutine  get_expendables(unt$pointer, expendable_code, exp_name, exp_qty, nfound)
+###########################################################################
+#$%
+#$% Purpose:
+#$%
+#$% Called By:
+#$%
+#$% Calls:     none
+#$%
+#$% Tables:
+#$%
+#$% Date       October 1996
+#$%
+#$% Author:    Alex Vagus
+#$%
+###########################################################################
+BBcommon
+ 
+integer unt$pointer, expendable_code
+VMSchar*(*) exp_name[100]
+integer     exp_qty[100]
+integer     nfound
+BBDeclare  (DEQ$Pointer,
+            TBL$Pointer, TBL$Name$V, TBL$FullName$V)
+VMSchar     VSTRIP*ARB
+ 
+nfound = 0
+FOR_DEQ_CHAIN
+    {
+    if (expendable_code != xDEQ$ident$i) next
+ 
+    nfound = nfound + 1
+    exp_qty [nfound] = xDEQ$Remaining$i
+ 
+    tbl$pointer = xDEQ$pntr$i
+ 
+    TBL$Name$V = xTBL$Name$V
+    TBL$FullName$V = xTBL$FullName$V
+    Exp_name[nfound] = TBL$Name$V
+ 
+    if (TBL$FullName$V > " ")
+        Exp_name[nfound] = TBL$Name$V // "-" // TBL$FullName$V
+ 
+    } #end for loop
+ 
+return
+end
+
+
+

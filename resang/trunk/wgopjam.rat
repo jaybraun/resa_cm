@@ -1,0 +1,621 @@
+####    WGOPJAM Package
+####
+####    Entry Point into this Package: OJAM
+####
+####    Package Call Tree:
+####
+
+####    Record of Modifications:
+####
+####        Programmer          Date        Modification
+####
+####        trs    2/15/91    modified sui$ch$frequency$i to sui$ch$frequency$f
+####
+####        G. G. Gustafson     4/19/88     Reordered INCLUDE statements into
+####                                        alphabetical order (excepting
+####                                        BBCODE and BBCTL).
+####
+####                                        Replaced the three subprograms
+####
+####                                            AIRJAM
+####                                            SHRJAM
+####                                            SHPJAM
+####
+####                                        with the single subprogram
+####                                        RESET_RADAR_JAMMER.  The original
+####                                        three subprograms accessed the
+####                                        DYN table through the aliases
+####                                        ACD, SB, and SHD.  The new sub-
+####                                        program accesses the DEQ table
+####                                        directly.
+####
+ 
+
+INCLUDE "bbctl.inc"
+INCLUDE "bbcode.inc"
+INCLUDE "ascii.inc"
+INCLUDE "bbcjc.inc"
+INCLUDE "bbdeq.inc"
+INCLUDE "bbjam.inc"
+include "bbjew.inc"                           # jecewsi - JFR 8/31/94
+INCLUDE "bbrad.inc"
+INCLUDE "bbsui.inc"
+INCLUDE "bbunt.inc"
+INCLUDE "orders.inc"
+INCLUDE "wgmdcomjam.inc"
+ 
+DEFINE ( BBImplicit, IMPLICIT NONE )
+
+SUBROUTINE ojam ( order_number,
+                  UNT$Pointer,
+                  argument_count,
+                  arguments )
+ 
+BBcommon
+ 
+INTEGER*4    argument_count                 # INPUT  - passed argument count
+INTEGER*2    argument_index                 # LOCAL  - argument being processed
+LITERAL      arguments [ argument_count ]   # INPUT  - PARSER arguments passed
+LITERAL      CSTRIP, CSTRIP8
+EXTERNAL     CSTRIP, CSTRIP8
+INTEGER*4    DEQ$Pointer
+LOGICAL*1    frequency_found                # LOCAL  - last test for success
+LOGICAL*1    jammer_found                   # LOCAL  - second test for success
+INTEGER*4    is_task_address
+EXTERNAL     is_task_address
+INTEGER*4    istat
+LOGICAL*1    message_sent                   # LOCAL  - allows only one message
+INTEGER*4    new_on_off_setting             # LOCAL  - set to $ON or $OFF
+#STRING       no_jamming_capability "xxxxx does not have jamming capabilities against xxxxx"
+#STRING       nonexistant_victim "xxxxx cannot jam nonexistant xxxxx"
+Character msg[ARB]
+INTEGER*4   order_number                   # INPUT  - order being processed
+INTEGER*4   RAD$CH$Index
+INTEGER*4   RAD$Pointer
+EXTERNAL    reset_comms_jammers            # EXTERNAL
+EXTERNAL    reset_radar_jammers            # EXTERNAL
+EXTERNAL    return_indices                 # EXTERNAL
+INTEGER*4   offset                         # LOCAL  - used with SMOVH
+INTEGER*4   SUI$Pointer
+INTEGER*4   SUI$CH$index                   #                        4/24/89
+integer*4   SUI$DeviceType$I
+logical*1   suite_freq_jammed
+INTEGER*2   UNT_index                      # LOCAL  - forced conversion
+INTEGER*4   UNT$Pointer
+LOGICAL*1   victim_found                   # LOCAL  - first test for success
+#integer*1    First_device
+BYTE        First_device         # jb (after 6/24/89 batch job complained
+INTEGER*4   UNT$View$I
+                                        # Begin executable code
+ 
+# if we are playing a jecewsi game then return since jam command illegal
+if (jecewsi$game == $yes) # JFR 8/10/94
+   {
+    UNT$View$I = xUNT$View$I
+    offset = 0
+    call smovv ("JAM/CEASE JAM COMMANDS ONLY VALID ", msg, offset)
+    call smovv ("DURING NON-JECEWSI GAME.", msg, offset)
+    call send_  (UNT$View$I, 0, offset, msg)
+    offset = 0
+    call smovv ("     USE ACTIVATE/SILENCE JAMMER COMMAND.<<", msg, offset)
+    call send_  (UNT$View$I, 0, offset, msg)
+    return
+   }
+ 
+IF ( arguments [ 1 ] == $lex$jam$ )
+    {
+    new_on_off_setting = $ON            # reset to JAM
+    First_Device = 2
+    }
+ELSE
+    {
+    new_on_off_setting = $OFF           # default to CEASE
+ 
+    if ( argument_Count > 1 & arguments[2] == $lex$jamming$ )
+        First_Device = 3
+    else
+        First_Device = 2
+    }
+ 
+IF ( ( argument_count < First_Device ) &
+     ( new_on_off_setting == $OFF ) )
+    {                                   # CEASE all Radar and Comms jamming
+    FOR_DEQ_CHAIN
+    	{
+        IF ( ( xDEQ$Ident$I == $jammer$code ) |
+             ( xDEQ$Ident$I == $CommunicationJammer$Code ) )
+            {
+            putDEQ$AllBands$I ( $OFF )
+            putDEQ$On$I ( $OFF )
+            }
+        }
+    }
+ELSE
+    {
+    message_sent = .FALSE.
+    FOR ( argument_index = First_Device;
+          argument_index <= argument_count & ! message_sent;
+          argument_index = argument_index+1 )
+        {
+ 
+        #$% allow processing multiple freqs per device   9/20/89
+        frequency_found = .FALSE.
+        jammer_found = .FALSE.
+        victim_found = .FALSE.
+ 
+                                        # First find jammable radars
+ 
+        FOR ( RAD$Pointer$First;
+              RAD$Pointer$Ok & ! victim_found;
+              RAD$Pointer$Next )
+            {
+            victim_found = ( arguments [ argument_index ] == xRAD$Type$C )
+            IF ( victim_found )
+                {
+                ## Loop thru channels. Jammer may have multiple freqs active. 5/89
+                FOR( RAD$CH$Index = 1;
+                     RAD$CH$Index$OK;
+                     RAD$CH$Index = RAD$CH$Index + 1)  # reh 5/89
+                    {
+                    if ( EMI$Analysis != $no )
+                        {
+                        #$% if user is trying to jam a non-BEES channel
+                        if (xRAD$CH$Sensitivity$i == 0 |
+                            xRAD$CH$ModulationCode$i == 0 )
+                            {
+                            next
+                            }
+                        }
+ 
+                    # 4/89 passes UNT$Pointer
+                    CALL reset_radar_jammers (_
+                                          UNT$Pointer,
+                                          xRAD$CH$Frequency$F, ## $I->$F reh
+                                          new_on_off_setting,
+                                          frequency_found,
+                                          jammer_found )
+                    }
+                }
+            }
+ 
+                                        # Next find jammable comm suites
+ 
+        FOR ( SUI$Pointer$First;
+              SUI$Pointer$Ok & ! victim_found;
+              SUI$Pointer$Next )
+            {
+            victim_found = ( arguments [ argument_index ] == xSUI$Name$C )
+            IF ( victim_found )
+                {
+                UNT_index = UNT$Pointer$Index
+ 
+#                IF ( xSUI$FrequencyHopper$I == $YES ), out 4/91
+                SUI$DeviceType$I = xSUI$DeviceType$I
+ 
+                IF ( SUI$DeviceType$I == $FrequencyHopper ) # 4/91
+                    {
+                    SUI$CH$Index = 0
+                    CALL reset_comms_jammers (_
+                                         UNT_index,
+                                         SUI$Pointer, # previously passed freq, reh
+                                         SUI$CH$Index,# new param, 4/19, reh
+                                         new_on_off_setting,
+                                         frequency_found,
+                                         jammer_found )
+ 
+                    } # end if a frequency hopper
+                ELSE IF ( SUI$DeviceType$I == $FixedMode ) # 4/91
+                    {
+                    ## Loop thru channels. CommJammer may have multiple freqs active. 5/89
+                    FOR( SUI$CH$Index = 1;
+                         SUI$CH$Index$OK;
+                         SUI$CH$Index = SUI$CH$Index + 1)  # reh 5/89
+                        {
+                        if ( EMI$Analysis != $no )
+                            {
+                            #$% if user is trying to jam a non-BEES channel
+                            if (xSUI$CH$Sensitivity$i == 0 |
+                                xSUI$CH$ModulationCode$i == 0 )
+                                {
+                                next
+                                }
+                            }
+ 
+                        suite_freq_jammed = .false.
+ 
+                        CALL reset_comms_jammers (_
+                                         UNT_index,
+                                         SUI$Pointer, # previously passed freq, reh
+                                         SUI$CH$Index,# new param, 4/19, reh
+                                         new_on_off_setting,
+                                         suite_freq_jammed,
+                                         jammer_found )
+ 
+                        #$% if any commsuite channel is jammed
+                        if ( suite_freq_jammed )
+                            {
+                            frequency_found = .true.
+                            }
+                        }
+                    } # end else if device to be jammed is a fixed mode type
+                } # End IF Victim_Found
+            } # End FOR Sui$Pointer...
+ 
+                                        # Wrapup processing for argument
+ 
+        IF ( ( Is_Task_Address ( istat ) == $YES ) | frequency_found )
+            {
+            CONTINUE
+            }
+        ELSE IF ( ! victim_found )          # nonexistant victim
+            {
+            offset = 0
+            CALL SMOVHN( xUNT$Name$C, $$MaxLit, msg, offset )
+            CALL SMOVV(" cannot jam nonexistent ",msg,offset)
+            CALL SMOVHN( arguments [ argument_index ],$$MaxLit, msg, offset )
+            call send_ ( xUNT$View$I, 0, offset, msg)
+            }
+        ELSE IF ( ! jammer_found )          # no jammers on unit
+            {
+            message_sent = .TRUE.           # send message only once
+            offset = 0
+            CALL SMOVHN(xUNT$Name$C,$$MaxLit,msg,offset )
+            CALL SMOVV(" does not have jamming capabilities ",msg,offset)
+            call send_ ( xUNT$View$I, 0, offset, msg )
+            }
+        ELSE IF ( order_number == JAM$order ) # no cabability on frequency
+            {
+            offset = 0
+            CALL SMOVHN( xUNT$Name$C, $$MaxLit, msg, offset )
+            CALL SMOVV(" does not have jamming capabilities against ",msg,offset)
+            CALL SMOVHN( arguments [ argument_index ], $$MaxLit, msg,offset )
+            call send_ ( xUNT$View$I, 0, offset, msg)
+            }
+        } # End FOR Arguments...
+    } # END ELSE (not CEASE ALL JAMMING)
+END
+
+###    Name: RESET_RADAR_JAMMER
+###
+###    Usage:
+###
+###        CALL reset_radar_jammers ( UNT$Pointer,
+###                                   frequency,
+###                                   new_on_off_setting,
+###                                   frequency_found,
+###                                   jammer_found )
+###
+###    Purpose:
+###
+###        Sets the appropriate DEQ$EM$Band to the value passed in
+###        NEW_ON_OFF_SETTING.  Upon completion, tests whether any of
+###        the DEQ$EM$Band bits are set and if so sets DEQ$On to
+###        on; otherwise sets DEQ$On to off.
+###
+###    Arguments:
+###
+###        Input:
+###
+###            UNT$POINTER -           INTEGER*4 value which points to the
+###                                    UNT Table entry of interest.
+###
+###            FREQUENCY -             INTEGER*4 value which is the frequency
+###                                    which is to be set or reset.
+###
+###            NEW_ON_OFF_SETTING -    INTEGER*4 value containing either ON or
+###                                    OFF, to which the equipment is to be set.
+###
+###        Input/Output:
+###
+###        Output:
+###
+###            FREQUENCY_FOUND -       LOGICAL*1 variable which is to receive
+###                                    the status of the search for the given
+###                                    FREQUENCY.  Returns TRUE if the
+###                                    FREQUENCY was found; otherwise, returns
+###                                    FALSE.
+###
+###            JAMMER_FOUND -          LOGICAL*1 variable which is to receive
+###                                    the status of the search for a radar
+###                                    jammer.  Returns TRUE if a radar jammer
+###                                    was found; otherwise, returns FALSE.
+###
+###        Function Result: None.
+###
+###        COMMON:
+###
+###            Name            Source                   Use
+###
+###            BBoard          BBCommon                 Input
+###
+###    Limitations: None.
+###
+###    Warnings: None.
+###
+###    Notes: None.
+###
+###    Author:
+###
+###        G. G. Gustafson
+###        Computer Sciences Corporation
+###        4045 Hancock Street
+###        San Diego CA 92110
+###
+###        (619) 225-8401
+###
+###    Customer:
+###
+###        Naval Ocean Systems Center
+###        Code 413
+###        San Diego CA 92152-5000
+###
+###        (619) 553-3972
+###
+###    Subprograms Required: None.
+###
+###    Tables Required:
+###
+###        CTL
+###        CODE
+###        DEQ
+###        JAM
+###
+###    Algorithm: Linear searches through DEQ and JAM Tables. # 4/89
+###    modified for DEQ.
+###
+###    Date Developed: April 19, 1988.
+###
+###    Record of Modifications:
+###
+###        Programmer          Date        Modification
+###
+###    Waivers: None.
+
+SUBROUTINE reset_radar_jammers ( UNT$Pointer,
+                                 rad_frequency,
+                                 new_on_off_setting,
+                                 frequency_found,
+                                 jammer_found )
+ 
+BBcommon
+ 
+INTEGER*4    DEQ$EM$Index
+INTEGER*4    UNT$Pointer            # 4/89 reh
+INTEGER*4    DEQ$Pointer            # 4/89 reh
+INTEGER*4    DEQ$Ident$I
+REAL*4       rad_frequency          # 3/91 reh, was integer
+LOGICAL*1    frequency_found
+Real*4       High_Freq
+Real*4       Low_Freq
+INTEGER*4    JAM$Pointer
+INTEGER*4    JAM$FQ$Index
+INTEGER*4    JAM$FQ$CenterFreq$I
+INTEGER*4    JAM$FQ$BandWidth$I  # JFR 11/23/94
+LOGICAL*1    jammer_found
+INTEGER*4    new_on_off_setting
+ 
+jammer_found = .FALSE.
+# frequency_found = .FALSE.                # reh 9/20/89
+FOR_DEQ_CHAIN
+    {
+    DEQ$Ident$I = xDEQ$Ident$I
+    IF (DEQ$Ident$I == $jammer$code       |
+        DEQ$Ident$I == $RadComjammer$code |  # JFR 8/8/94
+        DEQ$Ident$I == $Radarjammer$code  )  # JECEWSI ALSP Interface
+        {
+        jammer_found = .TRUE.
+        JAM$Pointer = xDEQ$Pntr$I
+        FOR ( JAM$FQ$Index = 1;
+              JAM$FQ$Index <= JAM$FQ$Slots; # reh 10/29/80 & ! frequency_found;
+              JAM$FQ$Index = JAM$FQ$Index + 1 )
+            {
+            #$% allow for frequency separation between jammer and
+            #$% radar (is radar inside jammer bandwidth) - JFR 8/8/94 (jecewsi)
+            JAM$FQ$CenterFreq$I = xJAM$FQ$CenterFreq$I
+            JAM$FQ$BandWidth$I = xJAM$FQ$BandWidth$I
+ 
+            High_Freq = JAM$FQ$CenterFreq$I + JAM$FQ$BandWidth$I
+            Low_Freq  = JAM$FQ$CenterFreq$I - JAM$FQ$BandWidth$I
+ 
+            #$% if radar freq within jammer freq +- a percentage
+            #$% jam using 2nd harmonic of jammer, added 8/91.reh
+            IF ( (rad_frequency <= High_Freq & rad_frequency >= Low_Freq) |
+                 (rad_frequency <= High_Freq*2 & rad_frequency >= Low_Freq*2) )
+               {
+                frequency_found = .TRUE.
+                DEQ$EM$Index = JAM$FQ$Index
+                putDEQ$EM$Band$I ( new_on_off_setting )
+               }
+            }
+ 
+        putDEQ$On$I ( $ON )
+        IF ( xDEQ$AllBands$I == 0 )
+            {
+            putDEQ$On$I ( $OFF )
+            }
+        }
+    }
+END
+
+###    Name: RESET_COMMS_JAMMERS
+###
+###    Usage:
+###
+###    Purpose:
+###
+###    Arguments:
+###
+###        Input:
+###
+###        Input/Output:
+###
+###        Output:
+###
+###        Function Result:
+###
+###        COMMON:
+###
+###            Name            Source                   Use
+###
+###            BBoard          BBCommon                 Input
+###            IJF$$           $$IJF$$                  Output
+###            IJU$$           $$IJU$$                  Output
+###            JCT$$           $$JCT$$                  Output
+###            JFQ$$           $$JFQ$$                  Output
+###            JUN$$           $$JUN$$                  Output
+###
+###    Limitations:
+###
+###    Warnings:
+###
+###    Notes:
+###
+###    Author:
+###
+###        G. G. Gustafson
+###        Computer Sciences Corporation
+###        4045 Hancock Street
+###        San Diego CA 92110
+###
+###        (619) 225-8401
+###
+###    Customer:
+###
+###        Naval Ocean Systems Center
+###        Code 413
+###        San Diego CA 92152-5000
+###
+###        (619) 553-3972
+###
+###    Subprograms Required:
+###
+###    Tables Required:
+###
+###    Algorithm:
+###
+###    Date Developed:
+###
+###    Record of Modifications:
+###
+###        Programmer          Date        Modification
+###
+###    Waivers:
+
+SUBROUTINE reset_comms_jammers ( UNT_index,
+                                 SUI$Pointer,
+                                 SUI$CH$Index,
+                                 new_on_off_setting,
+                                 jammer_freq_found,
+                                 jammer_found)
+ 
+BBCommon
+ 
+INTEGER*2   UNT_index
+integer*4   SUI$Pointer
+integer*4   SUI$CH$Index
+INTEGER*4   new_on_off_setting
+logical*1   jammer_freq_found
+LOGICAL*1   jammer_found
+ 
+$$IJU$$
+#$$JFQ_JUN_TYPE
+$$JCT$$
+$$JUN$$
+ 
+INTEGER*4   DEQ$EM$Index
+INTEGER*4   DEQ$Pointer
+Real*4      Comms_frequency          # was integer, reh 3/91
+LOGICAL*1   frequency_found
+Real*4      High_Freq
+INTEGER*4   I_jam_freq
+INTEGER*4   I_jam_bdwth    # jecewsi - JFR 8/31/94
+INTEGER*2   jct_index
+INTEGER*2   lower_index
+Real*4      Low_Freq
+EXTERNAL    return_indices
+integer*4   SUI$DeviceType$i
+INTEGER*2   upper_index
+ 
+if (SUI$CH$Index$OK)
+    {
+    Comms_frequency = xSUI$CH$Frequency$f         # added 4/91, reh
+    }
+ 
+# frequency_found = .FALSE.    # this now done at the higher level
+jammer_found = .FALSE.
+jammer_freq_found = .false.
+ 
+IF ( jun$$_jun_count > 0 )
+    {
+    #$% get indexs of all jammers
+    CALL return_indices ( UNT_index,
+                          jun$$_jun_count,
+                          jun$$_jun_frequency [ 1 ],
+                          jun$$_jun_lower_index [ 1 ],
+                          jun$$_jun_upper_index [ 1 ],
+                          jammer_found,
+                          lower_index,
+                          upper_index )
+    }
+ 
+IF ( jammer_found )
+    {
+    FOR ( jct_index = lower_index;
+          jct_index <= upper_index;
+          jct_index = jct_index + 1 )
+        {
+        frequency_found = .FALSE.
+ 
+        #$% get frequency of jammer, in mHz
+        I_jam_freq = jct$$_jct_frequency ( iju$$ ( jct_index ) )
+        I_jam_bdwth = jct$$_jct_bandwidth  ( iju$$ ( jct_index ) )# JFR 8/8/94 (jecewsi)
+ 
+        SUI$DeviceType$i = xSUI$DeviceType$i        # added 4/91, reh
+ 
+        #$% if device to be jammed is a fixed mode
+        if ( SUI$DeviceType$i == $FixedMode )
+          {
+           High_Freq = I_jam_freq + I_jam_bdwth  # JFR 8/8/94
+           Low_Freq = I_jam_freq - I_jam_bdwth   # ALSP JECEWSI Interface
+ 
+           #$% if jammer freq within radar freq +- a percentage
+           #$% jamming on 2nd harmonic added, 8/91,reh
+           IF (( I_jam_freq <= High_Freq & I_jam_freq >= Low_Freq     ) |
+               ( I_jam_freq*2 <= High_Freq & I_jam_freq*2 >= Low_Freq ))
+             {
+              frequency_found = .TRUE.
+             }
+          } # end if device to be jammed is a fixed mode
+        #$% else if device to be jammed is a frequency hopper, 4/91, reh
+        else if ( SUI$DeviceType$i == $FrequencyHopper )
+          {
+           #$% if this jammer freq is within freq hopper band
+           if ( I_jam_freq >= xSUI$LowBandFrequencySS$F &
+                I_jam_freq <= xSUI$HighBandFrequencySS$F )
+             {
+              frequency_found = .TRUE.
+             }
+          }
+        else
+          {
+           return
+          }
+ 
+        #$% if this jammer frequency jams this commsuite frequency
+        if ( frequency_found )
+            {
+            jammer_freq_found = .true.
+ 
+            DEQ$Pointer = jct$$_jct_DYN_pointer ( iju$$ ( jct_index ) )
+            DEQ$EM$Index = _
+                    jct$$_jct_DYN_EQ_jammer_index ( iju$$ ( jct_index ) )
+            putDEQ$EM$Band$I ( new_on_off_setting )
+            putDEQ$On$I ( $ON )
+            IF ( xDEQ$AllBands$I == 0 )
+                {
+                putDEQ$On$I ( $OFF )
+                }
+            }
+        } # end for all jammer frequencies
+    }
+END

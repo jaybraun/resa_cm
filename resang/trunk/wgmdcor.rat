@@ -1,0 +1,532 @@
+#########################	WGMDCOR.RAT     ##########################
+ 
+include "bbctl.inc"
+include "bbcode.inc"
+include "bbrmt.inc"
+include "bbvue.inc"
+ 
+define ($DEBUGV,)
+define ($MaxCorr,800)
+define ($discrim,2)
+define ($MaxArc,4)
+define (BBimplicit,IMPLICIT NONE)   ## jb E2145 6/29/00
+define (corr$common,
+ 
+    integer*4	iemit[$MaxCorr],		# emitter pointer
+    		irmtp[$MaxCorr]			# rmt pointer
+ 
+    integer*2	idtor[$MaxCorr],		# detector index
+    		idtee[$MaxCorr],		# detectee index
+    		ibear[$MaxCorr],		# bearing
+    		ipnt[$MaxCorr],			# sorted indeces to data
+    		kore,
+    		kore2
+ 
+    real	ilast[$MaxCorr] 		# last detection time
+    logical*1	ignore[800]			# flags for tracks to ignore
+ 
+ 
+    common /scratch$pad/ iemit, irmtp,idtor, idtee, ilast, ibear,
+    			 ipnt, kore, kore2, ignore
+    )
+ 
+
+ 
+Subroutine CORMOD		# for use WITHOUT (chained) RMT linked-lists
+ 
+###############################################################################
+#
+# PURPOSE:  This routine determines the correlation of bearings between two
+#           detecting units at a specific target and performs two functions.
+#
+#           1. The two detecting units (with an intersection angle of at least
+#    		60 deg., or else the largest available angle) to a common
+#		target will display bearing lines.
+#
+#           2. Multiple targets detected within a certain maximum arc will
+#              display only one line; and will set the Composition field set
+#              (One, Few, or Many).
+#
+#           All other lines (ESM or Passive Sonar) will not displayed.
+#
+# DATE:     5/83
+#
+# AUTHORS:  T. BURZETTE & D. WILLS
+#
+###############################################################################
+BBcommon
+corr$common
+ 
+Integer  K,IANY,IEND,ISTART,IVIEW,NUMESM,NUMPSO,    # jb E2145  6/29/00
+    RMT$Pointer, RMT$Detectiontype$I,               # jb E2145  6/29/00
+    VUE$Pointer                                     # jb E2145  6/29/00
+ 
+DATA iany/YES/
+ 
+#______________________________________________________________________
+# initialize ...
+ 
+if (iany != NO)						# Check to see if
+    {							# already initialized
+    $DEBUGV test$name = 'COR.CLR'
+ 
+    iany = NO
+    							# Loop thru Remote tbl
+    for (RMT$Pointer$First; RMT$Pointer$Valid; RMT$Pointer$Next)
+    	{
+    	if (xRMT$InUse$I == $no) next			# Find the right slots
+ 
+#    	if (xRMT$Ignore$I != $no)	# Once found, set the	jb	5/4/84
+ 
+    	putRMT$Ignore$I ($no)	                  	# Ignore field to NO
+ 
+    	RMT$DetectionType$i = xRMT$DetectionType$i 	# spelling!	6/11/84
+ 
+    	if (RMT$DetectionType$i == $ESM$Code |		#== | If ESM	6/11/84
+    	    RMT$DetectionType$i == $Sonar$Code ) 	#==  or sonar,	6/11/84
+    		putRMT$Composition$I (1)		# set composition to 1
+    	}	# Note: $Sonar$Code = $PassiveSonar$Code = 2
+ 
+    $DEBUGV call dbreak ($no)
+    }
+ 
+if (Correlate$ESM == $no & Correlate$Sonar == $no) return
+ 
+#______________________________________________________________________
+# Loop for each Blue/Orange View
+ 
+for (iview = $firstBlue$view; iview <= $LastOrange$view; iview = iview + 1)
+   {
+    $DEBUGV test$name = 'COR.BLD'
+ 
+    VUE$Pointer$To iview				# Get to the right view
+ 
+    RMT$pointer$to xVUE$FirstRmtIndx$i			# Set first and last
+    istart = RMT$pointer				# RMT Index as limits
+    							# for loop
+    RMT$pointer$to xVUE$LastRmtIndx$i
+    iend = RMT$pointer
+ 
+    numESM = 0		# Counter for this View's ESM trks	4/21/86
+    numPSO = 0		# Counter for this View's PasSonar trks 4/21/86
+    kore = 0						# Initialize counter
+    							# Loop for each RMT
+    							# slot in View
+    for (RMT$pointer = istart; RMT$pointer <= iend; RMT$pointer$next)
+       {
+        if (xRMT$InUse$i == $no) next			# Skip if not in use
+ 
+        RMT$DetectionType$i = xRMT$DetectionType$i	# Get Detection Type
+    							# Get Passive Sonar &
+        if      (Correlate$ESM == $yes &		# ESM tracks:
+    		 RMT$DetectionType$i == $ESM$Code) 		continue
+ 
+    	else if (Correlate$Sonar == $yes &
+    		 RMT$DetectionType$i == $PassiveSonar$Code)    	continue
+ 
+    	else 	NEXT
+ 
+    						# Make sure that there are
+    	if (kore >= $MaxCorr) break		# enough slots for array
+ 
+    	kore = kore + 1				# Add to array counter
+    	irmtp[kore]   = rmt$pointer		# Save RMT Pointer
+    	idtor[kore]   = xRMT$Detector$I		# Save detector and detectee
+    	idtee[kore]   = xRMT$Detectee$I		# and detection age
+    	ilast[kore]   = xrmt$LastDetTime$f
+    	ibear[kore]   = xRMT$Bearing$I		# Save the bearing
+    	ignore[kore]  = YES 			# Or should it be YES ?
+    	ipnt[kore]    = kore			# Initialize sort index
+ 
+    	if (RMT$DetectionType$I != $ESM$Code)
+    	   {
+    	    numPSO = numPSO +1	# Count View's PasSonar trks	4/21/86
+    	    iemit[kore] = 0			# If not ESM, zero: ELSE,
+    	   }
+    	else
+    	   {
+    	    iemit[kore] = xRMT$EmitterPntr$I	# Save Emitter Pointer
+    	    numESM = numESM +1	# Count this View's ESM trks	4/21/86
+    	   }
+    	}
+ 
+    $DEBUGV call dbreak ($no)
+ 
+    #______________________________________________________________________
+    #
+ 
+#   if (kore == 0) return			# No tracks - quit
+#   if (kore == 0) NEXT		# No tracks - next view		3/20/85
+    if ( numPSO < 6  &  numESM < 6 )	# NO correlation wanted 4/28/86
+     {
+      for ( k =1; k <= kore; k =k +1 )	#  ..so, for this View,	4/21/86
+       {
+    	rmt$pointer = irmtp[k]		# set all IGNORE fields 4/21/86
+    	putRMT$Ignore$I ($NO)		#	to NO		4/21/86
+       }
+      NEXT				#(proceed to next View)	4/21/86
+     }
+ 
+    $DEBUGV test$name = 'COR.BST'
+ 
+    call Corr_Sort	# Sort Arrays by Detectee/Emitter/Last-Det-Time
+ 
+    call Corr_Bearing	# Calculate the correlation, and single source line
+    $DEBUGV call dbreak ($no)
+    $DEBUGV test$name = 'COR.ONE'
+ 
+    call Corr_Sort2	# Sort Arrays by Detector/Emitter/Bearing
+ 
+    call Corr_Bearing2	# Merge multiple lines to one single source line
+    $DEBUGV call dbreak ($no)
+ 
+    #______________________________________________________________________
+    # Set Ignore Fields
+ 
+    $DEBUGV test$name = 'COR.SET'
+ 
+    for (k=1; k <= kore; k=k+1)
+        {
+        if (ignore[k] != $yes) next	
+ 
+    	rmt$pointer = irmtp[k]			# Restore RMT Pointer
+    	putRMT$Ignore$I ($yes)			# Reset the ignore field
+ 
+    	iany = iany + 1				# Set flag for all clear
+        }
+ 
+    $DEBUGV call dbreak ($no)
+   } 						# end of loop for each VUE
+ 
+return
+end
+
+ 
+Subroutine Corr_Sort
+ 
+###############################################################################
+#
+# PURPOSE:  Corr_Sort is a routine that sorts the arrays by Detectee/
+#           Emitter/Detection Age.
+#
+# DATE:     5/83
+#
+# AUTHORS:  T. BURZETTE & D. WILLS
+#
+###############################################################################
+BBcommon
+corr$common
+ 
+Integer K, K1, J, J1        # jb  E2145 6/29/00
+ 
+for (k = 1; k < kore; k=k+1)				# Loop for the size
+    {							# of the array and
+    k1 = ipnt[k]					# set the corresponding
+    							# keys k1/j1
+    for (j = k+1; j <= kore; j=j+1)
+    	{
+        j1 = ipnt[j]
+    	
+    	if (idtee[k1] <  idtee[j1]) next		# detectee (ascending)
+    	if (idtee[k1] == idtee[j1])
+    	    {
+    	    if (iemit[k1] <  iemit[j1]) next		# emitter (ascending)
+    	    if (iemit[k1] == iemit[j1])
+    		{
+    		if (ilast[k1] >= ilast[j1]) next	# det time (descending)
+    		}
+    	    }
+ 
+    	ipnt[j] = k1					# switch items k/j
+    	ipnt[k] = j1
+    	k1 = j1
+    	}
+    }
+ 
+return
+end
+ 
+
+ 
+Subroutine Corr_Bearing
+ 
+###############################################################################
+#
+# PURPOSE:  Corr_Bearing is a routine that determines the two best detection
+#           units (the closest to a 90 degree angle) at a specific target;
+#           and displays only the bearing lines of the two units (either/or
+#           ESM or Passive Sonar lines).  The other bearing lines will
+#           be ignored.
+#
+# DATE:     5/83
+#
+# AUTHORS:  T. BURZETTE & D. WILLS
+#
+###############################################################################
+BBcommon
+corr$common
+ 
+Integer M, K, K1, J, J1        # jb  E2145 6/29/00
+ 
+	# Not needed:  CORMOD checks numPSO < 6  &  numESM < 6,   @ 4/21/86
+#if (kore == 1) ignore[kore] = NO      ## <RG> 9/24/85  for case of only 1..
+ 
+for (k = 1; k < kore; k=m+1)
+    {
+    k1 = ipnt[k]
+    m = k
+ 
+    for (j = k + 1; j <= kore; j = j + 1)
+    	{
+    	j1 = ipnt[j]
+ 
+    	if (idtee[k1] != idtee[j1] | iemit[k1] != iemit[j1]) break
+ 
+    	m = j
+    	}
+ 
+    if (k == m) 					# Only one bearing on
+    	{						# detecteee/emitter
+    	ignore[k1] = NO
+    	}
+    else if (k+1 == m) 					# Only 2 bearing lines
+    	{
+    	ignore[k1] = NO
+ 
+    	k1 = ipnt[m]
+    	ignore[k1] = NO
+    	}
+    else
+    	{
+        call corr_group (k,m)				# 3 or more bearing
+    	}						# lines
+    }
+ 
+return
+end
+ 
+
+ 
+subroutine Corr_Group (istart,iend)
+ 
+###############################################################################
+#
+# PURPOSE:  Corr_Group takes the sorted sublist and compares the bearing line
+#           of the detector to another.  If an angle of intersection falls
+#           within a specfic range, that line will be kept; otherwise, the
+#           best angle found will be kept.
+#
+# DATE:     5/83
+#
+# AUTHORS:  T. BURZETTE & D. WILLS
+#
+###############################################################################
+BBcommon
+corr$common
+ 
+Integer IPNT1,ISTART,IPNT2,IEND,    # jb E2145  6/29/00
+    K, K1, J, J1                    # jb E2145  6/29/00
+integer*2	ibest, idiff, intangle
+ 
+ipnt1     = ipnt[istart]
+ipnt2     = ipnt[istart+1]
+ibest     = 360
+ 
+for (k = istart; k < iend; k=k+1)			# Set up sort to
+    {							# compare the bearing
+    k1 = ipnt[k]					# from detectors to
+    							# the same detection
+    for (j = k + 1; j <= iend; j=j+1)
+    	{
+    	j1 = ipnt[j]
+ 
+        idiff = ibear[k1] - ibear[j1]			# Get the difference
+    							# between the two lines
+        intangle = abs (90 - mod(abs(idiff),180))	# Get the angle of
+    							# intercept
+        if (intangle <= 25)
+    	    {						# Take the first angle
+    	    ipnt1 = k1					# with the range
+    	    ipnt2 = j1
+    	    break 2
+            }
+ 
+        else if (intangle < ibest)			# If none are within
+    	    {						# the range, take the
+    	    ibest = intangle				# best found
+    	    ipnt1 = k1
+    	    ipnt2 = j1
+            }
+        }
+    }
+ 
+ignore[ipnt1] = NO					# Set the fields to
+ignore[ipnt2] = NO					# display only the
+    							# best lines found
+return
+end
+ 
+ 
+
+ 
+Subroutine Corr_Sort2
+ 
+###############################################################################
+#
+# PURPOSE:  Corr_Sort2 is a routine that sorts the arrays by Detector/
+#           Emitter/Bearing.
+#
+# DATE:     5/83
+#
+# AUTHORS:  T. BURZETTE & D. WILLS
+#
+# Modified: Carol Kropp - 4/99 (E2068)
+#           The sorting did not take into account the target, so when
+#           a detector had multiple passive sonar detections they were
+#           simply sorted by the bearing (emitter=0 for all passive
+#           sonar detections).  This was causing corr_bearing2 to
+#           perform comparisons on different detected platforms that
+#           could be very far apart.  The end result was many ignored
+#           contacts that should have been presented.
+#
+###############################################################################
+BBcommon
+corr$common
+ 
+integer  k, j     # loop control variables
+integer  k1, j1   # array sorting index references
+ 
+  kore2 = 0
+ 
+  # recreate an unsorted list with all detections kept from first pass
+  for (k = 1; k <= kore; k = k + 1)
+    {
+     if (ignore[k] == YES)  # if already set to ignore it
+       next
+ 
+     kore2 = kore2 + 1
+     ipnt[kore2] = k
+    }
+ 
+  for (k = 1; k <= kore2; k = k + 1)   # loop through the kept detections
+    {
+     k1 = ipnt[k]      # k1 = initial index in the arrays for the candidate
+     for (j = k + 1; j <= kore2; j = j + 1)    # loop through rest of the list
+       {
+        j1 = ipnt[j]   # j1 = index of a second detection entry being considered
+ 
+        if (idtor[k1] < idtor[j1])   # if the k1 candidate value is less then the 2
+          next                       # entries are already in the correct relative order
+ 
+        if (idtor[k1] == idtor[j1])  # same detector, consider the target
+          {
+           if (idtee[k1] < idtee[j1])         # if the detectee values are in the correct
+             next                             # relative order then there is no swap needed
+           if (idtee[k1] == idtee[j1])        # same detectee, consider the emitter
+             {
+              if (iemit[k1] < iemit[j1])      # if the emitter values are in the correct
+                 next                         # relative order then there is no swap needed
+              if (iemit[k1] == iemit[j1])     # matching emitters, consider bearing
+                {
+                 if (ibear[k1] >= ibear[j1])  # if bearing is in the correct orders
+                   next                       # then there is no need to swap
+                }   # end of if the same emitter
+             }   # end of if the same detectee
+          }   # end of if the same detector
+ 
+        ipnt[j] = k1     # swap the two entries, j = the lowest value from the
+        ipnt[k] = j1     # unsorted portion (the k+1..kore entries)
+        k1 = j1
+       }   # end of the loop through the unsorted portion
+    }   # end of the loop through all previously kept detections
+ 
+return
+end
+ 
+
+ 
+subroutine Corr_Bearing2
+ 
+###############################################################################
+#
+# PURPOSE:  Corr_Bearing2 will output only a single bearing line to target(s)
+#           when detection is at a distant range from the detecting unit.
+#           The detections will be grouped together, if they fall within a
+#           certain maximum arc, and the line nearest the center will be kept.
+#
+#           This will eliminate multiple lines to multiple targets in a
+#           cluster (either/or ESM or Passive Sonar lines).
+#
+# DATE:     5/83
+#
+# AUTHORS:  T. BURZETTE & D. WILLS
+#
+# Modified: Carol Kropp - 4/99 (E2068)
+#           The comparison for detector/emitter was not enough. All
+#           passive sonar detections for a detector have the emitter
+#           set to zero.  The result was that detections of different
+#           targets were being correlated away if the bearing was within
+#           the vicinity of a second detected unit.  Added the detectee
+#           into the if statement.
+#
+###############################################################################
+BBcommon
+corr$common
+ 
+integer  i, k, j          # loop control variables
+integer  m                # end of the sub-group of matching detections
+integer  i1, k1, j1, j2   # array sorting index references
+integer  RMT$Pointer
+integer  num              # number in the sub-group
+integer  icenter          # the
+ 
+  for (k=1; k < kore2; k=m+1)    # Loop thru sorted sub-group to find
+    {                            # at matching detector and emitter for target
+     k1 = ipnt[k]
+     j2 = k1
+     m  = k
+ 
+     for (j=k+1; j <= kore2; j=j+1)
+       {
+        j1 = ipnt[j]
+ 
+        if (idtor[k1] != idtor[j1] |      # the detector/detectee/emitter trio
+            idtee[k1] != idtee[j1] |      # is used to separate groups
+            iemit[k1] != iemit[j1]) break
+ 
+        if (abs(ibear[j2]-ibear[j1]) > $Discrim) break       # within 2 deg of prior
+        if (abs(ibear[k1]-ibear[j1]) > $MaxArc) break        # within 4 deg of first
+ 
+        j2 = j1
+        m = j
+       }
+ 
+     if (k == m)         # If only one bearing, so keep it
+       {
+        i1 = ipnt[k]
+        ignore[i1] = $NO
+        rmt$pointer = irmtp[i1]
+        putRMT$Composition$I ( 1 )
+       }
+     else               # If 2 or more bearing lines
+       {
+        num = m-k+1                 # How many in group
+        icenter = k + (num/2) - 1   # Pick the bearing in center
+        for (i=k; i <= m; i=i+1)    # Ignore all..EXCEPT one
+          {
+           i1 = ipnt[i]
+           ignore[i1] = YES
+          }
+ 
+        i1 = ipnt[icenter]          # Re-select the ONE in
+        ignore[i1] = NO             # the center
+ 
+        rmt$pointer = irmtp[i1]     # Restore RMT Pointer
+        if      (num > 3) num = 3   # jb        8/17/90
+        else if (num > 1) num = 2   # jb        8/17/90
+        putRMT$Composition$I (num)  # Flag the composition of the line
+       }
+    }
+ 
+return
+end

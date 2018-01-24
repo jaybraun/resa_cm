@@ -1,0 +1,416 @@
+ 
+include "ascii.inc"
+include "bbctl.inc"
+include "bbcode.inc"
+ 
+include "bbamh.inc"
+include "bbord.inc"
+include "bbunt.inc"
+include "orders.inc"
+ 
+define (err, -3)   # alsp.inc undefines it - who_am_i uses it
+ 
+define (number_args, 5)
+define (INPUT_UNIT, 10)
+define (OUTPUT_UNIT, 11)
+ 
+define ($$MaxRM, 1000)
+define (RMcommon,
+        literal RM_name[$$MaxRM]
+	integer RM_count
+	common/RM_common/ RM_name, RM_count
+)
+ 
+ 
+define (BBImplicit, Implicit None)
+ 
+undefine read
+undefine write   # use the standard fortran write statement
+undefine err
+ 
+program ATORESAmisn
+#########################################################################
+#$%
+#$% Purpose:    This program lists all ATO missions for the given ATOID.
+#$%             The orders queue, the unt table and the amh is searched.
+#$%
+#$% Calls:      initr4         <rlib.olb>
+#$%             read_arguments
+#$%             ctoi
+#$%             who_am_i
+#$%             bbmap
+#$%             check_version
+#$%             remark
+#$%             exit
+#$%             Init_Collection_File
+#$%             delay
+#$%             Game_DTG
+#$%             smov..
+#$%             echo..
+#$%             write
+#$%             close
+#$%
+#$% Tables:     global variables
+#$%
+#$% Date:       Jul 2009
+#$%
+#$% Author:     James O. Allen
+#$%
+#########################################################################
+BBcommon
+ 
+integer   atoid_pos
+integer   ctoi        # integer function
+integer   Game_DTG    # integer function
+ 
+integer          arg_len[number_args], k
+vaxcharacter*80  args[number_args], params
+ 
+integer kk
+ 
+vaxcharacter*80  ato_root
+vaxcharacter*80  atoid_update
+vaxcharacter*80  infile
+vaxcharacter*80  outfile
+ 
+vaxcharacter*80  atoid_dir
+ 
+integer   game_number
+character  msg[ARB]
+VMSCHAR*ARB bbname
+integer   error
+integer   next_cycle, delay_time, next_record_interval
+integer nl, na, nm
+integer n
+integer atoid_update_int
+integer   msg1_len
+character msg1[80]
+vaxcharacter*80  v_msg1
+Equivalence  (msg1, v_msg1)
+ 
+literal   atoid
+vaxcharacter*8  atoidv
+Equivalence  (atoid, atoidv)
+ 
+call initR4
+ 
+call Read_Arguments (number_args, args, arg_len, params)
+ 
+ato_root     = args[1][1:arg_len[1]]
+atoidv       = args[2][1:arg_len[2]]
+atoid_update = args[3][1:arg_len[3]]
+infile       = args[4][1:arg_len[4]]
+outfile      = args[5][1:arg_len[5]]
+ 
+# Get ato directory
+atoid_dir = ""
+kk = 0
+call smovvn(ato_root, atoid_dir, kk)
+call smovv("/", atoid_dir, kk)
+call smovvn(atoid, atoid_dir, kk)
+call smovv("/",atoid_dir, kk)
+call smovvn(atoid_update, atoid_dir, kk)
+call smovv("/", atoid_dir, kk)
+ 
+game_number = 0
+call who_am_i (game_number, bbname)
+BBmap (bbname)
+call check_version (error, msg)
+ 
+if (msg[1] != EOS)
+    call remark (msg)
+if (error == YES)
+    call exit
+ 
+call Init_Collection_File (atoid_dir, outfile)
+ 
+n=1; atoid_update_int = ctoi(%%ref(atoid_update),n)
+call list_ato_missions(atoid, atoid_update_int, nl)
+ 
+call report_missing_missions (atoid_dir, infile, na, nm)
+ 
+call echov ("Total RESA ATO Missions    = "); call echoib (nl,3); call echor
+ 
+call echov ("Total USMTF ATO Missions   = "); call echoib (na,3); call echor
+ 
+call echov ("Total Missing ATO Missions = "); call echoib (nm,3); call echor
+ 
+close (OUTPUT_UNIT)
+ 
+end
+
+ 
+subroutine who_am_i (igame, bbname)
+###########################################################
+#$%
+#$% Purpose:   WHO_AM_I allows user to start a game using
+#$%            a command line input
+#$%
+###########################################################
+ 
+character  buf[30]
+integer    k,ic, igame, CTOI  # jb E2145  6/1/00
+VMSCHAR*(*) BBname             # jb E2144  (Re: BBSmap & MAKE_..) 8/3/00
+ 
+ 
+call make_CSF_bb_name (igame,$$BBNAME,bbname)
+ 
+end
+
+ 
+Subroutine Init_Collection_File (atoid_dir, outfile)
+#########################################################################
+#$%
+#$% Purpose:    Init_Collection_File will open the ATO missing missions file
+#$%
+#$%
+#$% Called By:  atoresamisn (main program)
+#$%
+#$% Calls:      smov..
+#$%             open
+#$%             echo..
+#$%             exit
+#$%             write
+#$%
+#$% Tables:     global variables
+#$%
+#$% Date:       Jul 2009
+#$%
+#$% Author:     James O. Allen
+#$%
+#########################################################################
+BBcommon
+ 
+vaxcharacter*(*)  atoid_dir
+vaxcharacter*(*)  outfile
+ 
+vaxcharacter*80  missing_missions_file
+ 
+literal  atoid
+integer  interval    # interval at which data is to be collected
+integer  Game_DTG    # integer function
+integer  record_interval # Interval at which data is to be recorded
+integer    name_len
+character  file_name[ARB]
+vmschar*ARB  v_file_name
+equivalence (file_name, v_file_name)
+integer    return_val, msg_len, kk
+character  msg[80]
+vaxcharacter*80 v_msg
+Equivalence  (msg, v_msg)
+ 
+missing_missions_file = ""
+kk = 0
+call smovvn(atoid_dir, missing_missions_file, kk)
+call smovvn(outfile, missing_missions_file, kk)
+open (unit   = OUTPUT_UNIT,  file   = missing_missions_file,
+      iostat = return_val, recl = 120,   status = 'unknown')
+if (return_val != 0)
+{
+ call echov ("Output file not opened")
+ call echor
+ call exit
+}
+ 
+call echov ("Output file is ")
+call echovn (outfile)
+call echor
+ 
+return
+end
+
+Subroutine list_ato_missions (atoid, atoid_pos, nl)
+BBcommon
+RMcommon
+ 
+BBDeclare (ord$pointer, unt$pointer, amh$pointer)
+literal cstrip8, cstrip
+literal atoid
+integer atoid_pos
+vmschar vstrip*ARB
+integer k
+integer msg_len
+integer nl
+integer almostequal
+character msg[80]
+vaxcharacter*80  v_msg
+Equivalence  (msg, v_msg)
+ 
+character atoidc[8]
+literal   atoidL
+vmschar*8 atoid_v
+equivalence (atoidL, atoidc, atoid_v)
+ 
+literal misn
+character misnc[8]
+equivalence (misn, misnc)
+ 
+literal unt$atoid$c
+character untatoidc[8]
+equivalence (unt$atoid$c, untatoidc)
+ 
+character atoid_suffix[2]
+character UniqueAtoidChar
+ 
+nl = 0
+ 
+atoidL = atoid                          # Local copy
+call upper_v(atoid_v)
+call atoid_load
+call atoid_find (atoid, atoid_suffix)
+UniqueAtoidChar = atoid_suffix[1]
+ 
+#$% search ORD table for launch orders
+for_all_ok (ord)
+{
+    if (Xord$Code$i != LAUNCH$order &
+        Xord$Code$i != LAUNCHC$order) next
+ 
+    if (Xord$Sequence$i != 1) next      # Scramble always first order
+ 
+    if (Xord$NbrArgs$i < 9 ) next      # ATO Scramble has 9 arguments
+ 
+    if (Xord$W06$c != $lex$ATOID$) next     # Ship non ato launch orders
+ 
+    if (!almostequal(atoidL,Xord$W07$c)) next       # Skip different ATOID
+ 
+    nl = nl + 1
+    RM_name[nl] = Xord$W05$c                # Mission number 
+}
+
+#$% search ORD table for fire orders
+for_all_ok (ord)
+{
+    if (Xord$Code$i != FIRECRUISE$order) next
+ 
+    if (Xord$NbrArgs$i < 10 ) next		# ATO Fire has 10 arguments
+ 
+    if (Xord$W09$c != $lex$MISSION$) next    	# Ship non ato fire orders
+
+    misn = $BLANKLIT
+    call smovhn (Xord$W10$c, $$Maxlit, misn, k)
+ 
+    if (misnc[k] != UniqueAtoidChar) next	# Skip different ATOID
+ 
+    nl = nl + 1
+    RM_name[nl] = Xord$W10$c                	# Mission number 
+}
+ 
+#$% search UNT table
+for_all_ok (unt)
+{
+    if (Xunt$status$i == $BeingDeleted$code) next
+    if (Xunt$type$i != $Air$code) next
+    unt$ATOID$C = Xunt$ATOID$C
+    if (untATOIDC[1] != UniqueAtoidChar) next
+ 
+    nl = nl + 1
+    RM_name[nl] = Xunt$ForceName$c                # Mission number
+}
+ 
+#$% search AMH table
+for_all_valid (amh)
+{
+    if (xAMH$InUse$I == $no) next
+    k = 0
+    misn = $BLANKLIT
+    call smovhn (Xamh$CallSign$c, $$Maxlit, misn, k)
+ 
+    if (misnc[k] != UniqueAtoidChar) next
+ 
+    nl = nl + 1
+	RM_name[nl] = Xamh$Callsign$c
+}
+ 
+RM_count = nl
+return
+end
+ 
+subroutine report_missing_missions (atoid_dir, infile, na, nm)
+implicit none
+RMcommon
+ 
+vaxcharacter*(*)  atoid_dir
+vaxcharacter*(*)  infile
+integer na, nm
+ 
+vaxcharacter*80 ato_missions_file
+ 
+vaxcharacter*8 mission_name_v
+literal mission_name_l
+equivalence(mission_name_v, mission_name_l)
+ 
+integer kk
+integer RM_index, RM_find
+integer return_val
+ 
+ato_missions_file = ""
+kk = 0
+call smovvn(atoid_dir, ato_missions_file, kk)
+call smovvn(infile, ato_missions_file, kk)
+ 
+open (unit   = INPUT_UNIT,
+      file   = ato_missions_file,
+      iostat = return_val,
+      access = 'sequential',
+      recl   = 120,
+      status = 'unknown')
+ 
+if (return_val != 0)
+{
+ call echov ("Output file not opened")
+ call echor
+ call exit
+}
+na = 0
+nm = 0
+repeat
+{
+    #read ATO summary line
+    read (INPUT_UNIT,9001,end=8002,err=8001) mission_name_v
+	na = na + 1
+	RM_index = RM_find(mission_name_l)
+	if (RM_index == 0)
+	{
+		write(OUTPUT_UNIT,9001) mission_name_v
+		nm = nm + 1
+	}
+ 
+    9001 format (A)
+}
+ 
+repeat
+{
+    break
+ 
+    8001 continue       # Comes here for ERROR on open or READ
+}
+repeat
+{
+    break
+ 
+    8002 continue       # Comes here for END
+}
+close(INPUT_UNIT)
+close(OUTPUT_UNIT)
+ 
+ 
+return
+end
+ 
+Integer Function RM_find(mission_name)
+RMcommon
+ 
+literal mission_name
+integer i, litcmp
+ 
+for (i = 1; i <= RM_count; i = i + 1)
+{
+	if (litcmp(mission_name, RM_name[i]) == 0) break
+}
+ 
+if (i > RM_count) i = 0
+ 
+RM_find = i
+return
+end

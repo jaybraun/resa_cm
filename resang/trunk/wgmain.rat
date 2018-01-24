@@ -1,0 +1,1986 @@
+####    Record of Modifications:
+####
+####        Programmer          Date        Modification
+####
+####        G. G. Gustafson     3/31/88     Added the invocation of 
+####                                        ESTABLISH_COMMS_JAMMERS.
+####
+####        D. E. Wills         4/27/88     Integrated hooks for Data
+####                                        Collection (see JFFR's changes)
+####
+
+#$%
+#$%    The flowchart for the program WGMAIN is in WGMAIN.HIR
+#$%
+#$%    Additional information is in the file DOC.WHO
+#$%
+
+define($DEBUGV,)
+define($DEBUGT,)         # trace execution
+define($DEBUGM,# $$Debug$Control)       # Fix game$minute errors....
+define($DEBUGP,# $$Debug$Control)       # segment mapping info
+
+#include "gcctl.inc"                     # these two lines are needed to define
+undefine ($$tbl)                # whats needed to map the Game Control DB
+
+include "ascii.inc"         
+include "bbctl.inc"         
+include "bbcode.inc"         
+include "bbunt.inc"         
+include "bbvue.inc"         
+include "bbown.inc"         
+include "bbrmt.inc"         
+include "bbplc.inc"         
+include "bbrvu.inc"         
+include "bbnuc.inc"         
+include "bbisr.inc"             # clk 3/97 (E1771)
+
+include "csf.inc"         
+include "gcgam.inc"         
+include "hstim.inc"         
+include "elevation.inc"             # joa 11/95 (E1422)
+include "ssdef.inc"         
+
+define ($dispatch_message, 1)        # clk 4/23/92 - ALSP
+
+define (BBimplicit, Implicit None)
+
+define (exit_common,
+        logical         exitabort
+        integer         igame, gmin, xmode
+        literal         sname
+        character       err_msg[120]
+        common /xcom/exitabort,igame,gmin,xmode,sname,err_msg
+       )
+
+define ($X_model,
+    {
+    $$InsVaxC(@3,test$name,1,8)
+    $DEBUGV if (@2 == $no)
+    $DEBUGV    {
+                # max(time$step,game$time-motman$lastExecute$Time) insures
+                #  that on the first cycle from the beginning that
+                #  time$step minutes is processed
+                ifelse(@4,,,Model$Interval = max(time$step,Game$Time - @4)) # Model time interval (min)
+                @1                              # call the model
+                ifelse(@4,,,@4 = Game$Time)
+                $DEBUGV call dbreak ($no)
+    $DEBUGV    }
+    $DEBUGV else if (@2 > $yes)
+    $DEBUGV    {
+    $DEBUGV     call wgpaus (kstat,"Skipped model....")
+    $DEBUGV    }
+
+    if (trace$random != $NO & trace$random != $YES)
+        {
+        call echov  ("After ")                           
+        call echoh  (test$name,8)                           
+        call echov  (" M=")                           
+        call echoi  (game$minute)                           
+        call echov  (" seed[")                           
+        call echoi  (random$count)                           
+        call echov  ("]=")                           
+        call echox  (random$seed,8)                           
+        call echor
+        }
+    }
+    )
+#
+# $X_Model (call motman,skip$motman,"MOTMOD",motion$LastExecuteTime) # example usage
+#
+
+
+
+program WARCYC    
+
+########################################################
+#$%
+#$% Purpose:   WARCYC is the executive for the WARGAME.
+#$%            It controls the execution of the game
+#$%            models.
+#$%
+#$% Called By: None
+#$%
+#$% Calls:     Refer to DOC.WHO File 
+#$%
+#$% Tables:    None
+#$%
+#$% Date:      OCT 80
+#$%
+#$% Author:    Dana Wills
+#$%
+#$% Modified:  Carol Kropp - 12/95 (E1469)
+#$%            Added event flag information and processing
+#$%            for synchronization between RESA and the
+#$%            RESA/LSE Interface (RLI).  Two event flags
+#$%            within the CSF event flag cluseter were used,
+#$%            since the wargame already mapped that cluster.
+#$%
+#$%            Jim Allen - 11/95 (E1422)
+#$%            Added for mapping the DTED DB.
+#$%
+#$%            James Allen - 2/96 (E1467)
+#$%            Added call to fuel consumtpion model.
+#$%
+#$%            Carol Kropp - 3/96 (E1561)
+#$%            When a JTMD game initialize data and call
+#$%            the JTMD specific models.
+#$%
+#$%            Carol Kropp - 5/97 (E1791)
+#$%            Moved the JTMD sensor model calls outside of
+#$%            the overall $X_Model () macro expansion for
+#$%            the detection models (it became overloaded).
+#$%            Placed the JTMD attack model calls to be with
+#$%            the other JTMD sensor calls (half of it is a
+#$%            sensor model).
+#$%
+########################################################
+
+BBcommon
+exit_common
+external  wg_shutdown
+
+###      bbname[30], 
+VMSCHAR*30      bbname            # jb E2144  (Re: BBSmap & MAKE_..) 8/3/00
+character       vmsg[ARB]
+literal         hold_name
+
+integer         New_minute_flag
+
+#$% ALSP - required variables for alsp        clk 4/23/92
+real    ALSP_time
+integer ALSP_time_adv_status
+
+integer  number_of_processes    # number of processes synchronizing - msggen vts 
+
+integer*4  rli_resa_ef, rli_rli_ef   # event flags for sync between RESA and the RLI
+integer*4  ef_status                 # return status variable for EF calls
+
+integer     ok_to_write              # Dted map flag (E1422)
+integer     ierr, isend, now, kstat, igm,
+            irun_num, itime_now, Inext_Cycle_Start, idelay,
+            vue$pointer, nuc$pointer
+
+real        x, F_Motion_Last_Time
+VMSchar*3   dummy / " " /
+EXTERNAL ERROR_HANDLER
+
+call initr4                     # initialize all standard files and variables
+call setchtype(RAW, STDOUT)	# 
+call setchfd (STDIN, STDIN)
+call setchfd(STDOUT, STDOUT)
+
+exitabort = .true.              # initialize EXIT Status to default values
+err_msg[1] = EOS
+xmode = 0
+
+call tty_set_echo (NO)          # turn off keyboard echoing
+
+call who_am_i (igame,bbname)    # get the game index and BBname text
+BBmap (bbname)                  #load entire BB
+
+
+#______________________________________________________________________
+# turn WRAPAROUND ON (assuming I/O is to a VT100)
+
+call echo ($ESC)
+call echov ("[?7h")
+
+#______________________________________________________________________
+
+
+ok_to_write = 1                 # WGMAIN needs read/write access - joa 8/98 (E2016)
+DTED_Map                        # Map selected DTED data
+
+call check_version (ierr,vmsg)          # Correct Database Version?
+
+if (vmsg[1] != EOS)
+    {
+    call set_exit_msg (vmsg)
+    }
+
+if (ierr == YES) call exit
+
+#call check_active (ierr)
+#if (ierr == YES) call exit
+
+call map_bb_parallel (bbname)
+
+call echor
+call echov ("WARGAME (version ")
+call echof ($$BBVersion,3)              # X bytes wide .000
+call echov (")")
+
+sname = scenario$name           # get scenerio name
+
+Game$pause       = $yes         # Set game in pause mode
+Game$Designation = igame        # set this game number
+
+
+skip$Extract = YES          # Don't send anything to CSF/RSMs
+skip$ExMsgs  = YES          # Orders or Msgs, either.
+
+call echov (" Independent-Game Mode")
+call echor
+
+rli_resa_ef = $RLI$EF$RESA_wakeup
+rli_rli_ef  = $RLI$EF$RLI_wakeup
+
+call wginit                     # init wargam (return when GO)
+
+call gen_Updates        # set up plot fields, RVU Table # jb noDUP    3/89
+
+#$% ALSP
+if (ALSP$Game != $no)
+  {
+   call Get_ALSP_Logicals          # wgalsp_init.rat
+
+   call Initialize_ALSP_Mapping    # clk 8/23/93
+
+   if (ALSP$Active == $YES)        # if alsp is active
+     {
+      if (execution$mode != review$mode & ALSP$Review == $NO)
+        call ALSP_init ((Game$Time / 60.0), $no)
+     }
+   else   
+     ALSP$Game = $NeverJoined$Code
+  }
+#$% ALSP end
+
+test$name = 'START'
+$DEBUGV call dbreak ($no)
+
+call wgstat (0)                 # process statistics (0= first pass)
+
+
+
+############################################################################
+
+CALL establish_comms_jammers                                              # GGG
+
+repeat                                  # start cycle
+   {
+    Game$WasPaused   = Game$Pause       # dew 13-Nov-91
+    call echop ("RELS")                 # turn it on.....
+
+    test$name = 'TOP'
+    $DEBUGV call dbreak ($no)
+
+    wargam$status = $busy$code          # INDICATE WARGAM using BLACK BOARD
+
+    cycle$start$time = now(x)           # get time of day (millisec)
+
+    call check_disk_space               # make sure we can run  7/90
+
+    if (game$WasPaused == $yes)         # Process go order
+    {
+        call GoFromPause
+    }
+
+    # Simulation has crossed minute boundary
+    if (int(previousGame$Time) != int(Game$time+.001))        
+        New_minute_flag = $yes
+    else
+        New_minute_flag = $no
+      
+#    if (new_minute_flag == $yes)
+#    {
+        # Force model$interval to be at least one minute for order processing
+        Orders$lastExecuteTime = game$time - max(time$step, 1.0)
+        $X_Model (call wgordp($YES),skip$wgordp,"ORD.TOP",
+                  Orders$LastExecuteTime) # order processing
+#    }
+
+    test$name = 'HALT'
+    if (Halt$request != $no)            # CHECK ON NEED TO STOP
+        {                               # Value is $YES for an END or Ctrl-K
+         halt$forks = $yes              #       or $YES+$YES for a Ctrl-Z
+
+# jhm ct03 obe if (RTU$Interface$State != $RTU_State_Not_Connected)  # clk 5/96 (E1498)
+
+        call wghalt                     # Close down process
+        }
+    else
+        {
+        halt$forks = $no
+        }
+
+    if (Game$WasPaused != $yes)         ####  Start processing models  ###
+        {
+        if (ALSP$Active == $yes)    # clk 5/6/93   JHM 4/03 moved this up in cycle to get updates before motion and engagement
+          {                         # read any dispatch messages from the acm
+             hold_name = test$name
+             test$name = 'ALSP_TA'
+
+           if (execution$mode != review$mode & ALSP$Review == $NO)
+             {
+            call ALSP_Request_Advance         #JHM 1/25/03  existing module covers time pending better
+  #          ALSP_time = game$time * $Hours$Per$Minute  #JHM (E2331)
+  #           call ALSP_Advance_Time (ALSP_time)
+  #          ALSP_time_adv_status = -1
+  #          while (ALSP_time_adv_status != 0)
+  #            {
+  #              call alsp_chk_adv (ALSP_time_adv_status)
+  #              if (ALSP_time_adv_status != 0)
+  #                 call delay (500)    # delay for one half of a second
+  #             }      # end while (ALSP_time_adv_status != 0)
+             }
+           else
+             {
+               # read alsp messages from message log for current minute
+               call rev_alsp_log
+             }    
+           test$name = hold_name
+          }
+
+
+
+
+        if (CEC$Interface$State == $CEC$Interface_Connected)   # clk 11/96 (E1695)
+           call Check_CEC_Assignments
+
+        ########################################################################
+        if (minute$to$randomize <= game$minute) #FOR DATA COLLECTION INTEGRATION
+            {                                   # JFFR 2/88
+            call get_run_number (irun_num)      # get run number for seed
+            if ((irun_num > 0) &
+                (irun_num <= random$tbl$entry)) # JFFR 2/88
+                {
+                call echor
+                call echov ("For run #")
+                call echoi (irun_num)
+                call echov (", at game minute ")
+                call echoi (game$minute)
+                call echov (", setting random seed to ")
+                random$seed = random$tbl$seed(irun_num)
+                call echoi (random$seed)
+                call echor
+                }
+            }
+
+        if(MOD (cycle$count,motion$recurrence) == 0)           # time to execute motion model  
+          {
+           f_motion_last_time = Motion$LastExecuteTime
+           $X_Model (call MOTMAN,skip$motman,"MOTION",motion$LastExecuteTime)      # Motion/Manuvering
+           $X_Model (call FUEL_MODEL,skip$motman,"FUEL",f_motion_last_time)        # ship fuel consumtpion - joa 2/96 (E1467)
+          }
+
+        if(MOD (cycle$count,flight$recurrence) == 0)           # time to execute model  
+           $X_Model (call FLTOPS,skip$fltops,"FLTOPS",
+                     flight$LastExecuteTime)      # Flight Operations
+
+        $X_Model ({                                      # ALL Detection Models
+            hold_name = test$name         
+        if(MOD (cycle$count,visual$recurrence) == 0)           # time to execute model  
+            $X_Model (call VISMOD,skip$vismod,"VISUAL",
+                      visual$LastExecuteTime)     # Visual
+  
+        if(MOD (cycle$count,ActiveSonar$recurrence) == 0 )
+              $X_Model (call SONMOD,skip$sonmod,"SONAR",
+                             ActiveSonar$LastExecuteTime)      # Sonar
+ 
+        if(MOD (cycle$count,sosus$recurrence) == 0)           # time to execute model  
+            $X_Model (call SBDMOD,skip$Bistatic,"SBDMOD",
+                      sosus$LastExecuteTime)   # Bistatic sosus
+  
+        if(MOD (cycle$count,ActiveSonar$recurrence) == 0)           # time to execute model  
+              $X_Model (call BISMOD,skip$Bistatic,"BISMOD",
+                                    ActiveSonar$LastExecuteTime)   # Bistatic
+
+        if(MOD (cycle$count,rej$recurrence) == 0)           # time to execute model  
+            $X_Model (call REJMOD,skip$rejmod,"REJMOD",
+                                  rej$LastExecuteTime)     # Radar/ESM/Jam
+
+            if (level$IR == 0)
+              {
+                if(MOD (cycle$count, eoir$recurrence) == 0)           # time to execute model  
+                  $X_Model (call EOIR_MOD,skip$EOIR,"EOIR  ",
+                                          eoir$LastExecuteTime)   # Electro-Optical
+              }
+            else
+                if(MOD (cycle$count, ir$recurrence) == 0)           # time to execute model  
+                  $X_Model (call IR_MOD,skip$EOIR,"EOIR  ",
+                                        ir$LastExecuteTime)     # Infra-Red 8/18/92
+
+        if(MOD (cycle$count,mad$recurrence) == 0)           # time to execute model  
+            $X_Model (call MADMOD,skip$MAD,   "MAD   ", 
+                                  mad$LastExecuteTime)     # MAD
+
+        if(MOD (cycle$count,lidar$recurrence) == 0)           # time to execute model  
+            $X_Model (call LIDARMOD, skip$LIDAR, "LIDARMOD",
+                                    lidar$LastExecuteTime)
+
+        if(MOD (cycle$count,swabs$recurrence) == 0)           # time to execute model  
+            $X_Model (call SWDMOD, skip$SWABS, "SWABS",
+                                   swabs$LastExecuteTime)
+  
+        if(MOD (cycle$count,rothr$recurrence) == 0)           # time to execute model  
+            $X_Model (call ROTMOD,skip$rothr,"ROTHR",
+                                  rothr$LastExecuteTime)       # Rothr
+  
+            $X_Model (call LCLDEL,skip$lcldel,"LCLDEL")     # Clean Up
+            test$name = hold_name
+            },skip$detect,"DETECT")
+
+        if (RTU$Interface$State != $RTU_State_Not_Connected)  # clk 5/96 (E1498)
+          RESA$State = $RESA$State$Processing
+
+        $X_Model (call MINE_MOD,skip$minefields,"MINEFLD")  # Mine Fields
+
+        if(MOD (cycle$count,engage$recurrence) == 0)           # time to execute model  
+        {
+           $X_Model (call ENGAGE,skip$engage,"ENGAGE",
+                                 engage$LastExecuteTime)         # Engagement
+        }
+    
+        if(MOD (cycle$count,engage$recurrence) == 0)           # time to execute model  
+        {
+           $X_Model (call DAMAGE,skip$damage,"DAMAGE")         # Damage Assesment
+        }
+
+        $X_Model (call REPIN ,skip$repin ,"REPIN ")         # Reporting Policy In
+        $X_Model (call COMMOD,skip$commod,"COMM  ",
+                  Comms$LastExecuteTime)         # Communications 
+        $X_Model (call REPOUT,skip$repout,"REPOUT")         # Reporting Policy Out
+ 
+        $X_Model (call CORMOD,skip$Corlat,"CORRLAT")        # Correlate (ESM/SONAR)
+ 
+        if(MOD (cycle$count,survsat$recurrence) == 0)           # time to execute model  
+           $X_Model (call SATMOD,skip$satmod,"SURVSAT",
+                                 survsat$LastExecuteTime)        # SurvSat
+
+
+        #_________________________________________________________________
+        # During the following two models, the Links (chaining the data
+        # together) are not always complete.  This Write request places both
+        # a Read & Write-lock on the BlackBoard to protect STATUS from 
+        # following the wrong path.
+
+        $X_Model (call BBWrtR,skip$dummy,"WRTLOK")  # request exclusive write 
+                                                    # permission for BB
+
+        $X_Model (call HFDMOD,skip$hfdmod,"HFDMOD")      # HFDF
+        $X_Model (call SOSMOD,skip$sosmod,"SOSMOD")      # SOSUS
+
+        } # end of: IF GAME NOT PAUSED (first test)
+
+    $X_Model (call Gen_Updates,skip$Update,"UPDATE") # bld RVU tbl #jb noDUP 3/89
+
+    if (time$tags == $yes)              # Send time tags to all views
+        {
+        for (isend=$first$view; isend<=$last$view; isend=isend+1)
+##            call send (isend,0,4,"----")
+            call send_V (isend,"----")  # jb E2144  8/3/00
+        }
+
+    wargam$status = $idle$code          # INDICATE WARGAM DONE WITH BBOARD
+
+    read$request  = -1                  # Unlock BB
+    read$count    =  0
+
+    #$% ALSP - send out any changed data for owned units to ALSP confederation
+    if (Game$Pause != $yes)
+      {
+       if (ALSP$Active == $YES)
+         if (execution$mode != review$mode & ALSP$Review == $NO)
+           call ALSP_Send_Unit_Updates
+
+       #$% clk 3/8/94 - clear the modified flags
+       #$% Note:  If any other process needs the UNT modified flags, this
+       #$%        should be moved immediately below it.  CSF/RSM does not
+       #$%        utilize UNT$Modified, so it has been used for ALSP.
+       call Clear_UNT_Modified_Flags
+      }
+
+    cycle$mid$time = now(X)             # get clock time in milliseconds
+    status$minute  = game$minute        # flag for status to start
+
+    if (Game$WasPaused != $yes)         # if the Game is NOT Paused (2nd time)
+       {
+        ########################################################################
+        $X_Model (call RECRD,skip$record,"RECORD")       # Record & Remove
+        $X_Model (call SAVFOR,skip$savfor,"SAVES")       # Save
+
+        # at this point, GAME$MINUTE is not yet incremented
+
+        write$request = -1              # enable player input
+        write$count = 0
+
+        #if in alsp$review mode, wait for prescript to input orders for next min
+        if (ALSP$Review == $YES)            # joa 8/01 E2229
+        {
+            while ($swar_wakeup == $NO)
+			{
+				call delay($WakeupDelay)
+			}
+            $swar_wakeup = $NO
+        }
+
+       } # end of:  IF GAME NOT PAUSED (second test)
+
+    cycle$stop$time = now(X)            # get clock time in milliseconds
+
+    if (igame != 0)
+        call Notify_CSF ("NOTICE",EOS)  # let the CSF know where we are
+
+    if (Nuclear$Capable == YES)         ## tpa 5/7/85  Moved up 3/2/93 - clf
+        {
+        for (NUC$Pointer$First; still_valid(NUC) ; NUC$Pointer$Next) #9/26/88
+            {
+            if (xNUC$Radius$I == 25)    NUC$Zero        ## clear 25 nm circles
+            }
+        }
+
+    if (Game$WasPaused == $yes)             #  if game in pause mode
+        {
+        cycle$stop$time = now(X)        # reset STOP (time in milliseconds)
+
+        call resync                     # delay execution till end of cycle
+
+        iGM=0                           #  game minute is not incremented
+       }
+    else if (execution$mode == review$mode)     # if in review mode
+       {
+        if (review$fast < game$minute)          # if not in REVIEW FAST Mode
+            call resync                         # delay execution
+
+        if (game$minute > replay$thru$minute) halt$request = $yes # ????
+
+        iGM=1
+       }
+    else
+       {
+        #$% ALSP
+#     There is an alsp_request_advance at top of cycle.  Only one request advance necessary per cycle
+#        if (ALSP$Active == $yes & ALSP$Review == $NO)   # joa 8/01 E2229
+#          {
+#           hold_name = test$name
+#           test$name = 'ALSP_TA'
+#           call ALSP_Request_Advance   # routine is in alsp_time.rat
+#          cycle$stop$time = now(x)
+#           test$name = hold_name
+#          }
+
+# JHM 2/03 ct03 if (TMS$Recording == $yes &       # indicates TMS is participating
+# E2341      TMS$Data$Available == $yes)   # tripped when data needs to be
+#          call Send_Data_To_TMS           # reported to TMS - clk 7/95 (E1419)
+
+        call resync                     # delay execution till end of minute
+
+        iGM=1
+       }
+
+    test$name = 'BOTTOM'
+    $DEBUGV call dbreak ($no)
+    
+    if(Game$WasPaused == $no)             # game is NOT paused  (3rd time we ask this question) 
+     {
+       call wgstat(1)                      # statistics 
+
+#       if (ReportC2Data == $yes)           # tripped when C2 data needs to be
+#         call oreport_c2                   # reported - clk 10/94
+
+       cycle$count = cycle$count + iGM            # step to next cycle
+        if (iGM == 1)                       # Time needs to be incremented
+        {    
+            PreviousGame$Time = game$time + .001
+            game$time = game$time + Time$Step              # Float minutes 
+            game$minute = game$time + 0.001         # Fudge for rounding error
+
+        }   # end of if time needs to be incremented
+     }   # end of if the game was not paused
+    }                                   # end of main repeat loop
+
+end
+
+ 
+
+subroutine get_ch (char,itime)   
+    # WARNING:  DON'T change (CONSTANT?) argument ITIME!
+########################################################
+#$%
+#$% Purpose:   GET_CH checks to see if anything has
+#$%            been typed at the terminal since the
+#$%            last time it was called.  Returns
+#$%            the typed character, or a null.
+#$%
+#$% Called By: WGPAUS
+#$%
+#$% Calls:     GETFCH
+#$%
+#$% Tables:    None
+#$%
+#$% Date:      OCT 80
+#$%
+#$% Author:    Dana Wills
+#$%
+########################################################
+
+BBcommon
+integer char,itime
+
+#$% if WARCYC is not running in the detached mode, i.e. with
+#$% a terminal connected always return a zero character
+if (detached$mode != YES) 
+    {
+    call getfch (char,$no,0) # command file (using ttyin, allow nulls)
+    }
+else
+    {
+    #$% set the character to 0
+    char = 0
+    }
+
+return
+end
+
+
+subroutine echo (ichar)      
+
+###########################################################
+#$%
+#$% Purpose:   ECHO passes one character for ttyout if not 
+#$%            in the detached mode
+#$%
+#$% Called By: DBREAK     DDEBUG     DMODEL     DVALUE
+#$%            WGPAUS     WHAMO      
+#$%
+#$% Calls:     ECHOP
+#$%
+#$% Tables:    None
+#$%
+#$% Date:      JAN 82
+#$%
+#$% Author:    DONGOG
+#$%
+###########################################################
+
+BBCommon
+exit_common
+integer         ichar
+VMSchar*ARB     Log_file_name        # jb E2144  8/3/00
+character       xdate[16], xtime[16]
+integer         nchar[2], log_fd, open
+data            nchar/ 0, 0/
+data            log_fd / 0/
+
+
+#$% set nchar to first four character of ichar
+nchar [1] = ichar
+
+#$% send contol character to echop for execution
+call echop_b (nchar)
+
+return
+end
+
+
+Subroutine wg_shutdown
+
+###########################################################
+#$%
+#$% Purpose:   WG_SHUTDOWN sets up error mesage to CSF if 
+#$%            a students game shuts down due to a fatal error
+#$%            
+#$%
+#$% Called By: WARCYC
+#$%            
+#$%
+#$% Calls:     NOTIFY_CSF 
+#$%
+#$% Tables:    NONE
+#$%
+#$% Date:      OCT 82
+#$%
+#$% Author:    WILLS
+#$%
+###########################################################
+
+exit_common
+
+#$%   if shutdown is caused by an error, call for the
+#$%   display an error message to CSF
+
+if (exitabort) call Notify_CSF ("ERROR",EOS)
+
+return
+end
+
+#____________________________________________________________
+
+Subroutine set_exit_msg (msg)
+
+###########################################################
+#$%
+#$% Purpose:   SET_EXIT_MSG set up an error message if shutdown
+#$%            caused by a fatal error
+#$%            
+#$%
+#$% Called By: WHO_AM_I
+#$%            
+#$%
+#$% Calls:     SCOPY
+#$%
+#$% Tables:    NONE
+#$%
+#$% Date:      OCT 82
+#$%
+#$% Author:    WILLS
+#$%
+###########################################################
+
+exit_common
+external scopy
+
+character msg[ARB]
+
+#$% copies the string input to an array
+
+call scopy(msg,1,err_msg,1)
+
+return
+end
+
+
+
+Subroutine Notify_CSF (vmsg,msg2)
+
+###########################################################
+#$%
+#$% Purpose:   NOTIFY_CSF sets up a message, and sends it to 
+#$%            the CSF Controller
+#$%
+#$% Called By: WARCYC   WG_SHUTDOWN     WGHALT
+#$%            
+#$%
+#$% Calls:     SMOV     SMOVH     SMOVI
+#$%
+#$% Tables:    NONE
+#$%
+#$% Date:      OCT 82
+#$%
+#$% Author:    WILLS
+#$%
+###########################################################
+
+BBcommon
+exit_common
+
+VMSchar*(*) vmsg
+character   msg2[ARB], line[160]
+integer     ilen, length
+
+gmin  = Game$minute                     # get game minute
+
+ilen = 0                                # initialize array position for smov
+
+#$% move msg into array with other game data for display
+
+call smovv (vmsg,line,ilen)
+call smovv ("   War Game; Game=",line,ilen)
+call smovi (igame,line,ilen)
+call smovv (", Minute=",line,ilen)
+call smovi (gmin,line,ilen)
+
+if (Game$Pause == YES)                          # if game is in PAUSE mode
+    {
+    call smovv (', Msg="PAUSE"',line,ilen)  # tell him PAUSE 
+    }
+else
+    {
+    call smovv (', Msg="GO"',line,ilen)     # tell him GO
+    }
+
+if (msg2[1] != 0)                               # if there is more message
+    {
+    call smovh (msg2,ARB,line,ilen)             # move it into message array 
+    }
+
+if (length(err_msg) != 0)                       # if there is an error message 
+    {
+    call smovv (", msg='",line,ilen)        # send it too !
+    call smovh (err_msg,ARB,line,ilen)
+    call smovv ("'",line,ilen)
+
+    err_msg[1] = EOS                            # erase the message, once sent
+    }
+
+call smov  (NEWLINE,line,ilen)                  # terminate the message
+call smov  (EOS,line,ilen)
+
+call echoh (line,ilen)                       # send it
+call echor
+
+return
+end
+
+
+subroutine who_am_i (igame, bbname)
+
+###########################################################
+#$%
+#$% Purpose:   WHO_AM_I allows user to start a game using
+#$%            a command line input
+#$%
+#$% Called By: BBTEST   CC_INIT   GLMAIN   WARCYC
+#$%            
+#$%
+#$% Calls:     READ_PNAME_INDEX   GETARG   SET_EXIT_MSG 
+#$%            MAKE_CSF_BB_NAME 
+#$%
+#$% Tables:    NONE
+#$%
+#$% Date:      SEP 82
+#$%
+#$% Author:    WILLS
+#$%
+###########################################################
+BBcommon
+
+VMSCHAR*(*) BBname             # jb E2144  (Re: BBSmap & MAKE_..) 8/3/00
+character       buf[30]
+integer         igame, ctoi, ic, getarg3, k
+
+
+call make_CSF_bb_name (igame,$$BBNAME,bbname) # create blackboard name
+
+return
+end
+
+
+
+subroutine wginit
+
+###########################################################
+#$%
+#$% Purpose:   WGINIT initializes for WARCYC
+#$%
+#$% Called By: WARCYC
+#$%
+#$% Calls:     FILEOP   ECHOR   ECHOH   
+#$%
+#$% Tables:    NONE
+#$%
+#$% Date:      JAN 82
+#$%
+#$% Author:    WILLS
+#$%
+###########################################################
+
+BBcommon
+integer     vue$pointer
+
+#$% display starting message to user
+call echor
+call echov ("WARGAM. (Starting Processing ")
+call echohn (Scenario$name,8)
+call echov (")")
+
+call echor
+
+call fileop                             # open all history files
+
+call open_Start_Time_file
+
+call Record_Start_Time
+
+#$% for each view, set plot map and save
+for (vue$pointer$first; still_ok(vue) ; vue$pointer$next) # 9/26/88
+   {
+    PUTvue$PlotMap$i($YES)
+   }
+
+#$% initialize values           
+halt$request = $no
+halt$forks  = $no
+auto$logout = $no
+
+read$request = -1                       # enable status input
+read$count = 0
+
+write$request = -1                      # enable player input
+write$count = 0
+
+cycle$start$time = 1
+cycle$stop$time = 10
+
+sync$a = cycle$count + 1
+sync$b = sync$a
+
+if (log$engage == $YES) call init_eng_rec
+
+#call Initialize_TMS_Interface   # open the file even if DEFINE TMS ON wasn't entered
+# jhm 2/03 ct03 E2341            # during init - control can do it - clk 7/95 (E1419)
+
+return
+end
+
+ 
+
+subroutine wgpaus (istat,msg)       
+
+###########################################################
+#$%
+#$% Purpose:   WGPAUS allows system to pause for user response.
+#$%            (istat: G==$no,C==$yes,H==2*$yes)
+#$%
+#$% Called By: RESYNC   WARCYC   WGHALT
+#$%
+#$% Calls:     GET_CH   ECHOH   ECHOR   ECHOHN   ECHO   DELAY
+#$%            TRACE
+#$%
+#$% Tables:    NONE
+#$%
+#$% Date:      JAN 82
+#$%
+#$% Author:    WILLS
+#$%
+###########################################################
+
+BBcommon                                
+integer     istat, ichar
+VMSchar*(*) msg
+
+#$% initialize status
+istat = $no
+
+#$% skips type ahead feature
+repeat                      
+   {
+    call get_ch (ichar,0)
+   } until (ichar == $null)
+
+#$% reset istat
+istat = -2
+
+#$% display message to user depending on istat
+repeat
+   {
+    if (istat == -3)
+       {
+        call echor
+        call echov ("Enter: Trace, Go [or Continue w/error or Halt]")
+       }
+
+    if (istat <= -2)
+       {
+        call echor
+        call echov (" <")
+        call echohn (test$name,5)
+        call echov (">  ")
+        call echo ($bell)
+        call echov (msg)
+        call echo ($space)
+        #$% reset status
+        istat = -1
+       }
+
+    repeat
+       {
+        #$% get a character
+        call get_ch (ichar,0)
+
+        #$% if the character is not a null, break out of loop
+        if (ichar != $null) break
+
+        #$% call for a one sec delay
+        call delay (1000)
+       }
+
+    #$% set all letters to capital letters
+    if (ichar >= $LiTa & ichar <= $LiTz) ichar = ichar - $space
+
+    #$% display the character
+    call echo (ichar)
+
+    #$% if character is a T
+    if (ichar == $LetT)
+       {
+        #$% add "race" to T for Trace
+        call echov ("race")
+        call echor
+        #$% get trace
+        call trace
+        call echor
+        #$% reset status
+        istat = -2
+       }
+    #$% else if the character is a G
+    else if (ichar == $LetG)
+       {
+        #$% add "o" for go
+        call echov ("o")
+        call echor
+        #$% reset status
+        istat = $no
+       }
+    #$% else if the character is a C
+    else if (ichar == $LetC)
+       {
+        #$% add rest of characters for word "continue"
+        call echov ("ontinue")
+        call echor
+        #$% reset status
+        istat = $yes
+       }
+    #$% else if the character is a H
+    else if (ichar == $LetH)
+       {
+        #$% add rest of characters for word "halt"
+        call echov ("alt")
+        call echor
+        #$% reset status
+        istat = $yes + $yes
+       }
+    #$% else if the character is none of the above
+    else
+       {
+        #$% display ??? and ring bell
+        call echov (" ???")
+        call echo ($bell)
+        call echor
+        #$% reset status
+        istat = -3
+       }
+   
+     #$% repeat until status is a positive number
+   } until (istat >= 0)
+
+return
+end
+
+ 
+
+subroutine recrd         #record post game analysis
+
+###########################################################
+#$%
+#$% Purpose:   RECRD records post game analysis
+#$%
+#$% Called By: WARCYC
+#$%
+#$% Calls:     RECORD   REMOVE_UNITS
+#$%            
+#$% Tables:    NONE
+#$%
+#$% Date:      JAN 82
+#$%
+#$% Author:    WILLS
+#$%
+###########################################################
+
+BBcommon
+
+if (time$between$records == 0                |
+    Halt$request         == $yes             |          # last pass...
+    # for VTS, PGA will be collected on cycles - JFR 1/13/94
+    # Fudge value .001 to account for rounding errors
+    (game$time - last$time$between$records + .001) >= time$between$records) # JFR 1/13/94 for VTS
+    {
+
+    $DEBUGV call dbreak ($no)
+    test$name = 'REMOVE'
+
+    call remove_units # removes units/related data at RECORD and HALT times
+    }
+
+return
+end
+
+
+
+
+subroutine wghalt
+
+#####################################################################
+#$%
+#$% Purpose:   WGHALT closes out files and logs player out of system
+#$%
+#$% Called By: WARCYC
+#$%
+#$% Calls:     DELAY   MSGEOF   NODEOF   ORDEOF   ECHOP    WGORDP
+#$%            NOTIFY_CSF       LOGOUT   ENDR4    
+#$%            
+#$% Tables:    NONE
+#$%
+#$% Date:      JAN 82
+#$%
+#$% Author:    WILLS
+#$%
+###########################################################
+
+BBcommon
+exit_common
+integer     vue$pointer, kstat, isend
+
+read$request = -1               # Unlock BB
+read$count = 0
+
+if (Halt$Request == $YES)       # STATION ignores $YES+$YES     # E2130 DEW 9/99
+    call delay (10000)          # Delay for player to catch halt$request
+
+#$% initialize values
+sync$a = 0
+sync$b = 0
+
+test$name = 'ORD.XIT'
+$DEBUGV if (skip$wgordp == $no)
+$DEBUGV    {
+            call wgordp ($No)      # Process any last minute orders
+            $DEBUGV call dbreak ($no)
+$DEBUGV    }
+$DEBUGV else if (skip$wgordp > $yes)
+$DEBUGV    {
+$DEBUGV     call wgpaus (kstat,"Skipped model....")
+$DEBUGV    }
+
+call MSGeof                     # Close out Msg History file
+
+call NODeof                     # Close out Comm Node History file
+
+call RECeof                     # Close Engagement log
+
+call ORDeof                     # Close out Player Order History file
+
+call close_Start_Time_file
+
+
+###########################################################################
+
+
+test$name = 'HALT'
+$DEBUGV call dbreak ($no)       # process last CPU Watch
+$DEBUGV call echor
+$DEBUGV call echor
+
+call echop ("XTEE")             # close typescript file (if it exists)
+
+for (isend=$first$view; isend<=$last$view; isend=isend+1)
+    {
+    vue$pointer$to isend                        # turn Off all players
+    PUTvue$PlayerOn$i (NO)
+    }
+
+call unmap_bb_parallel                          # do.... whatever
+
+exitabort = .false.                             # set flag for normal shutdown
+
+call Notify_CSF("ACK",EOS)                      # notify CSF of shutdown
+
+RESA$State = $RESA_Halt
+if (auto$logout == $yes) call logout            # if in auto$logout mode 
+                                                # go through logout procedures
+
+call endr4                                      # close all opened files and 
+                                                # terminate program
+
+stop
+end
+
+ 
+
+
+subroutine gen_Updates 
+
+#####################################################################
+#$%
+#$% Purpose:   GEN_UPDATES makes preparations for seting up PLOT
+#$%            and RVU files    (jb no DUP 3/89)
+#$%
+#$% Called By: WARCYC
+#$%
+#$% Calls:     GPLOTC   GPLOTM   GEN_RVE   (jb - no GEN_DUP 3/89)
+#$%            
+#$% Tables:    NONE
+#$%
+#$% Date:      JAN 82
+#$%
+#$% Author:    WILLS
+#$%
+###########################################################
+
+bbcommon
+
+call gplotc                             # set up center points
+call gplotm                             # set up xmarks/circles
+
+call gen_rvu                            # Generate RVU Table
+##call gen_dup    # Generate DUP Table  # jb   DELETED    3/23/89
+call upd_lrt                            # Generate LRT Table
+
+return
+end
+
+ 
+
+subroutine gplotm                       
+
+###########################################################
+#$%
+#$% Purpose:   GPLOTM generates position data for plot 
+#$%            marks (X's and circles)
+#$%            
+#$% Called By: GEN_UPDATES
+#$%
+#$% Calls:     NONE
+#$%            
+#$% Tables:    NONE
+#$%
+#$% Date:      JAN 82
+#$%
+#$% Author:    DONGOG
+#$%
+###########################################################
+
+bbcommon
+integer     plc$pointer, plc$ReferenceType$i, plc$Reference$i,
+            plc$latitude$f, plc$longitude$f,
+            unt$pointer, rmt$pointer, own$pointer
+
+#$% for each place pointer (place = x's and circles)
+for (plc$pointer$first; still_ok(plc) ; plc$pointer$next) # 9/26/88
+   {
+    #$% get reference type and reference pointer location
+    plc$ReferenceType$i = xplc$ReferenceType$i
+    plc$Reference$i = xplc$Reference$i
+
+    #$% if reference type ok
+    if (plc$ReferenceType$i == $true$code)
+       {
+        #$% set unit pointer to reference value
+        unt$pointer$to plc$Reference$i
+
+        #$% if unit status is "being deleted"
+        if (Xunt$status$i == $BeingDeleted$code)
+           {
+            #$% delete unit data in blackboard and get next entry            
+            plc$zero
+            next
+           }
+
+        #$% set position pointer to unit pointer index
+##      pos$pointer$to unt$pointer$index
+
+        
+        #$% make place postition same as unit position
+        plc$latitude$f = Xunt$TrueLatitude$f        #  jb    3/22/89
+        plc$longitude$f = Xunt$TrueLongitude$f      #  jb    3/22/89
+       }
+    #$% else if reference type is own force
+    else if (plc$ReferenceType$i == $OwnForce$code)
+       {
+        #$% set own pointer to place reference value
+        own$pointer$to plc$Reference$i
+
+        #$% if own unit not found
+        if (Xown$Unit$i == $null)
+           {
+            #$% delete unit data in blackboard and get next entry            
+            plc$zero
+            next
+           }
+
+        #$% make place postition same as own position
+        plc$latitude$f = Xown$Latitude$f
+        plc$longitude$f = Xown$Longitude$f
+       }
+    #$% else if reference type is other force
+    else if (plc$ReferenceType$i == $OtherForce$code)
+       {
+        rmt$pointer$to plc$Reference$i
+
+        #$% if remote track not found
+        if (Xrmt$InUse$i == $null)
+           {
+            #$% delete unit data in blackboard and get next entry            
+            plc$zero
+            next
+           }
+
+        #$% make place postition same as remote track position
+        plc$latitude$f = Xrmt$ApparentLat$f
+        plc$longitude$f = Xrmt$ApparentLon$f
+       }
+
+    Else          # Don't mess up POSITION Lat/Lon!          
+       {
+        NEXT      # jb/reh                11/29/89
+       }
+
+    #$% save position
+    PUTplc$latitude$f
+    PUTplc$longitude$f
+   }
+
+return
+end
+
+ 
+
+subroutine gplotc                       # prep for plot center points
+
+###########################################################
+#$%
+#$% Purpose:   GPLOTC generates position data for center points
+#$%            
+#$% Called By: GEN_UPDATES
+#$%
+#$% Calls:     RLL2RB
+#$%            
+#$% Tables:    NONE
+#$%
+#$% Date:      JAN 82
+#$%
+#$% Author:    DONGOG
+#$%
+###########################################################
+
+bbcommon
+integer     vue$pointer, vue$PlotSourceType$i, vue$PlotSource$i,
+            vue$EmbarkIndx$i, vue$PlotMap$i,
+            unt$pointer, unt$Status$i,   
+            rmt$pointer, own$pointer
+
+real        range, brng,
+            vue$Latitude$f, vue$Longitude$f
+
+#$% for each view 
+for (vue$pointer$first; still_ok (vue) ; vue$pointer$next) # 9/26/88
+   {
+    #$% get plot source type and plot source
+    vue$PlotSourceType$i = Xvue$PlotSourceType$i
+    vue$PlotSource$i     = Xvue$PlotSource$i
+
+    #$% get embark index
+    vue$EmbarkIndx$i     = Xvue$EmbarkIndx$i
+
+    #$% if index within range of avaiable slots
+    if (vue$EmbarkIndx$i >  0        &
+        vue$EmbarkIndx$i <= unt$slots )
+       {
+        #$% set unit pointer to embark index
+        unt$pointer$to vue$EmbarkIndx$i
+
+        #$% get unit status
+        unt$Status$i = Xunt$Status$i
+
+        #$% if unit status is "being deleted" or "sinking"
+        if (unt$Status$i == $BeingDeleted$code |
+            unt$Status$i == $Sinking$code)
+
+            #$% set embark index to indicate no longer embarked in valid 
+            #$% platform
+            call NOEMBK(vue$pointer,unt$pointer)
+       }
+
+    #$% if plot source cannot be found, get next entry
+    if (vue$PlotSourceType$i == $null$code)  next
+
+    #$% if plot source ok
+    if (vue$PlotSourceType$i == $true$code)
+       {
+        #$% set unit pointer to plot source
+        unt$pointer$to vue$PlotSource$i
+
+        #$% if unit status if "being deleted"
+        if (Xunt$status$i == $BeingDeleted$code)
+           {
+            #$% set plot source type to null, save and get next
+            vue$PlotSourceType$i = $null$code
+            PUTvue$PlotSourceType$i
+            next
+           }
+
+        #$% set postion pointer to unit pointer index
+##      pos$pointer$to unt$pointer$index
+
+        #$% get unit position for view
+        vue$latitude$f = Xunt$TrueLatitude$f          #  jb    3/22/89
+        vue$longitude$f = Xunt$TrueLongitude$f        #  jb    3/22/89
+       }
+
+    #$% else if plot source type is own force
+    else if (vue$PlotSourceType$i == $OwnForce$code)
+       {
+        #$% set own pointer to plot source
+        own$pointer$to vue$PlotSource$i
+
+        #$% if own unit not found
+        if (Xown$Unit$i == $null)
+           {
+            #$% set plot source type to null, save and get next
+            vue$PlotSourceType$i = $null$code
+            PUTvue$PlotSourceType$i
+            next
+           }
+
+        #$% get own position for view
+        vue$latitude$f = Xown$Latitude$f
+        vue$longitude$f = Xown$Longitude$f
+       }
+
+    #$% else if plot source type is another force
+    else if (vue$PlotSourceType$i == $OtherForce$code)
+       {
+        #$% set remote track pointer to plot source
+        rmt$pointer$to vue$PlotSource$i
+
+        #$% if remote track cannot be found
+        if (Xrmt$InUse$i == $null)
+           {
+            #$% set plot source type to null, save and get next
+            vue$PlotSourceType$i = $null$code
+            PUTvue$PlotSourceType$i
+            next
+           }
+ 
+        #$% get remote track position for view
+        vue$latitude$f = Xrmt$ApparentLat$f
+        vue$longitude$f = Xrmt$ApparentLon$f
+       }
+
+    #$% if plot map required, save position and get next entry
+    if (Xvue$PlotMap$i == $yes)
+       {
+        PUTvue$latitude$f
+        PUTvue$longitude$f
+        next
+       }
+
+    #$%get position data
+    call RLL2RB (Xvue$latitude$f,
+                 Xvue$longitude$f,
+                 COS(Xvue$latitude$f),
+                 vue$latitude$f,
+                 vue$longitude$f,
+                 COS(vue$latitude$f),
+                 range,brng)
+    ## Note:  only RANGE is used below--not brng.
+
+    #$% if range is 1/10 of plot radius
+    if (range >= (Xvue$PlotRadius$i * 0.10) )
+       {
+        #$% get plot map and save
+        vue$PlotMap$i = $yes
+        PUTvue$PlotMap$i
+
+        #$% save position 
+        PUTvue$latitude$f
+        PUTvue$longitude$f
+       }
+   }
+
+return
+end
+
+ 
+
+Subroutine NOEMBK(vue$pointer,unt$pointer)
+
+###########################################################
+#$%
+#$% Purpose:   NOEMBK sets embark index outside the range to indicate
+#$%            not embarked on any valid platform and send warning 
+#$%            message to user
+#$%            
+#$% Called By: GPLOTC
+#$%
+#$% Calls:     SMOVH   SMOVHN   SEND
+#$%            
+#$% Tables:    NONE
+#$%
+#$% Date:      JAN 82
+#$%
+#$% Author:    DONGOG
+#$%
+###########################################################
+
+BBcommon
+character       msg[60]
+integer         vue$pointer, vue$EmbarkIndx$i, 
+                unt$pointer,
+                k
+literal         cstrip8
+
+vue$EmbarkIndx$i = unt$slots + 1                # embark on nothing
+PUTvue$EmbarkIndx$i
+
+#$% if unit status is "being deleted"
+if (Xunt$Status$i == $BeingDeleted$code)
+   {
+    #$% move warning message into message array and display    
+    k = 0                                               #       1/29/82
+    call smovhn (Xunt$Name$c,$$MaxLit,msg,k)                   #       VAX00
+    call smovV (" no longer exists -- choose new embarcation.",msg,k)
+    call send_(vue$pointer$index,0,k,msg)     # send msg to view  1/29/82
+   }
+else
+   {
+    k = 0                                               #       1/29/82
+    call smovhn (Xunt$Name$c,$$MaxLit,msg,k)                   #       VAX00
+    call smovV (" sinking -- choose new embarcation.",msg,k)
+    call send_(vue$pointer$index,0,k,msg)     # send msg to view  1/29/82
+   }
+
+return
+end
+
+ 
+
+subroutine resync
+
+########################################################
+#$%
+#$% Purpose:   RESYNC delays execution until the
+#$%            end of the game minute.
+#$%
+#$% Called By: WARCYC
+#$%
+#$% Calls:     DELAY
+#$%
+#$% Tables:    None
+#$%
+#$% Date:      OCT 80
+#$%
+#$% Author:    Dana Wills
+#$%
+########################################################
+
+BBcommon
+integer     jnow, now, jwhen, idely, kstat
+real        x
+
+repeat
+   {
+    jnow = now(x)                               # get clock time in 
+                                                # milliseconds SINCE MidNight
+
+    if (jnow < cycle$start$time)                # check if we passed midnight,
+        cycle$start$time = cycle$start$time - 1000*$Seconds$Per$Day   # shift 24 hours
+
+    jwhen = cycle$start$time + (time$spec*1000)  # compute next start  
+
+    if (jnow >= jwhen) break                    # if time has not gone by yet
+
+    idely = (jwhen - jnow)                 # compute amount of delay
+
+    if (idely <= 10) break                      # if less than 10 millisecs...
+
+    call delay (idely)                      # delay IDELY and break
+    break
+
+   }
+
+return
+end
+undefine read
+undefine write
+undefine err
+
+# FOLLOWING MODULE IS FOR DATA COLLECTION INTEGRATION --- JFFR 2/88
+subroutine get_run_number (nrun)
+integer    nrun
+integer    xix
+
+#
+# Alternate methods for getting the Run Number are:
+#
+#    Call LIB$Get_Symbol ("Symbol_name", return_descriptor, return_length)
+#
+#    Call LIB$SYS_Trnlog ("Symbol_name", return_length, return_descriptor,,,)
+#
+
+nrun = 0
+       OPEN (UNIT=11, FILE='gamenum.dat',STATUS='OLD',ERR=1919)
+       READ(11,1918) xix
+
+nrun = xix
+xix  = xix + 1
+
+#
+# Why is wargame incrementing the Run Number ???   It should be done 
+# by the outside, controling, process or procedure....
+#
+
+       REWIND 11
+       WRITE (11,1918) xix
+       CLOSE(11)
+
+1918 format(i3)
+1919 continue
+end
+
+
+Subroutine check_disk_space
+BBCOMMON
+
+#   This routine checks the amount of disk space on the default drive
+#   to determine if the game should be allowed to run....
+#
+#   Three levels of status are possible:
+#       1)  Plenty of disk, do not do anything
+#       2)  Less than two saves are possible, send warning message to Control
+#       3)  Less than one save is possible, Set the Pause Flag & send a message
+#
+
+Integer*4   Save_Size
+Integer*4   Free_Size
+Integer*4   Total_Size
+
+Character   Msg[200]
+Integer*4   N, iview
+
+call Query_Disk_Info ("SYS$DISK", Total_Size, Free_Size)
+
+Save_Size = (Max$BB$Words$save + 127) / 128
+
+if (free_size <= save_size)
+    {
+    iview = $Neutral$View
+    N = 0
+    call smovv ("** ALERT ** ",Msg,N)
+    call smov  ($tab,msg,N)
+    call smov  (8,msg,N)
+    call smov  ($return,msg,N)
+    call smovv ("Disk space is too low to continue the exercise.",msg,N)
+    call smov  ($return,msg,N)
+    call smovv ("Have the System Manager or Exercise Operators",msg,N)
+    call smov  ($return,msg,N)
+    call smovv ("free up as much disk space as possible to ",msg,N)
+    call smovv ("continue.",msg,N)
+    call smov  ($return,msg,N)
+    call smovv ("**** The exercise is PAUSED ****",msg,N)
+    call send_  (iview,0,N,Msg)
+
+    Game$Pause = $yes
+    }
+else if (free_size <= save_size*2)
+    {
+    iview = $Neutral$View
+    N = 0
+    call smovv ("** WARNING ** ",Msg,N)
+    call smov  ($tab,msg,N)
+    call smov  (8,msg,N)
+    call smov  ($return,msg,N)
+    call smovv ("Disk space is approaching a critical low.",msg,N)
+    call smov  ($return,msg,N)
+    call smovv ("Have the System Manager or Exercise Operators",msg,N)
+    call smov  ($return,msg,N)
+    call smovv ("start freeing up as much disk space as ",msg,N)
+    call smovv ("possible.",msg,N)
+    call send_  (iview,0,N,Msg)
+    }
+
+end
+
+
+
+subroutine Clear_UNT_Modified_Flags
+##################################################################
+#$%
+#$% Purpose:   Clear_UNT_Modified_Flags loops through the UNT
+#$%            Tables and clears (zeros) the UNT$ALSPModifiedFlags$I
+#$%            field which overlays the UNT$Modified$I.
+#$%
+#$% Called By: WARCYC
+#$%
+#$% Calls:     None
+#$%
+#$% Tables:    UNT
+#$%
+#$% Date:      March 1994
+#$%
+#$% Author:    Carol Kropp
+#$%
+########################################################
+BBcommon
+
+integer     UNT$Pointer, UNT$ALSPModifiedFlags$I, UNT$RelocatedFlag$I, 
+            UNT$SideChangedFlag$I, UNT$PropulsionChangedFlag$I
+
+  for (UNT$Pointer$First; UNT$Pointer$Ok; UNT$Pointer$Next)
+    {
+     UNT$ALSPModifiedFlags$I = $no
+     putUNT$ALSPModifiedFlags$I
+
+     UNT$RelocatedFlag$I = $no
+     putUNT$RelocatedFlag$I
+
+     UNT$SideChangedFlag$I = $no
+     putUNT$SideChangedFlag$I
+
+     UNT$PropulsionChangedFlag$I = $no
+     putUNT$PropulsionChangedFlag$I
+    }
+
+return
+end
+
+
+
+subroutine Record_Start_Time    # Write hstim record
+BBcommon
+tim$record$definition
+
+PUTtim$ScenarioName$c( scenario$name )
+
+PUTtim$Year$f( Start$Year )
+
+PUTtim$Month$f( Start$Month )
+
+PUTtim$Day$f( Start$Day )
+
+PUTtim$Hour$f( Start$Hour )
+
+PUTtim$Min$f( Start$Minute )
+
+PUTtim$StartRecordTime$f( float(Record$from$minute) )
+
+PUTtim$EndRecordTime$f( game$time )
+
+PUTtim$DataBaseVersion$f( Data$base$Version )
+
+write ($lfc$TIME) tim$record
+
+return
+end
+
+
+
+subroutine JTIDS_RMT_Cleanup
+##################################################################
+#$%
+#$% Purpose:   JTIDS_RMT_Cleanup will loop through the BLUE views'
+#$%            RMT areas and drop any detections for which
+#$%            Zero_RMT_Entry had been called before a delete
+#$%            was sent to the LSE.  Zero_RMT_Entry flagged the
+#$%            RMT entry for deletion and the RLI should have
+#$%            sent the delete report.
+#$%
+#$% Called By: WARCYC
+#$%
+#$% Calls:     Zero_RMT_Entry    <wgmdrem.rat>
+#$%
+#$% Tables:    VUE    RMT
+#$%
+#$% Date:      January 1996 (E1469)
+#$%
+#$% Author:    Carol Kropp
+#$%
+##################################################################
+BBcommon
+
+integer  view_index
+integer  VUE$Pointer
+integer  VUE$FirstRmtIndx$I, VUE$LastRmtIndx$I
+integer  last_rmt_ptr_for_view
+integer  RMT$Pointer
+
+for (view_index = $FirstBlue$View; view_index <= $LastBlue$View;
+                                   view_index = view_index + 1)
+  {
+   VUE$Pointer$To  (view_index)
+   VUE$FirstRmtIndx$I = xVUE$FirstRmtIndx$I
+   VUE$LastRmtIndx$I  = xVUE$LastRmtIndx$I
+
+   RMT$Pointer$To  (VUE$LastRmtIndx$I)
+   last_rmt_ptr_for_view = RMT$Pointer
+
+   for (RMT$Pointer$To  (VUE$FirstRmtIndx$I);
+        RMT$Pointer <= last_rmt_ptr_for_view; RMT$Pointer$Next)
+     {
+      if (xRMT$JTIDSDeletePending$I == $yes &     # if it was flagged for
+          xRMT$JTIDSDeleteSent$I == $yes)         # deletion and the delete
+        call Zero_RMT_Entry (RMT$Pointer)         # was sent - clear it!
+     }   # end of loop through the view's RMT area   
+  }   # end of loop through the blue views
+
+return
+end
+
+
+subroutine Check_CEC_Assignments
+##################################################################
+#$%
+#$% Purpose:   Check_CEC_Assignments will loop through the
+#$%            UNT table to check to see if any platforms have
+#$%            received requests to engage/disengage.
+#$%
+#$% Called By: WARCYC
+#$%
+#$% Calls:     smov..
+#$%            send
+#$%
+#$% Tables:    UNT
+#$%
+#$% Date:      October 1996 (E1695)
+#$%
+#$% Author:    Carol Kropp
+#$%
+#$% Modified:  Carol Kropp - 3/97 (E1771)
+#$%            Added calls to Add_CEC_Assignment_to_ISR so that
+#$%            the information will be available on the INTEL
+#$%            astab.
+#$%
+##################################################################
+BBcommon
+
+integer    UNT$Pointer, UNT$View$I, UNT$CECTrackAssigned$I
+literal    cstrip8, UNT$Name$C
+character  msg[ARB]
+integer    msg_len
+
+  for (UNT$Pointer$First; UNT$Pointer$Ok; UNT$Pointer$Next)
+    {
+     if (xUNT$CECEngRequestRcvd$I != $no)
+       {
+        UNT$Name$C = xUNT$Name$C
+        UNT$CECTrackAssigned$I = xUNT$CECTrackAssigned$I
+        UNT$View$I = xUNT$View$I
+        msg_len = 0
+        call smovv  ("***************************************", msg, msg_len)
+        call send_   (UNT$View$I, 0, msg_len, msg)
+
+        msg_len = 0
+        call smovhn (UNT$Name$C, $$MaxLit, msg, msg_len)
+        call smovv  (" has been requested to engage CEC Track ", msg, msg_len)
+        call smoviz (UNT$CECTrackAssigned$I, $CEC$TrackNumber$Length, msg, msg_len)
+        call send_   (UNT$View$I, 0, msg_len, msg)
+
+        msg_len = 0
+        call smovv  ("***************************************", msg, msg_len)
+        call smov   ($Bell, msg, msg_len)
+        call send_   (UNT$View$I, 0, msg_len, msg)
+
+        putUNT$CECEngRequestRcvd$I ($no)
+
+        call Add_CEC_Assignment_to_ISR (UNT$Name$C, $yes, UNT$CECTrackAssigned$I)
+       }   # end of if the unit has received an engagement request
+     else if (xUNT$CECDisengRequestRcvd$I != $no)
+       {
+        UNT$Name$C = xUNT$Name$C
+        UNT$CECTrackAssigned$I = xUNT$CECTrackAssigned$I
+        UNT$View$I = xUNT$View$I
+        msg_len = 0
+        call smovv  ("***************************************", msg, msg_len)
+        call send_   (UNT$View$I, 0, msg_len, msg)
+
+        msg_len = 0
+        call smovhn (UNT$Name$C, $$MaxLit, msg, msg_len)
+        call smovv  (" has been requested to disengage CEC Track ", msg, msg_len)
+        call smoviz (UNT$CECTrackAssigned$I, $CEC$TrackNumber$Length, msg, msg_len)
+        call send_   (UNT$View$I, 0, msg_len, msg)
+
+        msg_len = 0
+        call smovv  ("***************************************", msg, msg_len)
+        call smov   ($Bell, msg, msg_len)
+        call send_   (UNT$View$I, 0, msg_len, msg)
+
+        putUNT$CECDisengRequestRcvd$I ($no)
+        putUNT$CECTrackAssigned$I  ($no)
+
+        call Add_CEC_Assignment_to_ISR (UNT$Name$C, $no, UNT$CECTrackAssigned$I)
+       }   # end of if the unit has received a disengagement request
+    }   # end of loop through the UNT table
+
+return
+end   # end of Check_CEC_Assignments
+
+
+subroutine Add_CEC_Assignment_to_ISR (_
+                       unit_name, 
+                       engage_flag,
+                       cec_track_nbr)
+##################################################################
+#$%
+#$% Purpose:   Add_CEC_Assignment_to_ISR will add a line to the
+#$%            Intel ASTAB, since the information scrolls off the
+#$%            i/o so fast (the CEC model sends waves of engage
+#$%            and disengage messages).
+#$%
+#$% Called By: Check_CEC_Assignments
+#$%
+#$% Calls:     count_isr
+#$%            getisr
+#$%            echo..
+#$%            smov..
+#$%            lib$movc3
+#$%
+#$% Tables:    ISR
+#$%
+#$% Date:      March 1997 (E1771)
+#$%
+#$% Author:    Carol Kropp
+#$%
+##################################################################
+BBcommon
+
+literal    unit_name
+integer    engage_flag, cec_track_nbr
+
+integer    Game_DTG
+
+integer    i
+integer    line_count
+integer    first_msg_nbr, last_msg_nbr
+integer    msg_nbr
+integer    ISR$Pointer
+integer    len
+character  txt[80]
+
+  for (i = $FirstBlue$View; i <= $LastBlue$View; i = i + 1)
+    {
+     call count_isr (i, line_count, first_msg_nbr, last_msg_nbr)
+     msg_nbr = last_msg_nbr + 1
+     call getisr (ISR$Pointer)
+     if (ISR$Pointer == 0)
+       {
+        call echov ("Intel ASTAB table is full");
+        call echor
+        return
+       }
+     #          1         2         3         4
+     # 1234567890123456789012345678901234567890123
+     # ddddddZ   name      ENGAGE CEC      000001
+     # ddddddZ   name      DISENGAGE CEC   000001
+     len = 0
+     call smovv ("                                           ", txt, len)
+     len = 0
+     call smoviz (Game_DTG(Game$Time), 6, txt, len)
+     call smovv  ("Z", txt, len)
+     len = 10
+     call smovhn (unit_name, $$MaxLit, txt, len)
+     len = 20
+     if (engage_flag == $yes)
+       call smovv ("ENGAGE CEC", txt, len)
+     else
+       call smovv ("DISENGAGE CEC", txt, len)
+     len = 36
+     call smoviz (cec_track_nbr, $CEC$TrackNumber$Length, txt, len)
+     putISR$LineLen$I (len)
+     putISR$LineNbr$I (1)
+     putISR$VUEIndx$I (i)
+     putISR$MsgNbr$I  (msg_nbr)
+     if (ISR$Last < ISR$Pointer)
+       ISR$Used = ISR$Pointer$Index * ISR$Entry
+     call lib$movc3(len, txt, xISR$Text$I)
+    }
+
+return
+end    # end of Add_CEC_Assignment_to_ISR
+
+
+subroutine chkeq            # dummy routine 
+BBimplicit              # jb E2145  7/27/00
+
+return
+end
+
+
+
+subroutine chkflt           # dummy routine
+BBimplicit              # jb E2145  7/27/00
+
+return
+end
+

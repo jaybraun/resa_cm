@@ -1,0 +1,1340 @@
+#####   FILE:   WGOPTOT.RAT
+#
+# Created - September 2000, DEW
+#
+# Routines (both Order processing and Motion) for insuring Unit Time-
+# Over-Target (TOT) arrivals.  This also includes Planed-Arrival-Time (PAT)
+#
+#
+ 
+define ($DEBUGt,)
+ 
+include "ascii.inc"
+include "bbctl.inc"
+include "bbcode.inc"
+ 
+include "bbord.inc"
+include "bbunt.inc"
+include "bbrmt.inc"
+ 
+include "bbacc.inc"
+include "bbagd.inc"
+include "bbcmc.inc"
+include "bbshc.inc"
+include "bbpim.inc"
+include "bbrte.inc"
+include "bbrto.inc"
+include "plplay.inc"
+ 
+define(trace$fltops$tot,istrip(trace$fltops,6,M1bits)) # trace TOT
+ 
+define (BBimplicit, IMPLICIT NONE)  # jb E2145  5/10/00
+ 
+#--------------------------------------------------
+# The following two structures allow for ongoing calculation of motion/time
+# Given an initial position/course/speed (Pos record)
+# Then, one of two things can happen
+# - No change for N minutes -->> leads to new DR position.
+#   Any order can have a delay time.
+# - Ordered Manuver ->> leads to time required
+#   Manuvers may be change in course/speed, with no specified position
+define ($TOT_Pos_Curr_Common,
+    Literal curr_Name
+    Integer curr_Side
+    real    curr_Lat,
+            curr_Long,
+            curr_Course,
+            curr_Speed,
+            curr_Alt,
+            curr_Time,
+            curr_Cruise
+    vmschar*40 curr
+ 
+    common/TOT_Pos_curr/_
+            curr_Name,
+            curr_Side,
+            curr_Lat,
+            curr_Long,
+            curr_Course,
+            curr_Speed,
+            curr_Alt,
+            curr_Time,
+            curr_Cruise
+    equivalence(curr_Name, curr)
+)
+ 
+define ($TOT_Pos_Dest_Common,
+    Literal dest_Name
+    Integer dest_Side
+    real    dest_Lat,
+            dest_Long,
+            dest_Course,
+            dest_Speed,
+            dest_Alt,
+            dest_Time,
+            dest_Cruise
+    vmschar*40 dest
+ 
+    common/TOT_Pos_dest/_
+            dest_Name,
+            dest_Side,
+            dest_Lat,
+            dest_Long,
+            dest_Course,
+            dest_Speed,
+            dest_Alt,
+            dest_Time,
+            dest_Cruise
+    equivalence(dest_Name, dest)
+)
+ 
+#--------------------------------------------------
+ 
+define ($TOT_Mov_Action_Common,
+    Literal Action_Track,
+            Action_Base,
+            Action_Force
+    Integer Action_Point,
+            Action_UNT,
+            Action_RTE,
+            Action_RTE_Leg
+    real    Action_Lat,
+            Action_Long,
+            Action_Distance,
+            Action_Course,
+            Action_Speed,
+            Action_Alt,
+            Action_Time
+    vmschar*68 action
+ 
+    common/TOT_Mov_Action/_
+            Action_Track,
+            Action_Base,
+            Action_Force,
+            Action_Point,
+            Action_UNT,
+            Action_RTE,
+            Action_RTE_Leg,
+            Action_Lat,
+            Action_Long,
+            Action_Distance,
+            Action_Course,
+            Action_Speed,
+            Action_Alt,
+            Action_Time
+    equivalence(Action_Track, Action)
+ 
+  )
+ 
+define ($erase$record,
+    {
+    call Lib$MovC5 (0,0,0, len(@1), @1)
+    } )
+ 
+#--------------------------------------------------
+ 
+ 
+
+Subroutine Estimate_Time_Needed (ord$pointer,    # (In) Order to analyze
+                                 minutes_needed) # (out) time required to complete
+################################################################################
+#$%
+#$% Purpose:    Estimates time required for the specified order to complete.
+#$%
+#$% Called By:  WGORDT
+#$%
+#$% Date:       SEP 2000
+#$%
+#$% Author:     Dane Wills
+#$%
+#$%
+################################################################################
+BBcommon
+ 
+real        minutes_needed, fudge
+real        execute_now / 999999.0 /
+ 
+literal     cstrip8, cruiseType
+ 
+BBdeclare  (ord$pointer, ord$Start$i, ord$Code$i,
+            ord$AddIndx$i, ord$wrd$index)
+BBdeclare  (UNT$pointer, UNT2$pointer, unt$Type$i, ACC$pointer, RMT$pointer,
+            rte$pointer, rto$pointer, rto$wrd$index, cmc$pointer,
+            shc$pointer, agd$pointer)
+ 
+Integer     nargs, pos_arg, sp_arg, kk,
+            Init_Side,
+            Dest_UNT,
+            Dest_Ground,
+            find_agd_slot,
+            isPlottable,
+            indx
+ 
+Integer     iseq, icnt, nseq, positionFlag, nord, kargs, isplottableorder
+ 
+Literal     Dest_Track,         # enemy track
+            Dest_Base,          # own side
+            Dest_Force,         # enemy side
+            args[$max$args]
+ 
+Real        Init_Lat, Init_Long,
+            Dest_Lat, Dest_Long,
+            Dest_Distance,
+            Desired_Speed, dms2rad, brg
+ 
+fudge = 0.05
+minutes_needed = 0.0
+ 
+ord$AddIndx$i  = Xord$AddIndx$i
+ 
+if (ord$AddIndx$i == 0)
+    {
+    # we could tell the user (?) there is a problem, or not
+ 
+    minutes_needed = execute_now
+    return     # Bail out. no UNT assigned.
+    }
+ 
+unt$pointer$to   ord$AddIndx$i
+ord$Code$i     = Xord$Code$i
+ 
+#------------------------------
+# Get Current Lat/Long
+ 
+Init_Lat    = xUNT$TrueLatitude$F
+Init_Long   = xUNT$TrueLongitude$F
+ 
+call whside(xUNT$View$i, Init_side)
+ 
+#------------------------------
+# If we can get a distance/speed, we can compute time required
+#
+ 
+Dest_Track          = 0         # initialize values
+Dest_Base           = 0
+Dest_Force          = 0
+Dest_Unt            = 0
+Dest_Ground         = 0
+Dest_Lat            = 0.0
+Dest_Long           = 0.0
+Dest_Distance       = -1        # flag for empty
+ 
+# for the time being.
+Desired_speed       = -1        # flag for cruise speed
+ 
+# We could set this to UNT's Ordered Speed, and let the code below
+# call for 'cruise' speed as appropriate                DEW
+ 
+pos_arg     = 0                 # where to look for POSITION
+sp_arg      = 3                 # SPEED might occur here or later
+ 
+nargs       = xORD$NbrArgs$I
+for (kk = 1; kk <= nargs; kk=kk+1)
+    {
+    ord$wrd$index = kk
+    args[kk] = xORD$WRD$$C
+    }
+ 
+ 
+#------------------------------
+# Use the parameters of the order, to replace the DEST_* fields
+ 
+if (ord$code$i == Attack$Order)                 # Attack track TOT
+    {
+    Dest_track = args[2]
+    }
+else if (ord$code$i == JTMDAttackModel$Order)   # Attack Position TOT
+    {
+    Pos_Arg = 2             # POSITION lex code MUST be here
+    sp_arg  = 5             # SPEED might occur here or later
+    }
+else if (ord$code$i == BINGO$order)             # Bingo PAT
+    {
+    if (args[2] == $lex$TO$)
+        {
+        Dest_Base = args[3]
+        }
+    else
+        {
+        Dest_UNT = xUNT$RecoverIndx$i
+        }
+    sp_arg = nargs   # Never a SPEED
+    }
+else if (ord$code$i == CAPSTATION$order)        # CAP position PAT
+    {
+    Pos_Arg = 2             # POSITION lex code MUST be here
+    sp_arg  = 5             # SPEED might occur here or later
+    }
+else if (ord$code$i == ORBIT$Order)             # Orbit PAT
+    {
+    # Does not use POSITION lex code
+ 
+    Dest_Lat    = dms2rad(args[3])
+    Dest_Long   = dms2rad(args[4])
+ 
+    sp_arg      = 5         # SPEED might occur here or later
+    }
+else if (ord$code$i == PROCEED$order)           # Proceed course/position PAT
+    {
+    if (args[2] == $lex$COURSE$)
+        {
+        Dest_Distance = args[4]
+        }
+    else
+        {
+        Pos_Arg = 2             # POSITION lex code MUST be here
+        }
+ 
+    sp_arg = 5                  # SPEED might occur here or later
+    }
+else if (ord$code$i == PROCEEDRoute$order)      # Proceed using Route PAT
+    {
+    call find_a_route (args[3], init_side, rte$pointer)
+ 
+    if (rte$pointer$ok)
+        {
+        nseq = 1
+        if (nargs > 4)
+            {
+            if (args[5] == $lex$BACK$) nseq = Xrte$NumOrders$i
+            }
+        # Find first or last position order
+        iseq = 1
+        icnt = Xrte$NumOrders$i
+        positionFlag = $no
+        for (rto$pointer = Xrte$RTOpntr$i; iseq <= icnt; rto$pointer$next)
+        {
+            # Is this order a positon type order? If not skip
+            rto$wrd$index = 3           # Order Number
+            nord = Xrto$wrd$$c
+            kargs = Xrto$NbrArgs$i - 7
+            isPlottable = isPlottableOrder(iseq, nord, kargs, Xrto$args$i)
+            iseq = iseq + 1
+            if (isPlottable == $NO) next
+            call get_position_from_order(nord, kargs, Xrto$args$i, dest_lat,
+                                     dest_long)
+            positionFlag = $yes
+            if (iseq >= nseq) break         # Keep first of last position order
+        }
+ 
+        if (PositionFlag == $no)
+            {
+            Dest_Distance = 0.0
+            }
+        }
+    else
+        {
+        Dest_Distance = 0.0         # make it real close.
+        }
+ 
+    sp_arg = nargs   # Never a SPEED
+    }
+else if (ord$code$i == RECONN$order)            # Reconn Base/Track TOT
+    {
+    if (args[2] == $lex$BASE$)
+        {
+        Dest_Force = args[3]
+        }
+    else
+        {
+        Dest_Track = args[2]
+        }
+    }
+else if (ord$code$i == STRIKE$order)            # Strike Position TOT
+    {
+    if (args[2] == $lex$POSITION$)
+        {
+        Pos_Arg = 2             # POSITION lex code MUST be here
+        sp_arg  = 5             # SPEED might occur here or later
+        }
+    else if (args[2] == $lex$GROUND$)
+        {
+        sp_arg  = 4             # SPEED might occur here or later
+        Dest_Ground = args[3]
+        }
+    }
+else if (ord$code$i == TAKE$order)              # Take Track/Base TOT
+    {
+    if (args[2] == $lex$BASE$)
+        {
+        Dest_Force = args[3]
+        }
+    else
+        {
+        Dest_Track = args[2]
+        }
+    sp_arg = 4              # SPEED might occur here or later
+    }
+ 
+else if (ord$code$i == LAUNCH$order |           # Launch TOT
+         ord$code$i == LAUNCHC$order)
+    {
+    Dest_Distance = 0.0                         # processed elsewhere
+    sp_arg = nargs                              # Never a SPEED
+    }
+#            1      2       3      4    5    6         7           8
+#[ | PLAN ] FIRE <number> <name> CRUISE AT POSITION <latitude> <longitude>
+#[ | PLAN ] FIRE <number> <name> CRUISE AT BASE <shore-base>
+#FIRE <number> <name> BALLISTIC  [ BEARING <degrees> RANGE <nautical-miles>  |
+#                                  AT [ BASE <shore-base> | TRACK <track-no> |
+#                                  POSITION <latitude> <longitude> ] ]
+else if (ord$code$i == FIRECRUISE$order)        # Fire TOT
+{
+    kk = 1
+    if (args[1] == $lex$plan$) kk = 2
+    if (args[kk+3] == $lex$cruise$)
+    {
+        if (args[kk+5] == $lex$position$)
+            pos_arg = kk+5
+        else if (args[kk+5] == $lex$base$)
+            dest_force = args[kk+6]
+ 
+        cruiseType = args[kk+2]
+        for (cmc$pointer$first; cmc$pointer$ok; cmc$pointer$next)
+        {
+            if (Xcmc$Type$c == cruiseType)
+            {
+                desired_speed = Xcmc$AvgSpeed$i
+                break
+            }
+        }
+    }
+}
+ 
+#------------------------------
+# See if POSITION must be specified
+ 
+if (pos_arg != 0)
+    {
+    kk = pos_arg
+    if (args[kk] == $lex$POSITION$)
+        {
+        Dest_Lat      = dms2rad(args[kk+1])
+        Dest_Long     = dms2rad(args[kk+2])
+ 
+        kk = kk + 3
+ 
+        # Should we push SPEED out a little.
+        # SPEED never preceeds POSITION             DEW
+        if (sp_arg <= kk) sp_arg = kk
+        }
+    else # No POSITION lex code
+        {
+        # We have a problem, did not find POSITION lex code,
+        # give up, and make it run now.
+ 
+        minutes_needed = execute_now
+        return
+        }
+    }
+ 
+#------------------------------
+# See if any SPEED specified
+ 
+for (kk = sp_arg; kk < nargs; kk = kk + 1)
+    {
+    if (args[kk] != $lex$speed$) next
+ 
+    Desired_speed = args[kk+1]
+    break
+    }
+ 
+#------------------------------
+# If 'cruise' speed, find it
+ 
+if (Desired_speed == -1)            # flag for cruise speed
+    {
+    unt$Type$i = Xunt$Type$i
+    if (unt$type$i == $air$code)
+        {
+        acc$pointer = Xunt$accPntr$i
+        Desired_speed = Xacc$CruiseSpeed$I
+        }
+    else if (unt$Type$i == $Surface$Code |
+             unt$Type$i == $Sub$Code)
+        {
+        shc$pointer = Xunt$ShcPntr$i
+        Desired_speed = Xshc$CruiseSpeed$i
+        }
+    else
+        {
+        Desired_speed = Xunt$Speed$I * 0.7      # 70% of Max Speed
+        }
+    }
+ 
+#------------------------------------------------------------
+# We now have something to process.
+# The speed and a distance, or something to compute a distance to.
+ 
+if (Dest_distance < 0)
+    {
+    if (dest_track != 0)
+        {
+        call find_a_track (Dest_track, init_side, RMT$Pointer)
+ 
+        if (rmt$pointer == 0)           # was track a valid target?
+            {
+            minutes_needed = execute_now
+            return                      # (let the user see the error)
+            }
+ 
+        # We have a RMT$pointer to a valid track.
+        # We could compute an intercept vector, and range (and time)
+        # with the routine RMIN_TO_TARGET, recompute the VECTOR speed, and
+        # redo all the math, etc.
+        # BUT, TOT's are expected to be 'fixed' targets, and we are going
+        # to assume such here.
+ 
+        Dest_Lat    = xRMT$ApparentLat$F
+        Dest_Long   = xRMT$ApparentLon$F
+        }
+    else if (dest_Ground != 0)
+        {
+        # Get position of ground unit
+        indx = find_agd_slot (dest_ground,$NO)
+        if (indx != 0)
+            {
+            agd$pointer$to indx
+            Dest_Lat  = xAGD$TrueLatitude$F
+            Dest_Long = xAGD$TrueLongitude$F
+            }
+        }
+    else
+        {
+        unt2$pointer = 0
+ 
+        if (dest_force != 0)
+            {
+            call find_a_force (Dest_force, init_side, UNT2$Pointer)
+ 
+            if (UNT2$pointer == 0)          # was it a valid target?
+                {
+                minutes_needed = execute_now
+                return                      # (let the user see the error)
+                }
+            }
+        else if (dest_base != 0)
+            {
+            call find_a_base (Dest_base, UNT2$Pointer)
+ 
+            if (UNT2$pointer == 0)          # was it a valid base?
+                {
+                minutes_needed = execute_now
+                return                      # (let the user see the error)
+                }
+            }
+        else if (dest_UNT != 0)
+            {
+            unt2$pointer$to Dest_UNT
+            }
+ 
+        if (unt2$pointer != 0)
+            {
+            Dest_Lat    = xUNT2$TrueLatitude$F
+            Dest_Long   = xUNT2$TrueLongitude$F
+            }
+        }
+ 
+    # we should now have a Destination Lat/Long, get the distance
+ 
+    call RLL2RB (Init_Lat, Init_Long, COS(Init_Lat),
+                 Dest_Lat, Dest_Long, cos(Dest_Lat),
+                 Dest_Distance, brg)
+    }
+ 
+#------------------------------
+# Compute travel time required
+# Note: Speed is in nautical miles per hour,
+#       convert to miles per minute
+ 
+if (Desired_Speed <= 0.0) Desired_Speed = fudge
+minutes_needed = (Dest_Distance / (Desired_Speed / 60.0 ) ) + fudge
+ 
+return
+end
+ 
+
+subroutine find_a_track (A_name, iside1, RMT$Pointer)
+BBimplicit
+ 
+literal     A_name
+BBdeclare  (unt$pointer, rmt$pointer)
+ 
+integer     msglen, invalid_track, iside1
+character   msg[ARB]
+ 
+ 
+msglen = 0
+ 
+# The following routine will not do what we needed...
+# revisit later to fix it...
+ 
+#call Verify_track (A_name,          # receive track name
+#                   msg,             # return error message
+#                   msglen,          # return length of msg
+#                   invalid_track,   # return yes or no
+#                   UNT$Pointer,     # receive A/C unit pointer
+#                   RMT$Pointer)     # return RMT pointer
+ 
+invalid_track = $yes
+ 
+IF (invalid_track == $yes)
+    {
+    rmt$pointer = 0
+    }
+ 
+return
+end
+
+subroutine find_a_force (A_name, iside1, UNT2$Pointer)
+BBcommon
+ 
+literal     A_name
+BBdeclare  (unt2$pointer)
+integer     find_unit, iside1, iside2
+ 
+UNT2$Pointer = Find_Unit (a_name)
+ 
+if (UNT2$Pointer != 0 & xUNT2$Type$I == $shorebase$code)
+    {
+    call whside(Xunt2$view$i,iside2)
+ 
+    if (iside1 == iside2)     #$% if units on same side
+        {
+        unt2$pointer = 0
+        }
+    }
+else
+    {
+    unt2$pointer = 0
+    }
+ 
+return
+end
+
+subroutine find_a_base (A_name, UNT2$Pointer)
+BBcommon
+ 
+literal     A_name
+BBdeclare  (unt2$pointer)
+integer     find_unit
+ 
+UNT2$Pointer = Find_Unit (a_name)
+ 
+if (UNT2$Pointer != 0 & xUNT2$Type$I == $shorebase$code)
+    {
+    continue
+    }
+else
+    {
+    unt2$pointer = 0
+    }
+ 
+return
+end
+ 
+
+subroutine find_a_route (a_name, iside1, rte$pointer)
+# Finds a route for the view with the right name
+ 
+BBcommon
+ 
+BBdeclare  (rte$pointer)
+literal     A_name, cstrip8
+integer     iside1, iside2, litcmp
+ 
+for (Rte$Pointer$First; Rte$Pointer$Valid; Rte$Pointer$Next)
+{
+    call whside(xRTE$View$i, iside2)
+    if (iside1 == iside2 | iside1 == $Neutral$code)
+    {
+        if (litcmp(xrte$Name$c, A_Name) == 0) return
+    }
+}
+ 
+rte$pointer = 0
+ 
+return
+end
+ 
+
+Subroutine Compute_Launch_Delay(_                           # DEW (E2206)
+            ord_launch,     # (In) Order to analyze
+            unt2$pointer,   # (In) Launch Platform
+            acc$pointer,    # (In) A/C Type
+            Init_Course,    # (in)
+            Init_Speed,     # (in)
+            Init_Alt,       # (in)
+            End_Time,       # (in) arrival time (game minute)
+            TOT_Time,       # (out) Requested arrival time
+            Transit_Time)   # (out) Estimated transit time
+################################################################################
+#$%
+#$% Purpose:    Estimates time required traverse the flight plan to the first
+#$%             PAT/TOT specified.
+#$%
+#$%             If End_Time is non-zero, then we can stop at the end of the
+#$%             first route.  If NO PAT's and no END (or route), Transit
+#$%             time is 0.0
+#$%
+#$%             This routine may be overkill, it computes time for general
+#$%             motion operations like course and speed as well as time
+#$%             delays.
+#$%
+#$% Called By:  XVLAUNC
+#$%
+#$% Date:       SEP 2000
+#$%
+#$% Author:     Dane Wills
+#$%
+################################################################################
+BBcommon
+ 
+BBdeclare  (ord$pointer, unt2$pointer, acc$pointer)
+integer     Init_Course, Init_Speed, Init_Alt,
+            Ord_Launch, end_time, iside
+real        transit_time, TOT_time
+ 
+literal     cstrip8
+integer     cnt_launch, seq_launch, # ORD count and sequence of Launch
+            ord_tot, seq_tot,       # ORD Pointer and sequence of first TOT
+            ord_route, seq_route,   # ORD Pointer and sequence of first Route
+            iseq, end_seq
+ 
+$TOT_Pos_Curr_Common
+$TOT_Pos_Dest_Common
+$TOT_Mov_Action_Common
+ 
+#----------------------------------------
+Transit_Time = 0.0          # default value, no time required.
+ 
+$erase$record (Curr)
+ 
+# get current position (lat/long) from UNT2, add initial values
+ 
+call whside(Xunt2$view$i,iside)
+ 
+curr_Side   = iside
+Curr_Lat    = xUNT2$TrueLatitude$f
+Curr_Long   = xUNT2$TrueLongitude$f
+Curr_Course = Init_Course / (deg$per$rad)
+Curr_Speed  = Init_Speed
+Curr_Alt    = Init_Alt
+Curr_Time   = 0.0
+Curr_Cruise = xACC$CruiseSpeed$I
+ 
+ord_tot = 0             # ORD Pointer and sequence of first TOT
+seq_tot = 0
+ord_route = 0           # ORD Pointer and sequence of first Route
+seq_route = 0
+ 
+#--------------------------------------------------
+# scan flight plan for:
+#   - first PAT/TOT request, OR
+#   - first Proceed Route command
+ 
+ord$pointer = Ord_Launch
+cnt_launch  = xORD$Count$i
+seq_launch  = xORD$Sequence$i
+iseq        = seq_launch
+end_seq     = 0
+tot_time    = 0
+ 
+for (ord$pointer$next; xORD$Count$i == cnt_launch; ord$pointer$next)
+    {
+    iseq = iseq + 1
+    if (iseq != xORD$Sequence$i) break
+    if (iseq >  cnt_launch     ) break
+ 
+    if (iseq == 3)  curr_Name = xORD$Addressee$C    # Flight name should be here
+ 
+    if (seq_tot    == 0 &       # still looking for first PAT/TOT?
+        xORD$PAT$i != 0  )      # Have one here ?
+        {
+        ord_tot = ord$pointer
+        seq_tot = iseq
+        end_seq = iseq
+        tot_time = xORD$Start$i   # Planned Arrival Time
+        break
+        }
+ 
+    if (seq_route   == 0 &      # still looking for first route?
+        xORD$Code$i == ProceedRoute$Order)
+        {
+        ord_route = ord$pointer
+        seq_route = iseq
+ 
+        if (End_Time != 0)
+            {
+            end_seq = iseq
+            tot_time = End_time
+            break
+            }
+        }
+    }
+ 
+if (trace$fltops$tot == $yes)
+    {
+    call echor
+    call echov  ('^tot ')
+    call echohn (Curr_name,$$MaxLit)
+    call echov  (' to ')
+    call echoi (end_seq)
+    call echov (" (")
+    call echoi (seq_tot)
+    call echov ("/")
+    call echoi (seq_route)
+    call echov (") of ")
+    call echoi (cnt_launch)
+    }
+ 
+if (end_seq == 0) return            # No manuvering here
+ 
+# Use first position order with PAT/TOT qualifier
+# if EndTime specified, use END of first route (prior to any TOT/PAT's)
+ 
+ord$pointer = Ord_Launch
+iseq        = seq_launch
+ 
+for (ord$pointer$next; ; ord$pointer$next)
+    {
+    iseq = iseq + 1
+    if (iseq != xORD$Sequence$i) break
+    if (iseq >  end_seq        ) break
+ 
+    if (Xord$code$i == load$order) next #joa ufl05 skip load order
+ 
+    $erase$record (Action)
+ 
+    if (xORD$PAT$i == $NO)              # look for delta times....
+        action_time = xORD$Start$i
+ 
+    if (action_time != 0)
+        {
+        Call apply_tot_action
+        curr = dest
+        $erase$record (Action)
+        }
+ 
+    Call decode_tot_action (unt2$pointer,ord$pointer)
+    Call apply_tot_action
+    curr = dest
+ 
+    }
+ 
+transit_time = curr_time
+ 
+if (trace$fltops$tot == $yes)
+    {
+    call echor
+    call echov  ('^tot transit ')
+    call echof (transit_time,1)
+    }
+ 
+return
+end
+
+subroutine decode_tot_action (unt_launching, ord$pointer)
+BBcommon
+ 
+integer     unt_launching
+integer     iseq, icnt, nseq, positionFlag, nord, kargs
+BBdeclare  (ORD$Pointer, ORD$WRD$Index, ORD$Code$I,
+            UNT$Pointer, UNT2$Pointer, RMT$Pointer,
+            RTE$Pointer, RTO$Pointer, rto$wrd$index)
+ 
+$TOT_Pos_Curr_Common
+ 
+$TOT_Mov_Action_Common
+ 
+real        desired_speed, minutes_needed, dms2rad, tcos
+real        dest_lat, dest_long
+real        execute_now / 0.0 /
+ 
+Integer     nargs, pos_arg, sp_arg, kk
+Integer     isplottableorder, isplottable
+literal     args[$max$args], cstrip8
+ 
+# We could set this to UNT's Ordered Speed, and let the code below
+# call for 'cruise' speed as appropriate                DEW
+ 
+pos_arg     = 0                 # where to look for POSITION
+sp_arg      = 3                 # SPEED might occur here or later
+ 
+nargs       = xORD$NbrArgs$I
+for (kk = 1; kk <= nargs; kk=kk+1)
+    {
+    ord$wrd$index = kk
+    args[kk] = xORD$WRD$$C
+    }
+ 
+ORD$Code$I = xORD$Code$I
+ 
+Desired_speed   = -1            # flag for NO speed
+Action_Point    = $yes          # move to a point
+Action_Distance = 0.0           # flag no-op
+Action_Speed    = Curr_Speed    # Maintain same speed
+ 
+#------------------------------
+# Use the parameters of the order, to replace the Action_* fields
+ 
+if (ord$code$i == Attack$Order)                 # Attack track TOT
+    {
+    Action_track = args[2]
+    Desired_speed = Curr_Cruise
+    }
+else if (ord$code$i == JTMDAttackModel$Order)   # Attack Position TOT
+    {
+    Pos_Arg = 2             # POSITION lex code MUST be here
+    sp_arg  = 5             # SPEED might occur here or later
+    Desired_speed = Curr_Cruise
+    }
+else if (ord$code$i == BINGO$order)             # Bingo PAT
+    {
+    if (args[2] == $lex$TO$)
+        {
+        Action_Base = args[3]
+        }
+    else
+        {
+        unt$pointer = unt_launching
+        Action_UNT = UNT$Pointer$index
+        }
+    sp_arg = nargs   # Never a SPEED
+    Desired_speed = Curr_Cruise
+    }
+else if (ord$code$i == CAPSTATION$order)        # CAP position PAT
+    {
+    Pos_Arg = 2             # POSITION lex code MUST be here
+    sp_arg  = 5             # SPEED might occur here or later
+    Desired_speed = Curr_Cruise
+    }
+else if (ord$code$i == COURSE$order     |       # Course
+         ord$code$i == COURSENOSPEED$order)
+    {
+    Action_Course   = args[3] / (deg$per$rad)
+ 
+    if (args[1] == $lex$turn$)
+        {
+        Action_Course = Action_Course + Curr_Course
+        $ang2pi (Action_Course)
+        }
+ 
+    Action_Distance = 0
+    Desired_speed   = Curr_Cruise
+    Action_Point    = $no                       # move on a course
+ 
+    sp_arg  = 3             # SPEED might occur here or later
+    }
+else if (ord$code$i == ORBIT$Order)             # Orbit PAT
+    {
+    # Does not use POSITION lex code
+ 
+    Action_Lat    = dms2rad(args[3])
+    Action_Long   = dms2rad(args[4])
+    Desired_speed = Curr_Cruise
+ 
+    sp_arg      = 5         # SPEED might occur here or later
+    }
+else if (ord$code$i == PROCEED$order)           # Proceed course/position PAT
+    {
+    if (args[2] == $lex$COURSE$)
+        {
+        Action_Course   = args[3] / (deg$per$rad)
+        Action_Distance = args[4]
+        }
+    else
+        {
+        Pos_Arg = 2             # POSITION lex code MUST be here
+        }
+ 
+    Desired_speed = Curr_Cruise
+    sp_arg = 5                  # SPEED might occur here or later
+    }
+else if (ord$code$i == PROCEEDRoute$order)      # Proceed using Route PAT
+    {
+    call find_a_route (args[3], Curr_side, rte$pointer)
+ 
+    Desired_speed = Curr_Cruise         # Assume cruise speed for now
+    if (Curr_speed > 0)
+        Desired_speed = Curr_Speed      # Maintain current speed
+ 
+    if (rte$pointer == 0)       # any problem finding the route?
+        {
+        Action_Distance = 0.0   # make it real close.
+        }
+    else
+        {
+        nseq = 1
+        if (nargs > 4)
+            {
+            if (args[5] == $lex$BACK$) nseq = Xrte$NumOrders$i
+            }
+        # Find first or last position order
+        iseq = 1
+        icnt = Xrte$NumOrders$i
+        positionFlag = $no
+        for (rto$pointer = Xrte$RTOpntr$i; iseq <= icnt; rto$pointer$next)
+        {
+            # Is this order a positon type order? If not skip
+            rto$wrd$index = 3           # Order Number
+            nord = Xrto$wrd$$c
+            kargs = Xrto$NbrArgs$i - 7
+            isPlottable = isPlottableOrder(iseq, nord, kargs, Xrto$args$i)
+            iseq = iseq + 1
+            if (isplottable == $NO) next
+            call get_position_from_order(nord, kargs, Xrto$args$i, dest_lat,
+                                     dest_long)
+            positionFlag = $yes
+            if (iseq >= nseq) break         # Keep first of last position order
+        }
+ 
+        if (PositionFlag == $no)
+            {
+            Action_Distance = 0.0
+            }
+        else
+            {
+            Action_Lat    = dest_lat
+            Action_Long   = dest_long
+            }
+        #--------------------
+        Action_RTE      = RTE$Pointer
+        Action_RTE_leg  = nseq
+        }
+ 
+    sp_arg = nargs   # Never a SPEED
+    }
+else if (ord$code$i == RECONN$order)            # Reconn Base/Track TOT
+    {
+    if (args[2] == $lex$BASE$)
+        {
+        Action_Force = args[3]
+        }
+    else
+        {
+        Action_Track = args[2]
+        }
+    Desired_speed = Curr_Cruise
+    }
+else if (ord$code$i == SPEED$order     )        # Speed
+    {
+    Action_Point    = $no                       # move on a course
+    Action_Distance = 0
+    Desired_speed   = args[2]
+    }
+else if (ord$code$i == STRIKE$order)            # Strike Position TOT
+    {
+    Desired_speed = Curr_Cruise
+    Pos_Arg = 2             # POSITION lex code MUST be here
+    sp_arg  = 5             # SPEED might occur here or later
+    }
+else if (ord$code$i == TAKE$order)              # Take Track/Base TOT
+    {
+    if (args[2] == $lex$BASE$)
+        {
+        Action_Force = args[3]
+        }
+    else
+        {
+        Action_Track = args[2]
+        }
+    Desired_speed = Curr_Cruise
+    sp_arg = 4              # SPEED might occur here or later
+    }
+ 
+else if (ord$code$i == LAUNCH$order |           # Launch TOT
+         ord$code$i == LAUNCHC$order)
+    {
+    Action_Distance = 0.0                       # processed elsewhere
+    sp_arg = nargs                              # Never a SPEED
+    }
+else
+    {
+    Action_Point    = $no                       # move on a course
+    }
+ 
+#------------------------------
+# See if POSITION must be specified
+ 
+if (pos_arg != 0)
+    {
+    kk = pos_arg
+    if (args[kk] == $lex$POSITION$)
+        {
+        Action_Lat      = dms2rad(args[kk+1])
+        Action_Long     = dms2rad(args[kk+2])
+ 
+        kk = kk + 3
+ 
+        # Should we push SPEED out a little.
+        # SPEED never preceeds POSITION             DEW
+        if (sp_arg <= kk) sp_arg = kk
+        }
+    else # No POSITION lex code
+        {
+        # We have a problem, did not find POSITION lex code,
+        # give up, and make it run now.
+ 
+        Action_Distance = 0.0
+        Action_Course = Curr_Course
+        Desired_speed = Curr_Cruise
+        }
+    }
+ 
+#------------------------------
+# See if any SPEED specified
+ 
+for (kk = sp_arg; kk < nargs; kk = kk + 1)
+    {
+    if (args[kk] != $lex$speed$) next
+ 
+    Desired_speed = args[kk+1]
+    break
+    }
+ 
+#------------------------------
+# If 'cruise' speed, set it
+ 
+if (Desired_speed != -1)            # flag for 'cruise' speed
+    {
+    Action_Speed = Desired_speed
+    }
+ 
+if (Action_Speed == 0)              # no speed specified
+{
+    Action_Speed = Curr_Cruise
+}
+ 
+return
+end
+
+subroutine apply_tot_action
+BBcommon
+ 
+#------------------------------------------------------------
+# This routine expects a number of things to operate properly.
+# The CURR record identifies the units estimated location in time and space
+# The ACTION record contains information about what to do
+# Major Action flags are:
+#
+#   1)  Action_Time (non Zero)
+#       Indicates that the unit should move along the current course at
+#       the current speed for the given time, to a new Lat/long.
+#       I.e. the unit is Dead Reckoned to the new location.
+#
+#   2)  Action_Time (zero)
+#       Indicates somewhere to go has been supplied. Calculate transit time.
+#
+#       2a) Action_Point (YES)
+#           Indicates that a new Lat/Lon is supplied, or that one of the
+#           following is given, that can be tracked to a lat/long
+#           Options include (in order):
+#               Action_Track - Track number (i.e. RMT track AS034)
+#               Action_Force - Force name (same side)
+#               Action_Base  - Base name (any side)
+#               Action_UNT   - UNT Index (any)
+#               Action_Lat/Long
+#
+#       2b) Action_Point (NO)
+#           Indicates new course, speed, distance provided, that can be
+#           projected to a new Lat/Long
+#
+#   And when all things are processed, increment time by the
+#   time given/computed.
+#
+#   DEST will contain the new location/time/etc
+#
+#------------------------------------------------------------
+ 
+$TOT_Pos_Curr_Common
+$TOT_Pos_Dest_Common
+$TOT_Mov_Action_Common
+ 
+real        minutes_needed  / 0.0 /
+real        execute_now     / 0.0 /
+real        fudge           / 0.05 /
+ 
+BBdeclare  (UNT$pointer, UNT2$pointer, RMT$pointer)
+real        range, brg, tcos, Motion_Increment, delta
+ 
+#----------------------------------------
+# Motion on routes and flight plans is limited to even increments of
+# how often the motion model is executed.
+ 
+Motion_Increment = Time$step * Motion$Recurrence    # In Float Minutes
+ 
+#----------------------------------------
+ 
+dest = curr
+ 
+#--------------------
+ 
+if (action_time != 0)
+    {
+    # Apply current course and speed on current position for the given time
+ 
+    action_distance = curr_speed * (action_time / 60.0)
+    action_course   = curr_course
+ 
+    # compute dest_lat/long
+ 
+    tcos = cos(dest_lat)
+    Call RRB2LL(_                   #Rhumb line Range/Bearing to Lat/Lon
+                dest_lat,           # latitude (input & output)
+                dest_long,          # longitude (input & output)
+                action_distance,    # range (input)
+                action_course,      # relative bearing (input)
+                0.0,                # ref. bearing (input) = 0.0
+                tcos)               #cosine of latitude (input & output)
+    }
+else
+    {
+    if (Action_Point == $yes)
+        {
+        if (Action_track != 0)
+            {
+            call find_a_track (Action_track, Curr_Side, RMT$Pointer)
+ 
+            if (rmt$pointer == 0)           # was track a valid target?
+                {
+                Action_Distance = 0.0
+                Action_Course = Curr_Course
+                Action_speed = Curr_Cruise
+                Action_Point = $No          # (let the user see the error)
+                }
+            else
+                {
+                # We have a RMT$pointer to a valid track.
+                # We could compute an intercept vector, and range (and time)
+                # with the routine RMIN_TO_TARGET, recompute the VECTOR speed, and
+                # redo all the math, etc.
+                # BUT, TOT's are expected to be 'fixed' targets, and we are going
+                # to assume such here.
+ 
+                Action_Lat    = xRMT$ApparentLat$F
+                Action_Long   = xRMT$ApparentLon$F
+                }
+            }
+        else
+            {
+            unt2$pointer = 0
+ 
+            if (Action_force != 0)
+                {
+                call find_a_force (Action_force, Curr_Side, UNT2$Pointer)
+ 
+                if (UNT2$pointer == 0)          # was it a valid target?
+                    {
+                    minutes_needed = execute_now
+                    return                      # (let the user see the error)
+                    }
+                }
+            else if (Action_base != 0)
+                {
+                call find_a_base (Action_base, UNT2$Pointer)
+ 
+                if (UNT2$pointer == 0)          # was it a valid base?
+                    {
+                    Action_Distance = 0.0
+                    Action_Course = Curr_Course
+                    Action_speed = Curr_Cruise
+                    Action_Point = $No          # (let the user see the error)
+                    }
+                }
+            else if (Action_UNT > 0)
+                {
+                unt2$pointer$to Action_UNT
+                }
+ 
+            if (unt2$pointer != 0)
+                {
+                Action_Lat    = xUNT2$TrueLatitude$F
+                Action_Long   = xUNT2$TrueLongitude$F
+                }
+            }
+        } # end if ACTION_POINT == YES
+ 
+    if (Action_Point == $yes)
+        {
+        # we should now have a Action_Lat/Long, get the distance/bearing
+ 
+        call RLL2RB (Curr_Lat, Curr_Long, COS(Curr_Lat),
+                     Action_Lat, Action_Long, cos(Action_Lat),
+                     Action_Distance, action_course)
+ 
+        }
+    else
+        {
+        # we have a course/speed, get a lat/long
+ 
+        action_lat  = curr_lat
+        action_long = curr_long
+ 
+        tcos = cos(action_lat)
+        Call RRB2LL(_                   #Rhumb line Range/Bearing to Lat/Lon
+                    action_lat,         # latitude (input & output)
+                    action_long,        # longitude (input & output)
+                    action_distance,    # range (input)
+                    action_course,      # relative bearing (input)
+                    0.0,                # ref. bearing (input) = 0.0
+                    tcos)               #cosine of latitude (input & output)
+        }
+ 
+ 
+    #------------------------------
+    # We now have something to process.
+    # The speed, distance & Lat/Long
+ 
+    dest_lat    = action_lat
+    dest_long   = action_long
+    dest_course = action_course
+    dest_speed  = action_speed
+ 
+    #------------------------------
+    # Compute travel time required
+    # Note: Speed is in nautical miles per hour,
+    #       convert to miles per minute
+ 
+    action_time = (Action_Distance / (Action_Speed / 60.0 ) ) + fudge
+ 
+    #------------------------------
+    # Need to check for even multiple of Motion_Increment
+    # This is because, units cannot round corners of a route, mid-cycle
+ 
+    delta = MOD (action_time, Motion_Increment) # get remainder..
+    if (delta > fudge)                          # allow Epsilon...
+        {
+        action_time = action_time + Motion_Increment - delta
+        }
+    }
+ 
+#--------------------
+ 
+if (action_alt != 0)
+    dest_alt = action_alt
+ 
+ 
+#--------------------
+dest_time = curr_time + action_time
+ 
+if (trace$fltops$tot == $yes)
+    {
+    call echor
+    call echov  ('^tot ')
+    call echohn (Curr_name,$$MaxLit)
+    call echov  (' @')
+    call echof  (curr_time,2)
+    call echov  (' ')
+    call echoiz (int(action_course * 180/$pi),3)
+    call echov  (' for ')
+    call echof  (action_distance,1)
+    call echov  ('nmi @')
+    call echoi  (int(action_speed))
+    call echov  ('k (')
+    call echof  (action_time,2)
+    call echov  (' min)')
+    }
+ 
+return
+end

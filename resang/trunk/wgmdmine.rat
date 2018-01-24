@@ -1,0 +1,1641 @@
+####    FILE:   WGMDMINE.rat
+#### This is the initial skeleton for the RESA Mine Model
+####
+####    Record of Modifications:
+####
+####        Programmer          Date        Modification
+####
+####        D.E. Wills          29-Jun-89   Created initial model
+####
+####
+ 
+include "ascii.inc"
+include "bbctl.inc"
+include "bbcode.inc"
+include "bbunt.inc"
+include "bbmfd.inc"
+include "bbord.inc"
+include "bbtat.inc"
+include "bbacc.inc"
+include "bbshc.inc"
+include "bbswp.inc"
+include "orders.inc"
+include "plplay.inc"
+ 
+include "bbbom.inc"              # Include files needed for the modeling
+include "bbdeq.inc"              # of the individual mines/persistent
+include "bbpem.inc"              # effects munitions - DROP MINE command
+include "bbtrp.inc"              # clk 2/97 (E1731)
+include "cenglog.inc"
+include "hseng.inc"
+ 
+define (BBImplicit, Implicit None)  # jb E2145  7/10/00
+ 
+define(trace$engage$exe, istrip(trace$engage,0,M1bits)) # trace general exec
+define(trace$engage$roe, istrip(trace$engage,1,M1bits)) # trace ckroe select
+define(trace$engage$tgt, istrip(trace$engage,2,M2bits)) # trace assgnt select
+define(trace$engage$tgx, istrip(trace$engage,3,M1bits)) # trace assgnt all
+ 
+
+subroutine Mine_Mod    # Primary module for modeling Mine fields
+BBcommon
+ 
+# The mine model provides for up to 100 minefields (50 for blue,
+# 50 for orange).  Each game unit will only be subject to striking/sweeping
+# mines once every N game minutes.  To spread the processing load across
+# each game minute, only 1/N of the units are processed each cycle, where N
+# is the defined MineField$CheckFrequency.
+ 
+# CLK 3/93 (E1023) - Several modifications
+# 1.  No delay on minefield hits
+# 2.  Definable variable check frequency
+# 3.  Added ability to specify the mine target type ( ASW, ASUW, or both)
+ 
+# clk - 6/9/95 (E1411):  Density was being reduced each time through
+# by the 10%/30% factors, causing minefield density to "rapidly" decrease
+# (after the implementation of definable check frequency).
+ 
+LITERAL     CSTRIP8                          # jb E2145  7/10/00
+VMSchar*(8)  mine_fld                        # jb E2144  9/6/00
+real        density_factor_power
+real        ac_density_factor
+real        surf_density_factor
+real        pcent
+real        xlat [6]
+real        xlong[6]
+real        PH
+real        time_hit
+REAL  RANDOM, TEMP, X,                           # jb E2145  7/10/00
+    MFD$Density$F, UNT$Truespeed$F             # jb E2145  7/10/00
+Integer IFLAG, INDX, IPH,                      # jb E2145  7/10/00
+    MFD$Pointer,MFD$VER$Index,MFD$Sequence$I,  # jb E2145  7/10/00
+    BOM$MaxRangeYards$I,MFD$Targettype$I,MFD$Side$I,  # jb E2145  7/10/00
+    UNT$Pointer,UNT$Type$I,UNT$Minesweeping$I, # jb E2145  7/10/00
+    TAT$Pointer                                # jb E2145  7/10/00
+BBDeclare (unt$subtype$i)
+integer     last_unit
+integer     this_time
+integer     in_field
+integer     in_sweeparea
+integer     nvert
+integer     mine_fld_len         # khc 2/93 (E1112)
+integer     nmines
+BBDeclare   (bom$pointer, mfd$Area$f)
+BBDeclare   (swp$pointer, swp$ver$Index)
+BBDeclare   (mfd$SWP$Index, mfd$NSweepAreas$i)
+BBDeclare   (unt$TrueLatitude$f, unt$TrueLongitude$f)
+data x/0.0/		# Get next random number in sequence
+ 
+last_unit = unt$used / unt$entry
+this_time = mod(cycle$count, MineField$CheckFrequency ) + 1
+ 
+# Sweeping will reduce the density of a minefield at a rate
+# of 30% per hour for aircraft and 10% per hour for surface units.
+# new density = current density * (factor**(1/checks per hour))
+density_factor_power = (MineField$CheckFrequency * Time$Step) / $Minutes$Per$Hour
+ac_density_factor    = 0.7**density_factor_power
+surf_density_factor  = 0.9**density_factor_power
+ 
+for_all_OK (MFD)        # loop for all mine field entries
+    {
+    mfd$sequence$i = Xmfd$sequence$i
+    MFD$TargetType$I = xMFD$TargetType$I
+ 
+    if ( mfd$sequence$i == 0) next        # skip empty ones
+ 
+    if ( Xmfd$GhostedUnit$i == $yes) next # skip ghosted minefields
+ 
+    # move lat/long verticies into array for passing to INOUT
+    nvert = xmfd$points$i
+    for (mfd$ver$index=1;mfd$ver$index<=nvert;mfd$ver$index=mfd$ver$index+1)
+        {
+        xlat [mfd$ver$index] = xmfd$ver$latitude$f
+        xlong[mfd$ver$index] = xmfd$ver$longitude$f
+        }
+ 
+    for (indx = this_time; indx <= last_unit; indx = indx + MineField$CheckFrequency)
+        {
+        unt$pointer$to indx
+ 
+        if (Xunt$inuse$i == $no ) next    # skip empty ones
+ 
+        unt$type$i = Xunt$type$i
+ 
+        if (unt$type$i != $Air$code   &          # these can affect or
+            unt$type$i != $Sub$code   &          # be affected by mines
+            unt$type$i != $Surface$code ) next
+ 
+     if (UNT$Type$I == $Sub$Code)                # Torpedoes not affected
+       {                                         #  by mines
+        UNT$SubType$I = xUNT$SubType$I
+        if (UNT$SubType$I == $Torpedo$SubCode) next
+       }
+ 
+        unt$truelatitude$f  = Xunt$truelatitude$f
+        unt$truelongitude$f = Xunt$truelongitude$f
+ 
+        #------------------------------------------------------------
+        # first check if this unit is in the current mine field
+ 
+        call inout(unt$truelongitude$f,unt$truelatitude$f,
+                   nvert,xlong,xlat,in_field)
+ 
+        if (in_field != $YES) next
+ 
+        #------------------------------------------------------------
+        # check if this unit is in swept area
+        mfd$NSweepAreas$i = Xmfd$NSweepAreas$i
+        in_sweeparea = $NO
+        for (mfd$SWP$Index=1; mfd$SWP$Index<=mfd$NSweepAreas$i;
+             mfd$SWP$Index = mfd$SWP$Index+1)
+        {
+            swp$pointer$to Xmfd$SWP$SwpIndx$i
+            # Sweep areas must be complete to be used
+            if (Xswp$Status$i != $Complete$code) next
+            nvert = xswp$points$i
+            for (swp$ver$index=1;swp$ver$index<=nvert;
+                 swp$ver$index=swp$ver$index+1)
+            {
+                xlat [swp$ver$index] = xswp$ver$latitude$f
+                xlong[swp$ver$index] = xswp$ver$longitude$f
+            }
+            call inout(unt$truelongitude$f,unt$truelatitude$f,
+                       nvert,xlong,xlat,in_sweeparea)
+ 
+            if (in_sweeparea == $YES) break
+ 
+        }
+        if (in_sweeparea == $YES) next
+        #------------------------------------------------------------
+        # now check if this unit is a mine sweeper
+        # If it is, decrease density....
+ 
+        unt$MineSweeping$i = Xunt$MineSweeping$i
+ 
+        if (unt$MineSweeping$i == $Yes)
+            {
+            if (trace$engage$exe != $no)
+               {
+                call echor
+                call echov  ('!')
+                call echohn (Xunt$name$c,$$MaxLit)
+                call echov (" is sweeping mine field # ")
+                call echoi (mfd$sequence$i)
+                call echov("....")
+               }
+ 
+            if (unt$type$i == $air$code) pcent = ac_density_factor
+            else                         pcent = surf_density_factor
+ 
+            mfd$Density$f = Xmfd$Density$f
+            mfd$Density$f = mfd$Density$f * pcent
+            PUTmfd$Density$f
+            }
+ 
+        #------------------------------------------------------------
+        # Now check if this unit is going to take a hit.  If it is,
+        # compute time of Hit and add to TAT table.
+ 
+ 
+        if (unt$type$i == $Air$code) next   # this cannot hit a mine
+ 
+        if (UNT$Type$I != MFD$TargetType$I  &         # if not the mine type
+            MFD$TargetType$I != $ShipAndSub$Code)     # or the mine type isn't ships and subs
+           next
+ 
+        unt$truespeed$f = Xunt$truespeed$f
+        if (unt$truespeed$f <= 0.00001) next    # can't hit anything if still
+ 
+        if (trace$engage$exe != $no)
+           {
+            call echor
+            call echov  ('!')
+            call echohn (Xunt$name$c,$$MaxLit)
+            call echov (" is in mine field # ")
+            call echoi (xmfd$sequence$i)
+            call echov("....")
+           }
+ 
+        bom$pointer$to Xmfd$BOMIndx$i
+        bom$MaxRangeYards$i    = Xbom$MaxRangeYards$i
+        mfd$density$f   = Xmfd$density$f
+ 
+        temp = -1.0 * unt$truespeed$f * bom$MaxRangeYards$i * mfd$density$f *
+                (MineField$CheckFrequency / 60.0)
+        PH = 1.0 - exp(temp / 1000.0)
+ 
+        if (unt$MineSweeping$i == $YES)                         # 5/3/90 DEW
+             PH = PH * 0.1        # sweepers are less likely to hit a mine...
+ 
+        if (trace$engage$exe != $no)
+           {
+            call echov  (" (Ph=")
+            iph = ph * 100
+            call echoi (iph)
+            call echov  (") ")
+           }
+ 
+        if (random(X) > PH) next                        # Not hit this time
+ 
+        # One less mine, so recompute density
+        mfd$Area$f = Xmfd$Area$f
+        nmines = Xmfd$Density$f * mfd$Area$f + .5
+        nmines = nmines - 1
+        mfd$Density$f = nmines / mfd$Area$f
+        PUTmfd$Density$f
+ 
+# E1023 (part 1) - No time delay on hits.
+        time_hit = 0.
+ 
+        # build entry into TAT table now....
+        iflag = $no
+ 
+        #$% if trace display requested by user (usually for debug)
+        if (trace$engage$exe != $no)
+           {
+            #$% display message
+            call echov (" Hit at ")
+            call echoi (Game$Minute)
+           }
+ 
+        if  (log$engage != $no)              # if engagement log desired
+          {
+           #$% khc 2/93 - Set up parameters for subroutine Generate_eng_rec which
+           #$% E1112      builds and writes out an engagement record to the postgame
+           #$%            engagement log.
+           mine_fld = ""
+           mine_fld_len = 0
+           MFD$Side$I = xMFD$Side$I
+           if (MFD$Side$I == $Blue$Code)
+             call Vmovv  ("B ", mine_fld, mine_fld_len) # jb #2144  9/6/00
+           else if (MFD$Side$I == $Orange$Code)
+             call Vmovv  ("O ", mine_fld, mine_fld_len) # jb #2144  9/6/00
+           call Vmovib (MFD$Sequence$I, 2, mine_fld, mine_fld_len) # jb 9/6/00
+           call engdata (0, unt$pointer)
+           call Generate_eng_rec (mine_fld, "MINE    ", xUNT$Name$C)
+          }
+ 
+        for(TAT$POINTER$FIRST;still_valid(TAT);TAT$POINTER$NEXT)
+            {
+            # find empty Time-at-Target slot
+            if(Xtat$TargetIndx$I != 0)  next
+ 
+            putTAT$BOMIndx$i    (Xmfd$BomIndx$i)
+            putTAT$TargetIndx$I (UNT$POINTER$INDEX)   # save target pointer
+            putTAT$SourceIndx$I (0)                   # no owner to inform
+            putTAT$SourceALSPId$I (Xmfd$ALSPId$i)     # minefield alsp id as from
+            puttat$Time$f       (game$time+TIME_hit)# save time to target
+            putTAT$Weight$I     (Xbom$Weight$i)       # Lbs TNT of the mine
+            putTAT$Fired$I      (1)                   # save number mines
+            putTAT$Hits$I       (1)                   # save number of hits
+            putTAT$Ident$I      ($Mine$code)          # this is a mine
+#            putTAT$YIELD$I      (0)                   # overlays weight$i
+            iflag = $yes
+            break
+            }
+ 
+        if (iflag != $yes)
+            {
+            call echor
+            call echov ("TAT Table overflow for Mine Model")
+            }
+ 
+        } # end loop of all units
+    } # end loop of fields
+ 
+end
+ 
+
+subroutine    osweep (nord,id,unt$pointer,nargs,args)
+BBcommon
+ 
+literal         args[$max$args]
+literal         name_sweeper
+LITERAL     CSTRIP8                     # jb E2145  7/10/00
+Integer ACC$Pointer,SHC$Pointer,        # jb E2145  7/10/00
+    UNT$Pointer,UNT$View$I,UNT$Type$I   # jb E2145  7/10/00
+integer         sweeper
+integer         nord, nargs, id  # (Unused ARGUMENTS)
+integer         msglen, xsave
+character       msg[200]
+ 
+unt$view$i   = Xunt$View$i
+name_sweeper = Xunt$Name$c
+ 
+#------------------------------------------------------------
+# start validation of the command
+ 
+msglen = 0                              # build an initial error message
+call smovhn(name_sweeper,$$MaxLit,msg,msglen)
+call smovv(" cannot sweep mines: ",msg,msglen)
+call smov ($tab,msg,msglen)
+call smov (msglen,msg,msglen)
+xsave = msglen                            # save length of error msg
+ 
+unt$type$i = Xunt$type$i
+if (unt$type$i == $Air$code )
+    {
+    acc$pointer = Xunt$AccPntr$i
+    sweeper = Xacc$MineSweeper$i
+    }
+else if (unt$type$i == $Surface$code       |
+         xunt$SUPERtype$i == $Submarine$SUPERcode ) # jb    2/13/91
+    {
+    shc$pointer = Xunt$shcPntr$i
+    sweeper = Xshc$MineSweeper$i
+    }
+else
+    {
+    sweeper = $no
+    }
+ 
+ 
+if (sweeper == $no)
+    {
+    call smovv ("  It is not capable.",msg,msglen)
+    }
+ 
+#------------------------------------------------------------
+# were there any errors precluding sweeping....
+if (xsave != msglen)
+    {
+    while (mod(msglen,4) != 0)
+        call smov ($null,msg,msglen)
+ 
+    call send_ (unt$view$i,0,msglen,msg)     # display message of failure
+ 
+    return                                  # drop out...
+    }
+ 
+#------------------------------------------------------------
+# validation complete, now initiate action
+ 
+if (args[1] == $LEX$COMMENCE$) PUTunt$MineSweeping$i ($Yes)
+else                           PUTunt$MineSweeping$i ($No)
+ 
+end
+ 
+
+subroutine ominefield (nord,nargs,args,id)
+ 
+#$% Modified:  Susan Miller - 6/94 (E1290)
+#$%            Reduced number of command arguments from 21 to 20.
+#$%
+#$% Modified:  Jim Allen - 1/97 (E1597)
+#$%            Save lay density for mine field status board
+ 
+BBcommon
+ 
+literal         args[$max$args]
+literal         mine_name
+literal         cstrip8
+real            dms2rad
+real            density
+REAL MFD$VER$latitude$F,MFD$VER$longitude$F # jb E2145  7/10/00
+BBDeclare (mfd$BOMIndx$i, bom$pointer)
+Integer IPNT,                               # jb E2145  7/10/00
+    MFD_MATCH,MFD_EMPTY,MFD$Pointer,        # jb E2145  7/10/00
+    MFD$Sequence$I,MFD$Side$I,   # jb E2145  7/10/00
+    MFD$VER$Index                           # jb E2145  7/10/00
+integer         msglen, xsave, nargs
+integer         nord, id  #  (Unused ARGUMENTS)
+integer         imode, inumber, iside, radius, nepu, weight, npoints
+integer         target_type
+integer         nmines      # Number of mines in field
+integer         litcmp
+real            PolygonArea, area
+real            xlat[MFD$VER$slots], xlon[MFD$VER$slots]
+character       msg[200]
+ 
+# args[1]: DEACTIVATE | LAY
+# args[2]: MINFIELD
+# args[3]: field number
+# args[4]: BLUE | ORANGE
+# args[5]: mine name            (LAY MINEFIELD COMMAND)
+# args[6]: number of mines      (LAY MINEFIELD COMMAND)
+# args[7]: SUB | SURF | BOTH   (LAY MINEFIELD COMMAND) # changed for per E1290
+# args[8-...]: positions       (LAY MINEFIELD COMMAND)
+ 
+ 
+inumber = args[3]
+ 
+if (args[4] == $lex$blue$) iside = $blue$code
+else                       iside = $orange$code
+ 
+if (args[1] == $lex$DEACTIVATE$)
+{
+    call deactivate_minefield (nord,nargs,args,id)
+    return
+}
+ 
+Mine_Name  = args[5]
+nmines  = args[6]
+ 
+ 
+npoints = (nargs - 6) / 2
+ 
+# possible Error-handling alternative is the following...
+# call wgoerr (iview,iaddr,nord,nargs,args,text)
+ 
+#------------------------------------------------------------
+# start validation of the command
+ 
+msglen = 0                              # build an initial error message
+ 
+call smovv("Cannot ",msg,msglen)
+ 
+call smovv("LAY",msg,msglen)
+ 
+call smovv(" minefield #",msg,msglen)
+call smovi (inumber,msg,msglen)
+ 
+call smovv(" for ",msg,msglen)
+if (iside == $blue$code) call smovv("BLUE",msg,msglen)
+else                     call smovv("ORANGE",msg,msglen)
+call smovv(": ",msg,msglen)
+ 
+call smov ($tab,msg,msglen)
+call smov (msglen,msg,msglen)
+xsave = msglen                            # save length of error msg
+ 
+if (inumber < 1  | inumber > 50)
+    {
+    call smovv ("  Field number out of range.",msg,msglen)
+    }
+ 
+mfd$BOMIndx$i = 0
+for_all_valid (BOM)
+{
+    if (Xbom$Type$i != $mine$code) next
+ 
+    if (litcmp(Xbom$Name$c, mine_name) == 0)
+    {
+        mfd$BOMIndx$i = Bom$pointer$index
+        break
+    }
+}
+ 
+if (mfd$BOMIndx$i == 0)
+{
+    call smovv ("  Could not locate mine named ",msg,msglen)
+    call smovhn (mine_name, $$maxlit, msg, msglen)
+}
+ 
+ 
+ 
+mfd_match = 0
+mfd_empty = 0
+ 
+for_all_valid (MFD)
+    {
+    mfd$sequence$i = Xmfd$sequence$i
+ 
+    if (Xmfd$InUse$i == 0 & mfd_empty == 0)
+        {
+        mfd_empty = mfd$pointer$index
+        if (mfd_match != 0) break
+        }
+ 
+    mfd$side$i = Xmfd$side$i
+ 
+    if (mfd$side$i == iside & mfd$sequence$i == inumber)
+        {
+        mfd_match = mfd$pointer$index
+        if (mfd_empty != 0) break
+        }
+    }
+ 
+ 
+if ( mfd_empty == 0 ) call smovv ("  Mine Table Full.",msg,msglen)
+if ( mfd_match != 0 ) call smovv ("  Duplicate Field.",msg,msglen)
+ 
+ 
+#------------------------------------------------------------
+# were there any errors precluding sweeping....
+if (xsave != msglen)
+    {
+    while (mod(msglen,4) != 0)
+        call smov ($null,msg,msglen)
+ 
+    call send_ ($neutral$view,0,msglen,msg)     # display message of failure
+ 
+    return                                  # drop out...
+    }
+ 
+#------------------------------------------------------------
+# validation complete, now initiate action
+ 
+# laying a new mine field
+ 
+mfd$pointer$to mfd_empty
+ 
+if (mfd$last < mfd$pointer)
+   {
+    mfd$used = mfd$pointer$index * mfd$entry
+   }
+ 
+PUTmfd$Side$i       (iside)
+PUTmfd$Sequence$i   (inumber)
+PUTmfd$BOMIndx$i
+PUTmfd$Status$i     ($operational$code)
+PUTmfd$ALSPID$i     (0)
+PUTmfd$Points$i     (npoints)
+putMFD$TimeCreated$F (game$time) # store time created - joa UFL04
+PUTmfd$TargetType$I (Xbom$TargetCode$i)
+ 
+ipnt = 7
+for (mfd$ver$index = 1; mfd$ver$index <= npoints;
+        mfd$ver$index = mfd$ver$index + 1)
+    {
+    mfd$Ver$Latitude$f  = DMS2rad (args[ipnt])
+    mfd$Ver$Longitude$F = DMS2rad (args[ipnt+1])
+ 
+    PUTmfd$Ver$Latitude$f
+    PUTmfd$Ver$Longitude$F
+ 
+    xlat[mfd$ver$index] = mfd$Ver$Latitude$f
+    xlon[mfd$ver$index] = mfd$Ver$Longitude$f
+ 
+    ipnt = ipnt + 2
+    }
+ 
+area = PolygonArea (npoints, xlat, xlon)  # Area in sq nm
+area = max(0.1, area)            # Don't allow zero area
+ 
+density = nmines / area
+ 
+PUTmfd$Density$f    (density)
+putMFD$LayDensity$F (density)    # store initial density - joa 1/97 (E1597)
+PUTmfd$Area$f    (area)
+ 
+return
+end
+ 
+
+ 
+Subroutine deactivate_minefield (nord,nargs,args,id)
+BBcommon
+ 
+literal         args[$max$args]
+literal         mine_name
+literal         cstrip8
+integer         iside
+integer         mfd_match, mfd_empty
+integer         msglen, xsave, nargs
+integer         nord, id  #  (Unused ARGUMENTS)
+integer         inumber
+integer         litcmp
+character       msg[200]
+ 
+BBDeclare (mfd$pointer, mfd$sequence$i, mfd$side$i)
+ 
+# args[1]: DEACTIVATE
+# args[2]: MINFIELD
+# args[3]: field number
+# args[4]: BLUE | ORANGE
+ 
+inumber = args[3]
+ 
+if (args[4] == $lex$blue$) iside = $blue$code
+else                       iside = $orange$code
+ 
+msglen = 0                              # build an initial error message
+ 
+call smovv("Cannot ",msg,msglen)
+ 
+call smovv("DEACTIVATE",msg,msglen)
+ 
+call smovv(" minefield #",msg,msglen)
+call smovi (inumber,msg,msglen)
+ 
+call smovv(" for ",msg,msglen)
+if (iside == $blue$code) call smovv("BLUE",msg,msglen)
+else                     call smovv("ORANGE",msg,msglen)
+call smovv(": ",msg,msglen)
+ 
+call smov ($tab,msg,msglen)
+call smov (msglen,msg,msglen)
+xsave = msglen                            # save length of error msg
+ 
+if (inumber < 1  | inumber > 50)
+{
+    call smovv ("  Field number out of range.",msg,msglen)
+}
+ 
+mfd_match = 0
+mfd_empty = 0
+ 
+for_all_valid (MFD)
+{
+    mfd$sequence$i = Xmfd$sequence$i
+ 
+    mfd$side$i = Xmfd$side$i
+ 
+    if (mfd$side$i == iside & mfd$sequence$i == inumber)
+    {
+        mfd_match = mfd$pointer$index
+        break
+    }
+}
+ 
+if ( mfd_match == 0 )
+{
+    call smovv ("  Could not locate match.",msg,msglen)
+}
+ 
+# were there any errors precluding sweeping....
+if (xsave != msglen)
+{
+    while (mod(msglen,4) != 0)
+        call smov ($null,msg,msglen)
+ 
+    call send_ ($neutral$view,0,msglen,msg)     # display message of failure
+ 
+    return                                  # drop out...
+}
+ 
+ 
+mfd$pointer$to mfd_match
+PUTmfd$Status$i( $BeingDeleted$Code )
+ 
+return
+end
+
+ 
+ 
+Subroutine Process_Mine_Weapons (UNT$Pointer)
+########################################################################
+#$%
+#$% Purpose:   Process_Mine_Weapons is for platforms to drop one or
+#$%            more individual mines on a position or on a track.
+#$%            The mine may also have persistent effects associated
+#$%            with it, in which case an entry in the PEM table will
+#$%            be created.  Only one DROP MINE command can be processed
+#$%            at a time and the command validation set up the info
+#$%            in the unit's DEQ list for the mine type and number to
+#$%            drop.
+#$%
+#$% Called By: epross        <wgmdeng.rat>
+#$%
+#$% Calls:     RLL2RB        <lbmath.rat>
+#$%            DEQGET        <lbcommn.rat>
+#$%            MIN           <fortran>
+#$%            engdata       <wgmdeng.rat>
+#$%            Random        <lbmath.rat>
+#$%            write_eng_rec <wgmdrec.rat>
+#$%            ALSP_Send_ASM_or_Bomb_Engage    <alsp_send_interact.rat>
+#$%            BOMB_or_Mine_at_Posit           <wgmdeng.rat>
+#$%            smov..                          <lbsmov.rat>
+#$%            send                            <wgxsend.rat>
+#$%
+#$% Tables:    UNT     BOM     DEQ     PEM
+#$%
+#$% Date:      2/97 (E1731)
+#$%
+#$% Author:    Carol Kropp
+#$%
+########################################################################
+BBCommon
+ENCommon
+ 
+literal  cstrip8    # function used in extracting names from the blackboard
+real     Random, x     # function which returns a uniform random number
+real     range_to_target, bearing_to_target
+real     attacker_lat, attacker_long, target_lat, target_long
+real     BOM$ProbHit$F, random_nbr
+real     MBURange # jb E2145 (function)  7/10/00
+integer  i
+integer  UNT$Pointer
+integer  UNT$AssignedTarget$I, UNT$View$I
+integer  UNT2$Pointer, UNT2$Hits$I, UNT2$BombHits$I
+integer  mine_drop_complete
+integer  number_eq
+integer  eqlist[5,30]
+integer  BOM$Pointer
+integer  DEQ$Pointer, DEQ$NbrMinesToLay$I, DEQ$Remaining$I
+integer  number_to_drop
+integer  delivered_tnt
+integer  msg_len
+character  msg[ARB]
+data x/0.0/		# Get next random number in sequence
+ 
+  UNT$View$I = xUNT$View$I
+  UNT$AssignedTarget$I = xUNT$AssignedTarget$I
+  if (UNT$AssignedTarget$I == UNT$Engaging$Position)
+    {
+     if (xUNT$RangeToNext$F != 0.0)    # since unit would be straight shot to posit.
+       {
+        target_lat = xUNT$OrderedLatitude$f
+        target_long = xUNT$OrderedLongitude$f
+       }
+     else
+       {
+        target_lat = xUNT$TrueLatitude$F
+        target_long = xUNT$TrueLongitude$F
+       }
+    }   # end of if dropping mines on a position
+  else
+    {
+     UNT2$Pointer$To  (UNT$AssignedTarget$I)
+     target_lat = xUNT2$TrueLatitude$F
+     target_long = xUNT2$TrueLongitude$F
+    }   # end of if dropping mines on a unit/track
+ 
+  attacker_lat = xUNT$TrueLatitude$F
+  attacker_long = xUNT$TrueLongitude$F
+  call RLL2RB (target_lat,     target_long,     xUNT$CosTrueLat$F,
+               attacker_lat,   attacker_long,   cos(target_lat),
+               range_to_target, bearing_to_target)
+  if (range_to_target <= 1.0)      # if within a mile of the position
+    {
+     mine_drop_complete = $yes
+ 
+     number_eq = 0
+     call DEQGET (UNT$pointer, $Mine$Code, number_eq, EqList)
+     for (i = 1; i <= number_eq; i = i + 1)
+       {
+        BOM$Pointer = eqlist [2,i]
+        DEQ$Pointer$To  (eqlist [1,i])
+        DEQ$NbrMinesToLay$I = xDEQ$NbrMinesToLay$I
+ 
+        number_to_drop = MIN (eqlist [3,i], DEQ$NbrMinesToLay$I)
+        eqlist [3,i] = number_to_drop
+        DEQ$Remaining$I = xDEQ$Remaining$I - number_to_drop
+        DEQ$NbrMinesToLay$I = DEQ$NbrMinesToLay$I - number_to_drop
+        putDEQ$NbrMinesToLay$I
+ 
+        if (DEQ$NbrMinesToLay$I > 0)
+          mine_drop_complete = $no
+ 
+        if (number_to_drop > 0)
+          {
+           if (UNT$AssignedTarget$I != UNT$Engaging$Position)
+             {
+              if (log$engage != $no)
+                {
+                 call engdata      (UNT$Pointer, UNT2$Pointer)
+                 putENG$Range$F    (range_to_target)
+                 putENG$Weapon$C   (xBOM$Name$C)
+                 putENG$MBURange$F (MBURange(UNT2$Pointer))
+                }    # end of if an engagement log is being kept
+ 
+              BOM$ProbHit$F = xBOM$ProbHit$F
+              random_nbr = Random(x)
+              if (random_nbr <= BOM$ProbHit$F)
+                {
+                 if (log$engage != $no)
+                   {
+                    putENG$Result$I (ENG$Hit$Code)
+                    call write_eng_rec
+                   }    # end of if an engagement log is being kept
+ 
+                 delivered_tnt = INT (xBOM$Weight$I * number_to_drop + 0.5)
+                 if (xUNT2$GhostedUnit$I == $yes &      # if an ALSP ghost
+                     ALSP$Active == $yes)
+                   {
+                    call ALSP_Send_ASM_or_Bomb_Engage (UNT$Pointer, $Bomb$Code,
+                                                       BOM$Pointer, UNT2$Pointer,
+                                                       number_to_drop,
+                                                       xUNT$TargetType$I)
+                   }   # end of if the target was an ALSP engagement
+                 else
+                   {
+                    UNT2$Hits$I = xUNT2$Hits$I + delivered_tnt
+                    UNT2$Hits$i = MIN (UNT2$Hits$I, $Hi_UNT$Hits$I)
+                    putUNT2$Hits$I
+ 
+                    UNT2$BombHits$I = xUNT2$BombHits$I + delivered_tnt
+                    UNT2$BombHits$i = MIN (UNT2$BombHits$I, $Hi_UNT$BombHits$I)
+                    putUNT2$BombHits$I
+                   }   # end of if not an ALSP engagement
+                }   # end of if mine hit target
+              else
+                {
+                 if (log$engage != $no)
+                   {
+                    putENG$Result$I (ENG$Miss$Code)
+                    call write_eng_rec
+                   }    # end of if an engagement log is being kept
+                }   # end of if mine missed its target
+             }   # end of if dropping on a unit
+ 
+           # only want one engagement record for the initial placement, but
+           # the subroutine is being used to place/create the PEM
+           i = log$engage    # store the true engagement log flag
+           if (UNT$AssignedTarget$I != UNT$Engaging$Position)
+             log$engage = $no
+           call BOMB_or_Mine_at_Posit (UNT$Pointer, range_to_target,
+                                       target_lat,  target_long,
+                                       number_eq,    1,           eqlist)
+           log$engage = i
+ 
+           # since BOMB_or_Mine_at_Posit sets the number of mines remaining
+           # to zero, use the local DEQ$Remaining$I to reset the value
+           putDEQ$Remaining$I
+          }   # end of if this mine is to be dropped
+       }   # end of loop through the units mine inventory
+ 
+     if (mine_drop_complete == $yes)
+       {
+        msg_len = 0
+        call smovhn (xUNT$Name$C, $$MaxLit, msg, msg_len)
+        call smovv  (" has completed dropping mine(s).", msg, msg_len)
+        call send_   (UNT$View$I, 0, msg_len, msg)
+ 
+        putUNT$DroppingMineFlag$I ($no)
+        putUNT$AssignedTarget$I   (0)
+       }   # end of if the unit has dropped all specified mines
+    }    # end of unit within a mile of the target position
+ 
+return
+end   # end of Process_Mine_Weapons
+
+#--- Routines for processing persistent effect munitions (clk 2/97 (E1731)) ---#
+ 
+define (max_unit_slots, UNT$Slots)
+ 
+define (Previous_Data_Common, {
+              integer  last_check_data_entry_in_use_flag[max_unit_slots]
+              real     last_check_data_prev_lat[max_unit_slots]
+              real     last_check_data_prev_cos_lat[max_unit_slots]
+              real     last_check_data_prev_long [max_unit_slots]
+              real     last_check_data_prev_speed[max_unit_slots]
+           common /prev_unit_common/_
+              last_check_data_entry_in_use_flag,
+              last_check_data_prev_lat,
+              last_check_data_prev_cos_lat,
+              last_check_data_prev_long,
+              last_check_data_prev_speed} )
+ 
+define ($Not_In_Use_Code, 0)
+define ($In_Use_Code    , 1)
+ 
+
+ 
+Subroutine Create_Persistent_Munition (_
+                   UNT$Pointer,     # in: UNT Table Pointer for unit dropping munition
+                   BOM$Pointer,     # in: BOM Table Pointer
+                   latitude,        # in: latitude of munition - radians
+                   longitude,       # in: longitude of munition - radians
+                   ghost_flag,      # in: $yes/$no flag - not RESA created?
+                   side,            # in: $Blue$Code, $Orange$Code, etc.
+                   DIS_Site_Id,     # in: DIS Site portion of DIS ID
+                   DIS_Appl_Id,     # in: DIS Application portion of DIS ID
+                   DIS_Entity_Id)   # in: DIS Entity portion of DIS ID
+################################################################################
+#$%
+#$% Purpose:    Create a persistent effects munition entry at the specified
+#$%             location.  Use the BOM$Pointer to determine when the munition
+#$%             should terminate if the persistent detonations are not used.
+#$%
+#$% Called By:  Bomb_or_Mine_At_Posit     <wgmdeng.rat>
+#$%
+#$% Calls:      smov..            <lbsmov.rat>
+#$%             send              <wgxsend.rat>
+#$%             echo..            <lbecho.rat>
+#$%
+#$% Tables:     UNT     BOM     PEM
+#$%
+#$% Date:       January 1997 (E1731)
+#$%
+#$% Author:     Carol L. Kropp
+#$%
+#$% Modified:   Carol Kropp - 7/97 (E1858)
+#$%             When a RESA initiated PEM is create, set up the PEM related
+#$%             fields if an engagement log is being kept.  This enables the
+#$%             RTU to know this is an engagement with a related "entity".
+#$%
+################################################################################
+BBCommon
+ENCommon
+ 
+literal  cstrip8    # function used in extracting names from the blackboard
+real     latitude, longitude
+real     PEM$TerminationTime$F
+integer  UNT$Pointer, BOM$Pointer
+integer  ghost_flag, side
+integer  DIS_Site_Id, DIS_Appl_Id, DIS_Entity_Id
+integer  PEM$Pointer
+integer  table_full_flag
+integer     msg_len
+integer  PEM$NbrDetsRemaining$I, PEM$BOMIndx$I
+character   msg[ARB]
+ 
+ 
+  table_full_flag = $yes
+  for (PEM$Pointer$First; PEM$Pointer$Valid; PEM$Pointer$Next)
+    {
+     if (xPEM$InUse$I == $no)
+       {
+        table_full_flag = $no
+ 
+        putPEM$DISSiteId$I          (DIS_Site_Id)
+        putPEM$DISApplicationId$I   (DIS_Appl_Id)
+        putPEM$DISEntityId$I        (DIS_Entity_Id)
+ 
+        putPEM$Latitude$F           (latitude)
+        putPEM$Longitude$F          (longitude)
+        putPEM$Side$I               (side)
+        putPEM$GhostedUnit$I        (ghost_flag)
+        putPEM$NbrUnitsinTgtList$I  (0)
+        putPEM$DISDeleteSent$I      ($no)
+ 
+        PEM$TerminationTime$F = Game$Time + float (xBOM$LifeTimeMinutes$I)
+        putPEM$TerminationTime$F
+ 
+        PEM$NbrDetsRemaining$I = xBOM$NbrPersistentDets$I
+        putPEM$NbrDetsRemaining$I
+ 
+        PEM$BOMIndx$I = BOM$Pointer$Index
+        putPEM$BOMIndx$I
+ 
+        if (ghost_flag == $yes & DIS_Entity_Id != 0)
+          putPEM$GhostedDISUnit$I ($yes)
+        else
+          putPEM$GhostedDISUnit$I ($no)
+ 
+        if (ghost_flag == $no & log$engage != $no)  # clk 7/97 (E1858)
+          {
+           putENG$PersistentMunition$I ($yes)
+           putENG$PEMIndx$I            (PEM$Pointer$Index)
+          }
+ 
+        break
+       }   # end of if this slot is free
+    }   # end of looking for a free slot
+ 
+  if (table_full_flag == $yes)
+    {
+     call echo  ($Bell)
+     call echo  ($Bell)
+     call echov ("The Persistent Effect Munitions (PEM) ")
+     call echov ("table is full.")
+     call echor
+ 
+     msg_len = 0
+     call smovhn (xUNT$Name$C, $$MaxLit, msg, msg_len)
+     call smovv  (" dropped a ", msg, msg_len)
+     call smovhn (xBOM$Name$C, $$MaxLit, msg, msg_len)
+     call smovv  (" but the persistent munition", msg, msg_len)
+     call smovv  (" could not be created.", msg, msg_len)
+     call send_   (xUNT$View$I, 0, msg_len, msg)
+    }
+ 
+return
+end    # end of Create_Persistent_Munition
+
+ 
+Subroutine Persistent_Munition_Eng
+########################################################################
+#$%
+#$% Purpose:   Process_Persistent_Eng will loop through the PEM
+#$%            table to process engagements by mines which were defined
+#$%            to have persistent effects.
+#$%
+#$% Called By: WARCYC
+#$%
+#$% Calls:     Get_Persistent_Target_List
+#$%            Process_Persistent_Munition
+#$%            Update_PEM_Unit_Data
+#$%
+#$% Tables:    PEM
+#$%
+#$% Date:      1/97 (E1731)
+#$%
+#$% Author:    Carol Kropp
+#$%
+########################################################################
+BBCommon
+ 
+integer  PEM$Pointer
+integer  target_list_generated
+integer  number_of_targets
+integer  target_list [max_unit_slots]
+ 
+  target_list_generated = $no
+  for (PEM$Pointer$First; PEM$Pointer$Valid; PEM$Pointer$Next)
+    {
+     if (xPEM$InUse$I != $no)
+       {
+        if (xPEM$TerminationTime$F > Game$Time &
+            xPEM$NbrDetsRemaining$I > 0)
+          {
+           if (target_list_generated == $no)
+             {
+              call Get_Persistent_Target_List (number_of_targets, target_list)
+              target_list_generated = $yes
+              putPEM$InUse$I ($yes)    # jhm 01/02 E2252  from overlapped word 3
+             }   # end of if the potential target list was not previous obtained
+           call Process_Persistent_Munition (PEM$Pointer,
+                                             number_of_targets, target_list)
+          }   # end of if this one is still live
+        else if (RTU$Interface$State == $RTU_State_Not_Connected |
+                 xPEM$DISDeleteSent$I == $yes)
+          {
+           PEM$Zero
+          }   # end of if this one can be removed
+       }   # end of if this one is in use
+    }   # end of loop through the persistent munitions
+ 
+  if (target_list_generated == $yes)
+     call Update_PEM_Unit_Data
+ 
+return
+end   # end of Persistent_Munitions_Eng
+
+ 
+Subroutine Get_Persistent_Target_List (_
+                   number_of_targets,   # out: nbr of targets in the list
+                   target_list)         # out: list of possible targets
+########################################################################
+#$%
+#$% Purpose:   Get_Persistent_Target_List will generate a list of
+#$%            UNT table index numbers as possible targets for
+#$%            persistent munitions.
+#$%
+#$%            The following unit types are not legal targets:
+#$%                Aircraft               Hide Sites
+#$%                Bases                  Marker Subs
+#$%                Counter Measures       PIMs
+#$%                Cruise Missiles        SAMs
+#$%                False Contact Subs     TBMs
+#$%
+#$%
+#$% Called By: Persistent_Munitions_Eng
+#$%
+#$% Calls:     None
+#$%
+#$% Tables:    UNT
+#$%
+#$% Date:      1/97 (E1731)
+#$%
+#$% Author:    Carol Kropp
+#$%
+########################################################################
+BBCommon
+Previous_Data_Common
+ 
+integer  number_of_targets, target_list [max_unit_slots]
+ 
+integer  UNT$Pointer, UNT$Type$I, UNT$SubType$I
+integer  unt_index
+ 
+  number_of_targets = 0
+  for (UNT$Pointer$First; UNT$Pointer$Ok; UNT$Pointer$Next)
+    {
+     unt_index = UNT$Pointer$Index
+     if (xUNT$InUse$I  != $no &
+         xUNT$Status$I != $BeingDeleted$Code)
+       {
+        UNT$Type$I = xUNT$Type$I
+        UNT$SubType$I = xUNT$SubType$I
+        if (! ((UNT$Type$I == $Air$Code)                    |
+               (UNT$Type$I == $ShoreBase$Code)              |
+               (UNT$Type$I == $CruiseMissile$Code)          |
+               (UNT$Type$I == $SubSurface$Code           &
+                (UNT$SubType$I == $CtrMeasure$SubCode   |
+                 UNT$SubType$I == $FalseContact$SubCode |
+                 UNT$SubType$I == $MarkerSub$SubCode    ))  |
+               (UNT$Type$I == $Site$Code &
+                UNT$SubType$I == $HideSite$SubCode)         |
+               (UNT$Type$I == $PIM$Code)                    |
+               (UNT$Type$I == $SAMissile$Code)              ))
+          {
+           number_of_targets = number_of_targets + 1
+           target_list [number_of_targets] = unt_index
+           if (last_check_data_entry_in_use_flag[unt_index] == $Not_In_Use_Code)
+             {
+              last_check_data_entry_in_use_flag[unt_index] = $In_Use_Code
+              last_check_data_prev_lat[unt_index] = xUNT$TrueLatitude$F
+              last_check_data_prev_cos_lat[unt_index] = xUNT$CosTrueLat$F
+              last_check_data_prev_long[unt_index] = xUNT$TrueLongitude$F
+              last_check_data_prev_speed[unt_index] = xUNT$TrueSpeed$F
+             }   # end of if this is a new target
+          }   # end of if this is a legal target type
+        else
+          {
+           last_check_data_entry_in_use_flag[unt_index] = $Not_In_Use_Code
+          }   # end of if this is not a good target
+       }   # end of if this one is in use
+    }   # end of loop through the active units
+ 
+return
+end   # end of Get_Persistent_Target_List
+
+ 
+Subroutine Process_Persistent_Munition (_
+                   PEM$Pointer,         # in: persistent munition pointer
+                   number_of_targets,   # in: nbr of targets in the list
+                   target_list)         # in: list of possible targets
+########################################################################
+#$%
+#$% Purpose:   Process_Persistent_Munition will determine if any of the
+#$%            units in the target_list are to cause the munition to
+#$%            detonate.  The munition maintains a list of targets
+#$%            which have caused a detonation.  If a target has left
+#$%            the munition coverage area it will be removed from the
+#$%            list so that when it reenters the area it will be a
+#$%            potential target.
+#$%
+#$%            Moving units within the munitions' area of coverage are
+#$%            to cause a detonation.  A unit which was outside of the
+#$%            munitions' area during the last evaluation but is now
+#$%            stationary within the area will be considered moving.  A
+#$%            unit which was stationary in the area of coverage, but
+#$%            is now outside the area will be considered (unless
+#$%            it previously received a detonation).
+#$%
+#$% Called By: Persistent_Munitions_Eng
+#$%
+#$% Calls:     preprx       <lbmath_proxim.rat>
+#$%            proxim       <lbmath_proxim.rat>
+#$%            Unit_In_PEM_TGT
+#$%            Remove_From_PEM_TGT
+#$%            Process_Persistent_Detonation
+#$%
+#$% Tables:    PEM     UNT
+#$%
+#$% Date:      1/97 (E1731)
+#$%
+#$% Author:    Carol Kropp
+#$%
+########################################################################
+BBCommon
+Previous_Data_Common
+ 
+integer  PEM$Pointer, number_of_targets, target_list [max_unit_slots]
+ 
+integer  Unit_In_PEM_TGT     # function to determine if unit was in target list
+ 
+real     PEM$Latitude$F, PEM$Longitude$F
+real     pem_cos_lat
+integer  PEM$BOMIndx$I
+integer  BOM$Pointer, BOM$MaxRangeYards$I
+real     munition_range_nmi
+integer  n
+integer  detonation_needed_flag
+integer  unt_index
+integer  UNT$Pointer
+real     UNT$TrueLatitude$F, UNT$TrueLongitude$F
+real     UNT$CosTrueLat$F, UNT$TrueSpeed$F
+real     range_to_tgt, bearing_to_tgt
+ 
+  PEM$Latitude$F = xPEM$Latitude$F
+  pem_cos_lat = COS(PEM$Latitude$F)
+  PEM$Longitude$F = xPEM$Longitude$F
+  PEM$BOMIndx$I = xPEM$BOMIndx$I
+  BOM$Pointer$To  (PEM$BOMIndx$I)
+  BOM$MaxRangeYards$I = xBOM$MaxRangeYards$I
+  munition_range_nmi = BOM$MaxRangeYards$I / $Yds$Per$Mile
+ 
+  call preprx (PEM$Latitude$F, PEM$Longitude$F, pem_cos_lat, munition_range_nmi)
+ 
+  for (n = 1; n <= number_of_targets; n = n + 1)
+    {
+     detonation_needed_flag = $no
+ 
+     unt_index = target_list[n]
+     UNT$Pointer$To  (unt_index)
+     UNT$TrueLatitude$F = xUNT$TrueLatitude$F
+     UNT$TrueLongitude$F = xUNT$TrueLongitude$F
+     UNT$CosTrueLat$F = xUNT$CosTrueLat$F
+     UNT$TrueSpeed$F = xUNT$TrueSpeed$F
+ 
+     call proxim (UNT$TrueLatitude$F, UNT$TrueLongitude$F,
+                  UNT$CosTrueLat$F, range_to_tgt, bearing_to_tgt)
+     if (range_to_tgt < 0.0)                               # if out of range
+       {
+        if (last_check_data_prev_speed[unt_index] <= 0.0) # previously stopped
+          {
+           call proxim (last_check_data_prev_lat[unt_index],
+                        last_check_data_prev_long[unt_index],
+                        last_check_data_prev_cos_lat[unt_index],
+                        range_to_tgt, bearing_to_tgt)
+           if (range_to_tgt >= 0.0)      # if was previously in range
+            {
+             if (Unit_In_PEM_TGT (PEM$Pointer, unt_index) == $no)
+               detonation_needed_flag = $yes
+            }   # end of if it was in range before, so it crossed the boundary
+          }   # end of if the unit was previously stopped
+ 
+        if (detonation_needed_flag == $no)
+           call Remove_From_PEM_TGT (PEM$Pointer, unt_index)
+       }   # end of if not in range now & previously stopped
+     else                           # the unit is within range
+       {
+        if (UNT$TrueSpeed$F > 0.0)  # if the unit is moving
+          {
+           if (Unit_In_PEM_TGT (PEM$Pointer, unt_index) == $no)
+             detonation_needed_flag = $yes
+          }   # end of if the unit is moving
+        else if (last_check_data_prev_speed[unt_index] > 0.0) # stationary now,
+          {                                                    # but previously moving
+           call proxim (last_check_data_prev_lat[unt_index],
+                        last_check_data_prev_long[unt_index],
+                        last_check_data_prev_cos_lat[unt_index],
+                        range_to_tgt, bearing_to_tgt)
+           if (range_to_tgt < 0.0)      # if was previously out of range
+            {
+             if (Unit_In_PEM_TGT (PEM$Pointer, unt_index) == $no)
+               detonation_needed_flag = $yes
+            }   # end of if out of range before, so it crossed into the area
+          }   # end of if the unit is now stationary, but was moving
+       }   # end of if the unit is within range
+ 
+     if (detonation_needed_flag == $yes)
+       {
+        call Process_Persistent_Detonation (PEM$Pointer, UNT$Pointer)
+        if (xPEM$NbrDetsRemaining$I == 0)
+          return
+       }   # end of if the munition is to detonate against the target
+    }   # end of loop through the possible targets
+ 
+return
+end   # end of Process_Persistent_Munition
+
+ 
+Subroutine Remove_From_PEM_TGT (_
+                   PEM$Pointer,         # in: persistent munition pointer
+                   target_unt_index)    # in: UNT$Pointer$Index of unit to removed
+########################################################################
+#$%
+#$% Purpose:   Remove_From_PEM_TGT will look for the specified
+#$%            UNT$Pointer$Index value in the PEM entry's TGT
+#$%            subtable.  If the unit index is there the slot will be
+#$%            cleared and the last entry will be moved to its place.
+#$%
+#$% Called By: Process_Persistent_Munition
+#$%
+#$% Calls:     None
+#$%
+#$% Tables:    PEM
+#$%
+#$% Date:      1/97 (E1731)
+#$%
+#$% Author:    Carol Kropp
+#$%
+########################################################################
+BBCommon
+ 
+integer  PEM$Pointer, target_unt_index
+ 
+integer  PEM$NbrUnitsinTgtList$I
+integer  PEM$TGT$Index
+integer  PEM$TGT$UNTIndx$I
+integer  temp_tgt_index, temp_unt_index
+ 
+  PEM$NbrUnitsinTgtList$I = xPEM$NbrUnitsinTgtList$I
+  if (PEM$NbrUnitsinTgtList$I > 0)
+    {
+     if (PEM$NbrUnitsinTgtList$I > PEM$TGT$Slots)
+       PEM$NbrUnitsinTgtList$I = PEM$TGT$Slots
+ 
+     for (PEM$TGT$Index = 1; PEM$TGT$Index <= PEM$NbrUnitsinTgtList$I;
+                             PEM$TGT$Index = PEM$TGT$Index + 1)
+       {
+        PEM$TGT$UNTIndx$I = xPEM$TGT$UNTIndx$I
+        if (PEM$TGT$UNTIndx$I == target_unt_index)
+          {
+           putPEM$TGT$UNTIndx$I (0)
+           if (PEM$TGT$Index < PEM$NbrUnitsinTgtList$I)
+             {
+              temp_tgt_index = PEM$TGT$Index
+              PEM$TGT$Index  = PEM$NbrUnitsinTgtList$I
+              temp_unt_index = xPEM$TGT$UNTIndx$I
+              putPEM$TGT$UNTIndx$I (0)
+              PEM$TGT$Index  = temp_tgt_index
+              putPEM$TGT$UNTIndx$I (temp_unt_index)
+             }   # end of if this is not the last one, so move the last one
+ 
+           PEM$NbrUnitsinTgtList$I = PEM$NbrUnitsinTgtList$I - 1
+           putPEM$NbrUnitsinTgtList$I
+           break
+          }   # end of if this is the one
+       }   # end of loop through the PEM entry's TGT subtable
+    }   # end of if the PEM entry has any target detonations
+ 
+return
+end   # end of Remove_From_PEM_TGT
+
+ 
+integer function Unit_In_PEM_TGT (_
+                   PEM$Pointer,         # in: persistent munition pointer
+                   target_unt_index)    # in: UNT$Pointer$Index of unit
+########################################################################
+#$%
+#$% Purpose:   Unit_In_PEM_TGT will look for the specified
+#$%            UNT$Pointer$Index value in the PEM entry's TGT
+#$%            subtable.  If the unit index is there $yes is returned,
+#$%            $no is returned otherwise.
+#$%
+#$% Called By: Process_Persistent_Munition
+#$%
+#$% Calls:     None
+#$%
+#$% Tables:    PEM
+#$%
+#$% Date:      1/97 (E1731)
+#$%
+#$% Author:    Carol Kropp
+#$%
+########################################################################
+BBCommon
+ 
+integer  PEM$Pointer, target_unt_index
+ 
+integer  PEM$NbrUnitsinTgtList$I
+integer  PEM$TGT$Index
+integer  PEM$TGT$UNTIndx$I
+ 
+  Unit_In_PEM_TGT = $no
+ 
+  PEM$NbrUnitsinTgtList$I = xPEM$NbrUnitsinTgtList$I
+  if (PEM$NbrUnitsinTgtList$I > 0)
+    {
+     if (PEM$NbrUnitsinTgtList$I > PEM$TGT$Slots)
+       PEM$NbrUnitsinTgtList$I = PEM$TGT$Slots
+ 
+     for (PEM$TGT$Index = 1; PEM$TGT$Index <= PEM$NbrUnitsinTgtList$I;
+                             PEM$TGT$Index = PEM$TGT$Index + 1)
+       {
+        PEM$TGT$UNTIndx$I = xPEM$TGT$UNTIndx$I
+        if (PEM$TGT$UNTIndx$I == target_unt_index)
+          {
+           Unit_In_PEM_TGT = $yes
+           break
+          }   # end of if this is the one
+       }   # end of loop through the PEM entry's TGT subtable
+    }   # end of if the entry has an targets in list
+ 
+return
+end   # end of Unit_In_PEM_TGT
+
+ 
+Subroutine Process_Persistent_Detonation (_
+                   PEM$Pointer,     # in: persistent munition pointer
+                   UNT$Pointer)     # in: target UNT pointer
+########################################################################
+#$%
+#$% Purpose:   Process_Persistent_Detonation sets up the engagement
+#$%            log data, damage model data and decrements the number
+#$%            of detonations left for this munition.  The target will
+#$%            be added to the target list of the PEM.
+#$%
+#$% Called By: Persistent_Munitions_Eng
+#$%
+#$% Calls:     random               <lbmath.rat>
+#$%            mburange             <wgmdeng.rat>
+#$%            write_eng_rec        <wgmdrec.rat>
+#$%            echo..               <lbecho.rat>
+#$%            smov..               <lbsmov.rat>
+#$%
+#$% Tables:    PEM     BOM     UNT
+#$%
+#$% Date:      1/97 (E1731)
+#$%
+#$% Author:    Carol Kropp
+#$%
+########################################################################
+BBCommon
+ENCommon
+ 
+integer  PEM$Pointer, UNT$Pointer
+ 
+real     Random, x        # function to obtain a random number
+real     MBURange      # function to obtain range to the MBU
+literal  cstrip8       # function use to extract names from BB
+ 
+integer  PEM$NbrDetsRemaining$I
+integer  PEM$BOMIndx$I
+integer  PEM$NbrUnitsinTgtList$I
+integer  PEM$TGT$Index, PEM$TGT$UNTIndx$I
+integer  BOM$Pointer, BOM$Weight$I
+real     BOM$ProbHit$F
+real     random_num
+integer  hit_flag
+integer  UNT$Hits$I, UNT$BombHits$I
+ 
+integer    UNT$Type$I, UNT$SubType$I
+integer    TBL$Pointer
+integer    msg_len
+character  msg[12]    # temporary storage for lat/long values
+data x/0.0/		# Get next random number in sequence
+ 
+  PEM$NbrDetsRemaining$I = xPEM$NbrDetsRemaining$I - 1
+  putPEM$NbrDetsRemaining$I
+ 
+  PEM$BOMIndx$I = xPEM$BOMIndx$I
+  BOM$Pointer$To  (PEM$BOMIndx$I)
+  BOM$Weight$I = xBOM$Weight$I
+  BOM$ProbHit$F = xBOM$ProbHit$F
+ 
+  random_num = Random (x)
+  if (random_num <= BOM$ProbHit$F)
+    {
+     UNT$Hits$I = MIN ((xUNT$Hits$I + BOM$Weight$I), $Hi_UNT$Hits$I)
+     putUNT$Hits$I
+     UNT$BombHits$I = MIN ((xUNT$BombHits$I + BOM$Weight$I), $Hi_UNT$BombHits$I)
+     putUNT$BombHits$I
+ 
+     hit_flag = $yes
+    }
+  else
+     hit_flag = $no
+ 
+  if (log$engage != $no)
+    {
+     call engdata (UNT$Pointer, 0)
+     putENG$Platform$C           (xBOM$Name$C)    # attacker/munition name
+     putENG$PersistentMunition$I ($yes)
+     putENG$PEMIndx$I            (PEM$Pointer$Index)
+     putENG$Weapon$C             (xBOM$Name$C)    # attacker/munition type
+     putENG$PlatformType$C       ("PERSIST ")     # attacker type
+     putENG$Target$C             (xUNT$Name$C)    # target name
+     putENG$RecLat$f             (xUNT$TrueLatitude$f)  # E2224
+     putENG$RecLon$f             (xUNT$TrueLongitude$f)  # E2224
+     putENG$MBURange$F           (MBURange (UNT$Pointer))
+ 
+     UNT$Type$I = xUNT$Type$I           # obtain and store
+     if (UNT$Type$I == $Sub$Code)
+       {
+        UNT$SubType$I = xUNT$SubType$I
+        if (UNT$SubType$I == $Torpedo$SubCode)
+          TBL$Pointer = xUNT$TrpPntr$I
+        else   # a marker or regular sub
+          TBL$Pointer = xUNT$ShcPntr$I
+       }
+     else   # ship or boat
+        TBL$Pointer = xUNT$ShcPntr$I
+     putENG$TargetType$C (xTBL$Name$C)
+ 
+     putENG$BEPart1$C ("        ")
+     putENG$BEPart2$C ("        ")
+     putENG$TIN$C     ("        ")
+     putENG$Track$C   ("        ")
+ 
+     if (hit_flag == $yes)
+       putENG$Result$I (ENG$Hit$Code)
+     else
+       {
+        putENG$Result$I   (ENG$Miss$Code)
+        putENG$ResultPh$F (BOM$ProbHit$F)
+       }   # end of if a miss
+     call write_eng_rec
+    }   # end of if an engagement log is desired
+ 
+  if (trace$engage$exe != $no)
+    {
+     call echor
+     call echoV    ('!')            # jb E2144  (echoV) 8/2/00
+     call echov   (" Persistent Munition....")
+     call echohn  (xBOM$Name$C, $$MaxLit)
+     call echov   (" at ")
+     msg_len = 0
+     call smovlls (xPEM$Latitude$F, "NS", msg, msg_len)
+     call echoh   (msg, msg_len)
+     call echov   (" ")
+     msg_len = 0
+     call smovlls (xPEM$Longitude$F, "EW", msg, msg_len)
+     call echoh   (msg, msg_len)
+     call echov   (" vs. ")
+     call echohn  (xUNT$Name$C, $$MaxLit)
+     if (hit_flag == $yes)
+       call echov (" ... HIT - PD=")
+     else
+       call echov (" ... MISSED - PD=")
+     call echof (BOM$ProbHit$F, 0604)
+     call echov (" RN=")
+     call echof (random_num, 0604)
+     call echor
+    }   # end of if engagement modeling is being traced
+ 
+  if (hit_flag == $yes)   # if a deonation against the target occured
+    {                     # add the target to the PEMs target list
+     PEM$NbrUnitsinTgtList$I = xPEM$NbrUnitsinTgtList$I
+     if (PEM$NbrUnitsinTgtList$I < PEM$TGT$Slots)   # if there is space in the
+       {                                            # target subtable
+        PEM$NbrUnitsinTgtList$I = PEM$NbrUnitsinTgtList$I + 1
+        putPEM$NbrUnitsinTgtList$I
+        PEM$TGT$Index = PEM$NbrUnitsinTgtList$I
+        PEM$TGT$UNTIndx$I = UNT$Pointer$Index
+        putPEM$TGT$UNTIndx$I
+       }
+    }   # end of if the target needs to be added to the PEM target list
+ 
+return
+end   # end of Process_Persistent_Detonation
+
+ 
+Subroutine Update_PEM_Unit_Data
+########################################################################
+#$%
+#$% Purpose:   Update_PEM_Unit_Data updates the data contained in the
+#$%            last_check_data array, so that the next time the PEM
+#$%            Engagements are processed the model will have access
+#$%            to where units were located.
+#$%
+#$% Called By: Persistent_Munitions_Eng
+#$%
+#$% Calls:     None
+#$%
+#$% Tables:    UNT
+#$%
+#$% Date:      1/97 (E1731)
+#$%
+#$% Author:    Carol Kropp
+#$%
+########################################################################
+BBCommon
+Previous_Data_Common
+ 
+integer  i
+integer  UNT$Pointer
+ 
+  for (i = 1; i <= max_unit_slots; i = i + 1)
+    {
+     if (last_check_data_entry_in_use_flag[i] == $In_Use_Code)
+       {
+        UNT$Pointer$To  (i)
+        last_check_data_prev_lat[i]     = xUNT$TrueLatitude$F
+        last_check_data_prev_cos_lat[i] = xUNT$CosTrueLat$F
+        last_check_data_prev_long[i]    = xUNT$TrueLongitude$F
+        last_check_data_prev_speed[i]   = xUNT$TrueSpeed$F
+       }   # end of if this entry is in use
+    }   # end of loop through the previous location data array
+ 
+return
+end   # end of Update_PEM_Unit_Data
+ 
+
+ 
+real function PolygonArea (nvert, xlat, xlon)
+implicit none
+ 
+integer     nvert
+real        xlat[6]
+real        xlon[6]
+real        area            # sq nm
+real        lolat, hilat
+real        lolon, hilon
+real        gelat, gelon
+real        cosgelat
+integer     i
+integer     in_field
+real        gridHeight, gridWidth
+real        boxinc, boxincsq
+real        dellon
+ 
+area = 0.0
+ 
+#-------------------------------------------------------------------
+# Place box around polygon to determine low and high lats and lons
+lolat =  9999.
+hilat = -9999.
+lolon =  9999.
+hilon = -9999.
+ 
+for (i=1; i<=nvert; i=i+1)
+{
+    if (xlat[i] < lolat) lolat = xlat[i]
+    if (xlat[i] > hilat) hilat  = xlat[i]
+ 
+    if (xlon[i] < lolon) lolon = xlon[i]
+    if (xlon[i] > hilon) hilon  = xlon[i]
+}
+ 
+#-------------------------------------------------------------------
+# Using box limits, determine side of grid element
+ 
+gridheight = (hilat - lolat)
+ 
+dellon = hilon - lolon
+if (dellon > $PI)                   # Adjust for date line
+    dellon = $TWOPI - dellon
+gridwidth  = (dellon)
+ 
+boxinc = min(gridheight, gridwidth) / 50.     # Use 1/50 of box to approx
+ 
+if (boxinc < .000001) return (0.0)            # Null polygon
+ 
+boxincsq = (boxinc * $rad2nmi) * (boxinc * $rad2nmi)  # Area of grid element
+ 
+#-------------------------------------------------------------------
+# Approximate polygon area using small boxes in grid
+ 
+for (gelat = lolat; gelat <= hilat; gelat = gelat + boxinc)
+{
+    cosgelat = cos(gelat)
+    for (gelon = lolon; gelon <= hilon; gelon = gelon + boxinc)
+    {
+        call inout(gelon, gelat, nvert, xlon, xlat, in_field)
+        if (in_field == $yes)
+        {
+            area = area + boxincsq * cosgelat
+        }
+    }
+}
+#-------------------------------------------------------------------
+ 
+return(area)
+end
+ 

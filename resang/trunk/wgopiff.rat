@@ -1,0 +1,414 @@
+## File:    WGOPIFF.rat
+## Created: January 1997 (E1732)
+ 
+include "bbctl.inc"
+include "bbcode.inc"
+include "bbacc.inc"
+include "bbdeq.inc"
+include "bbunt.inc"
+include "bbord.inc"
+include "plplay.inc"
+include "ascii.inc"
+include "orders.inc"
+include "bbiff.inc"
+ 
+define(BBImplicit, Implicit NONE)       # MJC 5/1/2000 (E2145)
+ 
+subroutine oIFF (id,           # id number of order
+                 UNT$Pointer,  # unit pointer
+                 num_args,     # number of arguments
+                 args,         # array of arguments
+                 iview)        # view of person entering order
+########################################################
+#$%
+#$% Purpose:   oIFF processes Improved IFF Model commands.
+#$%
+#$% Called By: EXEORD
+#$%
+#$% Calls:     IFF_set_mode     IFF_clear_mode
+#$%
+#$% Tables:    UNT
+#$%
+#$% Date:      Jan 1997  (E1732)
+#$%
+#$% Author:    Susan Miller
+#$%
+#$% Modified:  Susan Miller 5/99 (E2088)
+#$%            Added return after "can only SET or CLEAR MODE 3."
+#$%            message is sent so the mode is not set and
+#$%            sent out over the OTG msgen.
+########################################################
+ 
+BBcommon
+ 
+integer id, UNT$Pointer, num_args, iview
+literal args[num_args]
+ 
+integer mode[3], code[3], found, msg_len
+integer UNT$View$I
+ 
+integer NUMBER_OF_MODES,
+        MODE_LOOP,
+        DEQ$Pointer,
+        IFF$Pointer,
+        ORD$Pointer                 # MJC 5/1/2000 (E2145)
+literal CSTRIP8                     # MJC 5/3/2000 (E2145)
+ 
+character msg[ARB]
+ 
+ # get the ORD pointer
+ call fndord (id,ORD$Pointer)
+ # if order not found, return
+ if (ORD$Pointer == 0) RETURN
+ 
+ UNT$View$I = xUNT$View$I
+ # orange units that are not aircraft cannot process this order
+ if (((UNT$View$I >= $FirstOrange$View & UNT$View$I <= $LastOrange$View) |
+      (UNT$View$I == $Neutral$View)) &
+     (xUNT$Type$I != $Air$Code))
+    {
+     msg_len = 0
+ 
+     call smovv ("***** ",msg,msg_len)
+     call smovhn (xUNT$Name$C,$$MaxLit,msg,msg_len)
+     if (args[1] == $LEX$SET$)
+         call smovv (" -  SET ",msg,msg_len)
+     else if (args[1] == $LEX$CLEAR$)
+         call smovv (" -  CLEAR ",msg,msg_len)
+     call smovv ("IFF command not available for ",msg,msg_len)
+     call smovv ("non-aircraft in this view.  ",msg,msg_len)
+     call send_ (xUNT$View$I, 0, msg_len, msg)
+ 
+     putORD$Status$I ($BeingDeleted$Code)
+     return
+    }
+ 
+ if (args[3] != $LEX$ALL$)
+   {
+    mode[1] = args[3]
+ 
+    number_of_modes = 1
+    if (num_args > 4)
+      {
+       mode[2] = args[5]
+       if (num_args > 6)
+         {
+          mode[3] = args[7]
+          number_of_modes = 3
+         }
+       else number_of_modes = 2
+      }
+   }
+ else
+   {
+    number_of_modes = 0
+   }
+ 
+ # first find the DEQ index of the IFF for this unit
+ found = $no      # initialize to no transponder - clk 5/97 (E1801)
+ for_DEQ_chain (UNT$Pointer$index)
+    {
+     if (xDEQ$Ident$I == $IFF$Code)
+        {
+         IFF$Pointer = xDEQ$Pntr$i
+         if (xIFF$Function$i != $INTERROGATOR$Code)
+            {
+             found = $yes
+             break
+            }
+        }
+    }
+ 
+ if (found == $no) # unit specified has no IFF on board
+    {
+     msg_len = 0
+ 
+     call smovhn (xUNT$Name$C,$$MaxLit,msg,msg_len)
+     call smovv (":  Doesn't have a Transponder IFF on board.",msg,msg_len)
+ 
+     call send_(xUNT$View$I, 0, msg_len, msg)
+ 
+     putORD$Status$I ($BeingDeleted$Code)
+     return
+    }
+ 
+ # return if mode number entered is less than 1 or greater than 3
+ for (mode_loop = 1;
+      mode_loop <= number_of_modes;
+      mode_loop = mode_loop + 1)
+    {
+     if ((mode[mode_loop] < 1) | (mode[mode_loop] > 3))
+       {
+        msg_len = 0
+        call smovv (" Invalid Mode value ",msg,msg_len)
+        call smovi (mode[mode_loop],msg,msg_len)
+        call smovv (" was entered for ",msg,msg_len)
+        call smovhn (xUNT$Name$C,$$MaxLit,msg,msg_len)
+        call smovv (".  Only Modes 1 through 3 may be set.  ",msg,msg_len)
+ 
+        call send_(xUNT$View$I, 0, msg_len, msg)
+        putORD$Status$I ($BeingDeleted$Code)
+ 
+        return
+       }
+ 
+     # aircraft in the orange or neutral view may only set mode 3
+     if (((UNT$View$I >= $FirstOrange$View & UNT$View$I <= $LastOrange$View) |
+          (UNT$View$I == $Neutral$View)) &
+         (xUNT$Type$I == $Air$Code))
+        {
+         if ((mode[mode_loop] == 1) | (mode[mode_loop] == 2))
+            {
+             msg_len = 0
+             call smovv ("***** ",msg,msg_len)
+             call smovhn (xUNT$Name$C,$$MaxLit,msg,msg_len)
+             call smovv (" -  can only SET or CLEAR MODE 3.  ",msg,msg_len)
+ 
+             call send_(xUNT$View$I, 0, msg_len, msg)
+             return # SMM 5/99 (E2088)
+            }
+        }
+    }
+ 
+ if (args[1] == $LEX$SET$)
+    {
+     # args [1] [2]           [3]               [4]
+     #      SET IFF (mode) <iff-mode> (code) <iff-octal-code>
+     # args                   [5]               [6]
+     #                 [| <iff-mode> (code) <iff-octal-code>
+     # args                   [7]               [8]
+     #                 [| <iff-mode> (code) <iff-octal-code> ]];
+     code[1] = args[4]
+     if (num_args > 4)
+        {
+         code[2] = args[6]
+         if (num_args > 6) code[3] = args[8]
+        }
+     call IFF_set_mode(DEQ$Pointer,UNT$Pointer,mode,code,
+                       number_of_modes,iview)
+    }
+ else if (args[1] == $LEX$CLEAR$)
+    {
+     # args [1]  [2]           [3]           [4]           [5]
+     #     CLEAR IFF (mode) <iff-mode> [| <iff-mode> [| <iff-mode> ]];
+     call IFF_clear_mode(DEQ$Pointer,mode,number_of_modes)
+    }
+ 
+ putORD$Status$I ($BeingDeleted$Code)
+ 
+return
+end
+
+ 
+Subroutine IFF_set_mode(DEQ$Pointer,    #
+                        UNT$Pointer,    #
+                        mode,           # mode to be set
+                        code,           # code to set for mode
+                        number_of_modes,# number of modes to be set
+                        iview)          # view of input
+########################################################
+#$%
+#$% Purpose:   IFF_set_mode processes the SET IFF mode
+#$%            and code order.  If the mode to be set has
+#$%            a value, it must be CLEARed first.
+#$%
+#$% Called By: oIFF
+#$%
+#$% Calls:     smov...
+#$%
+#$% Tables:    UNT
+#$%
+#$% Date:      Jan. 1997  (E1732)
+#$%
+#$% Author:    Susan Miller
+#$%
+#$% Modified:  Carol Kropp - 3/97 (E1772)
+#$%            Changed the processing of mode 1 values
+#$%            to match the Link-11 specification and
+#$%            DIS PDUs.  Mode one is five bits long
+#$%            with the first digit values 0-7 and the
+#$%            second 0-3.  The bit layout is
+#$%            _ _ _ | _ _.
+#$%
+#$%            John McCormick - 8/98 (E2028)
+#$%            Removed the restriction from allowing
+#$%            players to change mode 1 and mode 2
+#$%            codes.  Also allow changes without clearing.
+#$#
+########################################################
+ 
+BBcommon
+ 
+integer MODE_NUMBER,I_SWITCH_1,IVIEW,
+        DEQ$IFFMODE1_digit1$I,
+        DEQ$IFFMODE1_digit2$I,
+        DEQ$Iffmode2$I,
+        DEQ$Iffmode3$I                  # MJC 5/1/2000 (E2145)
+literal CSTRIP8                         # MJC 5/4/2000 (E2145)
+integer DEQ$Pointer, UNT$Pointer, mode[3], code[3]
+integer number_of_modes
+ 
+integer msg_len, temp_code[4], current_mode
+integer UNT$View$I, DEQ$On$I, mode_set
+ 
+character msg[ARB]
+ 
+# code should be treated as an octal number
+# convert it to decimal in order to store it
+# convert it back to octal to display it on i/o or astabs
+ 
+UNT$View$I = xUNT$View$I
+DEQ$On$I = xDEQ$On$I
+mode_set = $no
+ 
+for (mode_number = 1;
+     mode_number <= number_of_modes;
+     mode_number = mode_number + 1)
+   {
+    current_mode = mode[mode_number]
+ 
+ 
+    temp_code[1] = MOD(code[mode_number],10)
+    temp_code[2] = MOD((INT(code[mode_number]/10)),10)
+ 
+    switch (current_mode)
+       {
+        case 1: # code is between octal numbers 0-73 (with the second digit
+                # only containing values from 0-3)
+            {   # temp_code[1] is the low order digit (0-3)
+                # temp_code[2] is the high order digit (0-7)
+             if ((temp_code[1] > 3) | (temp_code[2] > 7))
+                {
+                 msg_len = 0
+                 call smovv (" Code value (",msg,msg_len)
+                 call smovi (code[mode_number],msg,msg_len)
+                 call smovv (") entered for ",msg,msg_len)
+                 call smovhn (xUNT$Name$C,$$MaxLit,msg,msg_len)
+                 call smovv (" Mode 1 is not legal - range",msg,msg_len)
+                 call smovv (" is 0-73 (second digit 0-3).",msg,msg_len)
+ 
+                 call send_(UNT$View$I, 0, msg_len, msg)
+                 next
+                }
+ 
+             code[mode_number] = temp_code[1] + (temp_code[2] * 8)
+             DEQ$IFFMode1_Digit1$I = temp_code[2]
+             putDEQ$IFFMode1_Digit1$I
+             DEQ$IFFMode1_Digit2$I = temp_code[1]
+             putDEQ$IFFMode1_Digit2$I
+             mode_set = $yes
+            }
+         case 2,3: # code is between octal numbers 0-7777
+            {
+             if (code[mode_number] > 7777)
+                {
+                 msg_len = 0
+                 call smovv (" Code value entered for ",msg,msg_len)
+                 call smovhn (xUNT$Name$C,$$MaxLit,msg,msg_len)
+                 call smovv (" Mode ",msg,msg_len)
+                 call smovi (current_mode,msg,msg_len)
+                 call smovv (" is too large - range is 0 to 7777.",msg,msg_len)
+ 
+                 call send_(UNT$View$I, 0, msg_len, msg)
+                 next
+                }
+ 
+             temp_code[3] = MOD((INT(code[mode_number]/100)),10)
+             temp_code[4] = MOD((INT(code[mode_number]/1000)),10)
+             if ((temp_code[1] > 7) | (temp_code[2] > 7) |
+                 (temp_code[3] > 7) | (temp_code[4] > 7))
+                {
+                 msg_len = 0
+                 call smovv (" Code value entered for ",msg,msg_len)
+                 call smovhn (xUNT$Name$C,$$MaxLit,msg,msg_len)
+                 call smovv (" Mode ",msg,msg_len)
+                 call smovi (current_mode,msg,msg_len)
+                 call smovv (" is not an octal value ",msg,msg_len)
+                 call smovv ("- range is 0 to 7777.",msg,msg_len)
+ 
+                 call send_(xUNT$View$I, 0, msg_len, msg)
+                 next
+                }
+ 
+             code[mode_number] = temp_code[1] + (temp_code[2] * 8)
+             code[mode_number] = (temp_code[3] * 64) + code[mode_number]
+             code[mode_number] = (temp_code[4] * 512) + code[mode_number]
+ 
+             if (current_mode == 2)
+                {
+                 DEQ$IFFMode2$I = code[mode_number]
+                 putDEQ$IFFMode2$I
+                 mode_set = $yes
+                }
+             else if (current_mode == 3)
+                {
+                 DEQ$IFFMode3$I = code[mode_number]
+                 putDEQ$IFFMode3$I
+                 mode_set = $yes
+                }
+            }
+       } # end of switch loop
+   } # end of for loop through number_of_modes
+ 
+ if (mode_set == $yes & DEQ$On$I != $yes)
+    {
+     msg_len = 0
+     call smovhn (xUNT$Name$C,$$MaxLit,msg,msg_len)
+     call smovv (":  IFF codes set - ",msg,msg_len)
+     call smovv (" ACTIVATE IFF Transponder.  ",msg,msg_len)
+ 
+     call send_(xUNT$View$I, 0, msg_len, msg)
+    }
+ 
+return
+end
+
+ 
+Subroutine iff_clear_mode(DEQ$Pointer,  # unit pointer
+                          mode,         # mode to be cleared
+                          number_of_modes)# number of modes
+########################################################
+#$%
+#$% Purpose:   IFF_clear_mode processes the CLEAR IFF
+#$%            mode order.
+#$%
+#$% Called By: oIFF
+#$%
+#$% Calls:     None
+#$%
+#$% Tables:    UNT
+#$%
+#$% Date:      Jan. 1997  (E1732)
+#$%
+#$% Author:    Susan Miller
+#$%
+########################################################
+ 
+BBcommon
+ 
+integer MODE_NUMBER,
+        I_SWITCH_1              # MJC 5/1/2000 (E-2145)
+ 
+integer DEQ$Pointer, mode[3], number_of_modes
+ 
+ if ((number_of_modes == 0) | (number_of_modes == 3))
+   {
+    putDEQ$IFFMode1$I (0)
+    putDEQ$IFFMode2$I (0)
+    putDEQ$IFFMode3$I (0)
+   }
+ 
+ for (mode_number = 1;
+      mode_number <= number_of_modes;
+      mode_number = mode_number + 1)
+    {
+     switch (mode[mode_number])
+       {
+        case 1:  putDEQ$IFFMode1$I (0)
+        case 2:  putDEQ$IFFMode2$I (0)
+        case 3:  putDEQ$IFFMode3$I (0)
+       }
+    }
+ 
+return
+end

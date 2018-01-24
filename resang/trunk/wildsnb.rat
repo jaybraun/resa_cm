@@ -1,0 +1,457 @@
+ 
+ 
+#####   version 3.1  dated-  7apr81
+ 
+ 
+#####   version 3.0  dated- 22dec80
+ 
+ 
+# 
+ 
+#$%      MODULE                       UTILITY                     DATA
+#$%    SUBROUTINES                  SUBROUTINES                  TABLES
+#$%    ===========                  ===========                  ======
+#$%
+#$%      WGLSNB                        ECHO                       SOB
+#$%      GETSR  <WGLOAD>               ECHOH
+#$%      GSLOTM <WGLOAD>               ECHOR
+#$%      BADFLD <WGLOAD>
+#$%
+#$%
+#$%
+#$%    NOTES
+#$%    =====
+#$%
+#$%    1.  <FILENAME> INDICATES WHERE SUBROUTINE IS LOCATED.
+#$%
+#$%    2.  UTILITY SUBROUTINES NOT SHOWN ON FLOWCHART.
+#$%
+#$%    3.  * INDICATES NO OTHER SUBROUTINES CALLED.
+#$%
+#$%
+#$%
+#$%    FLOWCHART FOR FILE WGLSNB
+#$%    =========================
+#$%
+#$%    START0 <WARGAM> - WGLOAD - WGLSNB - GETSR *
+#$%                                      - GSLOTM*
+#$%                                      - BADFLD*
+ 
+
+ 
+define(DEBUG,#)
+include "bbctl.inc"
+include "bbcode.inc"
+include "bbsob.inc"
+include "ascii.inc"
+ 
+define(BBImplicit, Implicit NONE)       # MJC 4/28/2000
+ 
+subroutine wglsnb (reccnt,recsz,rec)    # load in the sonobuoy scenario file
+ 
+########################################################
+#$%
+#$% Purpose:   WGLSNB loads in the sonobuoy scenario
+#$%            file data.
+#$%
+#$% Called By: WGLOAD
+#$%
+#$% Calls:     BADFLD     ECHO       ECHOH
+#$%            ECHOR      GETSR      GSLOTM
+#$%
+#$% Tables:    SOB
+#$%
+#$% Date:      OCT 80
+#$%
+#$% Author:    Ron Williams, Dana Wills
+#$%
+########################################################
+ 
+BBcommon
+ 
+integer reccnt,recsz,pnt
+literal rec[1500]
+ 
+integer mr
+ 
+integer LOOP, LEN, ISTAT, LPNT, K, kk,      # jb (kk) E2209 11/30/00
+        SOB$Pointer, SOB$Activesonar$I,
+        SOB$NV$Index, SOB$Passivemaxrange$I,
+        SOB$Acousticcom$I, SOB$Buoylife$I,
+        SOB$Centerfreq$I, SOB$Recognitiondiff$I,
+        SOB$Timetorepair$I, SOB$Pinginterval$I,
+        SOB$SEC$Index, SOB$SEC$di$I, SOB$Mtbf$I,
+        SOB$Sourcelevel$I, SOB$NV$maxrange$I,
+        SOB$Stdevsigxs$I, SOB$Sysloss$I,
+        SOB$Loendfreq$I, SOB$Hiendfreq$I,
+        SOB$Horizbeam$I, SOB$Vertbeam$I,
+        SOB$Integrationtime$I                       # MJC 4/28/2000
+real    SOB$Stdevbrgerr$F                           # MJC 4/28/2000
+literal SOB$Type$C                                  # MJC 4/28/2000
+ 
+BBdeclare (SOB$FullName$V)                  # jb  E2209    11/30/00
+ 
+DEBUG call echov("<wglsnb:")
+ 
+ 
+#$% if file is empty (no record count)
+if (reccnt <= 1)
+   {
+    #$% display warning message to user and return
+    call echov ("Sonobuoy File Empty")
+    call echor
+    return
+   }
+ 
+for (loop = 2; loop <= reccnt; )        # for each record in the file
+   {
+    call getsr (loop,recsz,rec)         # get scenario record
+    len = rec[1]                        # save length
+ 
+    #$% get appropriate number of slots from sonobuoy table
+    call gslotm (sob$pointer,$$sob,sob$entry,istat)
+ 
+    #$% if table is full
+    if (istat == $no)
+       {
+        #$% send warning message to user and return
+        call echov ("Items from ")
+        call echohn (rec[3],$$MaxLit)
+        call echov (" and on are not loaded.")
+        call echor
+        return
+       }
+ 
+    sob$type$c = rec[3]                 # Sonobuoy Name
+    PUTsob$type$c
+ 
+    if (rec[5] == 'ACT')              # check for Active
+       {
+        #$% set active sonar indicator to yes & save
+        sob$activesonar$i = $yes
+        PUTsob$activesonar$i
+        putSOB$StDevSigXS$I( 6 )        #Default value
+       }
+    else if (rec[5] == 'PASS')         # check for Passive
+       {
+        #$% set active sonar indicator to no & save
+        sob$activesonar$i = $no
+        PUTsob$activesonar$i
+ 
+        SOB$NV$Index = 1    # CLK 12/8/92 (E1110) - default passive max range
+        SOB$PassiveMaxRange$I = MIN (500, Passive$MaxRange)
+        putSOB$PassiveMaxRange$I
+       }
+    else if (rec[5] == 'COMM')         # check for Communication gear
+       {
+        #$% set acoustic comm indicator to yes & save
+        sob$acousticcom$i = $yes
+        PUTsob$acousticcom$i
+ 
+        #$% set active sonar indicator to no & save
+        sob$activesonar$i = $no         # ????
+        PUTsob$activesonar$i
+       }
+ 
+    lpnt = 1                            # save dummy last word pointer
+    for (pnt = 6; pnt <= len; )         # for each word in the record
+       {
+        if (pnt == lpnt)                # if ==, didnt process.... error
+           {
+            call badfld (_              # display unknown field
+                         "Sonobuoy  ",  # file type
+                         rec[3],        # record name
+                         rec[pnt])      # ????? fld
+ 
+            #$% increment pointer
+            pnt = pnt + 1
+           }
+        lpnt = pnt
+ 
+        #$% if array word is LIFE
+        if      (rec[pnt] == 'LIFE')
+           {
+            #$% get life of deployed buoy and save
+            sob$buoylife$i = rec[pnt+1]
+            PUTsob$buoylife$i
+ 
+            #$% increment pointer
+            pnt = pnt + 2
+           }
+        #$% else if array word is CFREQ
+        else if (rec[pnt] == 'CFREQ')
+           {
+            #$% get sonarbuoy center frequency & save
+            sob$centerFreq$i = rec[pnt+1]
+            PUTsob$centerFreq$i
+ 
+            #$% increment pointer
+            pnt = pnt + 2
+           }
+        #$% else if array word is RD
+        else if (rec[pnt] == 'RD')
+           {
+            #$% get recognition differential (Hz) & save
+            sob$recognitiondiff$i = rec[pnt+1]
+            PUTsob$recognitiondiff$i
+ 
+            #$% increment pointer
+            pnt = pnt + 2
+           }
+        #$% else if array word is DI00
+        else if (rec[pnt] == 'DI00')
+           {
+            #$% for each 10 deg section less than or equal to 180 deg
+            for (sob$sec$index=1;
+                 sob$sec$index<=18;
+                 sob$sec$index=sob$sec$index+1)
+               {
+                #$% compute value to position pointer in same relative
+                #$% position in each group of slots
+                k = pnt + sob$sec$index
+ 
+                #$% if section is greater than 60 and 120 deg
+                if (sob$sec$index >  6) k = k + 1
+                if (sob$sec$index > 12) k = k + 1
+ 
+                #$% get directivity index (0 - 180 deg) in db and save
+                sob$sec$di$i = rec[k]
+                PUTsob$sec$di$i
+               }
+            #$% increment pointer
+            pnt = pnt + 3 * 7
+           }
+        #$% else if array word is LEVEL             # 12/4/90  trs
+        else if (rec[pnt] == 'LEVEL')
+           {
+            #$% get source level & save
+            sob$sourcelevel$i = rec[pnt+1]
+            PUTsob$sourcelevel$i
+ 
+            #$% increment pointer
+            pnt = pnt + 2
+           }
+ 
+        #$% else if array word is RMAX (maximum range in the 4 environments)
+        else if (rec[pnt] == 'RMAX')          # 12/4/90  trs
+           {
+            #$% loop thru max range for 4 different environments
+            for (SOB$NV$index=1;
+                 SOB$NV$index<=SOB$NV$slots;
+                 SOB$NV$index=SOB$NV$index+1)
+               {
+                k = pnt + SOB$NV$index
+                #$% get max range for environment and save
+                SOB$NV$MaxRange$I = rec[k]
+                putSOB$NV$MaxRange$I
+ 
+                mr = xSOB$NV$MaxRange$I
+               }
+            #$% increment counter
+            pnt = pnt + 5
+           }
+ 
+        #$% else if array word is RMAX1 (maximum passive sensor range)
+        else if (rec[pnt] == 'RMAX1')           # CLK 12/8/92 (E1110)
+          {
+           SOB$PassiveMaxRange$I = rec[pnt+1]   # get max detection range
+           putSOB$PassiveMaxRange$I             # and save
+           pnt = pnt + 2                        # increment counter
+          }
+ 
+        #$% else if array word is RDA     11/29/90 trs
+        else if (rec[pnt] == 'RDA')
+           {
+            #$% get recognition differential for active sonar and save
+            sob$recognitiondiff$i = rec[pnt+1]
+            PUTsob$recognitiondiff$i
+ 
+            #$% increment counter
+            pnt = pnt + 2
+           }
+ 
+        #$% else if array word is SIGMA               # 12/4/90  trs
+        else if (rec[pnt] == 'SIGMA')
+           {
+            #$% get sigma for standard deviation of signal excess and save
+            SOB$StDevSigXS$I = rec[pnt+1]
+            putSOB$StDevSigXS$I
+ 
+            #$% increment counter
+            pnt = pnt + 2
+           }
+ 
+        #$% else if array word is LOSS    11/29/90 trs
+        else if (rec[pnt] == 'LOSS')
+           {
+            #$% get system loss and save
+            SOB$SysLoss$I = rec[pnt+1]
+            putSOB$SysLoss$I
+ 
+            #$% increment counter
+            pnt = pnt + 2
+           }
+ 
+        #$% else if array word is FCRTE   11/29/90 trs
+        else if (rec[pnt] == 'FCRTE')
+           {
+            #$% get false contact rate and save
+#            SOB$FalseRate$I = rec[pnt+1]    # jb removed 12/19/90
+#            putSOB$FalseRate$I              # jb removed 12/19/90
+ 
+            #$% increment counter
+            pnt = pnt + 2
+           }
+ 
+        #$% else if array word is LFREQ
+        else if (rec[pnt] == 'LFREQ')
+           {
+            #$% get low end of freq band & save
+            sob$loendfreq$i = rec[pnt+1]
+            PUTsob$loendfreq$i
+ 
+            #$% increment pointer
+            pnt = pnt + 2
+           }
+        #$% else if array word is HFREQ
+        else if (rec[pnt] == 'HFREQ')
+           {
+            #$% get high end of freq band & save
+            sob$hiendfreq$i = rec[pnt+1]
+            PUTsob$hiendfreq$i
+ 
+            #$% increment pointer
+            pnt = pnt + 2
+           }
+        #$% else if array word is HZBW
+        else if (rec[pnt] == 'HZBW')
+           {
+            #$% get horizontal beamwidth & save
+            sob$horizbeam$i = rec[pnt+1]
+            PUTsob$horizbeam$i
+ 
+            #$% increment pointer
+            pnt = pnt + 2
+           }
+        ## else if array word is HDERR  ## 6/17/83 tpa
+        else if (rec[pnt] == 'HDERR')
+            {
+#           SOB$StDevBrgErr$F = rec[pnt+1] * .01
+            SOB$StDevBrgErr$F = rec[pnt+1]              #       10/3/83
+            putSOB$StDevBrgErr$F
+ 
+            pnt = pnt + 2                   ## increment pointer
+            }
+        ## else if array word is OMNI   ## 6/17/83 tpa
+        else if (rec[pnt] == 'OMNI')
+            {
+            if (rec[pnt+1] == 'YES') PUTsob$OmniFlag$I (YES)
+            # else                     PUTsob$OmniFlag$I (NO)
+ 
+            pnt = pnt + 2                   ## increment pointer
+            }
+        #$% else if array word is VRBW
+        else if (rec[pnt] == 'VRBW')
+           {
+            #$% get vertical beamwidth & save
+            sob$vertbeam$i = rec[pnt+1]
+            PUTsob$vertbeam$i
+ 
+            #$% increment pointer
+            pnt = pnt + 2
+           }
+        #$% else if array word is BRERR         ## tpa 8/1/83
+        else if (rec[pnt] == 'BRERR')
+           {
+            #$% get bearing error & save
+#           SOB$StDevBrgErr$F = rec[pnt+1] * .01
+            SOB$StDevBrgErr$F = rec[pnt+1]              #       10/3/83
+            putSOB$StDevBrgErr$F
+ 
+            #$% increment pointer
+            pnt = pnt + 2
+           }
+        #$% else if array word is RANGE
+        else if (rec[pnt] == 'RANGE')
+           {
+#           sob$$i = rec[pnt+1]                 # for the future
+#           PUTsob$$i
+ 
+            #$% increment pointer
+            pnt = pnt + 2
+           }
+        #$% else if array word is CABLE
+        else if (rec[pnt] == 'CABLE')
+           {
+#           sob$cablelength$i = rec[pnt+1]      # for the future
+#           PUTsob$cablelength$i
+ 
+            #$% increment pointer
+            pnt = pnt + 2
+           }
+ 
+        else if  ( rec [ pnt ] == 'MNFAL' )
+          {
+            #$% update blackboard with Mean time between failure data
+            #$%from commSOBte record
+            SOB$MTBF$I = rec [ pnt + 1 ]
+ 
+            putSOB$MTBF$I
+ 
+            pnt = pnt + 2
+          }
+ 
+        else if  ( rec [ pnt ] == 'MNRPR' )
+          {
+            #$% update blackboard with Pulse value from commSOBte record
+            SOB$TimeToRepair$I = rec [ pnt + 1 ]
+ 
+            putSOB$TimeToRepair$I
+ 
+            pnt = pnt + 2
+          }
+ 
+        #$% else if array word is PINTS   JFR 11/16/93
+        else if (rec[pnt] == 'PINTS')
+           {
+            #$% Minimum ping time for active sonar
+            SOB$PingInterval$I = rec[pnt+1] # JFR 11/16/93
+            putSOB$PingInterval$I           # JFR 11/16/93
+            #$% increment counter
+            pnt = pnt + 2
+           }
+ 
+        #$% else if array word is TINTG   JFR 11/16/93
+        else if (rec[pnt] == 'TINTG')
+           {
+            #$% Minimum integration time for passive sonar
+            SOB$IntegrationTime$I = rec[pnt+1] # JFR 11/16/93
+            putSOB$IntegrationTime$I           # JFR 11/16/93
+ 
+            #$% increment counter
+            pnt = pnt + 2
+           }
+ 
+        else if(rec[pnt] == 'NOMEN')  # jb E2209  11/29/00
+           {
+           SOB$Fullname$V = ""
+           kk = 0
+           call vmovh (rec[pnt+1], 24, SOB$Fullname$V, kk)
+           putSOB$Fullname$V
+           pnt = pnt + 4
+           }
+        else if(rec[pnt] == 'UDB')  # jb E2209  11/29/00
+           {
+           if      (rec[pnt+1] == 'YES') putSOB$UDB$i ($YES)
+           else if (rec[pnt+1] != 'NO')  putSOB$UDB$i (!$NO)
+           pnt = pnt + 2
+           }
+ 
+       }                                # loop for next word in record
+ 
+   }                                    # loop for next record
+ 
+DEBUG call echo ($GREAT)
+ 
+return
+end

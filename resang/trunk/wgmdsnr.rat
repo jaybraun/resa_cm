@@ -1,0 +1,4330 @@
+#####   version 3.1  dated-  7apr81  
+###                     - WGMDSNR.rat  File -
+###
+###
+### mod to version 3.0          July-Oct 1983, per PPS of May 1983
+###
+### smn prog    module  comments
+### === ====    ======  ==============================================
+###     ojb     SONDET/PASDET/FRQDET/GETBBN/PSCHAR/REPPSD/DPVDSR
+###         new NVREGN  Implemented PPS for BGTCSF Passive Sonar Model.
+###         new NBPRPL  (Elsewhere:  Modifications & additions to Black-
+###                      Board tables, and to Plot, Status and WGMDDET
+###                      modules.)
+###
+### mod to version 3.0          dated 18-feb-1981
+###
+### smn prog    module  comments
+### === ====    ======  ==============================================
+### 008 rjw     cbprep  now tests field boy$Acoustic$i
+###
+###
+### mod to version 3.0          dated 17-feb-1981
+###
+### smn prog    module  comments
+### === ====    ======  =================================================
+### 002 rjw     lpstgt  corrected problem relating to surface-to-surface detns
+###             lpsnon  corrected problem relating to surface-to-surface detns
+###             cbprep  changed so comm buoys time out next minute
+###             reppsd  corrected call to lclpsn
+###
+
+###
+### mod to version 3.0          dated 6-jan-1981
+###
+### smn prog    module  comments
+### === ====    ======  =================================================
+### 002 sfc             changed routine to call LCLPSN and LCLRAS to
+###                     enter passive and active sonar detection data
+###                     in the local detection table;
+###
+
+
+#####   version 3.0     dated 22-dec-1980
+
+
+#$%     MODULE                        UTILITY                   DATA
+#$%   SUBROUTINES                   SUBROUTINES                TABLES
+#$%   ===========                   ===========                ======
+#$%
+#$%     SONMOD                                                   UNT
+#$%     PRESON                                                   BOY
+#$%     SHPREP                        ANG2PI                     DEQ
+#$%     CBPREP                                                   ORD
+#$%     SBPREP                                                   SON
+#$%     TAPREP                        SIN                        BAR
+#$%     VDPREP                        COS
+#$%     SONDET                        RANDN                      SOB
+#$%     ACTSON                        PREPRX_M                   
+#$%     LPSTGT                                                   PRL
+#$%     LPSNON                        PROXIM_M                   SHN
+#$%     PASDET                        ANGPI                      SHC
+#$%     GETBBN                        NLTEST                     TRP
+#$%     DPVDSR                                                   SER
+#$%     PSCHAR                                                   ACC
+#$%     ASAC                                                     ACN
+#$%     ACTDET                        UNIT_ASPECT_INDEX          ANO
+#$%     FALSEtargets                  UNTGET                     FLS
+#$%     FRQDET
+#$%     INDFRQ
+#$%     INV_Worse                                                LCL
+#$%     NBPRPL
+#$%     NVREGN
+#$%     REPASD                        Subroutine LCLRAS                     
+#$%     REPPSD                        Subroutine LCLPSN
+#$%     Get_ACC_targets               AMIN1                      CTM
+#$%     Put_ACC_in_list
+#$%   ==================================================================
+ 
+
+
+ define(trace$sonar$Active, istrip(trace$sonar,0,M1bits))
+ define(trace$sonar$Passive,istrip(trace$sonar,1,M1bits))
+ 
+ # code for splitting active and passive execution
+ define($ActiveandPassive,1)   # JFR 11/16/93
+ define($ActiveOnly,2)         # JFR 11/16/93
+ define($PassiveOnly,3)        # JFR 11/16/93
+
+ define($tgtNV,#)                              #               3/3/87
+
+ include "bbctl.inc"              #def for basic blackboard parameters
+ include "bbcode.inc"             #def for blackboard & miscellaneous constants
+ include "bbord.inc"              # Add update of multi-line BOY seq. jb 9/10/87
+ include "bbano.inc"              #def for ambient noise table tokens
+ include "bbbar.inc"              #def for barrier plot table tokens
+ include "bbboy.inc"              #def for buoy table tokens
+ include "bbctm.inc"              #def for countermeasure char. table
+ include "bbdeq.inc"              #def for all dyanmics tables (air,ship,shore)
+ include "bbfls.inc"              #jb - False Targets                  12/27/90
+ include "bblcl.inc"              #jb - to find matching ActSon tracks 12/17/90
+ include "bbprl.inc"              #def for propagation loss table tokens
+ include "bbser.inc"              #def for Sonar Env.-Table tokens      6/20/83
+ include "bbshc.inc"              #def for ship characteristics table
+ include "bbshn.inc"              #def for ship noise table tokens
+ include "bbsob.inc"              #def for sonobuoy characteristics table tokens
+ include "bbson.inc"              #def for sonar characteristics table tokens
+ include "bbtrp.inc"              #def for smart torpedo char. table
+ include "bbunt.inc"              #def for unit table tokens
+ include "bbvue.inc"              #def for views
+ include "bbacc.inc"              #def for aircraft 6/91
+ include "bbacn.inc"              #def for aircraft noise 6/91
+
+ define(BBimplicit, IMPLICIT NONE)  # jb E2145  6/21/00
+ #***************************************************************************
+ #                                                                          *
+ #These definitions give the size of various arrays used by the sonar model.*
+ #                                                                          *
+ #***************************************************************************
+
+ define ($MAXDDL,UNT$Three_Half_Per)#max length of detector/detectee list
+ define ($MAXPSL,UNT$Half_Per)      #max length of passive sonar noise source list
+
+ #***************************************************************************
+ #                                                                          *
+ #These definitions represent the various detector codes.                   *
+ #                                                                          *
+ #***************************************************************************
+
+ define ($$$DP,1)       #direct path active sonar
+ define ($$$BB,2)       #bottom bounce active sonar
+ define ($$$CZ,3)       #convergence zone active sonar
+ define ($$$PAS,4)      #hull-mounted passive sonar
+ define ($$$ASB,5)      #active sonobuoy
+ define ($$$PSB,6)      #passive sonobuouy
+ define ($$$TA,7)       #towed array
+ define ($$$VDS,8)      #variable-depth sonar
+
+ #***************************************************************************
+ #                                                                          *
+ # These definitions represent the various detectee word masks.             *
+ # i.e. these are the ways he could be detected....                         *
+ #                                                                          *
+ #***************************************************************************
+
+ define ($$$PDac,1)     #passive-detection-of-acoustic-communication bit
+ define ($$$PDas,2)     #passive-detection-of-active-sonar bit
+ define ($$$PDgn,4)     #passive-detection-of-general-noise bit
+ define ($$$PASS,7)     #all passive-detection bits
+
+ define ($$$ACTdp,8)    #active-detection/deep bit
+ define ($$$ACTin,16)   #active-detection/in-layer bit
+ define ($$$ACT,24)     #all active-detection bits
+
+
+
+#*********************************************************************
+#
+# definition to give a convenient name to the common area used
+# by the sonar model.
+#
+#*********************************************************************
+
+define (SM$common,
+    ##--------------------------------------------------------------------
+    ##                      POINTERS & POSITION DATA
+    ##--------------------------------------------------------------------
+    Integer*4  UNT$POINTER      ##detector unit table pointer
+    Integer*4  BOY$POINTER      ##detector buoy table pointer
+    Integer*4  Dor_Index        ##detector DD list pointer
+    Real*4     Dor_Lat          ##detector latitude
+    Real*4     Dor_Lon          ##detector longitude
+    Real*4     Dor_CSLat        ##cosine of detector latitude
+    Real*4     Dor_Depth        ##detector depth
+    Real*4     Dor_Head         ##detector heading
+    Real*4     Dor_Speed        ##detector speed
+    Integer*4  Dor_Unt_x        ## unt index 
+
+    Integer*4  UNT2$POINTER     ##target unit table pointer
+    Integer*4  BOY2$POINTER     ##target buoy table pointer
+    Integer*4  Tgt_Index        ##target DD list pointer
+    Real*4     Tgt_Lat          ##target latitude
+    Real*4     Tgt_Lon          ##target longitude
+    Real*4     Tgt_CSLat        ##cosine of target latitude
+    Real*4     Tgt_Depth        ##target depth
+    Real*4     Tgt_Head         ##target heading
+    Real*4     Tgt_Speed        ##target speed
+    Integer*4  Tgt_Unt_x        ## unt index 
+
+    Integer*4  Intra_Target     ## data field for intra emi
+    Integer*4  Intra_Deq        ## data field for intra emi
+    Integer*4  Intra_Flag       ## data field for intra emi
+
+    Integer*4  SON$POINTER      ##pointer to sonar characteristics table
+    Integer*4  SOB$POINTER      ##pointer to sonobuoy characteristics table
+    Integer*4  SON$SPD$INDEX    ##speed index into detector self-noise subtable
+    Integer*4  SON$NV$index     ## $INV index for SON table             8/25/83
+    Integer*4  SOB$NV$index     ## $INV index for SOB table             8/25/83
+
+    Integer*4  Env_Num           ## Environment # for Computation; one of: 11/28/90
+    Integer*4  Env_Tgt           ## Environment # for Detectee (ship or SUB) 10/17/90
+    Integer*4  Env_Det           ## Environment # for DetectOR (ship or boy) 11/28/90
+    Integer*4  Env_Ping          ## Environment # for 'pinger' (ship or boy) 11/28/90
+               
+    Integer*4  sonarmodel_state # state of model since acive and passive - JFR 11/15/93
+                                # processing can be separate for VTS 
+    ##--------------------------------------------------------------------
+    ##               PASSIVE SONAR DEVICE CHARACTERISTICS
+    ##--------------------------------------------------------------------
+    Real*4     Pas_Sdev     ##Standard-Deviation of Bearing-Error     7/7/83
+    Real*4     Pas_RD       ##recognition differential
+    Integer*4  Pas_Hifreq   ##upper frequency limit of band
+    Integer*4  Pas_Lofreq   ##lower frequency limit of band
+    Real*4     Pas_Vbeam    ##half of vertical beam width
+    Real*4     Pas_Hbeam    ##half of horizontal beam width
+    Real*4     Pas_Slope    ##maximum depth/range to be within vertical beam width
+               
+    ##---------------------------------------------------------------------
+    ##                     DETECTOR/DETECTEE LIST  ($MAXDDL defined above)
+    ##---------------------------------------------------------------------
+    Integer*4  DD_Pntr [$MAXDDL]   ##pointer into UNT or BOY table
+    Integer*4  DD_View [$MAXDDL]   ##view belonging to
+    Integer*4  DD_Seq  [$MAXDDL]   ##buoy sequence number
+    Integer*4  DD_Char [$MAXDDL]   ##pointer into sonar or sonobuoy characteristics table
+    Integer*4  DD_Deq  [$MAXDDL]   ##deq pointer for sonar equipment (for intra - emi)
+    Integer*4  DD_Mode [$MAXDDL]   ##mode= DP CZ BB,PAS,ASB,PSB,TA,VDS (0 =can't detect)
+    Integer*4  DD_Flags[$MAXDDL]   ##detectee word: $$$PDac, $$$PDas, $$$PDgn; ($$$PASS,7)
+                                   ##                     $$$ACTdp, $$$ACTin;($$$ACT,24)
+               
+    Integer*4  DD_Count         ##counter for number of entries in DD list
+    Integer*4  DD_Ship          ##INDEX OF last ship entry in DD list 7/18/83
+    Integer*4  DD_Air           ##Index of last aircraft entry in DD list 6/91
+               
+    ##---------------------------------------------------------------------
+    ##                     PASSIVE SONAR LIST     ($MAXPSL defined above)
+    ##---------------------------------------------------------------------
+    Integer*4  PS_DD_x [$MAXPSL]   ## INDEX into detector/detectee list
+    Real*4     PS_Range[$MAXPSL]   ##range
+    Real*4     PS_Bear [$MAXPSL]   ##bearing
+    Integer*4  PS_Speed[$MAXPSL]   ##speed index
+    Real*4     PS_Depth[$MAXPSL]   ##depth
+    Real*4     PS_BBN  [$MAXPSL]   ##broadband noise power
+    Real*4     PS_Ploss[$MAXPSL]   ##propagation loss
+    Integer*4  PS_SHN  [$MAXPSL]   ##pointer to ship noise table
+    Integer*4  PS_Env_T[$MAXPSL]   ## Environment Index of TARGET posit. 5/7/86
+    Integer*4  PS_Count            ##counter for entries in PasSonarList
+    Integer*4  PS_Targets          ##INDEX OF last non-own-view entry in PasSonarList   7/18/83
+               
+    ##---------------------------------------------------------------------
+    ##                        DETECTION DATA                                
+    ##---------------------------------------------------------------------
+    Integer*4  Det_Freq             ##detected active sonar frequency
+    Integer*4  Det_Acous            ##integer flag for acoustic comm detection
+    Integer*4  Det_BB_flag          ##integer flag for broadband detection
+    Real*4     Det_Mean_Rng         ## Active sonobuoy mean detection range  2/2/83
+    Real*4     Det_SE              ## Signal excess for passing toward TMA  7/13/83
+    Integer*4  Det_Tn_Freq[6]       ## Detected tonal FREQUENCIES            6/21/83
+    Real*4     Det_Tn_SE[6]        ## Detected signature line Sig.-Excess values 7/20/83
+    Integer*4  Det_Tn_Count         ## running count of DETECTED line sig freq. 7/10/83
+               
+    common/scratch$pad/ _
+
+        # Pointers & Position Data
+        UNT$POINTER, BOY$POINTER, Dor_Index, Dor_Lat, Dor_Lon, 
+        Dor_CSLat, Dor_Depth, Dor_Head, Dor_Speed, Dor_Unt_x,  
+        UNT2$POINTER, BOY2$POINTER, Tgt_Index, Tgt_Lat, Tgt_Lon, 
+        Tgt_CSLat, Tgt_Depth, Tgt_Head, Tgt_Speed, Tgt_Unt_x, 
+        Intra_Target, Intra_Deq, Intra_Flag, 
+        SON$POINTER, SOB$POINTER, SON$SPD$INDEX, SON$NV$index, SOB$NV$index, 
+        Env_Num, Env_Tgt, Env_Det, Env_Ping, sonarmodel_state, # JFR 11/15/93 for VTS
+
+        # Passive Sonar Device Characteristics
+        Pas_Sdev, Pas_RD, Pas_Hifreq,  Pas_Lofreq, Pas_Vbeam, Pas_Hbeam,
+        Pas_Slope, 
+
+        # Detector/Detectee List  
+        DD_Pntr, DD_View, DD_Seq, DD_Char, DD_Deq, DD_Mode, DD_Flags,
+        DD_Count, DD_Ship, DD_Air, 
+
+        # Passive Sonar List     
+        PS_DD_x, PS_Range,  PS_Bear, PS_Speed, PS_Depth, PS_BBN, PS_Ploss, 
+        PS_SHN, PS_Env_T, PS_Count, PS_Targets,
+
+        # Detection Data                                
+        Det_Freq, Det_Acous, Det_BB_flag, Det_Mean_Rng, Det_SE, 
+        Det_Tn_Freq, Det_Tn_SE, Det_Tn_Count
+    ) 
+  
+
+Subroutine ACTDET(RANGE, # Input/ Output (may be -1.0) 
+                  BEAR)  # Input True brg to target
+#########################################################
+#$%
+#$% Purpose:    ACTDET calculates Sig.Excess for Active Sonar,
+#$%                    and tests for detection
+#$% Called by:  ACTSON
+#$%
+#$% Calls:       echo
+#$% Invokes:    $ANGPI    NLTEST    LOG10    INT
+#$%
+#$% Tables:     SON    SHC    PRL    ANO    UNT
+#$%
+#$% jb  Adapted October 1990 from Naval War College --
+#$%   then extended to include sonobuoys/two-way attenuation/
+#$%   ALERT factor/System Loss/database improvements
+#########################################################
+BBcommon
+SM$Common
+
+logical DRDEEP, TGDEEP
+
+real    RANGE,  BEAR    # (arguments)
+real    AN, SEk, NL, SN # Amb.Noise, SigExcess, NoiseLvl, SelfNoise
+real    RELbrg, RELbrg_DEG # Rel. Brg. to tgt, in Radians & Degrees
+
+real    TL1, TL2  # One-way prop-loss (TL1 pinger->tgt; TL2 tgt->rcvr)
+REAL*4 RANDOM, X                             # jb E2145  6/21/00
+data x/0.0/		# Get next random number in sequence
+
+Integer I,J,INDDI,ISPD1,LOSS,MODES_OK,ALERT  # jb E2145  6/21/00
+Integer JJJ,IBELOW,IABOVE,IFBELO,IFABOV,IFREQ # jb E2145  6/21/00
+Integer ANO$Pointer,ANO$NV$Index,            # jb E2145  6/21/00
+    LCL$Pointer,LCL$Nextindx$I,              # jb E2145  6/21/00
+    PRL$Pointer,PRL$NV$Index,PRL$NV$FQ$Index, # jb E2145  6/21/00
+    SHC$Pointer,SHC$Vrblts$I,SHC$ASP$Index,  # jb E2145  6/21/00
+    SOB$SEC$Index,SOB$Centerfreq$I,          # jb E2145  6/21/00
+    SON$MOD$Index,SON$SEC$Index              # jb E2145  6/21/00
+integer IRNG           # Index of Prop-Loss Range
+integer F_IX           # Indices for ANO table and Sonar Platform Speed
+
+integer RDA, DI, TS    # Recog.Differentl, Directivity Indx, Tgt.Strength
+integer LS, SIGMA      # Source Level; Sonar-Mode's Std.Deviation 
+
+integer ngl[4]         # Array for ANGLE comparison to RELBRG 12/20/90
+integer iLS[4]         # Array for LS comparisons             12/20/90
+integer iSg[4]         # Array for SIGMA comparison           12/20/90
+
+integer ibbtest        # YES/NO Detection-flag returned by function NLTEST
+integer NLTEST         # Function NLTEST
+
+data (ngl[I],I=1,4) / 1,1,1,0 /  # jb Initialize 3 YES, 4th NO 12/20/90
+data (iLS[I],I=1,4) / 1,1,1,0 /  # jb Initialize 3 YES, 4th NO 12/20/90
+
+if(trace$Sonar$ACTIVE != $NO)
+   {
+    call echor
+    call echov("RANGE = ")
+    call echof (RANGE,3)
+    call echov ("  ")
+    call echov("BEAR = ")
+    call echof(BEAR,3)
+   }
+
+ALERT = 0    # jb Initialize for both SON and SOB          12/11/90
+#######################################################################
+# Processing Blocks in ACTDET can be identified as:
+#  BLOCK I:  DETECTORS - (Sonars or SonoBuoys, with VDS a special
+#            case of a Sonar using the BOY table).  Consists of:
+#        Ia:  (SONAR geometry and mode)  Compute tgt relative brg. to
+#             determine which mode(s) are available for the sonar;
+#             then select DP, BB or CZ on the basis of best power
+#             output (LS).  For this mode, save LS and SIGMA.  From
+#             the relative brg., determine index to sector subtable
+#             and thence the Directivity Index (DI).
+#        Ib:  SONAR Recognition-Differential, ALERT factor, Self-Noise,
+#              Ambient Noise, system LOSS.
+#        Ic:  SONOBUOY power output (LS), SIGMA, Directivity Index (DI),
+#              Recognition Differential (RDA), System LOSS, Ambient Noise.
+#
+#  BLOCK II:  TARGET SHIP (ACTSON applies only to ships).  Determines
+#             target aspect (Angle-on-the-Bow); thence, Target Strength
+#             (TS), the sonar equivalent of radar cross-section.  Finds
+#             PropLoss (based on range, sonar environment, frequency, &
+#             depths of sensor and target with respect to layer-depth).
+#
+#  BLOCK III: DETECTION DETERMINATION.  Compute Signal Excess.  Based
+#             on Signal Excess, with mean of 0.0 and standard deviation
+#             SIGMA, draw random-number to determine whether detection
+#             occurred.
+######################################################################
+
+#####################################################################
+# BLOCK Ia:  (SONAR geometry and mode)  Compute tgt relative brg. to
+#             determine which mode(s) are available for the sonar;
+#             then select DP, BB or CZ on the basis of best power
+#             output (LS).  For this mode, save LS and SIGMA.  From
+#             the relative brg., determine index to sector subtable
+#             and thence the Directivity Index (DI).  
+
+if(Dor_Index <= DD_Ship | DD_Mode[Dor_Index] == $$$VDS) # Hullmounted or VDS 12/20/90
+    {
+    Dor_Head = xUNT$TrueCOURSE$F # Use the ship's own heading
+    RELBRG = BEAR - Dor_Head
+    $angPI (RELBRG)        # Between -PI and +PI
+    RELBRG = ABS(RELBRG)   # jb                            12/20/90
+    RELbrg_DEG = RELBRG * 180./$PI                   # jb  12/21/90
+
+#   SON$MOD$Index = DD_Mode[Dor_Index]                       # jb    11/5/90
+    modes_ok = SON$MOD$SLOTS  # Initialize number of mode choices
+                              # possible modes are DP/BB/ or CZ
+
+    for (j=1; j<=SON$MOD$SLOTS; j=j +1)
+       {
+        SON$MOD$index = j
+        NGL[j] = xSON$MOD$Angle$I                        # jb  12/20/90
+        if (NGL[j] < 2 * RELBRG_DEG)                # jb _DEG  12/21/90
+           {
+            NGL[j] = 0  # jb In FOR( below, SKIP this mode    12/20/90
+            modes_ok = modes_ok - 1 # For use in IFs below    12/20/90
+           }
+        ISG[j] = xSON$MOD$SIGMA$I                        # jb  12/20/90
+        ILS[j] = xSON$MOD$SourceLevel$I                  # jb  12/20/90
+       }
+
+    # NGL[1..son mod slots] now has the angles
+
+    if ( modes_ok == 0 )    # Blind in ALL Modes         jb  12/20/90
+       {
+        RANGE = -1.0    # Not detected..
+        RETURN 
+       }
+
+    # define ($$$DP,1)       #direct path active sonar
+    # define ($$$BB,2)       #bottom bounce active sonar
+    # define ($$$CZ,3)       #convergence zone active sonar
+
+    jjj = 0    # jb Initialize potential SON$MOD$index        12/21/90
+    for (j=1; j<=SON$MOD$SLOTS; j=j +1)                # jb   12/20/90
+       {
+        if (ngl[j] == 0)    NEXT
+        if(jjj == 0)   # if this is FIRST update..            12/21/90
+           {
+            jjj = j    # jb Update potential SON$MOD$index    12/21/90
+            SIGMA = ISG[jjj] # Save potential SIGMA and
+            LS    = ILS[jjj] #                          LS    12/21/90
+            if (modes_ok == 1)        # ONLY this mode is ok  12/20/90
+               {
+                if(DD_Mode[Dor_Index] != $$$VDS) DD_Mode[Dor_Index] = jjj  #    12/21/90
+                BREAK                  # jb                   12/20/90
+               }
+           }
+
+        if (ngl[j+1] != 0 & ILS[j+1] >= ILS[jjj] )
+           {
+            if(ILS[j+1] > ILS[jjj] | ISG[j+1] < ISG[jjj] )
+               {
+                jjj = j +1   # jb Update potential SON$MOD$index 12/21/90
+                SIGMA = ISG[jjj] # Save potential SIGMA and   
+                LS    = ILS[jjj] #                          LS   12/21/90
+               }
+           }
+
+        if(DD_Mode[Dor_Index] != $$$VDS) 
+            DD_Mode[Dor_Index] = jjj                # jb          12/21/90
+
+       }    # End of loop thru SON$MOD$SLOTS
+
+    # Determine DI for Hullmounted; or for VDS:
+    INDDI = INT( ABS(RELBRG)*(18./$PI) +1. ) # SEC subtable index
+    if(INDDI > 18) INDDI = 18
+
+    SON$SEC$index = INDDI
+    DI = xSON$SEC$DI$I                       # Directivity index
+   }    # End of find LS and SIGMA; plus hull DI or VDS SOB$SEC$index
+#############    End of BLOCK Ia  #################
+
+###########################################################################
+# BLOCK Ib:  SONAR Recognition-Differential, ALERT factor, Self-Noise,
+#              Ambient Noise, system LOSS:
+
+if(Dor_Index <= DD_Ship | DD_Mode[Dor_Index] == $$$VDS) # Hullmounted or VDS 
+    {
+    #$% Get ACTIVE recognition differential
+    RDA = xSON$RecDiffACTIVE$i
+
+    if(Level$ActiveSonar == 1)    # jb Search LCL chain??    12/17/90
+        {
+        for(lcl$NextIndx$i =Xunt$FirstLCLIndx$i; lcl$NextIndx$i !=0;)
+            {
+            lcl$pointer$to lcl$NextIndx$i
+            lcl$NextIndx$i = Xlcl$NextIndx$i
+#           if(Xlcl$Detectee$i != Tgt_Unt_x | Xlcl$LastDetSONAR$i != $YES |
+#                Xlcl$DetectionType$i != $ActiveNonVisual$Code)    NEXT 
+                                                             # 2/4/91 hdf
+
+            if(Xlcl$Detectee$i != Tgt_Unt_x ) next                     # DEW 2/1/91
+            if (Xlcl$DetectionType$i != $ActiveNonVisual$Code) NEXT # DEW 2/1/91
+            if (Xlcl$LastDetType$i != $SONAR$type) next             # DEW 2/1/91
+
+            ALERT = xSON$ALERT$I    # jb Apply ALERT factor! 11/17/90
+            BREAK                   #                        11/17/90
+            }
+        }
+    else if( RANDOM(X) > 0.25 ) # jb - DON'T search LCL chain; ran-
+        {
+        ALERT = xSON$ALERT$I #  domly say whether track existed..
+        }
+
+    #$% Determine Self-Noise, SN, divided by 10.:
+    ISPD1 = INT (0.2 * Dor_Speed +1.) # Dor_Speed to be set by DPVDSR
+
+    if (ISPD1 < 1) ISPD1 = 1
+    else if (ISPD1 > 6) ISPD1 = 6
+    SON$SPD$index = ISPD1
+    SN = xSON$SPD$Noise$I / 10. #(divisor 10. prepares for NL computation)
+
+    #$% Determine Ambient Noise, AN, divided by 10.:
+    F_IX = xSON$FreqIndex$i
+    ANO$Pointer$TO (F_IX)
+    ANO$NV$index = Env_Num
+    AN = xANO$NV$Noise$F / 10. #(divisor 10. prepares for NL computation)
+
+    #$% Combine SN and AN terms to compute NL:
+    NL = 10. * LOG10( (1.0D+1)**SN + (1.0D +1)**AN )
+
+    LOSS = xSON$SystemLOSS$i
+
+    }    # End if Potential detectOR is NOT a BUOY
+################    END of BLOCK Ib   ################
+
+###########################################################################
+#
+# BLOCK Ic: Determine SONOBUOY power output (LS), SIGMA, Directivity In-
+#     dex (DI), Recognition Differential (RDA), System LOSS, Ambient Noise.
+
+else # We have a SOB (sonobuoy) 
+   {
+    SOB$SEC$index = 1    # Set favorable index
+    LS = xSOB$SourceLevel$i
+    SIGMA = xSOB$StDevSigXS$i
+
+    DI = xSOB$SEC$DI$I       # Directivity Index
+
+    RDA = xSOB$RecognitionDiff$I
+
+#   ALERT = 0 # jb Not applicable to BOY/ initlz'd above    12/11/90
+
+    LOSS = xSOB$SysLOSS$I
+
+    #$% Determine Ambient Noise, AN, divided by 10.:
+    SOB$CenterFreq$i = xSOB$CenterFreq$i               # jb    12/11/90
+    if(SOB$CenterFreq$i == 0)        RETURN            # jb    12/11/90
+    call INDFRQ( _
+             SOB$CenterFreq$i,
+             IBELOW,
+             IABOVE,
+             IFBELO,
+             IFABOV)
+
+    ifreq = SOB$CenterFreq$i
+    if (iFabov -iFREQ < iFREQ -iFbelo )            # NEAREST
+         F_IX = iabove
+    else F_IX = ibelow                             #  tabulated
+ 
+    ANO$Pointer$TO (F_IX)
+    ANO$NV$index = Env_Num
+    NL = xANO$NV$Noise$F    # jb No Self-Noise to sum for NL    12/11/90
+   }    # End  if potential detectOR  IS a BOY
+###########    END of BLOCK Ic  ####################
+
+######################################################################
+#  BLOCK II:  TARGET SHIP (ACTSON applies only to ships).  Determines
+#             target aspect (Angle-on-the-Bow); thence, Target Strength
+#             (TS), the sonar equivalent of radar cross-section.  Finds
+#             PropLoss (based on range, sonar environment, frequency, &
+#             depths of sensor and target with respect to layer-depth).
+
+SHC$Pointer  = Xunt2$SHCpntr$i  # jb                        12/12/90
+SHC$VrblTS$i = XSHC$VrblTS$i    # Target Strength may be variable
+if(SHC$VrblTS$i == $YES) # Compute index if Target Strength is variable:
+    {                            # UNT2 is target           jb 2/15/91
+    call UNIT_ASPECT_INDEX(UNT2$Pointer,UNT$Pointer,SHC$ASP$index)
+    }                              # (returns target SHC$ASP$index) 8/2/91
+else 
+    {
+    SHC$ASP$index = 1  # jb (Index for NON-variable cross-section) 
+    }
+
+TS = XSHC$ASP$TgtStrength$i
+
+#$% Get Propagation Loss:
+
+irng = INT(RANGE +0.5)            # PRL index, adjusted 
+while (irng > 120)                #  to range 1-120, in  
+       { irng = irng - 30 }       #  steps of 30 ( per  12/7/90
+if (irng < 1) irng = 1            #  draft specs dated  
+                                  #  11 November '90 )  12/7/90
+PRL$Pointer$TO   (irng)
+PRL$NV$index    = Env_Num
+PRL$NV$FQ$index = F_IX
+
+Tgt_Depth = xUNT2$TrueAltDepth$I  # Target depth
+### Note: Dor_Depth to be set by DPVDSR    ???!!!
+
+TGDEEP = (Tgt_Depth >= LAYER$DEPTH)    # TARGET   at or below layer?
+
+if(Dor_Index > DD_Ship) # a BOY..(BEYOND ships in array)       12/7/90
+    DRDEEP = .TRUE. # jb  3.3.4(3.) in 11/15/90 specs  12/7/90
+else DRDEEP = (Dor_Depth >= LAYER$DEPTH) # DETECTOR at or below layer?
+
+if(DRDEEP & TGDEEP)                    # Both DEEP
+    TL1 = xPRL$NV$FQ$PropLossDEEP$F                    # TL1 12/7/90
+else if(!DRDEEP & !TGDEEP)             # Both IN-LAYER
+    TL1 = xPRL$NV$FQ$PropLossIN$F                      # TL1 12/7/90
+else                                   # CROSS-Layer
+    TL1 = xPRL$NV$FQ$PropLossCROSS$F
+
+TL2 = TL1    # jb !!! UNTIL we do the BISTATIC case        12/7/90
+
+############ END of BLOCK II #####################
+
+#####################################################################
+#  BLOCK III: DETECTION DETERMINATION.  Compute Signal Excess.  Based
+#             on Signal Excess, with mean of 0.0 and standard deviation
+#             SIGMA, draw random-number to determine whether detection
+#             occurred.
+
+#$% Determine Signal Exceee, SEk:
+#SEk =LS - 2.*PROP +TS -NL +DI -RDA            #Old Equation
+
+SEk = LS -TL1 -TL2 +TS -NL +DI -RDA -LOSS +ALERT #New Equation 12/7/90
+
+if (trace$sonar$ACTIVE!= $NO)
+   {
+    call echor
+    call echov (" ENV= ")
+    call echoi (Env_Num) 
+    call echov (" LS= ")
+    call echoi (LS) 
+    call echov ("  TL1= ")
+    call echof (TL1,ARB) 
+    call echov ("  TS= ")
+    call echoi (TS)              
+    call echov ("  F_IX= ")
+    call echoi (F_IX)              
+    call echov ("  NL= ")
+    call echof (NL,2)
+    call echov ("  DI= ")
+    call echoi (DI)              
+    call echov ("  INDDI= ")
+    call echoi (INDDI)
+    call echov ("  ASPindex= ")
+    call echoi (SHC$ASP$index)
+    call echov ("  RDA= ")
+    call echoi (RDA)                            
+    call echor                   
+   }
+
+ibbtest = nltest (0.,float(SIGMA),SEk)
+if (ibbtest == $NO) RANGE = -1.0        # NO DETECTION
+
+############  END of BLOCK III ##############
+
+if (trace$sonar$ACTIVE!= $NO)
+   {
+    call echov (" RANGE= ")
+    call echof (RANGE,2) 
+    call echov ("  SEk= ")
+    call echof (SEk,2) 
+    call echor
+   }
+return
+end    #  End subroutine ACTDET
+
+ Subroutine SONMOD
+
+ #######################################################
+ #$%
+ #$% Purpose:   SONMOD provides overall control
+ #$%            for the sonar model.
+ #$%
+ #$% Called By: WARDET
+ #$%
+ #$% Calls:     PRESON     SONDET
+ #$%
+ #$% Tables:    None
+ #$%
+ #$% Date:      FEB 81
+ #$%
+ #$% Author:    Ron Williams
+ #$%
+ #######################################################
+BBCOMMON
+
+if(Level$ActiveSonar == 1)
+    call FALSETARGETS
+
+ #$% prepares sonar model
+ call PRESON
+
+ #$$ process sonar detections
+ call SONDET
+
+ return
+ end            #  End SONMOD
+
+
+ Subroutine PRESON                      #PREparation for SONar model
+
+ #######################################################
+ #$%
+ #$% Purpose:   PRESON controls preparation for
+ #$%            sonar module working arrays.
+ #$%
+ #$% Called By: SONMOD
+ #$%
+ #$% Calls:     SHPREP     TAPREP     VDPREP
+ #$%            SBPREP     CBPREP     Put_ACC_in_list
+ #$%
+ #$% Tables:    UNT        BOY
+ #$%
+ #$% Date:      FEB 81
+ #$%
+ #$% Author:    Ron Williams
+ #$%
+ #######################################################
+ BBcommon
+ SM$Common
+
+ Integer I_SWITCH_1,UNT$Type$I,BOY$Type$I   # jb E2145  6/21/00
+
+
+ # ------------------------------------------------------------
+ # The DD arrays contain collected information about both detectors and
+ # possible targets (detectees).  The data is built into the arrays in
+ # three groups.  
+ # The first group is only ships/sub/boats/etc...
+ # DD_Ship indexes the last Ship entry.
+ # The second group is Aircraft, they can be heard by submerged subs.
+ # DD_Air indexes the last Aircraft entry.
+ # The last group is buoys (active, passive, towed arrays, vds)
+ # DD_Count indexes the very last entry.
+ #
+ # It is important to remember that NOT all Surface types are at the 
+ # front of the UNT table.... Aircraft and Boats can be all mixed up....
+ # That is why two complete passes of the UNT table are required. 
+ # ------------------------------------------------------------
+
+ DD_Count = 0                               #init dd list counter
+
+ DD_Ship = 0            # Init Index To Last Ship In DD Arrays    # dew 9/29/91
+ DD_Air  = 0            # Init Index To Last A/C In DD Arrays     # dew 9/29/91
+
+ # determine state so that active or passive sonar processing can be disabled
+ sonarmodel_state = $ActiveAndPassive  # JFR 111/15/93
+ if (mod(cycle$count,passiveson$recurrence) != 0  & # JFR 11/15/93
+     mod(cycle$count,activesonar$recurrence) == 0) sonarmodel_state = $ActiveOnly # JFR 111/15/93
+ if (mod(cycle$count,passiveson$recurrence) == 0  & # JFR 11/15/93
+     mod(cycle$count,activesonar$recurrence) != 0) sonarmodel_state = $PassiveOnly # JFR 111/15/93
+
+ # look for all ships
+ for(UNT$POINTER$FIRST;UNT$POINTER$OK;UNT$POINTER$NEXT)  #for each unit
+    {
+     if(DD_Count >= $MAXDDL) break      #quit if dd list full
+
+     UNT$TYPE$I = XUNT$TYPE$I           #get type
+
+     if(UNT$TYPE$I == $SURFACE$CODE |  #if sub or ship
+        UNT$TYPE$I == $SUB$CODE      )
+        {
+         call SHPREP                    # prepare for sonar processing
+         DD_Ship = DD_Count             # index High-water mark for ships
+        }
+    }
+
+ # look for all a/c                                                # dew 9/29/91
+ for(UNT$POINTER$FIRST;UNT$POINTER$OK;UNT$POINTER$NEXT)  #for each unit
+    {
+     if(DD_Count >= $MAXDDL) break      # quit if dd list full
+
+     UNT$TYPE$I = XUNT$TYPE$I           #get type
+
+     if(UNT$TYPE$I == $AIR$CODE)
+        {
+         call Put_ACC_in_list           #SMM   PAADS Model 6/91
+         DD_Air = DD_Count              # index High-water mark for a/c
+
+    #         if(Xunt$ASWindx$i != $NO &     #jb DO_MACROASW is called
+    #            Xunt$MISSION$i == $AntiSub$Code) # by the MOTION model
+    #            call MacroASW(UNT$POINTER)
+        } # end if aircraft
+    } #end for all UNT
+
+ # look for all Buoys
+ for(BOY$POINTER$FIRST;BOY$POINTER$OK;BOY$POINTER$NEXT) #each BOY entry
+    {
+     if(DD_Count >= $MAXDDL) break           #quit if dd list full
+
+     BOY$TYPE$I = XBOY$TYPE$I                   #get type
+
+     switch (boy$type$i)                                    # dew 9/29/91
+        {
+        case $TowedArray$code:      call Taprep
+        case $VDS$Code:             call VDPREP
+        case $ActiveBarrier$code,
+             $PassiveBarrier$code:  call SBPREP
+        case $Commbuoy$code:        call CBPREP
+        }
+    }                                   #end for
+
+ if (DD_Air < DD_Ship)                   # set variable 6/25/91
+     DD_Air = DD_Ship                
+
+ return
+ end            #  End  PRESON
+
+
+
+ Subroutine SONDET                              #SONar DETections 
+
+ #######################################################
+ #$%
+ #$% Purpose:   SONDET provides overall control for
+ #$%            the sonar detection processor.
+ #$%
+ #$% Called By: SONMOD
+ #$%
+ #$% Calls:     DPVDSR     ACTSON     LPSTGT
+ #$%            LPSNON     PASDET     RANDN
+ #$%            SIN        COS        get_ACC_targets
+ #$%
+ #$% Tables:    SON        BOY        SOB
+ #$%            UNT        PSD        ASD
+ #$%
+ #$% Date:      SEPT. 1990 (Active Sonar modifications)
+ #$%                              (see "SONCH" remarks)
+ #$% Author:    Ron Williams - Feb. '81
+ #$%            
+ #######################################################
+ BBcommon
+ SM$Common
+
+ LITERAL CSTRIP8                                # jb E2145  6/21/00
+ REAL DVSR,FNULL,stl,RDEEP,RIN,RMAX,RSD,RANDN   # jb E2145  6/21/00
+ REAL BOY$Lastpingtime$F, DEQ$Lastpingtime$F,   # jb E2145  6/21/00
+    SON$NV$bbdeepshort$F,SON$NV$bbdeeplong$F,   # jb E2145  6/21/00
+    SON$NV$bbinshort$F, SON$NV$bbinlong$F,      # jb E2145  6/21/00
+    SON$NV$czshort$F,  SON$NV$czlong$F,         # jb E2145  6/21/00
+    UNT$Truespeed$F                             # jb E2145  6/21/00
+ real lastint                # JFR 1/11/94 VTS integration time
+ real lastping               # JFR 1/11/94 VTS ping time
+ real SONAR_PingInterval     # JFR 1/11/94 time now in floating point minutes
+ real SONAR_IntegrationTime  # JFR 1/11/94 time now in floating point minutes
+ real SOB_PingInterval       # JFR 1/11/94 time now in floating point minutes
+ real SOB_IntegrationTime    # JFR 1/11/94 time now in floating point minutes
+ real cos_pas_vbeam
+ Integer Buoys_processed     # JFR 3/10/94 for processing all buoys in BOY table slot
+
+Integer INDSER,ISPEED,IPNTS,IPNTP,PNTRP              # jb E2145  6/21/00
+Integer BOY$Nbrbuoys$I, DEQ$Pointer,SON$MXR$Index,   # jb E2145  6/21/00
+        UNT3$Pointer,UNT$Truealtdepth$I,UNT$Type$I   # jb E2145  6/21/00
+Integer UNTIndx
+    
+$tgtNV integer nvdOR,ixDOR,ixDEE         #                       3/3/87
+$tgtNV nvdOR = Env_Num                   # Save detectOR envrnmt 3/3/87
+
+##----------------------------------------------------------------------
+ if (trace$sonar != $No)                                #       2/14/83
+    { # now echo game minte and game second --- JFR 11/2/93
+     call echor
+     call echov (" Game-Minute=")                   #15     2/7/83
+     call echoi (int(game$time))                       # 5     2/7/83
+     call echov (" Sonar-model Layer-Depth=")       #27
+     call echoi (layer$depth)                           # 5 54
+     #call echor
+    }
+##----------------------------------------------------------------------
+
+ #===================================================================
+ # Process Ships/Subs/Boats now
+
+ for(Dor_Index = 1; Dor_Index <= DD_Ship; Dor_Index = Dor_Index + 1)         # @ each ship in dd list
+    {
+     SON$POINTER  = DD_Char[Dor_Index]                   #set sonar char pntr
+     UNT$POINTER  = DD_Pntr[Dor_Index]                   #UNT pntr for detectOR
+
+     if (Xunt$GhostedUnit$I == $YES) next       # Skip ghosted unit detectors
+
+     UNTIndx =  unt$pointer$index                   # E2235 joa 9/01
+     Dor_Unt_x =  UNTIndx
+
+     Dor_Lat = XUNT$TRUELATITUDE$F                # detector latitude
+     Dor_Lon = XUNT$TRUELONGITUDE$F               # detector longitude
+
+     call NVREGN (Dor_Lat,                # DetectOR ship po-    11/26/90
+                  Dor_Lon,                #       sition          8/18/83
+                  indser,               # SER index             6/26/84
+                  Env_Det ) # return xSER$EnvNum$i to SM$Common  11/29/90
+     
+     if(indser != 0)                      # jb Ignore zero value 10/1/90
+         putUNT$SerIndx$i (indser)        # for subr. ACMLNK      6/26/84
+     Env_Num = Env_Det                    # jb                   11/29/90
+
+     # This Exclusion needs to be tested before Ping Time test      # DEW - E2178
+     if(DD_Mode[Dor_Index] == 0 |        #skip if it can't detect or if neutral
+        DD_View[Dor_Index] == $neutral$view) NEXT   # Moved up      # DEW - E2178
+
+     # NOW see if the Signal excess equation is to be processed
+     DEQ$Pointer = DD_Deq[Dor_Index] # get the deq pointer - JFR 11/10/93
+     if (DD_Mode[Dor_Index] != $$$PAS) # JFR 11/10/93
+        {
+        # time of last ping is deq$LastPingTime$f + 2097152 * DEQ$ScaleFactor$I
+        SONAR_PingInterval = $sec$to$min * float(xSON$PingInterval$I) # JFR 11/10/93 - ping interval for this sonar
+        deq$LastPingTime$f = xdeq$LastPingTime$f # JFR 11/10/93
+        LastPing = deq$LastPingTime$f #JFR 11/10/93
+        if (SONAR_PingInterval == 0.0)
+           { # not entered in characteristics so get default ping interval
+             # Note: ping interval is in seconds
+            SON$MXR$index = Env_det                          # JFR 11/10/93
+            SONAR_PingInterval = 2.5 * float(xSON$MXR$Range$I) * $sec$to$min # JFR 11/10/93
+            # if MXR not set in environment file or file missing
+            if (SONAR_PingInterval == 0.0) SONAR_PingInterval = 2.0 * $sec$to$min # JFR 11/19/93
+           }
+        # if not enough time since last ping has elapsed for this eq. then skip
+        if (game$time - LastPing < SONAR_PingInterval) Next # JFR 11/10/93
+        # now update the time of last ping
+        deq$LastPingTime$f = game$time
+        putdeq$LastPingTime$f   # JFR 11/10/93
+        }
+     else # must be passive sonar
+        {
+        # ping interval for active sonars and integration time for passive sonars
+        # are overlaid - JFR 11/10/93
+        SONAR_IntegrationTime = $sec$to$min * float(xSON$IntegrationTime$I) # JFR 11/10/93 - integration time for this sonar
+        deq$LastPingTime$f = xdeq$LastPingTime$f # JFR 11/10/93
+        LastInt = deq$LastPingTime$f # JFR 11/10/93
+        if (SONAR_IntegrationTime == 0.0)   # JFR 11/10/93
+           { # not entered in characteristics so get default integration time
+             # Note: integration time is in seconds
+            SONAR_IntegrationTime = 60.0 * $sec$to$min # JFR 11/10/93
+           }
+        # if not enough time since last integration has elapsed for this eq. then skip
+        if (game$time - LastInt < SONAR_IntegrationTime) Next # JFR 11/10/93
+        deq$LastPingTime$f = game$time
+        putdeq$LastPingTime$f   # JFR 11/10/93
+        }
+
+     Dor_CSLat = XUNT$COSTRUELAT$F # cos(detector lat) Moved down  4/23/86 
+     UNT$TrueSpeed$F    = xUNT$TrueSpeed$F            # jbSONCH 9/11/90
+     UNT$TrueAltDepth$I = xUNT$TrueAltDepth$I         # jbSONCH 9/11/90    
+
+     SON$NV$index = Env_Det      # $NV index for SON table      11/29/90
+     SOB$NV$index = Env_Det      # $NV index for SOB table      11/29/90
+##--------------------------------------------------------------------
+     if (trace$sonar != $No)                    #               2/14/83
+        {
+         call echor                             #               2/11/83
+         call echov ("Ship=")               # 5
+         call echohn(Xunt$name$c,$$MaxLit)             # 5
+         call echov (" Spd=")               # 5
+         ispeed = (UNT$TrueSpeed$F + 0.5)       #               9/11/90
+         call echoi (ispeed)                    # 4
+         call echov (" Dpth=")                  # 6
+         call echoi (unt$TrueAltDepth$i)        # 4             9/11/90
+         call echov (" ENV=")               # 5             8/3/83
+         call echoi (Env_Num)                    # 5? 49         8/22/83
+         }
+         
+##-------------------------------------------------------------------
+
+     if(DD_Mode[Dor_Index] == $$$DP)             # if DP mode
+       {
+        call DPVDSR( _                  # determine detect range
+                    RDEEP,              #return deep max range
+                    RIN)                #return in-layer max range
+
+        fNULL=0.0; call ACTSON( _       # determine active detections
+                    $$$ACT,           #pass ACTIVE mask / SONCH 9/11/90
+                    fNULL,             #pass min range
+                    amax1(RDEEP,RIN) ) #pass max range  / SONCH 9/11/90
+
+       }                #end if DP
+
+     else if(DD_Mode[Dor_Index] == $$$BB)        # if BB mode
+       {
+        Dor_Speed  = UNT$TrueSpeed$F                         # SONCH 9/11/90
+        Dor_Depth = UNT$TrueAltDepth$I                      # SONCH 9/11/90
+        SON$NV$BBDEEPSHORT$F = XSON$NV$BBDEEPSHORT$F    #       9/7/83
+        SON$NV$BBDEEPLONG$F  = XSON$NV$BBDEEPLONG$F     #       9/7/83
+        SON$NV$BBINSHORT$F   = XSON$NV$BBINSHORT$F      # SONCH 9/11/90
+        SON$NV$BBINLONG$F    = XSON$NV$BBINLONG$F       # SONCH 9/11/90
+        call ACTSON( _                  #determine active detections
+            $$$ACT,           #pass ACTIVE mask # SONCH 9/11/90
+            amin1(SON$NV$BBINSHORT$F,SON$NV$BBDEEPSHORT$F), # SONCH
+            amax1(SON$NV$BBINLONG$F,SON$NV$BBDEEPLONG$F) ) # SONCH 9/11/90
+
+       }        #end if BB mode
+
+     else if(DD_Mode[Dor_Index] == $$$CZ)        #if CZ mode
+       {
+        Dor_Speed  = UNT$TrueSpeed$F                         # SONCH 9/11/90
+        Dor_Depth = UNT$TrueAltDepth$I                      # SONCH 9/11/90
+        SON$NV$CZSHORT$F = XSON$NV$CZSHORT$F            #       9/7/83
+        SON$NV$CZLONG$F  = XSON$NV$CZLONG$F             #       9/7/83
+        call ACTSON(_                   #determine active detections
+                    $$$ACT,             #pass active mask
+                    SON$NV$CZSHORT$F,   # CZ min range  6/20/83
+                    SON$NV$CZLONG$F)    # CZ max range  6/20/83
+       }        #end if CZ mode
+
+     else if(DD_Mode[Dor_Index] == $$$PAS)       # if passive,
+       {
+        Dor_Depth = UNT$TRUEALTDEPTH$I      # get ship depth        9/11/90
+
+        if ( Dor_Depth < 1 ) dvsr = 180.    # Surface-ship divisor  1/18/84
+        else             dvsr = 360.    # submerged divisor     1/18/84
+        Pas_Vbeam = xson$vertbeam$i * ($pi/dvsr)   # for item 4r   1/18/84
+        cos_Pas_Vbeam = COS(Pas_Vbeam)              # UFL05 joa avoid zero divide
+        if (cos_pas_vbeam < .00001) cos_pas_vbeam = .00001
+        Pas_Slope = 6076.* SIN(Pas_Vbeam)/cos_Pas_Vbeam  # 6076=ft.per naut.mile
+
+        SON$MXR$Index = 1
+        call LPSTGT (xSON$MXR$Range$I) # list potential-target noise
+                                       # sources in PasSonarList
+
+        UNT$Type$I = XUNT$Type$I           #get type
+        if (UNT$Type$I == $Sub$Code & #subs are only unit that hear a/c
+            sonarmodel_state != $ActiveOnly)  # only active model being processed this cycle - JFR 11/15/93
+            { call get_ACC_targets }  #add potential a/c noise targets
+
+        if (PS_Targets == 0)  next                  #if no targets, skip
+
+        Dor_Head = XUNT$TRUECOURSE$F         #get ship heading
+        Dor_Speed = UNT$TRUESPEED$F           #get ship speed        9/11/90
+
+##--------------------------------------------------------------------
+        if (trace$sonar$Passive!= $No)           #               8/8/83
+         {
+          call echov (" SNR=")               # 5             8/4/83
+          call echohn(xSON$Type$c,$$MaxLit)      # 5             8/4/83
+         }
+##-------------------------------------------------------------------
+
+        call LPSNON                     #list non-target noise sources 
+
+        if ((Dor_Index > DD_Ship) & (Dor_Index <= DD_Air))   #it's an a/c so skip it
+            next
+        else
+            call PASDET                     #determine what is detected
+       }        #end if passive
+
+    }   #end for ships
+
+ #===================================================================
+ # Process Buoys now
+ buoys_processed = 0 # init buoy processed counter for VTS - JFR 3/10/94
+ for(Dor_Index =DD_Air +1; Dor_Index <=DD_Count; Dor_Index=Dor_Index +1)  #for each BOY entry in dd list
+    {
+     if(DD_Mode[Dor_Index] == 0 |                  #skip if it can't detect,
+        DD_View[Dor_Index] == $neutral$view) next  #  or if neutral
+
+     # DD_Pntr can have the same pointer for a range of index values
+     # since each entry in boy table has multiple buoys in the line - JFR 3/9/94
+     # just increment a counter and set ping time when get to boy$nbrbuoys
+     BOY$POINTER = DD_Pntr[Dor_Index]            #set BOY pointer for detector
+
+     if (Xboy$GhostedUnit$I == $YES) next        # skip ghosted boy detectors
+
+     if (buoys_processed == 0)
+        {
+         boy$nbrbuoys$i = xboy$nbrbuoys$i # get number to process in barrier - JFR 3/10/94 (VTS)
+         if (boy$nbrbuoys$i == 0)
+            {
+             buoys_processed = 0 # start the processed counter rolling - JFR 3/10/94
+            }
+         else
+            {
+             buoys_processed = 1 # start the processed counter rolling - JFR 3/10/94
+            }
+        }
+     if(DD_Mode[Dor_Index] ==$$$PSB | DD_Mode[Dor_Index] ==$$$ASB) # if sonobuoy  5/5/86
+        if(Xboy$KillTime$f <= game$time ) NEXT
+
+     Dor_CSLat = XBOY$COSTRUELAT$F         #get cosine of detector lat
+
+     SON$POINTER = 0   # JFR 11/19/93
+     SOB$POINTER = 0   # JFR 11/19/93
+     if(DD_Seq[Dor_Index] == 0)                 #if buoy seq # n/a
+       { # towed array, VDS
+        SON$POINTER = DD_Char[Dor_Index]         #char pointer is to SON
+
+        Dor_Lat = XBOY$TRUELATITUDE$F     #latitude right out of table
+        Dor_Lon = XBOY$TRUELONGITUDE$F    #longitude right out of table
+
+        Dor_Unt_x = 0                      # index of the detectee
+       }                #endif
+     else                               # otherwise,
+       { #
+        SOB$POINTER = DD_Char[Dor_Index]         # char pointer is to SOB
+
+        Dor_Lat = XBOY$TRUELATITUDE$F +   #calculate latitude of
+          (DD_Seq[Dor_Index] - 1) * XBOY$TRUEDELTALAT$F #     particular buoy
+
+        Dor_Lon = XBOY$TRUELONGITUDE$F +  #calculate longitude of
+          (DD_Seq[Dor_Index] - 1) * XBOY$TRUEDELTALON$F #     particular buoy
+
+        Dor_Unt_x = 0                      # index of the detectee
+       }        #endelse
+
+     call NVREGN (Dor_Lat,                # DetectOR buoy po-     8/18/83
+                  Dor_Lon,                #       sition          8/18/83
+                  indser,               # SER index             6/26/84
+                  Env_Det ) # return xSER$EnvNum$i to SM$Common  11/29/90
+
+     Env_Num = Env_Det                    # jb                   11/29/90
+
+     # NOW see if the Signal excess equation is to be processed
+     # get the last ping time and integration time from boy table
+     # since individual buoys can have same deq entry but different
+     # deployment times and so different starts to ping/integration
+     # times --- JFR 2/24/94
+     if (DD_Mode[Dor_Index] == $$$ASB &
+         SOB$POINTER != 0) # if active sonobuoy barrier
+        {
+        # time of last ping is deq$LastPingTime$f + 2097152 * DEQ$ScaleFactor$I
+        SOB_PingInterval = $sec$to$min * float(xSOB$PingInterval$I) # JFR 11/10/93 - ping interval for this sonobuoy
+        boy$LastPingTime$f = xboy$LastPingTime$f # JFR 2/24/95
+        LastPing = boy$LastPingTime$f #JFR 2/24/95
+        if (SOB_PingInterval == 0.0)
+           { # not entered in characteristics so get default ping interval
+             # Note: ping interval is in seconds
+            SOB$NV$index = Env_det              # JFR 11/10/93
+            SOB_PingInterval = 2.5 * float(xSOB$NV$MaxRange$I) * $sec$to$min # JFR 11/10/93
+            # if MXR not set in environment file or file missing
+            if (SOB_PingInterval == 0.0) SOB_PingInterval = 2.0 * $sec$to$min # JFR 11/19/93
+           }
+        # if not enough time since last ping has elapsed for this eq. then skip
+        if (game$time - LastPing < SOB_PingInterval)
+           { # processed buoy even though skipped it - JFR 3/10/94
+            buoys_processed = buoys_processed + 1 # bump up processed counter - JFR 3/10/94
+            Next # JFR 11/10/93
+           }
+        if (buoys_processed == xboy$nbrbuoys$i) # JFR 3/9/94
+           { # finished with all buoys in boy table slot (= 1 barrier) - JFR 3/10/94
+            # now update the time of last ping
+            boy$LastPingTime$f = game$time      # JFR 2/24/94
+            putboy$LastPingTime$f               # JFR 2/24/94
+            # now zero the processed counter to indicate a new barrier
+            # if any, to process                  JFR 3/10/94
+            buoys_processed = 0
+           }
+        else
+           {
+            buoys_processed = buoys_processed + 1  # bump up processed counter - JFR 3/10/94
+           }
+        # if not enough time since last ping has elapsed for this eq. then skip
+        if (game$time - LastPing < SOB_PingInterval) Next # JFR 11/10/93
+        }
+     else if (DD_Mode[Dor_Index] == $$$TA |     # JFR 11/19/93
+              DD_Mode[Dor_Index] == $$$VDS &    # JFR 11/19/93
+              SON$POINTER != 0) 
+        { # IT has the SON pointer set
+        # ping interval for active sonars and integration time for passive sonars
+        # are overlaid - JFR 11/10/93 (which is why using integration time for TA's
+        SONAR_IntegrationTime = $sec$to$min * float(xSON$IntegrationTime$I) # JFR 11/10/93 - integration time for this SONOBUOY
+        boy$LastPingTime$f = xboy$LastPingTime$f # JFR 2/24/94
+        if (SONAR_IntegrationTime == 0)   # JFR 11/10/93
+           { # not entered in characteristics so get default integration time
+             # Note: integration time is in seconds
+            SONAR_IntegrationTime = 60.0 * $sec$to$min # JFR 11/10/93
+           }
+        # if not enough time since last integration has elapsed for this eq. then skip
+        if (game$time - boy$LastPingTime$f < SONAR_IntegrationTime) Next # JFR 11/10/93
+        boy$LastPingTime$f = game$time          # UFL05 joa
+        putboy$LastPingTime$f
+        }
+     else if (DD_Mode[Dor_Index] == $$$PSB &
+              SOB$POINTER != 0)# must be passive sonobuoy barrier
+        { # has SOB pointer set
+        # ping interval for active sonars and integration time for passive sonars
+        # are overlaid - JFR 11/10/93
+        SOB_IntegrationTime = $sec$to$min * float(xSOB$IntegrationTime$I)
+        if (SOB_IntegrationTime == 0.0)   # JFR 11/10/93
+           { # not entered in characteristics so get default integration time
+             # Note: integration time is in seconds
+            SOB_IntegrationTime = 60.0 * $sec$to$min  # JFR 11/10/93
+           } 
+        boy$LastPingTime$f = xboy$LastPingTime$f # JFR 2/24/94
+        LastInt = boy$LastPingTime$f # JFR 2/24/94
+
+        # if not enough time since last integration has elapsed for this eq. then skip
+        if ((game$time - LastInt) < SOB_IntegrationTime) Next # JFR 11/10/93
+
+        if (buoys_processed == xboy$nbrbuoys$i) # JFR 3/9/94
+           { # finished with all buoys in boy table slot (= 1 barrier) - JFR 3/10/94
+            # now update the time of last ping
+            boy$LastPingTime$f = game$time      # JFR 2/24/94
+            putboy$LastPingTime$f               # JFR 2/24/94
+            # now zero the processed counter to indicate a new barrier
+            # if any, to process                  JFR 3/10/94
+            buoys_processed = 0
+           }
+        else
+           {
+            buoys_processed = buoys_processed + 1  # bump up processed counter - JFR 3/10/94
+           }
+
+        }
+
+$tgtNV nvdOR = Env_Det                   #                      11/29/90
+$tgtNV ixDOR = UNT$pointer$index        #<<<>>> for debug       3/3/87
+$tgtNV ixDEE = UNT2$pointer$index       #<<<>>> for debug       3/3/87
+
+     SON$NV$index = Env_Det                    #set $INV index 11/29/90
+     SOB$NV$index = Env_Det                    #set $INV index 11/29/90
+
+     if(DD_Mode[Dor_Index] == $$$ASB)            # if active sonobuoy,
+       {
+        pntrp = unt$pointer                     # Save pntr     7/19/83
+
+        UNT3$pointer$TO  xBOY$OwnerIndx$i       # AM.           3/30/89
+
+        Det_Mean_Rng = 1.0 * XSOB$NV$MaxRANGE$i # Max detection rng  12/04/90
+            
+        RSD = Det_Mean_Rng * (1. / 6.)                   # compute std dev
+
+        RMAX = RANDN(Det_Mean_Rng, RSD)                  # random detn range
+        
+
+        fNULL=0.0; call ACTSON( _       # determine active detections
+                    $$$ACT,             #pass active mask
+                    fNULL,              #pass min detn range
+                    RMAX)               #pass max detn range
+       }        #end if active sonobuoy
+
+     else if(DD_Mode[Dor_Index] == $$$PSB)       #if passive sonobuoy
+       {
+        Dor_Depth = XBOY$TRUEDEPTH$I                #get buoy depth
+
+        Pas_Vbeam = xsob$vertbeam$i * ($pi/360.)
+        cos_Pas_Vbeam = COS(Pas_Vbeam)              # UFL05 joa avoid zero divide
+        if (cos_pas_vbeam < .00001) cos_pas_vbeam = .00001
+        Pas_Slope = 6076.* SIN(Pas_Vbeam)/cos_Pas_Vbeam # 6076 ~ ft.per n.mi.
+
+        call LPSTGT (xSOB$PassiveMaxRange$I)   # list potential targets
+                                               # in PasSonarList
+
+        if (PS_Targets == 0)  next          #if no targets, skip
+
+        Dor_Head = 0.                       #assume oriented exactly right
+
+        Dor_Speed = -1.                      #indicates no self-noise
+
+        call LPSNON                     #list non-target noise sources
+
+        call PASDET                     #determine what is detected
+       }        #end if passive sonobuoy
+
+     else if(DD_Mode[Dor_Index] == $$$TA)                # if towed array
+       {
+        Dor_Speed = XBOY$TRUESPEED$F # speed of TA   PPS pg. 1-5     7/28/83
+####    Dor_Speed = -1.              # OUT:  TA now has self-noise   7/28/83
+
+        # Can't detect if needs more settling-time after course-change:
+        ipnts = son$pointer                     # Save pntr     8/16/83
+        ipntp = UNT3$pointer                    # Save pntr     8/1/83
+        son$pointer = Xboy$EqPntr$i             #               8/16/83
+        UNT3$pointer$TO  xBOY$OwnerIndx$i       #               8/1/83
+
+        if (Dor_Speed < 1.0) Dor_Speed = 1.0      # Avoid divide check jb 8/21/86
+        stl =(0.02 * Xson$CableLength$I / Dor_Speed) +2.5   #       8/26/83
+        if(stl >=game$time -Xunt3$TimeCourseChange$f) NEXT
+        son$pointer = ipnts                     # Restore pntr  8/16/83
+        UNT3$pointer = ipntp                    # Restore pntr  8/1/83
+
+        Dor_Head = XBOY$TRUEHEADING$F               #get heading
+        Dor_Depth = xboy$truedepth$i                #get depth
+        Pas_Vbeam = xson$vertbeam$i * ($pi/360.)
+        cos_Pas_Vbeam = COS(Pas_Vbeam)              # UFL05 joa avoid zero divide
+        if (cos_pas_vbeam < .00001) cos_pas_vbeam = .00001
+        Pas_Slope = 6076.* SIN(Pas_Vbeam)/cos_Pas_Vbeam  # 6076 ~ ft per naut.mi.
+
+        SON$MXR$Index = 1
+        call LPSTGT (xSON$MXR$Range$I) # list potential targets in PasSonarList
+
+        if (PS_Targets == 0)  next          #if no targets, skip
+
+##---------------------------------------------------------------------
+        call LPSNON                     #list non-target noise sources
+
+        call PASDET                     #determine what is detected
+       }        #end if towed array
+
+     else if(DD_Mode[Dor_Index] == $$$VDS)       #if variable depth sonar
+       {
+        call DPVDSR( _                  #determine detection ranges
+                    RDEEP,              #return deep max range
+                    RIN)                #return in-layer max range
+
+        fNULL=0.0; call ACTSON( _       # determine active detections
+                    $$$ACT,           #pass active/deep mask     9/11/90
+                    fNULL,            #pass min detn range
+                    amax1(RDEEP,RIN) ) #pass max detn range SONCH 9/11/90
+
+       }        #end if VDS
+
+    }   #end for BOY entries
+
+ return
+ end                    #end SONDET
+
+
+
+ Subroutine ACTSON( _                           #ACTive SONar detections 
+                   JMASK,                       #mask detectee word (in)
+                   RMIN,                        #minimum range (input)
+                   RMAX)                        #maximum range (input)
+
+ ############################################################
+ #$%
+ #$% Purpose:   ACTSON processes active sonar detections.
+ #$%
+ #$% Called By: SONDET
+ #$%
+ #$% Calls:     PREPRX_M     PROXIM_M     REPASD
+ #$%                         INV_WORSE
+ #$% Tables:    UNT
+ #$%
+ #$% Date:      Modified 9/90 for Active Sonar changes
+ #$%
+ #$% Author:    Ron Williams - FEB 81
+ #$%
+ ############################################################
+ BBcommon
+ SM$Common
+
+ LITERAL UNT$Name$C,CSTRIP8,SON$Type$C,CBONR # jb  E2145 6/21/00
+ Real*4 RANGE,RMIN,Intra_Degradation    # jb Added for EMI    11/6/90
+ Real*4 RRANG                     # jb Re-computed max. range 12/10/90
+ REAL   F1,RANDN,X,RANDOM,RMAX,     # jb  E2145 6/21/00
+    ERRORFACTOR,FMEAN,STDDEV,BEAR   # jb  E2145 6/21/00
+Integer*4 Hold_Deq               # jb             2/11/91
+Integer INDSER,IREPASDFLAG,ISAVV,IUP2        # jb  E2145 6/21/00
+Integer I_SWITCH_1,JDRVU,JMASK,MODD,NNBOY    # jb  E2145 6/21/00
+Integer SON$MXR$Index,SON$MXR$range$I,       # jb  E2145 6/21/00
+    DEQ$Pointer, DEQ2$Pointer,               # jb  E2145 6/21/00
+    SOB$NV$maxrange$I                        # jb  E2145 6/21/00
+data x/0.0/		# Get next random number in sequence
+
+if(Level$ActiveSonar > 0)    # jb Use 'new' model?         12/10/90
+   {
+    if(DD_Mode[Dor_Index] != $$$ASB)  #jb Revise MaxRange if NOT ASB 12/12/90
+       {
+        SON$MXR$index = Env_Num  # index for SON table 12/10/90
+        SON$MXR$RANGE$I = xSON$MXR$RANGE$I
+        if(SON$MXR$RANGE$I < 1 ) RETURN # OFF if not entered 12/10/90 
+        RMAX = float(SON$MXR$RANGE$I)
+       }
+   }
+
+ call PREPRX_M ( _                              #prepare proximity routine
+             Dor_Unt_x,                            #detector index jb 8/29/89
+             Dor_Lat,                             #pass detector latitude
+             Dor_Lon,                             #pass detector longitude
+             Dor_CSLat,                            #pass cosine of detector lat
+             RMAX)                              #pass maximum range
+
+ JDRVU = DD_View[Dor_Index]                              #get detector view
+
+ for(Tgt_Index = 1; Tgt_Index <= DD_Ship; Tgt_Index = Tgt_Index + 1)         #for each ship entry in ddlist
+    {
+     if(DD_View[Tgt_Index] == JDRVU) next                #skip if same view 9/7/83
+
+     if (Dor_Index == Tgt_Index) next                         # skip self
+
+     #$% PERs E1033 & E1034 - disallow active detections of inbound torpedos  cpa 8/12/92
+     if (DD_Pntr[Tgt_Index] == $Torpedo$Code)  # if target is a torpedo - next
+       next
+
+     UNT2$POINTER = DD_Pntr[Tgt_Index]                #set UNT pointer for target
+
+     if (Xunt2$NeverDetect$i == YES) next       # joa 3/05 per_never
+
+     if(xUNT$Type$i != $Sub$Code)     # jb 11/15/90 draft spec 3.3.4(1)
+       {
+        if(xUNT2$Type$i != $Sub$Code) # jb 11/15/90 draft spec 3.3.4(1)
+            NEXT                      # jb ONLY Sub detects Surface..12/7/90
+       }
+     if((JMASK & DD_Flags[Tgt_Index]) != 0)               #if appropriate bit set
+       {
+        iREPASDflag = $NO                       # jb Initlz to fail 11/29/90
+##       UNT2$POINTER = DD_Pntr[Tgt_Index]        #jb (already set above)    12/11/90
+        Tgt_Unt_x = unt2$pointer$index             # index of the target
+
+#       if (xpos$truealtdepth$i == 0 &
+#           xpos2$truealtdepth$i == 0)  next    #skip if both at surface
+
+        Tgt_Lat = XUNT2$TRUELATITUDE$F            #get target latitude 3/30/89
+        Tgt_Lon = XUNT2$TRUELONGITUDE$F           #get target longitude
+        Tgt_CSLat = XUNT2$COSTRUELAT$F             #get cosine of tgt latitude
+
+        call NVREGN (Tgt_Lat,                # Target po-        12/10/90
+                  Tgt_Lon,                #       sition         11/28/90
+                  indser,               # SER index
+                  Env_Tgt ) # return xSER$EnvNum$i to SM$Common  11/28/90
+
+        call Inv_Worse(Env_Det,  # Environment (1,2,3,4) where Detector is
+                       Env_Tgt,  # Environment (1,2,3,4) where Target   is
+                       Env_Num ) #  OUTPUT worse of the 2 Environments 
+
+        SON$NV$index = Env_Num      # $NV index for SON table 11/28/90
+        SOB$NV$index = Env_Num      # $NV index for SOB table 11/28/90
+
+        RRANG = 99999 # jb Initl'z as NOT a limiting range    1/2/91
+
+        if(Env_Num ==Env_Tgt & Env_Tgt !=Env_Det & level$activesonar >0 )
+           { # Env_Num might be WORSE than before..find new RRANG limit! 
+            if(DD_Mode[Dor_Index] != $$$ASB) # Revise if NOT ASB 8/3091
+               {
+                SON$MXR$index = Env_Num  # index for SON table 12/10/90
+                SON$MXR$RANGE$I = xSON$MXR$RANGE$I
+                if(SON$MXR$RANGE$I < 1 ) RETURN # OFF if not entered 12/10/90 
+                RRANG = float(SON$MXR$RANGE$I)
+               }
+            else   # This an active sonobuoy.. revise Max.Range    12/10/90
+               {
+                SOB$NV$MaxRANGE$I = xSOB$NV$MaxRANGE$I
+                if(SOB$NV$MaxRANGE$I < 1 ) RETURN #Not there ->OFF 12/10/90 
+                RRANG = float(SOB$NV$MaxRANGE$I)
+               }
+            # is RMAX set for this target and detector?         SMM 10/13/92
+            # it may have been set for a previous target...
+            # only reset if the RRANG is greater than RMAX, 
+            # otherwise, RRANG gets selected by using MIN anyway
+            if (RRANG > RMAX)   
+                {
+                 if(DD_Mode[Dor_Index] != $$$ASB) # if NOT ASB 
+                    {
+                     SON$MXR$index = Env_Det  # index for SON table
+                     SON$MXR$RANGE$I = xSON$MXR$RANGE$I
+                     if(SON$MXR$RANGE$I < 1 ) RETURN 
+                    }
+                 else   # This an active sonobuoy.. revise Max.Range
+                    {
+                     SOB$NV$MaxRANGE$I = xSOB$NV$MaxRANGE$I
+                     if(SOB$NV$MaxRANGE$I < 1 ) RETURN #Not there 
+                     RRANG = float(SOB$NV$MaxRANGE$I)
+                    }
+                 RMAX = float(SON$MXR$RANGE$I)
+                }
+            RMAX = min(RMAX,RRANG)               # jb          12/11/90
+           }
+
+        call PROXIM_M ( _                       #call proximity routine
+                    Tgt_Unt_x,                     #tgt Index    jb  8/29/89
+                    Tgt_Lat,                      #pass tgt latitude
+                    Tgt_Lon,                      #pass tgt longitude
+                    Tgt_CSLat,                     #pass cosine of tgt latitude
+                    RANGE,                      #return range (if close enuf)
+                    BEAR)                       #return bearing (if close)
+
+        if( RANGE > RMAX )    RANGE = -1.0    # Impose new limit!  12/11/90
+        if( RANGE < 0.0)      NEXT            # jb  added          12/11/90
+##---------------------------------------------------------------------
+        if (trace$sonar$ACTIVE != $NO)                  #       2/14/83
+           {
+            modd = DD_Mode[Dor_Index]    
+            SWITCH (modd)
+             {
+              CASE $$$BB:
+               {
+                call echov ("Mode=BB  RMIN=")               # 14
+                call echof (RMIN,2)                             # 7?
+                call echov (" RMAX=")                       # 7
+                call echof (RMAX,2)                             # 7?  35
+               }
+              CASE $$$CZ:
+               {
+                call echov ("Mode=CZ  RMIN=")               # 14
+                call echof (RMIN,2)                             # 7?
+                call echov (" RMAX=")                       # 7
+                call echof (RMAX,2)                             # 7?  35
+               }
+
+              CASE $$$ASB:
+               {
+                isavv = UNT$POINTER                     # save pointer
+                UNT$POINTER$TO XBOY$OWNERINDX$I         # owner's
+                UNT$NAME$C = XUNT$NAME$C
+                if(cbonr != UNT$NAME$C | nnboy != DD_Seq[Dor_Index] )
+                 {
+                  cbonr = UNT$NAME$C
+                  nnboy = DD_Seq[Dor_Index]
+
+                  SOB$POINTER = DD_Char[Dor_Index]
+                  call echov (" Mode= ASB  BUOY=")          # 17
+                  call echohn (Xsob$TYPE$C,$$MaxLit)                   # 5
+        
+                  call echov (" OWNR=")                     # 5
+                  call echohn (UNT$NAME$C,$$MaxLit)            # name  # 5   
+                  call echov (" BSEQ=")                     # 5
+                  call echoi (DD_Seq[Dor_Index])                # 2/17/83       # 5?
+                  call echov (" RMU=")                      # 6
+                  call echof (Det_Mean_Rng,3)                            # 7?
+                  call echov (" RMAX=")                     # 7
+                  call echof (RMAX,2)                           # 7? 69
+                  UNT$POINTER = isavv                   # restore pointer
+                  call echor
+                 }
+               } 
+              DEFAULT:
+               {
+                call echov ("RMIN=")                        # 5/29/84
+                call echof (RMIN,2)                             # 7?
+                call echov (" RMAX=")                       # 7
+                call echof (RMAX,2)                             # 7?  35
+               }
+             }                                  # END SWITCH
+           }            # END of 'if trace-sonar..'
+        if(Level$ActiveSonar > 0)    # jb Use 'new' model?      11/29/90
+            {}
+        else if(RANGE >= RMIN)  # jb    OLD MODEL               11/29/90
+         {    # (Note: if too far, 'RANGE' is -1.0) 
+          son$POINTER = DD_Char[Dor_Index]                       #       4/9/86
+          son$TYPE$C = Xson$TYPE$C                      #       4/8/86
+          if(son$TYPE$C == 'AA')                  #       4/8/86
+            {
+            F1 = RANGE * 0.1 * random(X)                #       4/8/86
+            if( random(X) < 0.5 )  F1 = -F1             #       4/9/86
+            RANGE = RANGE + F1                          #       4/8/86
+            }
+          iREPASDflag = $YES             # jb trace flag..   11/29/90
+          call REPASD(_                 #report active sonar detection
+                        RANGE,                  #pass range to detectee
+                        BEAR)                   #pass bearing to detectee
+         }    # End if RANGE >= RMIN (OLD model)
+##########################################
+        if(Level$ActiveSonar < 1)    # jb Use 'OLD' model?      11/29/90
+           {}
+    # Note:  ACTDET returns -1.0 RANGE   if  NO DETECTION 9/11/90 SONCH
+        else
+           {
+            CALL ACTDET(RANGE,BEAR) #     SONCH
+            if (RANGE > 0.0) # ACTDET could return -1.0   9/11/90 SONCH         
+               {
+                if(RANGE > 30.0)     # jb Apply range-error        12/19/90
+                   {
+                    FMEAN  = 0.0;    STDDEV = 1.0
+                    ERRORFACTOR = RANDN(FMEAN,STDDEV)          # jb 12/19/90
+                    RANGE = RANGE*(1.0 + 0.05 *ERRORFACTOR)    # jb 12/19/90
+                   } 
+                iREPASDflag = $YES             # jb trace flag..   11/29/90
+                call REPASD( _                 #report active sonar detection
+                        RANGE,                 #pass range to detectee
+                        BEAR)                  #pass bearing to detectee
+               } 
+           }                # end if RANGE > 0.0 (after ACTDET) #    SONCH
+##---------------------------------------------------------------------
+        if (trace$sonar$ACTIVE != $NO & iREPASDflag != $NO)    # 11/29/90
+           {
+            iup2 = UNT2$Pointer
+
+            UNT2$POINTER = DD_Pntr[Tgt_Index]         #set UNT pointer for target
+            call echov ("Active Sonar Target=")             # 21
+            call echohn (Xunt2$Name$c,$$MaxLit)                        #  5
+            call echov (" depth=")                          #  8 
+            call echoi (XUNT2$TrueAltDepth$i)   # 2/16/83       #  4  38
+            UNT2$Pointer = iup2
+            call echor           
+           }    # END of 'if trace-sonar..'
+##---------------------------------------------------------------------
+       }        #endif appropriate bit set
+
+    }   #endfor
+
+ return
+ end                    #end subroutine ACTSON
+
+
+ Subroutine REPASD(_                    #report active sonar detection 
+                   RANGE,               #true range to target (input)
+                   BEAR)                #tru bearing to target (input)
+ #######################################################
+ #$%
+ #$% Purpose:   REPASD reports active sonar
+ #$%            detection data.
+ #$%
+ #$% Called By: ACTSON
+ #$%
+ #$% Calls:     ANG2PI     APPLL      LCLRAS
+ #$%
+ #$% Tables:    ASD        UNT        BOY
+ #$%            
+ #$%
+ #$% Date:      FEB 81
+ #$%
+ #$% Author:    Ron Williams
+ #$%
+ #$% Modified:  Jim Allen - 8/96 (E1651)
+ #$%            Sonar should not detect through land mass.
+ #$%            Store the detector position information for
+ #$%            a call to land_between_points to determine
+ #$%            if land is in the way.
+ #$%
+ #######################################################
+ BBcommon
+ SM$Common
+
+ real ADRLAT,ADRLON,APPBRG
+
+integer  land_between_points          # function which indicates if a land mass
+                                      # is between 2 positions - joa 8/96 (E1651)
+integer  is_land                      # variables used by the
+real     detlat, detlon, cosdetlat    # call to land_between_points
+REAL BEAR,RANGE,RAPLAT,RAPLON       # jb E2145  6/21/00
+Integer N,LBEAR,LRNGE,UNT2$Type$I   # jb E2145  6/21/00
+
+ if (Dor_Index > DD_Ship)                             #if detector in BOY table
+
+    {
+     UNT$POINTER$TO XBOY$OWNERINDX$I          #set UNT pointer to owner
+
+     if (unt$pointer == unt2$pointer) return             #smn002
+
+     N = DD_Seq[Dor_Index]                            #get buoy sequence number
+
+     if (N <= 1)                               #if buoy number <= 1
+
+        {
+         ADRLAT = XBOY$ASSUMEDLATITUDE$F       #get assumed lat from boy
+
+         ADRLON = XBOY$ASSUMEDLONGITUDE$F      #get assumed lon from boy
+         detlat = xBOY$TrueLatitude$F 
+         detlon = xBOY$TrueLongitude$F
+         cosdetlat = xBOY$CosTrueLat$F
+        }                                      #end if
+
+     else                                     #otherwise
+
+        {
+         ADRLAT = XBOY$ASSUMEDLATITUDE$F +    #compute assumed latitude of
+                  (N-1)*XBOY$ASSUMEDDELTALAT$F #    nth buoy
+
+         ADRLON = XBOY$ASSUMEDLONGITUDE$F +   #compute assumed longitude of
+                  (N-1)*XBOY$ASSUMEDDELTALON$F #    nth buoy
+         detlat = xBOY$TrueLatitude$F + ((N-1) * xBOY$TrueDeltaLat$F)
+         detlon = xBOY$TrueLongitude$F + ((N-1) * xBOY$TrueDeltaLon$F)
+         cosdetlat = xBOY$CosTrueLat$F
+        }                                      #end else
+
+    }                                         #end if boy entry
+
+ else                                        #if detector in unt table
+
+    {
+     ADRLAT = XUNT$ASSUMEDLATITUDE$F          #get assumed lat of detector
+
+     ADRLON = XUNT$ASSUMEDLONGITUDE$F         #get assumed lon of detector
+     detlat = xUNT$TrueLatitude$F 
+     detlon = xUNT$TrueLongitude$F
+     cosdetlat = xUNT$CosTrueLat$F
+    }                                         #end else unt entry
+
+is_land = land_between_points (detlat, detlon, cosdetlat,
+                               tgt_lat, tgt_lon, tgt_CSLat)
+if (is_land == $NO)   # if terrain is not a factor - joa 8/96 (E1651)
+  {
+   APPBRG = BEAR + XUNT$HEADINGERROR$F         #compute tgt apparent bearing
+
+   $ang2PI(APPBRG)                         #insure between 0 and 2*pi
+
+   call APPLL(_                                #compute tgt apparent position
+            ADRLAT,                          #pass assumed detector lat
+            ADRLON,                          #pass assumed detector lon
+            RANGE,                           #pass range
+            APPBRG,                          #pass app tgt bearing
+            RAPLAT,                          #return apparent tgt lat
+            RAPLON)                          #return apparent tgt lon
+
+   LBEAR = INT(APPBRG*(180./$PI) + .5)         #convert app brng to degrees
+
+   if (LBEAR >= 360)                           #insure less than
+     LBEAR = LBEAR - 360                       #   360 degrees
+
+   LRNGE = INT(RANGE + .5)                     #range in whole naut miles
+
+   UNT2$TYPE$I = XUNT2$TYPE$I
+
+   call LCLRAS (_
+              unt$pointer,
+              unt2$pointer,
+              lbear,
+              raplat,
+              raplon,
+              lrnge,
+              unt2$type$i,
+              $SONAR$code)                      #               7/7/83
+  }   # end of if terrain is not between the detector and detectee
+
+ return
+ end            #       End REPASD
+
+
+ Subroutine SHPREP                              #SHip PREParation 
+
+#######################################################
+ #$%
+ #$% Purpose:   SHPREP prepares working arrays
+ #$%            for shipboard sonar.
+ #$%
+ #$% Called By: PRESON
+ #$%
+ #$% Calls:     None
+ #$%
+ #$% Tables:    UNT        SHP
+ #$%            SON
+ #$%
+ #$% Date:      FEB 81
+ #$%
+ #$% Author:    Ron Williams
+ #$%
+ #$% Modified:  Susan Miller - 8/95 (E1447)
+ #$%            Units that are in hiding should not be detected.
+ #$%
+ #######################################################
+ BBcommon
+ SM$Common
+
+Integer JSTATE,                         # jb E2145  6/21/00
+    DEQ$Pointer,DEQ$Ident$I,DEQ$On$I,    # jb E2145  6/21/00
+    UNT$Status$I                        # jb E2145  6/21/00
+
+  #$% get unit status
+ UNT$STATUS$I = XUNT$STATUS$I
+
+ #$% if unit is being deleted/AwaitingLaunch/Mooring/hiding
+ if (UNT$STATUS$I == $BEINGDELETED$CODE   |
+     UNT$STATUS$I == $AwaitingLaunch$Code | # jb    4/18/90
+     UNT$STATUS$I == $Mooring$CODE |        # jb    4/18/90
+     xUNT$HideStatus$I == $CurrentlyHiding) # SMM 8/95 (E1447)
+
+     { RETURN }
+
+ if (xUNT$SuperType$I == $MarkerSub$SuperCode)   # clk 11/24/92
+   {                           # if a marker sub, don't process
+      return
+   }
+
+ DD_Count = DD_Count + 1                        #increment dd list counter
+
+ DD_View[DD_Count] = XUNT$VIEW$I              #save view
+ DD_Seq [DD_Count] = 0                        #set buoy seq # to 0
+ DD_Pntr[DD_Count] = UNT$POINTER              #save UNT pointer
+ DD_Mode[DD_Count] = 0                        #init mode to "cannot detect"
+
+ if (UNT$STATUS$I == $SINKING$CODE)
+    {
+     DD_Flags[DD_Count] = $$$ACTin
+     return
+    }
+
+ DD_Flags[DD_Count] = 0                        #init detectee word
+ JSTATE = 0                             #init search priority level
+
+FOR_DEQ_CHAIN
+    {
+     DEQ$IDENT$I = XDEQ$IDENT$I #get type
+
+     if (Xdeq$TimeWhenUse$f > game$time) next # > vice <      12/6/83 - Now game$time for VTS - JFR 11/2/93
+
+     DEQ$ON$I = XDEQ$ON$I       #operating mode(moved 10/4/83)
+     if(DEQ$ON$I == $NO)    NEXT                   # jb     11/06/90
+
+     if (DEQ$IDENT$I == $ACOUSTICCOMM$CODE &     #if acoustic comm device
+        DEQ$ON$I    != $OFF                   ) # operating     10/6/83
+        {
+        DD_Char[DD_Count] = XDEQ$PNTR$I       #save characteris. pntr
+        DD_Mode[DD_Count] = 0                 #cannot detect
+        DD_Flags[DD_Count] = $$$PDac           # set pass-detn-of-ac-comm bit
+        break                           #done when ac comm found
+        }                               #end if acoustic comm on
+
+    if(JSTATE == 2)                     #if active sonar was found
+        next                            #search only for ac comm
+
+    if (DEQ$IDENT$I == $SONAR$CODE &            # if active sonar
+        DEQ$ON$I    != $OFF &                   # operating
+        sonarmodel_state != $PassiveOnly) # active sonar model processing this cycle - JFR 11/15/93
+        {
+        SON$POINTER = XDEQ$PNTR$I       #set sonar char pntr
+        if (XSON$VARIABLEDEPTH$I == $YES) NEXT  #skip if VDS
+
+        if (xSON$ActiveLFA$I == $YES) next  #skip if lfa
+
+        DD_Char[DD_Count] = SON$POINTER       #save char pntr
+        DD_Deq[DD_Count] = DEQ$Pointer     # 10/90 hdf        11/6/90
+        DD_Flags[DD_Count] = $$$PDas           #set pass-detn-of-act-son bit
+
+        if(DEQ$ON$I == $ON$DP & #if direct path mode
+           XUNT$TRUESPEED$F < 34.)      #and ship speed < 34 knots # 3/30/89
+           DD_Mode[DD_Count] = $$$DP          #set to direct path code
+
+        else if(DEQ$ON$I == $ON$CZ &    #if convergence zone mode
+                XUNT$TRUESPEED$F <= 15.)#and ship speed <= 15 knots    11/28/83
+           DD_Mode[DD_Count] = $$$CZ          #set to convergence zone code
+
+        else if(DEQ$ON$I == $ON$BB & #if bottom bounce mode
+                XUNT$TRUESPEED$F <= 15.)#and ship speed <= 15 knots # 3/30/89
+           DD_Mode[DD_Count] = $$$BB          #set to bottom bounce code
+
+        JSTATE = 2                      #indicate active sonar on
+       }                #end if active sonar on
+
+     if(JSTATE >= 1)                            #if act or pass sonar on
+        next                                    #seek higher priority eq
+
+     if(DEQ$IDENT$I == $PASSONAR$CODE & #if passive sonar
+                        DEQ$ON$I != $OFF)       # operating     10/6/83
+       {
+        SON$POINTER = XDEQ$PNTR$I               #set sonar char pntr
+
+        if(XSON$TOWEDARRAY$I == $YES) next      #skip if towed array
+
+        DD_Char[DD_Count] = SON$POINTER               #save char pntr
+        DD_Deq[DD_Count] = DEQ$Pointer             # 10/90 hdf 11/6/90
+        DD_Mode[DD_Count] = $$$PAS                    # passive detector code
+        DD_Flags[DD_Count] = 0                         #can't be detected
+        JSTATE = 1                              #flag passive sonar on
+       }        #end if passive sonar on
+
+    }   #end for
+
+
+ if(XUNT$TRUEALTDEPTH$I > LAYER$DEPTH)          #if ship below layer
+    DD_Flags[DD_Count] = DD_Flags[DD_Count] | $$$ACTdp                #set active-deep bit
+ else                                           #otherwise,
+    DD_Flags[DD_Count] = DD_Flags[DD_Count] | $$$ACTin        #set active-in-layer bit
+
+ DD_Flags[DD_Count] = DD_Flags[DD_Count] | $$$PDgn    #set pass-det-of-gen-noise bit
+
+ return
+ end            #  End SHPREP  
+
+
+ Subroutine CBPREP              #Communication Buoy PREParation
+
+#######################################################
+ #$%
+ #$% Purpose:   CBPREP prepares working arrays
+ #$%            for communication buoys.
+ #$%
+ #$% Called By: PRESON
+ #$%
+ #$% Calls:     None
+ #$%
+ #$% Tables:    BOY        SON        UNT
+ #$%
+ #$% Date:      FEB 81
+ #$%
+ #$% Author:    Ron Williams
+ #$%
+ #######################################################
+ BBcommon
+ SM$Common
+
+REAL     BOY$Killtime$F     # jb E2145  6/21/00
+
+ boy$KillTime$f = Xboy$KillTime$f               #get kill time for buoy
+
+ if(Xboy$KillTime$f <= game$time ) # buoys expired
+   {
+    return
+   }
+ 
+ if (DD_Count >= $MAXDDL)  return
+
+ if (xboy$Acoustic$i == $no) return     #smn008 #only want acoustic comm buoy
+
+ son$POINTER = XBOY$EQPNTR$I                    #set eq charac pointer
+
+ if (xboy$on$i == $off)  return                 #skip if not making noise
+
+ DD_Count = DD_Count + 1                                #increment dd list counter
+
+ UNT$POINTER$TO XBOY$OWNERINDX$I                #set UNT pointer for owner
+
+ DD_View[DD_Count] = XUNT$VIEW$I                      #save owner view
+
+ DD_Pntr[DD_Count] = BOY$POINTER                      #save BOY table pointer
+
+ DD_Seq[DD_Count] = 0                                #set buoy seq # to 0
+
+ DD_Mode[DD_Count] = 0                                #can't detect
+
+ DD_Flags[DD_Count] = $$$PDac                          #set pass-detn-of-ac-comm bit
+
+ DD_Char[DD_Count] = XBOY$EQPNTR$I                    #save characteristics pointer
+
+ return
+ end
+
+
+ Subroutine SBPREP              #Sonobuoy Barrier PREParation
+
+#######################################################
+ #$%
+ #$% Purpose:   SBPREP prepares working arrays
+ #$%            for sonobuoy barriers.
+ #$%
+ #$% Called By: PRESON
+ #$%
+ #$% Calls:     None
+ #$%
+ #$% Tables:    BOY        BAR        UNT
+ #$%
+ #$% Date:      FEB 81
+ #$%
+ #$% Author:    Ron Williams
+ #$%
+ #######################################################
+ BBcommon
+ SM$Common
+
+REAL    BOY$Killtime$F                              # jb E2145  6/21/00
+Integer I,                                          # jb E2145  6/21/00
+    BOY$Nbrlines$I,BOY$Lineseq$I,BOY2$Nextboy$I,    # jb E2145  6/21/00
+    BOY2$Nbrlines$I,BOY2$Lineseq$I,BOY$Ownerindx$I, # jb E2145  6/21/00
+    BOY$Nbrbuoys$I, BAR$Pointer, UNT$Status$I       # jb E2145  6/21/00
+
+ boy$KillTime$f = Xboy$KillTime$f               #               5/5/86
+ if(boy$KillTime$f <= game$time ) # buoys expired 
+   {
+     ### Update multi-line sonobuoy barrier sequence - jb       9/10/87
+    BOY$NBRlines$i = xBOY$NBRlines$i
+    BOY$LineSEQ$I  = xBOY$LineSEQ$I
+    if(BOY$NBRlines$i > 1 & BOY$LineSEQ$I == 1)
+     {
+      BOY2$NEXTboy$I  = xBOY$NEXTboy$I
+      for(i =1; i <= BOY$NBRlines$I -1 & BOY2$NEXTboy$I != $NO; i =i +1)
+       {
+        BOY2$Pointer$TO (BOY2$NEXTboy$I)
+# **********    WARNING     *************
+# DON'T HAVE THE ORD POINTER SO CAN'T DO THIS (BUT WHY DO WE NEED TO????????)
+#        if( i == 1 ) # Update ORDER to refer to the next line of buoys 
+#             PUTORD$BOYINDX$I   (BOY2$NEXTboy$I)
+
+        BOY2$NBRlines$i = xBOY2$NBRlines$i -1
+        putBOY2$NBRlines$i
+        BOY2$LineSEQ$I  = xBOY2$LineSEQ$I -1
+        putBOY2$LineSEQ$I
+
+        BOY2$NEXTboy$I  = xBOY2$NEXTboy$I
+       }
+     }
+     ##---- End 9/10/87 update of multi-line sonobuoy barrier sequence ---
+
+    BAR$POINTER$TO BOY$POINTER$INDEX            #delete corresponding
+    putBAR$Modified$I (YES)                     # jb            9/15/88
+    PUTboy$KillTime$f (1.0)                     #               6/27/86
+    return
+   }
+
+ UNT$POINTER$TO XBOY$OWNERINDX$I                #set UNT pointer for owner
+
+ if (unt$pointer$valid)
+ {
+    UNT$STATUS$I = XUNT$STATUS$I                   #get owner status
+    if(UNT$STATUS$I == $BEINGDELETED$CODE)         #if owner kaput
+    {
+        BOY$ownerindx$I = 0
+        PUTBOY$ownerindx$I
+        PUTboy$KillTime$f (game$time) # jb 9/17/87
+        return
+    }
+ }
+ # since birthtime can be fractional check to see if activated during this cycle - JFR 3/17/94
+ if(Xboy$BirthTime$f >= game$time + time$step)  return     #ignore if not yet active -Now game$time for VTS - JFR 11/2/93
+
+ BOY$NBRBUOYS$I = XBOY$NBRBUOYS$I               #get # of buoys in barrier
+ for(I=1; I<=BOY$NBRBUOYS$I; I=I+1)             #for each buoy in barrier
+    {
+     if(DD_Count >= $MAXDDL) break                   #if dd list full, punt
+
+     DD_Count = DD_Count + 1                            #increment dd list counter
+     DD_View[DD_Count] = XUNT$VIEW$I                  #save view
+     DD_Seq[DD_Count] = I                            #save buoy sequence number
+     DD_Pntr[DD_Count] = BOY$POINTER                  #save BOY table pointer
+     DD_Char[DD_Count] = XBOY$EQPNTR$I                #save equip char pointer
+
+     if(XBOY$TYPE$I == $ACTIVEBARRIER$CODE)     #if active
+       {
+        DD_Flags[DD_Count] = $$$PDas                   #set pass-detn-of-act-son bit
+        DD_Mode[DD_Count] = $$$ASB                    #set to active sonobuoy code
+       }
+     else                                       #if passive
+       {
+        DD_Flags[DD_Count] = 0                         #can't be detected
+        DD_Mode[DD_Count] = $$$PSB }
+    }                                           #end for buoys
+
+ return
+ end
+
+
+ Subroutine TAPREP                      #Towed Array PREParation 
+
+#######################################################
+#$%
+#$% Purpose:   TAPREP prepares working arrays for
+#$%            towed array parameters
+#$%
+#$% Called By: PRESON
+#$%
+#$% Calls:     none
+#$%
+#$% Tables:    UNT        BOY        
+#$%
+#$% Date:      FEB 81
+#$%
+#$% Author:    Ron Williams
+#$%
+#######################################################
+BBcommon
+SM$Common
+
+LITERAL CSTRIP8                     # jb E2145  6/21/00
+Integer    IFOUND,                  # jb E2145  6/21/00
+    BOY$Ownerindx$I,BOY$Eqpntr$I,   # jb E2145  6/21/00
+    DEQ$Pointer, UNT$Status$I       # jb E2145  6/21/00
+
+BOY$OWNERINDX$I = XBOY$OWNERINDX$I      # get UNT index of owner
+UNT$POINTER$TO BOY$OWNERINDX$I          # set UNT pointer 
+
+boy$EqPntr$i = Xboy$EqPntr$i 
+
+ifound = NO
+
+FOR_DEQ_CHAIN
+    {
+    if (XdEQ$Pntr$i != boy$EqPntr$i) next
+    # since timewhenuse can be fractional check to see if activated during this cycle - JFR 3/17/94
+    if (Xdeq$TimeWhenUse$f >= game$time + time$step) next  # equipment DOWN -Now game$time for VTS - JFR 11/2/93
+
+    ifound = YES
+    break
+    }
+
+UNT$STATUS$I = XUNT$STATUS$I
+if (UNT$STATUS$I == $BEINGDELETED$CODE |        #if owner kaput
+    UNT$STATUS$I == $SINKING$CODE      |
+    ifound       == NO                  )
+    {
+    PUTboy$KillTime$f (1.0)                     #               6/27/86
+    return
+    }
+
+PUTboy$TrueLatitude$f     (XUNT$TrueLatitude$f)         #copy
+PUTboy$TrueLongitude$f    (XUNT$TrueLongitude$f)        #  owner's
+PUTboy$CosTrueLat$f       (XUNT$CosTrueLat$f)           #    position
+PUTboy$TrueHeading$f      (XUNT$TrueCourse$f)           #      and
+PUTboy$AssumedLatitude$f  (XUNT$AssumedLatitude$f)      #        motion
+PUTboy$AssumedLongitude$f (XUNT$AssumedLongitude$f)     #          data
+PUTboy$AssumedHeading$f   (XUNT$AssumedCourse$f)
+PUTboy$TrueSpeed$f        (XUNT$TrueSpeed$f)
+PUTboy$TrueDepth$i        (XUNT$Truealtdepth$i +300)    
+
+if (trace$sonar == $Yes)
+    {
+    call echor
+    call echov("Ship ")
+    call echohn(xunt$name$c,$$MaxLit) 
+    }
+
+if(DD_Count < $MAXDDL)                       #if dd list not full
+    {
+    DD_Count = DD_Count + 1                     #increment dd list counter
+
+    DD_Pntr[DD_Count] = BOY$POINTER           #save pointer to BOY table
+    DD_Char[DD_Count] = XBOY$EQPNTR$I         #save eq char pointer
+    DD_View[DD_Count] = XUNT$VIEW$I           #save owner view
+    DD_Seq[DD_Count] = 0                     #set buoy seq # to 0
+    DD_Mode[DD_Count] = $$$TA                 #set detr code for towed array
+    DD_Flags[DD_Count] = 0                     #cannot be detected
+    }
+
+return
+end                     # End TAPREP
+
+
+ Subroutine VDPREP              #Variable Depth sonar PREParation 
+
+ #######################################################
+ #$%
+ #$% Purpose:   VDPREP prepares working arrays
+ #$%            for variable depth sonar.
+ #$%
+ #$% Called By: PRESON
+ #$%
+ #$% Calls:     None
+ #$%
+ #$% Tables:    UNT        BOY        
+ #$%
+ #$% Date:      FEB 81
+ #$%
+ #$% Author:    Ron Williams
+ #$%
+ #######################################################
+ BBcommon
+ SM$Common
+
+Integer    IFOUND,                          # jb E2145  6/21/00
+    BOY$Ownerindx$I,BOY$Eqpntr$I,           # jb E2145  6/21/00
+    DEQ$Pointer, UNT$Status$I,UNT$Type$I    # jb E2145  6/21/00
+
+BOY$OWNERINDX$I = XBOY$OWNERINDX$I      # get UNT index of owner
+UNT$POINTER$TO BOY$OWNERINDX$I          # set UNT pointer 
+
+boy$EqPntr$i = Xboy$EqPntr$i 
+
+ifound = NO
+
+FOR_DEQ_CHAIN
+    {
+    if (XdEQ$Pntr$i != boy$EqPntr$i) next
+    # since timewhenuse can be fractional check to see if activated during this cycle - JFR 3/17/94
+    if (Xdeq$TimeWhenUse$f >= game$time + time$step) next  # equipment DOWN -Now game$time for VTS - JFR 11/2/93
+
+    ifound = YES
+    break
+    }
+
+UNT$STATUS$I = XUNT$STATUS$I
+if (UNT$STATUS$I == $BEINGDELETED$CODE |        #if owner kaput
+    UNT$STATUS$I == $SINKING$CODE      |
+    ifound       == NO                  )
+    {
+    PUTboy$KillTime$f (1.0)                     #               6/27/86
+    return
+    }
+
+UNT$TYPE$I = XUNT$TYPE$I                #get owner type
+
+PUTboy$TrueLatitude$f     (Xunt$TrueLatitude$f)         #copy
+PUTboy$TrueLongitude$f    (Xunt$TrueLongitude$f)        #  owner's
+PUTboy$CosTrueLat$f       (Xunt$CosTrueLat$f)           #    position
+PUTboy$TrueHeading$f      (Xunt$TrueCourse$f)           #      and
+PUTboy$AssumedLatitude$f  (Xunt$AssumedLatitude$f)      #        motion
+PUTboy$AssumedLongitude$f (Xunt$AssumedLongitude$f)     #          data
+PUTboy$AssumedHeading$f   (Xunt$AssumedCourse$f)
+PUTboy$TrueSpeed$f        (Xunt$TrueSpeed$f)            
+
+if(DD_Count < $MAXDDL)                       # if dd list not full
+    {
+    DD_Count = DD_Count + 1                     # increment dd list counter
+
+    DD_View[DD_Count] = XUNT$VIEW$I           # save owner view
+    DD_Seq[DD_Count] = 0                     # set buoy seq # to 0
+    DD_Pntr[DD_Count] = BOY$POINTER           # save BOY table pointer
+    DD_Char[DD_Count] = XBOY$EQPNTR$I         # save eq char pointer
+    DD_Flags[DD_Count] = $$$PDas               # set pass-detn-of-act-son bit
+    DD_Mode[DD_Count] = $$$VDS                #set to var depth sonar code
+    }
+
+return
+end
+
+
+
+ Subroutine NVREGN(detLAT,              # DetectOR posi- 
+                   detLON,              #       tion (input)
+                   indser,              # SER index     6/26/84
+                   Num_Env )             # return xSER$EnvNum$i
+#######################################################
+ #$%
+ #$% Purpose:   NVREGN determines SER$EnvNum$i for each
+ #$%            ship and buoy that might detect by sonar
+ #$%
+ #$% Called By: SONDET (1 call for ships; 1 for buoys)
+ #$%
+ #$% Calls:     INOUT
+ #$%
+ #$% Tables:    SER        
+ #$%
+ #$% Date:      AUG. 1983
+ #$%
+ #$% Author:    J. Bryant
+ #$%
+ #######################################################
+ BBcommon
+
+ real x[6],y[6]
+ REAL DETLON,DETLAT             # jb E2145  6/21/00
+ integer*4 Num_Env
+ Integer INDSER,INFLAG,NVERT,   # jb E2145  6/21/00
+    SER$Pointer, SER$VER$Index  # jb E2145  6/21/00
+
+indser = 0       # jb Default (which SONDET ignores)        10/1/91
+Num_Env = 4              
+for (SER$Pointer$First; SER$Pointer$OK; SER$Pointer$Next) # 7/16/86
+ {
+  nvert = Xser$NbrVertices$i    # Number of Vertices
+  if( nvert < 1 | nvert > 6 ) NEXT                      #       8/19/83
+
+  for ( SER$ver$index=1; SER$ver$index<=nvert; SER$ver$index=SER$ver$index+1 )
+    {
+     x[SER$ver$index] = xSER$ver$longitude$f  # get vertices' longitudes
+     y[SER$ver$index] = xSER$ver$latitude$f   # get vertices' latitudes
+    }
+
+  call inout(detLON,detLAT,nvert,x,y,inflag)    # note LON before LAT!..
+  if( inflag == $YES )
+   {
+    Num_Env = Xser$EnvNum$i
+    indser = ser$Pointer$Index
+    BREAK
+   }
+ }              #       End  For Ser$Pointer.. 
+return
+end     #       End of subr. NVREGN
+
+
+
+ Subroutine LPSTGT  (max_sensor_range)  # receive the passive range of the
+                                        # sensor    CLK 12/9/92 (E1110)
+ #######################################################
+ #$%
+ #$% Purpose:   LPSTGT lists all passive sonar tar-
+ #$%            gets within range of the detector.
+ #$%
+ #$% Called By: SONDET
+ #$%
+ #$% Calls:     PREPRX_M     PROXIM_M
+ #$%
+ #$% Tables:    UNT        BOY
+ #$%
+ #$% Date:      FEB 81
+ #$%
+ #$% Author:    Ron Williams
+ #$%
+ #######################################################
+ BBcommon
+ SM$Common
+
+ REAL  RANGE, BEAR  # jb E2145  6/21/00
+ integer max_sensor_range,   # clk 12/9/92 (E1110)
+        JDRVU       # jb E2145  6/21/00
+
+ PS_Count = 0                                       #initialize ps list counter
+
+ call PREPRX_M ( _                              # prepare proximity routine
+             Dor_Unt_x,                         # detector index jb 8/29/89
+             Dor_Lat,                           # pass detector latitude
+             Dor_Lon,                           # pass detector longitude
+             Dor_CSLat,                         # pass cosine of detr latitude
+             FLOAT(max_sensor_range))           # pass max passive sonar range
+
+ jdrvu = DD_View[Dor_Index]
+
+#
+# indx_tgt is used to index the target for proxim  (dew 9/21/89)
+#
+
+ for(Tgt_Index = 1; Tgt_Index <= DD_Count; Tgt_Index = Tgt_Index + 1)           #for each dd list entry
+    {
+     if(PS_Count >= $MAXPSL) break                   #quit if ps list full
+
+     if(DD_View[Tgt_Index] == jdrvu) next            #want only non-own view
+
+     if(Tgt_Index <= DD_Ship)                           #if ship
+       {
+        UNT2$POINTER = DD_Pntr[Tgt_Index]          #set UNT pointer for target
+
+        if (Xunt2$NeverDetect$i == YES) next      # joa 3/05 per_never
+
+        Tgt_Unt_x  = unt2$pointer$index            # target index (dew 9/21/89)
+
+        Tgt_Depth = XUNT2$TRUEALTDEPTH$I            #get tgt depth
+
+        Tgt_Lat   = XUNT2$TRUELATITUDE$F          #get target latitude
+        Tgt_Lon   = XUNT2$TRUELONGITUDE$F         #get target longitude
+    
+        Tgt_CSLat = XUNT2$COSTRUELAT$F             #get cosine of tgt latitude
+
+        Tgt_Speed = XUNT2$TRUESPEED$F                #get tgt speed
+       }                                        #endif
+
+     else if((Tgt_Index > DD_Ship) & (Tgt_Index <= DD_Air))   # it's an a/c, deal with it
+       { next }                                 # in put_ACC_targets
+
+     else      # Otherwise, not ship nor a/c; it's a BUOY of some sort..
+       {
+        if ((DD_Flags[Tgt_Index] & $$$PASS) == 0) next      #skip if not detectable
+
+        BOY2$POINTER = DD_Pntr[Tgt_Index]                #set BOY pointer for target
+
+        Tgt_Depth = XBOY2$TRUEDEPTH$I               #get target depth
+
+        Tgt_CSLat = XBOY2$COSTRUELAT$F             #get cosine of target latitude
+
+
+        if(DD_Seq[Tgt_Index] <= 1)      #if buoy # is 1 or N/A, continue
+           {
+            Tgt_Lat = XBOY2$TRUELATITUDE$F        #lat. right out of table
+            Tgt_Lon = XBOY2$TRUELONGITUDE$F       #lon. right out of table
+
+            Tgt_Unt_x = 0                          # index of the target
+           }
+        else    # otherwise, use buoy's displacement to compute position 
+           {
+            Tgt_Lat = XBOY2$TRUELATITUDE$F +     #compute latitude of
+             (DD_Seq[Tgt_Index] - 1) * XBOY2$TRUEDELTALAT$F   #particular buoy
+
+            Tgt_Lon = XBOY2$TRUELONGITUDE$F +    #compute longitude of
+             (DD_Seq[Tgt_Index] - 1) * XBOY2$TRUEDELTALON$F   #particular buoy
+
+            Tgt_Unt_x = 0                         # index of the target
+            
+           }   # End else, & end of getting BUOY position
+
+       }        # end else a buoy of some sort...
+
+
+     call PROXIM_M ( _                          #call proximity routine
+                 Tgt_Unt_x,                        #tgt Index    jb  8/29/89
+                 Tgt_Lat,                         #pass target latitude
+                 Tgt_Lon,                         #pass target longitude
+                 Tgt_CSLat,                        #pass cosine of target lat
+                 RANGE,                         #return range
+                 BEAR)                          #return bearing
+
+     if(RANGE < 0.) next                        #if out of range, skip
+
+     if(ABS(Tgt_Depth - Dor_Depth) > RANGE*Pas_Slope) next  #if not in vert bmwdth, skip
+
+     PS_Count = PS_Count + 1                            #increment ps list counter
+
+                # Save TARGET's environment index in PS_Env_T[PS_Count]:
+$tgtNV call NVREGN (Tgt_Lat,      # TARGET po-                    3/3/87
+$tgtNV            Tgt_Lon,        #          sition               3/3/87
+$tgtNV            indser,       # SER index             output  3/3/87
+$tgtNV            PS_Env_T[PS_Count] ) #                       output  3/3/87
+     
+     PS_DD_x[PS_Count] = Tgt_Index                           #store dd list index for tgt
+
+     PS_Range[PS_Count] = RANGE                         #store tgt range
+
+     PS_Depth[PS_Count] = Tgt_Depth                        #store tgt depth
+
+     PS_Bear[PS_Count] = BEAR                          #store tgt bearing
+
+     if (Tgt_Index <= DD_Ship)                          #if ship
+        {
+         PS_Speed[PS_Count] = Tgt_Speed * .2 + .5       #store tgt speed index
+
+         if (PS_Speed[PS_Count] < 1) PS_Speed[PS_Count] = 1
+
+         else if (PS_Speed[PS_Count] > 6) PS_Speed[PS_Count] = 6
+        }
+     else
+
+         PS_Speed[PS_Count] = 0
+
+     PS_BBN[PS_Count] = -1.0                        #indicates bband not computed
+
+    }                                           #endfor
+
+ PS_Targets = PS_Count                                  #save number of targets
+
+ return
+ end                                            #end LPSTGT
+
+
+ Subroutine LPSNON         #List Passive Sonar NON-target noise sources
+
+ #######################################################
+ #$%
+ #$% Purpose:   LPSNON lists all passive sonar
+ #$%            non-target noise sources.
+ #$%
+ #$% Called By: SONDET
+ #$%
+ #$% Calls:     PROXIM
+ #$%
+ #$% Tables:    UNT        BOY
+ #$%
+ #$% Date:      FEB 81
+ #$%
+ #$% Author:    Ron Williams
+ #$%
+ #######################################################
+ BBcommon
+ SM$Common
+
+ REAL  RANGE, BEAR   # jb E2145  6/21/00
+ integer JDRVU       # jb E2145  6/21/00
+
+#
+# indx_prx is used to identify the destination point for proxim_m
+#
+
+ jdrvu = DD_View[Dor_Index]
+
+ for(Tgt_Index = 1; Tgt_Index <= DD_Count; Tgt_Index = Tgt_Index + 1)           #for each dd list entry
+
+    {
+     if(PS_Count >= $MAXPSL) break                   #quit if ps list full
+
+     if (DD_View[Tgt_Index] != jdrvu ) NEXT              #skip poss. tgts. 9/7/83
+     if(Tgt_Index == Dor_Index)             NEXT              #skip self
+
+     if(Tgt_Index <= DD_Ship)                           #if ship
+       {
+        UNT2$POINTER = DD_Pntr[Tgt_Index]                #set UNT pointer for target
+
+        if (Xunt2$NeverDetect$i == YES) next        #joa 3/05 per_never
+
+        Tgt_Depth = XUNT2$TRUEALTDEPTH$I            #get tgt depth
+
+        Tgt_Lat = XUNT2$TRUELATITUDE$F            #get target latitude
+
+        Tgt_Lon = XUNT2$TRUELONGITUDE$F           #get target longitude
+
+        Tgt_Unt_x = 0                              # index to target DEW 9/25/89
+
+        Tgt_CSLat = XUNT2$COSTRUELAT$F             #get cosine of tgt latitude
+
+        Tgt_Speed = XUNT2$TRUESPEED$F                #get tgt speed
+       }                                        #endif
+
+     else if ((Tgt_Index > DD_Ship) & (Tgt_Index <= DD_Air))  #it's an a/c in the list so it
+       { next }                                 #has to be a target, skip it
+
+     else               # it's a buoy
+       {
+        if ((DD_Flags[Tgt_Index] & $$$PASS) == 0) next    #skip if not detectable
+
+        BOY2$POINTER = DD_Pntr[Tgt_Index]                #set BOY pointer for target
+
+        Tgt_Depth = XBOY2$TRUEDEPTH$I               #get target depth
+
+        Tgt_CSLat = XBOY2$COSTRUELAT$F             #get cosine of target latitude
+
+        if(DD_Seq[Tgt_Index] <= 1)                      #if buoy # is 1 or N/A
+
+           {
+            Tgt_Lat = XBOY2$TRUELATITUDE$F        #latitude right out of table
+
+            Tgt_Lon = XBOY2$TRUELONGITUDE$F       #longitude right out of table
+
+            Tgt_Unt_x = 0                          # target index   DEW 9/21/89
+           }                                    #endif
+
+        else                                    #otherwise
+
+           {
+            Tgt_Lat = XBOY2$TRUELATITUDE$F +              #compute latitude of
+             (DD_Seq[Tgt_Index] - 1) * XBOY2$TRUEDELTALAT$F     #particular buoy
+
+            Tgt_Lon = XBOY2$TRUELONGITUDE$F +             #compute longitude of
+             (DD_Seq[Tgt_Index] - 1) * XBOY2$TRUEDELTALON$F     #particular buoy
+
+            Tgt_Unt_x = 0                          # target index   DEW 9/21/89
+            }                                    #endelse
+
+       }                                        #end else
+
+     call PROXIM_M ( _                          #call proximity routine
+                 Tgt_Unt_x,                        #tgt Index    jb  8/29/89
+                 Tgt_Lat,                         #pass target latitude
+                 Tgt_Lon,                         #pass target longitude
+                 Tgt_CSLat,                        #pass cosine of target lat
+                 RANGE,                         #return range
+                 BEAR)                          #return bearing
+
+     if(RANGE < 0.) next                        #if out of range, skip
+
+     if(ABS(Tgt_Depth - Dor_Depth) > RANGE*Pas_Slope) next  #if not in vert bmwdth, skip
+
+     PS_Count = PS_Count + 1                            #increment ps list counter
+
+        # Save "non-target's" environment index in PS_Env_T[PS_Count]:
+$tgtNV     call NVREGN (Tgt_Lat,  # "Non-Target's" po-            3/3/87
+$tgtNV            Tgt_Lon,        #                  sition       3/3/87
+$tgtNV            indser,       # SER index             output  3/3/87
+$tgtNV            PS_Env_T[PS_Count] ) #                       output  3/3/87
+
+     PS_DD_x[PS_Count] = Tgt_Index                           #store dd list index for tgt
+
+     PS_Range[PS_Count] = RANGE                         #store tgt range
+
+     PS_Depth[PS_Count] = Tgt_Depth                        #store tgt depth
+
+     PS_Bear[PS_Count] = BEAR                          #store tgt bearing
+
+     if (Tgt_Index <= DD_Ship)                          #if ship
+        {
+         PS_Speed[PS_Count] = Tgt_Speed * .2 + .5            #store tgt speed index
+
+         if (PS_Speed[PS_Count] < 1) PS_Speed[PS_Count] = 1
+
+         else if (PS_Speed[PS_Count] > 6) PS_Speed[PS_Count] = 6
+        }
+     else if ((Tgt_Index > DD_Ship) & (Tgt_Index <= DD_Air))
+            { next }        # it's an a/c so skip it
+     else
+         PS_Speed[PS_Count] = 0
+
+
+     PS_BBN[PS_Count] = -1.0                        #indicates bband not computed
+
+    }                                           #endfor
+
+
+ return
+ end                                            #end LPSNON
+
+ Subroutine PASDET
+
+ #######################################################
+ #$%
+ #$% Purpose:   PASDET processes passive sonar tar-
+ #$%            gets and determines detection of
+ #$%            broadband and narrowband noise.
+ #$%
+ #$% Called By: SONDET
+ #$%
+ #$% Calls:     INV_WORSE  GETBBN     FRQDET     ASAC
+ #$%            REPPSD     PSCHAR     
+ #$%            ANGPI      NLTEST
+ #$%
+ #$% Tables:    SON        SOB        SHN
+ #$%
+ #$% Date:      FEB 81
+ #$% Author:    Ron Williams
+ #$%
+ #$% Revised:   8/83 - J. Bryant (Revised PasSon PPS dtd 6/83)
+ #############################################################
+ BBcommon
+ SM$Common
+
+ LITERAL CSTRIP8                                    # jb E2145  6/21/00
+ real an2K                              # ambient noise @ 2000cps
+ REAL BBSN,BBNL,TGTBRG,RELBRG,DI,RDI,FLOBE,BBSEK,   # jb E2145  6/21/00
+      DIFF,BBSEI                                    # jb E2145  6/21/00
+ Integer I,K,JD,ISPD1,ITT,INDSER,INDDI,JUNT2,MODD,  # jb E2145  6/21/00
+    ISAVV,IFLAG,IASFLG,I_SWITCH_1,IFREQ,LEVEL,NDXDT,  # jb E2145  6/21/00
+    NLTEST,MBF,SVU,KT,KQ,                             # jb E2145  6/21/00
+    UNT2$Type$I, ANO$Pointer,ANO$NV$Index,            # jb E2145  6/21/00
+    SON$SEC$Index, SOB$SEC$Index,                     # jb E2145  6/21/00
+    SHN$Pointer, SHN$SPD$Index,SHN$SPD$TN$Index,      # jb E2145  6/21/00
+    SHN$SPD$TN$freq$I, SHN$SPD$TN$level$I,            # jb E2145  6/21/00
+    ACN$Pointer,ACN$NL$Index,ACN$NL$frequency$I,      # jb E2145  6/21/00
+    ACN$NL$level$I,    ACC$Pointer                    # jb E2145  6/21/00
+
+$tgtNV integer nvdOR,ixDOR,ixDEE,nvDEE  #<<<>>> For debug..     3/3/87
+$tgtNV nvdOR = Env_Num                   #<<<>>> for debug       3/3/87
+
+ call PSCHAR                         # Passive-Sonar CHARACTERISTICS
+
+# Note:  Computations of Broadband SelfNoise (BBSN); Ambient Noise
+#       (AN2k) and their combined value, Broadband Noise Level (BBNL)
+#       are made ONCE;  they should be required, since SONDET doesn't
+#       call PASDET if there are no potential targets.          7/21/83
+
+ if(Dor_Speed < 0. )                 # (flag) PassSonobuoy: no self-noise
+    {
+     BBSN = 0.                          #broadband self-noise is zero
+     SON$SPD$INDEX = 0                  # Flag for subr. FRQDET 
+    }
+ else                                           #otherwise
+    {
+     ISPD1 = .2 * Dor_Speed + .5                     # determine
+     if(ISPD1 < 1) ISPD1 = 1                    #   detector
+     else if(ISPD1 > 6) ISPD1 = 6               #     speed
+
+     SON$SPD$INDEX = ISPD1                      #       index
+
+        # Note:  PPS pg 3-18/19 SL =BL -10*log(bw) = BL - 27.0
+     BBSN = (Xson$SPD$bbNOISE$i - 27.0)/10.     # bb selfnoise  7/15/83
+        #Note: divisor of 10 prepares for BBNL computation below)
+ #!  BBSN =  QKPOWR(FLOAT(XSON$SPD$BBNOISE$I))  # broadband self-noise
+    }                                           # endelse 
+
+
+ for (k=1;k<=PS_Targets;k=k+1)   #for ea. target in PasSon List ~ 70 lines
+  {
+#################*********8888888888888888888888888888888       3/31/86
+   Tgt_Index = PS_DD_x[K] #TGT index to dr/de list in SM$Common MOVED UP  4/4/86
+
+   if(Tgt_Index <= DD_Air)                         # if ship or a/c  6/91
+    {
+     UNT2$POINTER = DD_Pntr[Tgt_Index]  # jb set UNT2 pointer for target 12/11/90
+     Tgt_Lat = XUNT2$TRUELATITUDE$F            #get target latitude
+     Tgt_Lon = XUNT2$TRUELONGITUDE$F           #get target longitude
+    }
+   else    # Otherwise, not ship nor a/c; it's a BUOY   12/11/90
+    {
+     BOY2$POINTER = DD_Pntr[Tgt_Index]   # jb Assume all buoys in the barrier
+     Tgt_Lat = XBOY2$TRUELATITUDE$F   #  are in the same Environment
+     Tgt_Lon = XBOY2$TRUELONGITUDE$F
+    }
+    
+   UNT2$Type$I = xUNT2$TYPE$I   # get the target unt type
+
+   #if the target is an a/c and the detector is a ship, skip it
+   if (UNT2$Type$I == $Air$Code & xUNT$Type$I == $Surface$Code)  next  
+
+   if(UNT2$TYPE$I != $AIR$CODE)
+      {
+       call NVREGN (Tgt_Lat,                # Target po-            12/11/90
+                    Tgt_Lon,                #       sition
+                    indser,               # SER index
+                    Env_Tgt ) # return xSER$EnvNum$i to SM$Common
+
+        call Inv_Worse(Env_Det,  # Environment (1,2,3,4) where Detector is
+                       Env_Tgt,  # Environment (1,2,3,4) where Target is
+                       Env_Num ) #  OUTPUT worse of the 2 Environments 
+      }
+    else        #else it is an aircraft target, so use detector environment
+      { Env_Num = Env_Det }
+
+    SON$NV$index = Env_Num      # $NV index for SON table
+    SOB$NV$index = Env_Num      # $NV index for SOB table
+
+$tgtNV   nvdEE = Env_Num                 #<<<>>> for debug               3/3/87
+$tgtNV   ixDEE = UNT2$pointer$index             #<<<>>> for debug       3/3/87
+$tgtNV   ixDOR = UNT$pointer$index              #<<<>>> for debug       3/3/87
+#################*********888888888888888888888888888888
+
+   ANO$POINTER$TO 16    # index for 2000cps broadband freq      7/15/83
+   ANO$NV$index = Env_Num                # (from NVREGN) Envrnmt 8/18/83
+    # Note:  PPS pg 3-18:  use amb.noise from table direct; and,
+    # dividing an2K by 10. prepares for BBNL computation, following
+   an2K = Xano$NV$Noise$F/10.                           #       7/15/83
+
+   BBNL = 10.*log10((1.0D+1)**BBSN + (1.0D+1)**AN2k) #PPS pg 3-20       8/11/83
+
+##-------------------------------------------------------------
+   if (trace$sonar$PASSIVE != $NO)        # >3)    #      12/15/83
+    {
+     call echov (" BbNoise=")               # 9     8/4/83
+     call echof (BBNL,2)                        # 7?
+    }
+##--------------------------------------------------------------
+
+   Det_SE = 0               # Init. Det_SE for forwarding to TMA        8/8/83
+   tgtbrg = PS_Bear[k]
+   relbrg = PS_Bear[k] - Dor_Head              #compute relative brng
+   $angpi(relbrg)
+
+   INDDI = abs(RELBRG) * (18. / $PI) + 1      #compute index into
+   if(INDDI > 18) INDDI = 18                  #        DI table
+   if(DD_Seq[Dor_Index] < 1)                          #if char in SON table
+    {
+     SON$SEC$INDEX = INDDI                  #set sector index
+     DI = XSON$SEC$DI$I                     #get directivity index
+    }
+   else                                       #if char in SOB table
+    {
+     SOB$SEC$INDEX = INDDI                  #set sector index
+     DI = XSOB$SEC$DI$I                     #get directivity index
+    }
+
+   RDI = DI - Pas_RD        # Combine Pas_RD (from PSCHAR) with DI      7/18/83
+
+   JD = DD_Flags[Tgt_Index]                       # get detectee word
+
+##-------------------------------------------------------------
+   if (trace$sonar$PASSIVE != $NO)      #                       7/26/83
+    {
+     call echor                                 #       2/11/83
+     call echov (" RDI=")           # 5             8/15/83
+     call echof (RDI,2)                 # 7?            8/15/83
+     junt2 = UNT2$Pointer               #   save pointers
+     UNT2$POINTER = DD_Pntr[Tgt_Index]         #set UNT2 pointer for target
+          call echov ("PasSon TGT=")                # 12
+          call echohn (Xunt2$Name$c,$$MaxLit)                  #  5
+          call echov (" indx=")                     # 12
+          call echoi (Tgt_Index)                       #  4    8/10/83
+          call echov (" depth=")                    #  8
+          call echoi (XUNT2$TrueAltDepth$i)             #  4  40
+          UNT2$Pointer = junt2                  #   pointers
+          #call echor
+    }           # END of if (trace$sonar ...) 
+##---------------------------------------------------------------
+###     The following trace relocated here                      8/23/83
+##-------------------------------------------------------------
+        if (trace$sonar$PASSIVE != $No)                 #       2/14/83
+           {
+            call echor 
+            call echov (" TARGET mode: ")           #       8/23/83
+            modd = DD_Mode[Dor_Index]    
+            isavv = UNT$POINTER                 # save pointer
+            SWITCH (modd)
+             {
+              CASE $$$PAS:                      #  Hull-mount passive
+               {
+                call echov (" Mode=P/hull ")                # 13
+                call echov (" OWNR indx=")                  # 5
+                call echoi (Dor_Index)                 #               8/11/83
+                
+               }
+              CASE $$$TA:                               #  Towed-Array
+               {
+                call echov (" Mode=TA ")                    # 9     
+                UNT$POINTER$TO XBOY$OWNERINDX$I         # owner
+                call echov (" OWNR=")                       # 5
+                call echohn (XUNT$NAME$C,$$MaxLit)                     # 5   45
+                call echov (" OWNR indx=")                  # 5
+                call echoi (Dor_Index)                 #               8/11/83
+               }
+
+              CASE $$$PSB:                              # Passive-Buoy
+               {
+                SOB$POINTER = DD_Char[Dor_Index]
+                call echov (" Mode=PSB BOY=")               # 14
+                call echohn (Xsob$TYPE$C,$$MaxLit)                     # 5
+                UNT$POINTER$TO XBOY$OWNERINDX$I         # owner
+                call echov (" OWNR=")                       # 5
+                call echohn (XUNT$NAME$C,$$MaxLit)                     # 5   
+                call echov (" OWNR indx=")                  # 5
+                call echoi (Dor_Index)                 #               8/11/83
+                call echov (" BSEQ=")                       # 5
+                call echoi (DD_Seq[Dor_Index])          # 2/17/83       # 5?
+               } 
+             }                                  # END SWITCH
+            UNT$POINTER = isavv                 # restore ptr.
+            call echor                          #               8/88
+
+           }    # END of if (trace$sonar$PASSIVE ...) 
+##-------------------------------------------------------------------- 
+
+   Det_BB_flag = $no                 #  BROADband    flag
+   Det_Freq = 0                   #  ACTive SONar freq. 
+   iasflg = $NO                 #  ACtive SONar flag
+   Det_Acous = $no                 #  ACoustic-Comm "
+
+## NOTE:  PPS pg 3-18:  "All active emissions which meet detection
+##                       criteria will be displayed."
+   if((JD & $$$PDas) != 0)              #if ACTv SON bit set,
+    {
+     call ASAC(_                        #get iFREQ and LEVEL
+                PS_DD_x[k],
+                ifreq,
+                level)
+##-----------------------------------------------------------------
+     if (trace$sonar$PASSIVE != $NO)    #       2/14/83
+        {
+         call echov (" ACTem: FRQ=")                # 12
+         call echoi (ifreq)                             # 5?  17
+        }
+##---------------------------------------------------------------
+     Flobe = 1.0        # Kow-Tow to Vers. 4.1 FORT. compiler   10/31/85 
+     ITT = 3                    # Flag NOT a TONAL case         7/21/83
+     call FRQDET(_              # SPCLVL & factor args replaced 7/20/83 
+                 k,             # for TGT. PS_Range/PS_Depth index     8/5/83
+                 ifreq,
+                 level,         
+                 iTT,           # 2(targ),1(tug),0(other),3(NA) 7/20/83
+                 ndxDT,         #Det_Tn_SE indx NOT NEEDED for ITT=3 7/20/83
+                 RDI,           # vice TERM (RDI - PS_Ploss[k]    8/4/83
+                 ISPD1,         # detectOR speed index          8/9/83
+                 Flobe,         # for TGT, lobe-factor is 1.0   10/31/85
+                 iasflg)
+
+    if (iasflg != $NO )                                 #       8/29/83
+      {
+       Det_Freq = ifreq                   # Put frequency in COMMON
+      }         # End of if iasflg == $yes
+
+    }           #       End of If Active-Sonar-bit set
+
+## NOTE:  PPS pg 3-18:  "All active emissions which meet detection
+##                       criteria will be displayed."
+
+   else if((JD & $$$PDac) != 0 &         # if ACstc COMM bit set
+            sonarmodel_state != $ActiveOnly) # if only active model processing then -JFR 11/15/93
+                                       # detected active pings above so no
+                                       # need to process accoustic comm
+    {
+     call ASAC(_                        # get freq and level
+                PS_DD_x[k],
+                ifreq,
+                level)
+##------------------------------------------------------------
+     if (trace$sonar$PASSIVE != $NO)    #       2/14/83
+      {
+        call echov (" ACST: FRQ=")          # 11    2/8/83
+        call echoi (ifreq)                      # 5?  16
+        call echor 
+        call echov (" VTS Accoustic Comm Being Processed ") # JFR 11/15/93
+        call echor
+      }
+##-------------------------------------------------------------
+     Flobe = 1.0        # Kow-Tow to Vers. 4.1 FORT. compiler   10/31/85 
+     ITT = 3                    # Flag NOT a TONAL case         7/21/83
+     call FRQDET(_              # SPCLVL & factor args replaced 7/20/83 
+                 k,             # for TGT. PS_Range/PS_Depth index     8/5/83
+                 ifreq,
+                 level,
+                 iTT,           #Flag 2(targ),1(tug),0(neither) 7/20/83
+                 ndxDT,         #Det_Tn_SE indx NOT NEEDED for ITT=3 7/20/83
+                 RDI,           # vice TERM (RDI - PS_Ploss[k]    8/4/83
+                 ISPD1,         # detectOR speed index          8/9/83
+                 Flobe,         # for TGT, lobe-factor is 1.0   10/31/85
+                 Det_Acous)
+
+#    if (Det_Acous != $NO )                                #       8/29/83
+#     {
+#     }         # End of if Det_Acous == $yes
+
+    }   #       End of If Acoustic-Comm-Bit set
+
+##<<<>>>
+   if((JD & $$$PDgn) != 0 &              #if general noise bit set
+      sonarmodel_state != $ActiveOnly) # if only active model processing then -JFR 11/15/93
+                                       # detected active pings above so no
+                                       # need to process general noise
+                                       # which is set for every surface and a/c
+    {
+     if (trace$sonar$PASSIVE != $No)   # JFR 11/15/93
+        {
+         call echor 
+         call echov (" VTS GENERAL NOISE BEING PROCESSED ") # JFR 11/15/93
+         call echor
+        }
+
+     if(UNT2$Type$I != $AIR$CODE)       #if it's not an a/c 
+       {
+        if (PS_BBN[k] < 0.)                #if not computed yet,
+        call GETBBN(k)                     #  get bb splvl, proploss
+                                             # See PPS p. 3-16 for Det_SE:
+        BBSEk = PS_BBN[k] -BBNL +RDI -PS_Ploss[k] # TGT Bband SE        7/18/83
+        Det_BB_flag = nltest(0.,Sonar$SIGMA,BBSEk) # Parameterize..     11/21/83
+        Det_SE = BBSEk         # For forwarding to TMA via LCLPSN      8/8/83
+
+#    se = qkdb(PS_BBN[k]/(bbnl+bbacc)) + di - Pas_RD     #signal excess
+
+##-------------------------------------------------------------
+        if (trace$sonar$PASSIVE != $NO)            #       2/14/83
+           {
+            call echov (" BROAD: SE=")           # 12
+            call echof (BBseK,2)                     # 7?    35      7/20/83
+            call echov (" tOR indx=")                    # 5
+            call echoi (Dor_Index)                          #       8/11/83
+            call echov (" tEE indx=")                    # 5
+            call echoi (Tgt_Index)                          #       8/11/83
+            call echor                               #       8/88
+           }
+##-------------------------------------------------------------
+
+        for (mBF =1; mBF <=6; mBF =mBF +1)         # init. arrays  7/20/83
+           {
+            Det_Tn_Freq[mBF] = 0           # Init. Tgt. Tonal FREQ's       7/20/83
+            Det_Tn_SE[mBF] = 0.0          # Init. Tgt. Tonal SE's         7/20/83
+           }
+
+        shn$pointer = PS_SHN[k]                    #               6/20/83
+        SHN$SPD$index = PS_Speed[k]                    # subtbl index  11/5/90
+       }   # end if it's not an a/c
+     
+## Note:  With General-Noise-bit set, this call to FRQDET establishes
+##        SE's for the TARGET tonals (frequencies stored by FRQDET in
+##        the Det_Tn_Freq array; SE values in Det_Tn_SE array.)
+##    As of 11/5/90, there are 6 possible tonals for EACH SPEED INDEX,
+##    rather than a total of 6.  Accordingly, SHN$SPD$Index must be
+##    set; then loop thru SHN$SPD$TN$Index (new subtable)    jb 11/5/90
+
+    Det_Tn_Count = 0      # Counter for # of tonals detected          7/20/83
+    if(UNT2$Type$I != $AIR$CODE)
+       {
+        do SHN$SPD$TN$index = 1, SHN$SPD$TN$slots # @ sig.line     11/5/90
+          {
+           SHN$SPD$tn$Freq$i = xSHN$SPD$tn$Freq$i            #      11/5/90
+           if( SHN$SPD$tn$Freq$i > 0 )    # if non-zero freq.       11/5/90
+              {
+               SHN$SPD$tn$Level$i = xSHN$SPD$tn$Level$i          # 11/5/90
+
+               Flobe = 1.0  # Kow-Tow to Vers. 4.1 FORT. compiler   10/31/85 
+               ITT = 2              # Flag a TARGET-TONAL case      7/21/83
+               call FRQDET(_        # SPCLVL & factor args replaced 7/20/83 
+                           k,            # for TGT. PS_Range/PS_Depth index     8/5/83
+                           SHN$SPD$tn$Freq$i,            #              11/5/90
+                           SHN$SPD$tn$Level$i,           #              11/5/90
+                           iTT,         #2(targ),1(tug),0(other),3(NA   7/20/83
+                           SHN$SPD$TN$INDEX,#Det_Tn_SE indx (NDXDT) for ITT=2   7/20/83
+                           RDI,         # vice TERM (RDI - PS_Ploss[k])   8/4/83
+                           ISPD1,       # detectOR speed index          8/9/83
+                           Flobe,       # for TGT, lobe-factor is 1.0   10/31/85
+                           iflag)
+
+               if (iflag != $NO)
+                  {
+                   Det_Tn_Count = Det_Tn_Count +1       # Count # of detected tonals  6/20/83
+#                   Det_Tn_Freq[SHN$SPD$index] = SHN$SPD$tn$Freq$i        #!   11/5/90
+                   Det_Tn_Freq[Det_Tn_Count] = SHN$SPD$tn$Freq$i        #!   7/31/91
+
+##-------------------------------------------------------------
+                   if (trace$sonar$PASSIVE != $NO)                #     2/14/83
+                      {
+                       call echoi (SHN$SPD$tn$Freq$i)        # 5?  13   11/5/90
+                      }
+##---------------------------------------------------------------
+                  } # End "if iflag != $NO"
+              } # End of if( SHN$SPD$tn$Freq$i > 0 ) # jb      11/5/90
+          } # End "do SHN$SPD$TN$index = 1, SHN$SPD$TN$slots "   11/5/90
+       }  # end if not $air$code
+    else   # it is an aircraft so loop through the possible six tonals
+       {
+        ACC$Pointer = xUNT2$AccPntr$I
+        acn$Pointer$To xACC$ACNIndx$I
+        do ACN$NL$index = 1, ACN$NL$slots
+          {
+           ACN$NL$Frequency$I = xACN$NL$Frequency$I
+           if (ACN$NL$Frequency$I > 0)  # non-zero frequency
+              {
+               ACN$NL$Level$I = xACN$NL$Level$I
+
+               Flobe = 1.0  # interference lobe factor
+               ITT = 2              # Flag a TARGET-TONAL case      
+               call FRQDET(_        # SPCLVL & factor args replaced 
+                           k,            # for TGT. PS_Range/PS_Depth index
+                           ACN$NL$Frequency$I,
+                           ACN$NL$Level$I,
+                           iTT,          #2(targ),1(tug),0(other),3(NA)  
+                           ACN$NL$index, #Det_Tn_SE indx (NDXDT) for ITT=2   
+                           RDI,          # vice TERM (RDI - PS_Ploss[k])   
+                           ISPD1,        # detectOR speed index       
+                           Flobe,        # for TGT, lobe-factor is 1.0  
+                           iflag)
+
+               if (iflag != $NO)
+                  {
+                   Det_Tn_Count = Det_Tn_Count +1       # Count # of detected tonals 
+#                   Det_Tn_Freq[ACN$NL$index] = ACN$NL$Frequency$I
+                   Det_Tn_Freq[Det_Tn_Count] = ACN$NL$Frequency$I    # jb 7/31/91
+##-------------------------------------------------------------
+                   if (trace$sonar$PASSIVE != $NO)           
+                      {
+                       call echov("For an aircraft target, freq = ")
+                       call echoi(ACN$NL$Frequency$I)      
+                      }
+##---------------------------------------------------------------
+                  }               # End "if iflag != $NO"
+              } # end of if frequency is greater than 0
+          } # end of do loop through ACN$NL$slots
+       } # end if it is an aircraft
+
+     for (i=1;i<=PS_Count;i=i+1)            #for each entry in ps list,
+      {
+       if (UNT2$Type$I == $AIR$CODE) next # skip the aircraft
+
+       if (Det_Tn_Count < 1 & BBSEK < -987.)   # If neither TGT TONALS 7/21/83
+        BREAK           # nor TGT Bband can be detected, BREAK  7/21/83
+
+       if (i == k)  next                # Skip TGT itself
+
+       diff = PS_Bear[i] - tgtbrg
+       $angpi(diff)
+##       ffid = abs(diff)                                 #       8/10/83
+##       if ( ffid > Pas_Hbeam )  NEXT  #not in horiz beam   #       8/10/83
+       if (diff < 0.0)    diff = -diff                    #        8/29/91
+       if ( diff > Pas_Hbeam )  NEXT  #not in horiz beam # 8/10/83 8/29/91
+
+##-------------------------------------------------------------
+###     The following trace relocated here:                     8/23/83
+##-------------------------------------------------------------
+        if (trace$sonar$PASSIVE != $No)                 #       2/14/83
+           {
+            call echor 
+            call echov (" INTERFER. mode: ")        #       8/23/83
+            modd = DD_Mode[Dor_Index]    
+            isavv = UNT$POINTER                 # save pointer
+            SWITCH (modd)
+            {
+            CASE $$$PAS:                        #  Hull-mount passive
+              {
+                call echov (" Mode=P/hull ")                # 13
+                call echov (" OWNR indx=")                  # 5
+                call echoi (Dor_Index)                 #               8/11/83
+              }
+            CASE $$$TA:                         #  Towed-Array
+              {
+                call echov (" Mode=TA ")                    # 9     
+                UNT$POINTER$TO XBOY$OWNERINDX$I         # owner
+                call echov (" OWNR=")                       # 5
+                call echohn (XUNT$NAME$C,$$MaxLit)                     # 5   45
+                call echov (" OWNR indx=")                  # 5
+                call echoi (Dor_Index)                 #               8/11/83
+              }
+            CASE $$$PSB:                                # Passive-Buoy
+              {
+                SOB$POINTER = DD_Char[Dor_Index]
+                call echov (" Mode=PSB BOY=")               # 14
+                call echohn (Xsob$TYPE$C,$$MaxLit)                     # 5
+                UNT$POINTER$TO XBOY$OWNERINDX$I         # owner
+                call echov (" OWNR=")                       # 5
+                call echohn (XUNT$NAME$C,$$MaxLit)                     # 5   
+                call echov (" OWNR indx=")                  # 5
+                call echoi (Dor_Index)                 #               8/11/83
+                call echov (" BSEQ=")                       # 5
+                call echoi (DD_Seq[Dor_Index])          # 2/17/83       # 5?
+              } 
+            }   # End  SWITCH
+
+            UNT$POINTER = isavv                 # restore ptr.
+            call echor                          #               8/88
+
+          }     # END of if (trace$sonar$PASSIVE ...) 
+##-------------------------------------------------------------------- 
+
+       if(BBSEk > -987.)        #IF TARGET Bband MAY be detected 7/20/83
+        {
+         if ( diff >= $PI/64.)  next    #not on same brg 10/13/83  8/29/91
+         if (PS_BBN[i] < 0.)            #if not computed yet,
+                call GETBBN(i)          # get bb splvl, proploss
+
+                                             # See PPS p. 3-16 for SE:
+         BBSEi = PS_BBN[i] -BBNL +RDI -PS_Ploss[k] # INTERFERING? 7/18/83
+
+##              Note:  PPS pg 3-17 specifies that ANY Bband SE in the
+##              beam ("on same bearing") greater than the target's SE
+##              prevents reporting target Bband; so Det_BB_flag is set to 0.
+##              BBSEk is flagged to prevent further Bband processing. 
+
+         if(BBSEi > BBSEk)                      #               8/11/83
+          {
+           Det_BB_flag = 0                           #               7/20/83
+           BBSEk  = -987.6      # Flag TGT Bband NOT detected   7/20/83
+
+    ##---------------------------------------------------------
+           if (trace$sonar$PASSIVE != $NO)              #       2/14/83
+            {
+             call echov (" BB INTERFER: indx= ")    # 20
+             call echoi (PS_DD_x[i])                      #       8/10/83
+             call echor                                 #       8/88
+            }
+    ##-----------------------------------------------------------
+          }             # End of IF (BBSEi > BBSEk )
+
+        }       #  End of "if BBSEk > 0"                        7/18/83
+
+
+##  See PPS p. 3-17:  If Towed-Array's tug has tonal matching a
+##              target tonal and target/tug are both in beam, the
+##              target tonal WON'T be reported (e.g. skip SE step
+##              in Subroutine  FRQDET).
+
+
+       If (Det_Tn_Count > 0)         # If TGT tonal(s) MAY be detected 7/21/83
+        {
+         ITT = 0                # Init. neither TARGET nor TUG  9/27/83
+
+##      [ Spec. (dis)regards lobe as complete sector, so fLOBE = 1. ]
+         fLOBE = 1.0             #OMNI lobe-factor is 1. 8/10/83
+
+         if(DD_Mode[Dor_Index] == $$$TA) # If this is a TOWED-ARRAY case 7/21/83
+          {
+           svu = UNT$Pointer                    # Save UNT ptr  7/21/83
+           UNT$Pointer$TO Xboy$OWNERindx$I      # TUG's pointer 7/21/83
+
+           for(kt = PS_Targets +1; kt <= PS_Count; kt =kt +1) # Which   7/21/83
+            {           # among the PasSonarList is the TUG?    7/21/83
+             kq = PS_DD_x[kt]             # Index to DD_Pntr arry   7/21/83
+             if(DD_Pntr[kq] == UNT$POINTER) # Matches TUG pntr    7/21/83
+              {
+                ITT = 1         # Flag this is TUG-case         7/21/83
+                BREAK           
+              }
+            }      # End of "Which... is the Tug?.."    
+           UNT$Pointer = svu            # Restore UNT ptr       7/21/83
+          }     # End "if this is Towed-Array case"             7/21/83
+
+         do SHN$SPD$TN$index = 1, SHN$SPD$TN$slots # @. sig.line 11/5/90
+          {
+           SHN$SPD$tn$Freq$i  = xSHN$SPD$tn$Freq$i        #     11/5/90
+           if( SHN$SPD$tn$Freq$i > 0 )   # if non-zero freq.    11/5/90
+            {
+             SHN$SPD$tn$Level$i = xSHN$SPD$tn$Level$i     #     11/5/90
+##-------------------------------------------------------------
+             if (trace$sonar$PASSIVE != $NO)            #       7/26/83
+              {
+               call echov (" ?INTON=")              # 9
+               call echoi (SHN$SPD$tn$Freq$i)            # 5?  14 11/5/90
+               call echov (" indx= ")               # 20
+               call echoi (PS_DD_x[i])                    #       8/10/83
+              }
+##---------------------------------------------------------------
+
+             call FRQDET(_      # SPCLVL & factor args replaced 7/20/83 
+                         i,     # for INTRF. PS_Range/PS_Depth index   8/5/83
+                         SHN$SPD$tn$Freq$i,      #              11/5/90
+                         SHN$SPD$tn$Level$i,     #2   1   0     11/5/90
+                         iTT,    #2(targ),1(tug),0(other),3(NA  7/20/83
+                         ndxDT, #FRQDET sets Det_Tn_SE indx @ ITT=0,1 7/20/83
+                         RDI,   # vice TERM (RDI - PS_Ploss[k])   8/4/83
+                         ISPD1,         # detectOR speed index  8/9/83
+                         fLOBE,         # Interfer. lobe-factor 8/10/83
+                         iflag)
+
+             if (iflag != $NO)
+              {
+                ##<<<>>>
+              }         # End of IF iflag != $NO
+            }       # End of if( SHN$SPD$tn$Freq$i > 0 ) #       11/5/90
+          }       # End of DO SHN$SPD$TN$index..         #       11/5/90
+        }       # End of "if Det_Tn_Count >0"
+
+##-------------------------------------------------------------
+###     Trace on modes moved from here                          8/23/83
+##-------------------------------------------------------------
+      }                 # End for ea. entry in PasSonarList
+
+    }           # End of "if general noise bit set"
+
+   if ( Det_Freq != 0 | Det_Acous  != $no |  #if echo, acstccomm,    8/29/83
+        Det_BB_flag != $no | Det_Tn_Count != 0 )    # Bband or Tonal(s) #   9/27/83
+     {
+      if(PS_Range[k] <= 333.0 |             # <<<>>> TEMPORARY! jb  9/13/83
+           (PS_Range[k] <= 333.0 & DD_Mode[Dor_Index] == $$$TA) ) #GK60;CARL30 9/13/83
+       {
+##-------------------------------------------------------------
+        if (trace$sonar$PASSIVE != $NO)         #       8/29/83
+         {
+          call echov (" Call REPPSD: Flags= ")
+          call echoi (Det_Freq)
+          call echov (",")
+          call echoi (Det_Acous)
+          call echoi (Det_BB_flag)
+          call echoi (Det_Tn_Count)
+          call echor
+         }
+##---------------------------------------------------------------
+        call REPPSD(PS_Bear[k],PS_Range[k])           #report detection
+       }                                # End if PS_Range
+     }          # End if ECHO/Bband/AcstComm/Tonals
+
+  }     # End of  FOR EACH TARGET       ~470 lines
+$tgtNV Env_Num = nvDOR                   # Restore DetecrOR Env_Num     11/26/90
+$tgtNV SON$NV$index = Env_Num            # $NV index for SON table       3/3/87
+$tgtNV SOB$NV$index = Env_Num            # $NV index for SOB table       3/3/87
+
+ return 
+ end            # End   Subroutine PASDET
+
+
+ Subroutine FRQDET( _                   #FReQuency DETection
+                   k,                   #                       8/5/83
+                   ifreq,               #frequency (in)
+                   level,               #signal level (in)
+                   iTT,  #2(targ),1(tug),0("other"),3(NA)       7/20/83
+                   ndxDT, #indx to Det_Tn_SE/Det_Tn_Freq; INput if ITT=2   7/20/83
+                   RDI,         # vice TERM (DI-RD-PS_Ploss[k])   8/4/83
+                   ISPD1,               # detectOR speed index  8/9/83
+                   fLOBE,               # Interfer. lobe-factor 8/10/83
+                   jflag)               #detect flag (out)
+
+ #######################################################
+ #$%
+ #$% Purpose:   FRQDET determines if a certain
+ #$%            frequency is detected, or whether a tonal
+ #$%            interferes with detection of a tgt. tonal
+ #$%
+ #$% Called By: PASDET
+ #$%
+ #$% Calls:     INDFRQ    (LOG10)
+ #$%            NLTEST
+ #$%
+ #$% Tables:    ANO     SON
+ #$%
+ #$% Date:      FEB 81
+ #$%
+ #$% Author:    Ron Williams
+ #$%
+ #$% Revised:   8/83 - J. Bryant (Revised PasSon PPS dtd 6/83)
+ ##############################################################
+ BBcommon
+ SM$Common                                       #               7/21/83
+
+ LITERAL CSTRIP8                                # jb E2145 6/21/00
+ REAL PRPLS,SN,FNOISE,FSE,RDI,FLOBE,PROB1,PROB2 # jb E2145  6/21/00
+ real AN
+ real*4 Ac_alt, Sub_depth, temp
+ Real*4 Intra_Degradation                       # For EMI        11/6/90
+ Integer*4 iflag1,iflag2,iflag3                 # For EMI        11/6/90
+ Integer*4 Hold_Deq                             # jb             2/11/91
+ Integer K,IFREQ,JFLAG,ITT,KLIN,IDB,NDXDT,LEVEL, # jb E2145  6/21/00
+    NLTEST2,NLTEST,IBELOW,IABOVE,IFBELO,IFABOV,  # jb E2145  6/21/00
+    ISPD1, KANO,ANO$Pointer,ANO$NV$Index,        # jb E2145  6/21/00
+    SON$SPD$TN$Index,                            # jb E2145  6/21/00
+    DEQ2$Pointer, DEQ$Pointer                    # jb E2145  6/21/00
+
+ if (ifreq < Pas_Lofreq |                     #if outside of detector band
+     ifreq > Pas_Hifreq)
+    {
+     jflag = $no                        #no detection
+     return
+    }
+
+ if ( ITT == 1 | ITT == 0 )     #TUG or other interfering case 7/21/83
+  {
+   klin = 0
+   for (iDB =1; iDB <=6; iDB =iDB +1)   # for Det_Tn_Freq elements    7/21/83
+    {
+     if (Det_Tn_Freq[iDB] == ifreq )  # If frequency has a match      7/21/83
+      {
+       klin =klin +1            # Count number of matches       7/21/83
+       NDXDT = iDB              # set Det_Tn_SE indx for ITT = 0     10/3/83
+       if (ITT == 1)            # Tug case only                 7/21/83
+        {
+    ##--------------------------------------------------------
+         if (trace$sonar$PASSIVE != $NO)                #       7/26/83
+          {
+           call echov (" TUG INTERFER!")            # 14
+           call echor
+          }
+    ##----------------------------------------------------------
+
+         Det_Tn_Count = Det_Tn_Count -1               # 1 LESS tonal detected 7/21/83
+         Det_Tn_Freq[iDB] = 0                 # Flag no frequency     7/21/83
+         Det_Tn_SE[iDB] = -987.6             # Flag SE as bad..      7/21/83
+         RETURN                 # for TUG, no need for SE       7/21/83
+        }               # End of "TUG case only"
+      }         # End "If frequency has a match"
+    }   # End "for Det_Tn_Freq (frequency) elements
+
+   if ( klin == 0 )     RETURN          # no frequencies match  7/21/83
+  }     # End "if TUG or other-interfering case"
+
+ if(ifreq == 0)        RETURN            # jb                    6/22/90
+ call INDFRQ( _
+             IFREQ,
+             IBELOW,
+             IABOVE,
+             IFBELO,
+             IFABOV)
+
+#if(IFABOV == IFBELO) RATIO = 0.                #prepare        7/19/83
+#else RATIO =FLOAT(IFREQ -IFBELO) / FLOAT(IFABOV -IFBELO) # interpolat.
+
+   ##Note: PPS pg 3-22 specifies NEAREST tabulated frequency    7/19/83
+ if (iFabov -iFREQ < iFREQ -iFbelo )            # NEAREST       8/5/83
+      kano = iabove
+ else kano = ibelow                             #  tabulated    8/5/83
+ ANO$POINTER$TO kano                            #   frequency.. 8/5/83
+ Call NBPRPL(_                                  # Get Nb PRPLS  8/5/83
+              k,                        # PS_Range/PS_Depth index      8/5/83
+              kano,                             # Freq. index   8/5/83
+              PRPLS )                           # (returned)    8/5/83
+
+ ANO$NV$index = Env_Num                          # Envrnmt       8/18/83
+
+    ##Note:  PPS pg 3-18 specifies AN taken directly from file  7/19/83
+ AN = XANO$NV$NOISE$F/10.       # AMBIENT noise right from tbl  7/19/83
+    #NOTE: dividing AN by 10. prepares for FNOISE computation, below
+ 
+ # SMM 5/12/98 (E1980)
+ # detectee is not an a/c... so change UNT$Type to UNT2$Type
+ if(xUNT2$TYPE$I != $AIR$CODE) # added extract SMM 2/98 (E1930)
+   {
+    if(son$spd$index == 0) SN = 0.         #if no self-noise, set to zero
+    else
+       {
+        SON$SPD$INDEX = ISPD1              #               index   7/19/83
+        SON$SPD$TN$INDEX = kano            #set index for freq     8/8/83
+
+        SN = XSON$SPD$TN$LEVEL$I/10.       #Self-Noise @ IFREQ.    7/19/83
+    # NOTE: dividing SN by 10. prepares for FNOISE computation, below
+    ##---------------------------------------------------------
+        if (trace$sonar$PASSIVE != $NO)            #       12/14/83
+         {
+          call echov (" nbSN=")                # 14
+          call echof (SN,2)                        #       8/8/83
+         call echov (" nbAN=")                # 14
+         call echof (AN,2)                        #       8/8/83
+        }
+    ##-----------------------------------------------------------
+       }   #endelse
+   }
+ else   # it's an aircraft, so set self-noise to zero and compute source level
+   {
+    SN = 0.
+# level = level - 7dB + 20log(sin(arctan(d/h))) pg. 3-23 Non-acoustic Model
+    Sub_depth = Dor_Depth    # d in above equation
+    Ac_alt = Tgt_Depth       # h in above equation
+
+    if (Sub_depth == 0.0 | Ac_alt == 0.0)  # jhm/ja 8/98 (E2041)
+      temp = 0.0                           # prevent log of zero
+    else
+      temp = LOG10(SIN(ATAN(Sub_depth/Ac_alt)))
+
+    level = FLOAT(level) - FLOAT(7) + FLOAT(20)*(temp)
+   }
+
+#FNOISE = SN + AN * factor + SPCLVL             #compute total noise
+#SE = level - qkdb(FNOISE) + term               #compute signal excess
+ FNOISE = 10.*log10((1.0D+1)**SN + (1.0D+1)**AN) #PPS pg 3-20   8/11/83
+ FSE  = level -FNOISE +RDI -PRPLS       #Sig.Excess; PPS pg 3-16 8/8/83
+ FSE = max(-987.6,FSE)                          #               12/14/83
+ if (ITT == 0 )                 # if "other-interfering" case   7/21/83
+  {
+ if (FSE*fLOBE > Det_Tn_SE[ndxDT] )  #       Fse                     8/10/83
+    {
+    ##---------------------------------------------------------
+     if (trace$sonar$PASSIVE != $NO)            #       2/14/83
+      {
+       call echov (" NB INTERFER: indx=")   # 19
+       call echoi (PS_DD_x[k])                    #       8/11/83
+       call echor                               #
+      }
+    ##-----------------------------------------------------------
+
+     Det_Tn_Count = Det_Tn_Count -1           # 1 LESS tonal detected 7/21/83
+     Det_Tn_Freq[ndxDT] = 0           # Flag no frequency     7/21/83
+     Det_Tn_SE[ndxDT] = -987.6       # INTERFERENCE flag..   7/21/83
+     RETURN                     # no need for nltest    7/21/83
+    }
+   else RETURN                  # no need for nltest    7/21/83
+  }     #       End of "if other-interfering case"
+
+##-------------------------------------------------------------
+ if (trace$sonar$PASSIVE != $NO)                #       7/26/83
+  {
+       call echor
+       call echov (" ITT=")                 # 5             8/11/83
+       call echoi (ITT)                         # 7?            8/11/83
+       call echov (" LEVEL=")               # 7             8/4/83
+       call echoi (level)                       # 7?            8/4/83
+       call echov (" NbNOISE=")             # 9             8/4/83
+       call echof (FNOISE,2)                    # 7?            8/4/83
+       call echov (" RDI=")                 # 6             8/4/83
+       call echof (RDI,2)                       # 7?            8/5/83
+       call echov (" PROP=")                # 6             8/4/83
+       call echof (PRPLS,2)                     # 7?            8/5/83
+       call echov (" NB SE=")               # 8
+       call echof (Fse,4)                       # 7?  15        12/14/83
+       call echov (" indx= ")               # 20
+       call echoi (PS_DD_x[k])                    #               8/10/83
+       call echor                               #       8/88
+  }
+
+##---------------------------------------------------------------
+
+ jflag = nltest(0.0,Sonar$SIGMA,FSE)# detect. flag              12/13/83
+
+ if( ITT > 1 & jflag != $NO )           #  TARGET detection!    8/8/83
+  {
+   Det_SE = MAX ( Det_SE, FSE )                 # Overall SE for TMA    8/8/83
+   If (ITT == 2) Det_Tn_SE[ndxDT] = FSE      # Store tgt tonal's SE  9/27/83
+  }     ## nb:  PASDET stores tgt tonal's iFREQ in Det_Tn_Freq array  7/21/83
+
+ return
+ end            #  End  Subroutine FRQDET
+
+
+ Subroutine INDFRQ( _           #INDex for FReQuency
+                   IFREQ,       #frequency (input)
+                   IBELOW,      #indx to freq just below (output)
+                   IABOVE,      #indx to freq just above (output)
+                   IFBELO,      #frequency just below (output)
+                   IFABOV)      #frequency just above (output)
+
+ #######################################################
+ #$%
+ #$% Purpose:   INDFRQ determines appropriate indices
+ #$%            into self-noise tables as well as in-
+ #$%            to the proploss and ambient noise
+ #$%            tables
+ #$%
+ #$% Called By: FRQDET  PSCHAR
+ #$%
+ #$% Calls:     None
+ #$%
+ #$% Tables:    None
+ #$%
+ #$% Date:      FEB 81
+ #$%
+ #$% Author:    Ron Williams
+ #$%
+ #######################################################
+BBIMPLICIT      # jb E2145  6/21/00
+
+ #Calls: QLOG2
+
+ real*4    MTH$ALOG2, FLG2    # jb;  For MTH$ALOG2        8/22/88
+Integer I,IBELOW,IABOVE,IFREQ,IFBELO,IFABOV # jb E2145  6/21/00
+ integer IFARG[20]
+ data (IFARG[I],I=1,20) / 10,15,20,30,40,60,80,100,125,250,315,630,900,
+                          1250,1600,2000,2500,3500,5000,10000 /
+ IBELOW = 1                                     #initialize
+ IABOVE = 20                                    #initialize
+
+## I = INT(1.9 * QKLG2(FLOAT(IFREQ)) - 5.3)  # jb (Old way) 9/1/88
+ FLG2 = FLOAT(IFREQ)                               # jb       8/22/88 
+ FLG2 = MTH$ALOG2(FLG2)               # jb replace WKLG2      8/22/88 
+ I = INT(1.9 * FLG2 - 5.3)        #compute a close starting-  8/22/88
+
+ if(I < 1)  I = 1                               #   point but make sure
+ else if(I > 20)  I = 20                        #     within correct limits
+
+ repeat                                         #continue until done
+
+    {
+     if(IFREQ < IFARG[I])                       #if index reprsnts higher freq
+
+       {
+        IABOVE = I                              #adjust ceiling
+
+        I = I - 1                               #decrease index for next try
+       }
+
+     else if(IFREQ > IFARG[I])                  #if index reprsnts lower freq
+
+       {
+        IBELOW = I                              #adjust floor
+
+        I = I + 1                               #increase index for next try
+       }                                        #endif
+
+     else                                       #if frequency matches
+       {
+        IBELOW = I
+
+        IABOVE = I
+       }
+
+    }   # endrepeat
+
+ until(IABOVE <= IBELOW + 1)                    #done when frequency pinched
+
+ IFBELO = IFARG[IBELOW]                         #get frequency below
+
+ IFABOV = IFARG[IABOVE]                         #get frequency above
+
+ return
+ end
+
+
+ Subroutine GETBBN(_
+                   k)
+
+ #######################################################
+ #$%
+ #$% Purpose:   GETBBN computes noise level due to
+ #$%            propagation loss and ship noise.
+ #$%
+ #$% Called By: PASDET
+ #$%
+ #$% Calls:     
+ #$%
+ #$% Tables:    PRL     SHN     UNT
+ #$%            SHC
+ #$%
+ #$% Date:      FEB 81
+ #$%
+ #$% Author:    Ron Williams
+ #$%
+ #######################################################
+ BBcommon
+ SM$Common
+
+Integer J,K,IRNG,                               # jb E2145  6/21/00
+    PRL$Pointer,PRL$NV$Index,PRL$NV$FQ$Index,   # jb E2145  6/21/00
+    SHN$Pointer,SHN$SPD$Index,                  # jb E2145  6/21/00
+    CTM$Pointer, SHC$Pointer                    # jb E2145  6/21/00
+ logical DRDEEP, TGDEEP
+
+ irng = INT(PS_Range[K] + .5)       #determine              6/20/83
+ if(irng < 1) irng = 1                  # range index   6/20/83
+ else if(irng > 120) irng = 120         # for PRL table 6/20/83
+ PRL$Pointer$to irng                    # set PRL pntr  6/20/83
+
+ PRL$NV$index = Env_Num                  # Envrnmt #     8/18/83
+ prl$NV$fq$index = 16                   #               8/8/83
+
+ DRDEEP = (Dor_Depth >= LAYER$DEPTH)        # Is detector at/below layer?
+
+ TGDEEP = (PS_Depth[K] >= LAYER$DEPTH)     # Is target at/below layer?
+
+ if(DRDEEP & TGDEEP)                    #if both deep
+    PS_Ploss[k] = XPRL$NV$FQ$PROPLOSSDEEP$F #approp. proploss     6/20/83
+
+ else if(!DRDEEP & !TGDEEP)             # if both in-layer,
+    PS_Ploss[k] = XPRL$NV$FQ$PROPLOSSIN$F #       approp.proploss 6/20/83
+
+ else                                   # if cross-layer
+    PS_Ploss[k] = XPRL$NV$FQ$PROPLOSSCROSS$F #approp. proploss    6/20/83
+
+
+
+ if (PS_Speed[k] <= 0)                      #                       11/28/83
+     PS_BBN[k] = 0.
+ else
+    {
+     
+     j = PS_DD_x[k]
+
+     UNT2$POINTER = DD_Pntr[J]                    #set UNT pntr for target
+
+     if(xUNT2$TYPE$I == $AIR$CODE) return         # joa RSOI4
+
+     #$% PERs E1033 & E1034 - disallow active detections of inbound torpedos  cpa 8/12/92
+     #$%        remove commented lines after testing is completed..........
+#    #$% smart torpedo unit type,  reh 5/2/90
+     if (xUNT2$SuperType$i == $Torpedo$SuperCode)
+         return
+#        {                   
+#        TRP$Pointer = xUNT2$TRPPntr$i
+#        SHN$Pointer$To xTRP$NoiseIndx$I 
+#        }
+
+    #$% countermeasure unit type,  reh 5/15/90
+#   else
+    if (xUNT2$SuperType$i == $CtrMeasure$SuperCode)
+        {                   
+        CTM$Pointer = xUNT2$CTMPntr$i
+        SHN$Pointer$To xCTM$NoiseIndx$I 
+        }
+    else
+        {
+        SHC$POINTER = XUNT2$SHCPNTR$I              #set SHC pntr for target
+
+        if(XUNT2$PROPULSIONMODE$I == $electric$code) # sub in battery mode
+             SHN$POINTER$TO XSHC$NOISEINDXELEC$I    #set noise ch ptr thus
+        else                                       #in all other cases
+            SHN$POINTER$TO XSHC$NOISEINDX$I        #set noise ch ptr thus
+        }
+
+     PS_SHN[k] = shn$pointer                    #save noise pointer
+
+#    S = 0.                               #initialize 1/3-octave accum
+#    do SHN$SPD$FQ$INDEX = INDLOF, INDHIF #add up contribution from each
+#       {
+#        S = S + QKPOWR(XSHN$SPD$FQ$BBNOISE$F) #  1/3-oct band in bandwidth
+#       }
+
+     SHN$SPD$INDEX = PS_Speed[k]    # set index for SPEED # STET    11/28/83
+
+##   S = xSHN$SPD$BbNoise$f     # Bband noise < 2000 Hz         6/21/83
+        # Note:  PPS pg 3-18/19 SL =BL -10*log(bw) = BL - 27.0
+     PS_BBN[k] = xSHN$SPD$BbNoise$f -27. # Bb Splvl @ 2000 Hz   7/18/83
+
+##   PS_BBN[k] = S / QKPOWR(PS_Ploss[k])  #adj for proploss       7/18/83
+    }
+
+ return
+ end
+
+
+ Subroutine ASAC(_
+                 iddl,
+                 ifreq,
+                 level)
+#######################################################
+ #$%
+ #$% Purpose:   ASAC returns source level and
+ #$%            center frequency of specified
+ #$%            acoustic-comm or sonar.         7/20/83
+ #$%
+ #$% Called By: PASDET
+ #$%
+ #$% Calls:     None
+ #$%
+ #$% Tables:    SON     SOB
+ #$%
+ #$% Date:      Modif'd 9/90 for Active Sonar changes (SONCH)
+ #$%
+ #$% Author:    Ron Williams - FEB 81
+ #$%
+ #######################################################
+ BBcommon
+ SM$Common
+
+ REAL    SIGMA, ANGLE                           # jb E2145  6/21/00
+ Integer IDDL,ISAVE,LEVEL,SON$MOD$Index,IFREQ   # jb E2145  6/21/00
+
+ if(DD_Seq[iddl] == 0)                           #if char stored in SON
+    {
+     isave = son$pointer
+     SON$POINTER = DD_Char[iddl]                  #set SON pointer
+
+  # Note:  SHPREP sets DD_Mode[iddl] to 0 for COMM buoys...
+     if (DD_Mode[IDDL] == 0 | Level$ActiveSonar == 0) # jb 9/11/90,1/10/91
+        LEVEL = XSON$SOURCELEVEL$I # jb 9/11/90            SONCH
+#$%--------------------------------------------------------- 11/5/90
+     else
+       {
+        SON$MOD$Index = DD_Mode[iddl]                     # jb    11/5/90
+        SON$MOD$Index =MIN(SON$MOD$Index,SON$MOD$SLOTS) # jb    11/5/90
+        level = xSON$MOD$SourceLevel$I                  # jb   12/19/90
+        SIGMA = xSON$MOD$Sigma$I                        # jb    11/5/90
+        ANGLE = xSON$MOD$Angle$I                        # jb    11/5/90
+       }
+#     else if (DD_Mode[IDDL] == $$$BB)# jb 9/11/90            SONCH
+#        LEVEL = XSON$LS_BB$I       # jb 9/11/90            SONCH
+#     else if (DD_Mode[IDDL] == $$$DP)# jb 9/11/90            SONCH
+#        LEVEL = XSON$LS_DP$I       # jb 9/11/90            SONCH
+#     else if (DD_Mode[IDDL] == $$$CZ)# jb 9/11/90            SONCH
+#        LEVEL = XSON$LS_CZ$I       # jb 9/11/90            SONCH
+#$%---------------------------------------------------------- 11/5/90
+
+     IFREQ = XSON$CENTERFREQ$I                  #get center frequency
+     son$pointer = isave
+    }
+ else                                           #if char stored in SOB
+    {
+     isave = sob$pointer
+     SOB$POINTER = DD_Char[iddl]                  #set SOB pointer
+     LEVEL = XSOB$SOURCELEVEL$I                 #get source level
+     IFREQ = XSOB$CENTERFREQ$I                  #get center frequency
+     sob$pointer = isave
+    }
+
+ return
+ end            # End of Subroutine ASAC
+
+
+
+ Subroutine PSCHAR              #Passive Sonar CHARacteristics
+
+#######################################################
+ #$%
+ #$% Purpose:   PSCHAR returns passive sonar charac-
+ #$%            teristics to the calling subroutine.
+ #$%
+ #$% Called By: PASDET
+ #$%
+ #$% Calls:     INDFRQ
+ #$%
+ #$% Tables:    SOB     SON
+ #$%
+ #$% Date:      FEB 81
+ #$%
+ #$% Author:    Ron Williams
+ #$%
+ #######################################################
+ BBcommon
+ SM$Common
+
+ if (DD_Seq[Dor_Index] > 0)                             #if char in SOB table
+    {
+     Pas_Sdev = XSOB$StDevBrgErr$F                  # std.dev. of Brg.Err 7/7/83
+
+     Pas_RD = XSOB$RECOGNITIONDIFF$I                #get recognition differential
+
+     Pas_Hifreq = XSOB$HIENDFREQ$I                    #get upper limit of band
+
+     Pas_Lofreq = XSOB$LOENDFREQ$I                    #get lower limit of band
+
+     Pas_Hbeam = xsob$horizbeam$i * ($pi/360.)     #half of horiz bm width (rad)
+    }
+ else                                           #if char in SON table
+    {
+     Pas_Sdev = XSON$StDevBrgErr$F                  # std.dev. of Brg.Err 7/7/83
+
+     Pas_RD = XSON$RECOGNITIONDIFF$I                #get recognition differential
+
+     Pas_Hifreq = XSON$HIENDFREQ$I                    #get upper limit of band
+
+     Pas_Lofreq = XSON$LOENDFREQ$I                    #get lower limit of band
+
+     Pas_Hbeam = xson$horizbeam$i * ($pi/360.)     #half of horiz bm width (rad)
+    }
+
+ return
+ end
+
+
+ Subroutine NBPRPL(_                    #                       8/5/83
+                   k,                   # PS_Range/PS_Depth index
+                   prl$NV$fq$index,     # index of freq.        
+                   PRPLS )              # return PROPLOSS
+
+ #######################################################
+ #$%
+ #$% Purpose:   NBPRPL computes PropLoss for NarrowBand
+ #$%
+ #$% Called By: PASDET
+ #$%
+ #$% Calls:     
+ #$%
+ #$% Tables:    PRL
+ #$%
+ #$% Date:      August 1983
+ #$%
+ #$% Author:    J. Bryant    
+ #$%
+ #######################################################
+ BBcommon
+ SM$Common
+
+ REAL    PRPLS                                  # jb E2145  6/21/00
+ Integer K,IRNG,                                # jb E2145  6/21/00
+    PRL$Pointer,PRL$NV$Index,PRL$NV$FQ$Index    # jb E2145  6/21/00
+ logical DRDEEP, TGDEEP
+
+ irng = INT(PS_Range[K] + .5)       #determine              6/20/83
+ if(irng < 1) irng = 1                  # range index   6/20/83
+ else if(irng > 120) irng = 120         # for PRL table 6/20/83
+ PRL$Pointer$to irng                    # set PRL pntr  6/20/83
+
+ PRL$NV$index = Env_Num                  # Envrnmt #     8/18/83
+
+ DRDEEP = (Dor_Depth >= LAYER$DEPTH)        # Is detector at/below layer?
+
+ TGDEEP = (PS_Depth[K] >= LAYER$DEPTH)     # Is target at/below layer?
+
+ if(DRDEEP & TGDEEP)                    #if both deep
+    PRPLS = XPRL$NV$FQ$PROPLOSSDEEP$F   #approp. proploss       8/5/83
+
+ else if(!DRDEEP & !TGDEEP)             # if both in-layer,
+    PRPLS = XPRL$NV$FQ$PROPLOSSIN$F     #       approp.proploss 8/5/83
+
+ else                                   #if cross-layer
+    PRPLS = XPRL$NV$FQ$PROPLOSSCROSS$F #approp. proploss        8/5/83
+
+ return
+ end            # End of Subroutine NBPRPL
+
+
+Subroutine REPPSD(_                     #REPort Passive Sonar Detection 
+                  BEAR,                 #true bearing to target (input)
+                  range)                #true range to target (input)
+########################################################
+#$%
+#$% Purpose:    REPPSD reports passive sonar
+#$%             detection data.
+#$%
+#$% Called By: PASDET
+#$%
+#$% Calls:      ANG2PI          LCLPSN
+#$%
+#$% Tables:     PSD     UNT     BOY     
+#$%
+#$% Date:       FEB 81
+#$%
+#$% Author:     Ron Williams
+#$%
+#$% Modified:  Jim Allen - 8/96 (E1651)
+#$%            Sonar should not detect through land mass
+#$%            Store the detector position information for
+#$%            a call to land_between_points to determine
+#$%            if land is in the way.
+#$%
+########################################################
+BBcommon
+SM$Common
+                        # \/ (unused argument)
+real APPBRG,FORLAT,FORLON,RANGE,BEAR    # jb E2145  6/21/00
+Integer N,IOMNI,LSBNBR,LBEAR            # jb E2145  6/21/00
+
+integer  land_between_points          # function which indicates if a land mass
+                                      # is between 2 positions - joa 8/96 (E1651)
+integer  is_land                      # variables used by the
+real     detlat, detlon, cosdetlat    # call to
+real     tgtlat, tgtlon, costgtlat    # land_between_points
+
+iOMNI = 0               # initial. NOT an omni-directional buoy 7/13/83
+ 
+if (Dor_Index > DD_Air)                        #if detector in BOY table
+   {
+    UNT$POINTER$TO XBOY$OWNERINDX$I     #get owner's UNT pointer
+    N = DD_Seq[Dor_Index]                       #get buoy seq number
+    lsbnbr = N + xboy$offset$i          #store buoy seq number
+
+    if(N == 0)                          #if towed array
+       {
+        lsbnbr = 511                      #indicates towed array
+        APPBRG = BEAR + XBOY$HEADINGERROR$F #compute appar brng of tgt
+        forlat = XBOY$ASSUMEDLATITUDE$F         #store assumed lat
+        forlon = XBOY$ASSUMEDLONGITUDE$F        #store assumed lon
+        detlat = xBOY$TrueLatitude$F 
+        detlon = xBOY$TrueLongitude$F
+        cosdetlat = xBOY$CosTrueLat$F
+       }        #end if towed array
+
+    else        #if sonobuoy
+       {
+        APPBRG = BEAR + XUNT$HEADINGERROR$F     #compute tgt appar brng # 3/89
+
+        forlat = XBOY$ASSUMEDLATITUDE$F +      # assumed lat of nth buoy
+                 (N-1)*XBOY$ASSUMEDDELTALAT$F
+
+        forlon = XBOY$ASSUMEDLONGITUDE$F +     # assumed lon of nth buoy
+                  (N-1)*XBOY$ASSUMEDDELTALON$F
+
+        detlat = xBOY$TrueLatitude$F + ((N-1) * xBOY$TrueDeltaLat$F)
+        detlon = xBOY$TrueLongitude$F + ((N-1) * xBOY$TrueDeltaLon$F)
+        cosdetlat = xBOY$CosTrueLat$F
+
+        SOB$Pointer = Xboy$EqPntr$i                     # 7/13/83
+        iOMNI = Xsob$OMNIflag$i                         # 7/13/83
+       }        #end else
+
+   }    #end if in boy table
+
+else                                    #if detector in UNT table
+   {
+    lsbnbr = 0                                  #sonobuoy number N/A
+
+    APPBRG = BEAR + XUNT$HEADINGERROR$F         # apparent brng of tgt
+
+    forlat = XUNT$ASSUMEDLATITUDE$F             # detector assumed lat
+
+    forlon = XUNT$ASSUMEDLONGITUDE$F            # assumed lon of detctr
+
+    detlat = xUNT$TrueLatitude$F 
+    detlon = xUNT$TrueLongitude$F
+    cosdetlat = xUNT$CosTrueLat$F
+   }
+
+$ang2PI(APPBRG)                         #insure app brng in (0,2*pi)
+
+lbear = INT(APPBRG*(180./$PI) + .5)     #convert to degrees
+
+if (lbear >= 360)                       #insure less than 360 degrees
+   lbear = lbear - 360                  #after rounding
+
+if (Tgt_Index<=DD_Air)                         #if detectee is ship or a/c
+   {
+    UNT2$POINTER = DD_Pntr[Tgt_Index]            #set UNT pntr for detectee
+    tgtlat = xUNT2$TrueLatitude$F 
+    tgtlon = xUNT2$TrueLongitude$F
+    costgtlat = xUNT2$CosTrueLat$F
+   }
+else                                    #if detectee in BOY
+   {
+    BOY2$POINTER = DD_Pntr[Tgt_Index]            #set BOY pointer for detectee
+    tgtlat = xBOY2$TrueLatitude$F 
+    tgtlon = xBOY2$TrueLongitude$F
+    costgtlat = xBOY2$CosTrueLat$F
+    UNT2$POINTER$TO XBOY2$OWNERINDX$I   #set UNT pointer for owner
+   }
+
+is_land = land_between_points (detlat, detlon, cosdetlat,
+                               tgtlat, tgtlon, costgtlat)
+if (is_land == $NO)
+  {
+    call LCLPSN (_
+                unt$pointer,
+                unt2$pointer,
+                lbear,
+                forlat,
+                forlon,
+                Det_Tn_Freq,                  #signature lines
+                Det_Acous,                 #ac comm detect flag
+                Det_BB_flag,                 #broadband detect flag
+                Det_Freq,                 #detected act son frq
+                lsbnbr,                 # SonoBuoy #
+                Pas_Sdev,                   # StdDev of BrgErr      7/7/83
+                Det_SE,                     # Signal Excess         7/13/83
+                iOMNI )                      # buoy OMNIflag    7/13/83
+  }   # end of if there in no land mass in the way
+
+return
+end             #       End  REPPSD
+
+ Subroutine DPVDSR( _           #Direct Path & VDSonar Range
+                RDEEP,          #max range for deep (output)
+                RIN)            #max rng for in-layer (output)
+
+ #######################################################
+ #$%
+ #$% Purpose:   DPVDSR computes direct path and
+ #$%            variable depth sonar range.
+ #$%
+ #$% Called By: SONDET
+ #$%
+ #$% Calls:     RANDN
+ #$%
+ #$% Tables:    SON     BOY     UNT
+ #$%
+ #$% Date:      SEPT. 1990 (Active Sonar Modifications - SONCH)
+ #$%
+ #$% Author:    Ron Williams - Feb. '81
+ #$%
+ #######################################################
+ BBcommon
+ SM$Common
+
+ LITERAL CSTRIP8                                            # jb E2145 6/21/00
+ REAL*4  RDMU,RIMU,RATIO,RDEEP,RIN,                         # jb E2145 6/21/00
+    SON$NV$dpdeep12$F,SON$NV$dpdeep18$F,SON$NV$dpin12$F,    # jb E2145 6/21/00
+    SON$NV$dpin18$F,SON$NV$dpdeep24$F,SON$NV$dpin24$F       # jb E2145 6/21/00
+Integer ISAVV,LSPEED,   SON$Variabledepth$I                 # jb E2145 6/21/00
+
+ SON$VARIABLEDEPTH$I = XSON$VARIABLEDEPTH$I     #get VDS flag
+
+ if(SON$VARIABLEDEPTH$I == $YES)                #if VDS
+    {
+##     SPEED = XBOY$TRUESPEED$F                   #get speed from BOY
+     Dor_Speed = XBOY$TRUESPEED$F       #get speed from BOY  9/11/90 SONCH
+     Dor_Depth = xSON$NV$DipDepth$I                   #     9/11/90 SONCH
+
+     if (trace$sonar != $no)                    #               2/2/83
+        {
+         isavv = UNT$POINTER                    # save pointer
+         call echor                             #               2/15/83
+         call echov (" Mode=VDS Depth=")    # 17
+         call echoi (Xboy$TrueDepth$i)          #  4 
+         UNT$POINTER$TO XBOY$OWNERINDX$I        # owner of VDS  2/14/83
+         call echov (" OWNR=")              # 5             2/14/83
+         call echohn (XUNT$NAME$C,$$MaxLit)            # 5             2/14/83
+         call echov (" SPD=")               # 5             2/14/83
+         Lspeed = Dor_Speed + 0.5                    #               9/11/90
+         call echoi (Lspeed)                    # 4 45          5/29/84
+         UNT$POINTER = isavv                    # restore ptr.
+        }
+    }
+ else                                           #if hull-mounted
+    {
+     Dor_Speed = XUNT$TRUESPEED$F            #get speed from UNT 9/11/90 SONCH
+     Dor_Depth = xUNT$TrueAltDepth$I                #           9/11/90 SONCH
+
+     if (trace$sonar !=$no)                     # (here, $$$DP) 2/2/83
+         call echov (" Mode= DP")           # 9  48
+    }
+
+ if(Dor_Speed <= 12.)                      #if between 0 & 12 knots 9/11/90 SONCH
+
+    {
+     RDMU = XSON$NV$DPDEEP12$F          #rng @ 12-kt, deep      6/20/83
+
+     RIMU = XSON$NV$DPIN12$F            #rng @ 12-kt, inlayer   6/20/83
+    }
+
+ else if(Dor_Speed <= 18.)            #if between 12 & 18 knots 9/11/90 SONCH
+    {
+     RATIO = (Dor_Speed - 12.) * (1. / 6.)  #prepare to interpolate 9/11/90 SONCH
+
+     SON$NV$DPDEEP12$F = XSON$NV$DPDEEP12$F #rng @ 12-kt, deep  6/20/83
+     SON$NV$DPDEEP18$F = XSON$NV$DPDEEP18$F # rng @ 18-kt, deep 6/20/83
+     SON$NV$DPIN12$F   = XSON$NV$DPIN12$F   # rng @ 12-kt, inlr 6/20/83
+     SON$NV$DPIN18$F   = XSON$NV$DPIN18$F   # rng @ 18-kt, inlr 6/20/83
+
+     RDMU = (SON$NV$DPDEEP18$F - SON$NV$DPDEEP12$F) *  #interpolate for
+             RATIO + SON$NV$DPDEEP12$F  # range for deep tgts  6/20/83
+
+     RIMU = (SON$NV$DPIN18$F - SON$NV$DPIN12$F) *       #interpolate for
+              RATIO + SON$NV$DPIN12$F   # rng for inlr tgts     6/20/83
+    }   #endif
+
+ else if(Dor_Speed <= 24.)            #if between 18 & 24 knots 9/11/90 SONCH
+    {
+     RATIO = (Dor_Speed - 18.) * (1. / 6.) #prepare to interpolate 9/11/90 SONCH
+
+     SON$NV$DPDEEP18$F = XSON$NV$DPDEEP18$F #18-kt rng for deep 6/20/83
+     SON$NV$DPDEEP24$F = XSON$NV$DPDEEP24$F #24-kt rng for deep 6/20/83
+     SON$NV$DPIN18$F   = XSON$NV$DPIN18$F   #18-kt rng for inlr 6/20/83
+     SON$NV$DPIN24$F   = XSON$NV$DPIN24$F   #24-kt rng for inlr 6/20/83
+
+     RDMU = (SON$NV$DPDEEP24$F - SON$NV$DPDEEP18$F) * #interpolate for
+             RATIO + SON$NV$DPDEEP18$F  # rng for deep tgts     6/20/83
+ 
+     RIMU = (SON$NV$DPIN24$F - SON$NV$DPIN18$F) * # & inlr tgts 6/20/83
+             RATIO  + SON$NV$DPIN18$F   
+    }
+
+ else                                           #if faster than 24 knots
+
+    {
+     if(SON$VARIABLEDEPTH$I == $YES)            #if VDS
+       {
+        RDMU = XSON$NV$DPDEEP24$F       #24-kt rng for deep     6/20/83
+        RIMU = XSON$NV$DPIN24$F         #24-kt rng for inlr     6/20/83
+       }
+     else                               #if hull-mounted
+       {
+        RATIO = (34. - Dor_Speed) * .1      #prepare to interpolate 9/11/90 SONCH
+
+        RDMU = XSON$NV$DPDEEP24$F * RATIO #interp so 0 at 34 kts 6/20/83
+        RIMU = XSON$NV$DPIN24$F * RATIO  #interp so 0 at 34 kts  6/20/83
+       }
+
+    }   #endelse
+
+ RDEEP = RDMU                            #        9/11/90     SONCH
+ RIN   = RIMU                            #        9/11/90     SONCH
+###-------------- Removed 9/11/90 for Active Sonar changes    SONCH
+# RDSD = RDMU * (1. / 6.)                #compute std dev for deep
+# RISD = RIMU * (1. / 6.)                #compute std dev for in-layer
+#
+# RDEEP = RANDN( _                       #generate random deep range
+#                RDMU,                   #pass mean for deep
+#                RDSD)                   #pass std dev for deep
+#
+# RIN = randn(_                          #random in-layer range
+#             RIMU,                      #pass mean for in-layer
+#             RISD)                      #pass std dev for in-layer
+###-------------- End of 9/11/90 Removal -------------------   SONCH
+
+ if (trace$sonar != $No)                #    52         2/2/83
+    {                   
+ #    call echov (" RIMU=")          # 7 #        9/11/90     SONCH    
+ #    call echof (RIMU,3)                # 7?#        9/11/90     SONCH
+ #    call echov (" RDMU=")          # 7 #        9/11/90     SONCH    
+ #    call echof (RDMU,3)                # 7?#        9/11/90     SONCH
+     #call echor
+     call echov ("     ")           # 5     
+     call echov (" RIN=")           # 6     
+     call echof (RIN,2)                 # 7?
+     call echov (" RDEEP=")         # 8     
+     call echof (RDEEP,2)               # 7?  33 cols on 2nd line
+     # call echor                               # (c/ret before TARGETS)
+    }
+
+ return
+ end            #       End DPVDSR
+
+
+ Subroutine FALSEtargets
+
+#######################################################
+ #$%
+ #$% Purpose: SONMOD calls FALSEtargets to search the FLS
+ #$%          table for matches of current game_minute to
+ #$%          fls$StartTime$f and fls$KillTime$f fields.
+ #$%          If KillMinute matches, the FLS slot is ZEROed and
+ #$%          the corresponding UNT slot STATUs field is set to
+ #$%          $BEINGDELETED$code.  If STARTminute matches and:
+ #$%          (1) the activated sonar is STILL active; (2) there
+ #$%          exist less than FLS$SLOTS false targets; and (3) a
+ #$%          UNT slot is available), a FALSEtarget UNT slot is
+ #$%          set up for each such match.
+ #$%
+ #$% Called By: SONMOD
+ #$%
+ #$% Calls:     UNTGET
+ #$%
+ #$% Tables:    UNT        SON
+ #$%
+ #$% Date:      December 1990
+ #$%
+ #$% Author:    Joe Bryant
+ #$%
+ #######################################################
+BBcommon
+
+REAL*4 RANGE,X,RANDOM,RELBRG,HEADNG,            # jb E2145  6/21/00
+    UNT2$Truelatitude$F,UNT2$Truelongitude$F,   # jb E2145  6/21/00
+    UNT2$Costruelat$F,UNT2$Truespeed$F,         # jb E2145  6/21/00
+    UNT2$Truecourse$F
+
+integer NFIND(11), ION,INEED                        # jb E2145 6/21/00
+Integer SHC2$Pointer, FLS$Sonindx$I,                # jb E2145 6/21/00
+    FLS$Pointer,FLS$Untindx$I,FLS$Shipindx$I,       # jb E2145 6/21/00
+    UNT3$Pointer, UNT$Pointer,                      # jb E2145 6/21/00
+    DEQ$Pointer,DEQ$On$I,                           # jb E2145 6/21/00
+    SON$Pointer,SON$MXR$Index,SON$MOD$Index,        # jb E2145 6/21/00
+    UNT2$Pointer,UNT2$Supertype$I,UNT2$Status$I,    # jb E2145 6/21/00
+    UNT2$View$I,UNT2$Speed$I,UNT2$Truealtdepth$I,    # jb E2145 6/21/00
+    unt2$HierarchyId$i
+BBDeclare (vue$pointer)
+data x/0.0/		# Get next random number in sequence
+
+# Shall we process FALSE submarine units?
+shc2$pointer =  FALSE$SUB$POINTER
+if(!shc2$Pointer$VALID)                      # jb        2/14/91
+    RETURN                 # jb NO - don't process       2/14/91
+
+for (FLS$Pointer$First; FLS$POINTER$Valid; FLS$POINTER$NEXT)
+   {
+    FLS$SHIPindx$i = xFLS$SHIPindx$i
+    if (fls$ShipIndx$i == 0) next       # empty slot
+
+    FLS$UNTindx$i = xFLS$UNTindx$i
+    if (xfls$KillTime$f <= game$time)           # Expired
+       {
+        unt3$Pointer$TO (FLS$UNTindx$i)
+        if(xUNT3$SuperType$i ==$FalseContact$SuperCode) # jb   1/3/91
+            PUTunt3$Status$i ($BeingDeleted$Code)
+        FLS$ZERO
+        NEXT
+       }
+    if (xfls$StartTime$f >= game$time) NEXT
+
+    UNT$Pointer$TO (FLS$SHIPindx$i)
+    iON = $OFF                        # Initlz ON-flag to OFF
+    for_DEQ_CHAIN
+       {
+        FLS$SONindx$i = xFLS$SONindx$i
+        SON$Pointer$TO (FLS$SONindx$i)
+        If (SON$Pointer != xDEQ$Pntr$i)    NEXT
+        DEQ$ON$i = xDEQ$ON$i
+        If (DEQ$ON$i != $OFF)
+           {
+            iON = DEQ$ON$i
+            BREAK
+           }
+       }
+    if (iON == $OFF)                        RETURN
+
+    fls$UNTIndx$i = Xfls$UNTIndx$i
+    if (fls$UNTIndx$i == 0)         # Need to create false target sub
+    {
+        ineed =1
+        call UNTGET(ineed,NFIND)  
+        UNT2$POINTER = NFIND[2]       #set empty slot pointer
+        if ( !UNT2$Pointer$VALID)    RETURN
+        if ( !UNT2$Pointer$OK)
+           {
+                ## Should msg be sent!!!???  TBD
+           }
+    
+        UNT2$TrueLatitude$F  = xUNT$TrueLatitude$F
+        UNT2$TrueLongitude$F = xUNT$TrueLongitude$F
+    
+        SON$MXR$index = $Env$User$code
+        RANGE = RANDOM(X) * xSON$MXR$Range$i
+    
+        SON$MOD$index = iON
+        RELBRG = RANDOM(X) * xSON$MOD$Angle$i * $PI / 360.
+        if (RANDOM(X) < 0.5)    RELBRG = -1.0 * RELBRG
+     
+        HEADNG = xUNT$TrueCourse$F
+        UNT2$CosTrueLat$F    = xUNT$CosTrueLat$F
+    
+        Call RRB2LL( _            #Rhumb line Range/Bearing to Lat/Lon
+                    UNT2$TrueLatitude$F,         #latitude (input & output)
+                    UNT2$TrueLongitude$F,        #longitude (input & output)
+                    RANGE,        #range (input)
+                    RELBRG,       #relative bearing (input)
+                    HEADNG,       #course (input)
+                    UNT2$CosTrueLat$F)       #cosine of latitude (input & output)
+    
+        putUNT2$CosTrueLat$F
+        putUNT2$TrueLatitude$F 
+        putUNT2$TrueLongitude$F 
+        putUNT2$AssumedLatitude$F (UNT2$TrueLatitude$F) 
+        putUNT2$AssumedLongitude$F (UNT2$TrueLongitude$F) 
+    
+        putUNT2$shcPNTR$I (shc2$Pointer)         # jb        2/15/91
+    
+        FLS$UNTindx$i = UNT2$Pointer$INDEX
+        putFLS$UNTindx$i
+    
+        UNT2$SuperTYPE$I = $FalseContact$SuperCODE
+        PUTUNT2$SuperTYPE$I
+    
+        UNT2$STATUS$I = $PROCEEDING$CODE  #status is proceeding
+        PUTUNT2$STATUS$I
+    
+        UNT2$VIEW$I = $Neutral$View
+        PUTUNT2$VIEW$I
+    
+        VUE$Pointer$To  UNT2$View$I
+        UNT2$HierarchyId$I = xVUE$ForceCode$I * 1000
+        PUTUNT2$HierarchyId$i
+    
+        unt2$Speed$I         = 21        # [Arbitrary]
+        unt2$TrueSpeed$F     = RANDOM(X) * 10.0       # (Specified)
+        unt2$TrueCourse$F    = RANDOM(X) * $twoPI     # (Specified)
+        unt2$truealtdepth$i  = 100 + 1000 * RANDOM(X) # (Specified)
+    
+        putunt2$Speed$I
+        putunt2$TrueSpeed$F
+        putunt2$OrderedSpeed$F (unt2$TrueSpeed$F)
+        putunt2$AssumedSpeed$F (unt2$TrueSpeed$F)
+        putunt2$TrueCourse$F
+        putunt2$OrderedCourse$F   (unt2$TrueCourse$F)
+        putunt2$AssumedCourse$F   (unt2$TrueCourse$F)
+        putunt2$truealtdepth$i
+        putunt2$orderedaltdepth$i (unt2$truealtdepth$i)
+    
+        PUTunt2$owninterval$i       ($Hi_UNT$OwnInterval$I)
+        PUTunt2$ESMTRACKinterval$i  ($Hi_UNT$EsmTrackInterval$I)
+        PUTunt2$AIRTRACKinterval$i  ($Hi_UNT$AirTrackInterval$I)
+        PUTunt2$SHIPTRACKinterval$i ($Hi_UNT$ShipTrackInterval$I)
+    
+        call assign_unique_unit_name (unt2$pointer)
+    }
+} 
+
+RETURN
+end    # End subroutine FALSE_targets
+
+define (BBimplicit, Implicit NONE)
+
+ Subroutine Put_ACC_in_list
+
+ #######################################################
+ #$%
+ #$% Purpose:   Put_ACC_in_list puts all aircraft with noise
+ #$%            into detector/detectee list. The UNT$POINTER
+ #$%            is passed via SM$Common 
+ #$%
+ #$% Called By: PRESON
+ #$%
+ #$% Calls:     
+ #$%
+ #$% Tables:    UNT        ACC
+ #$%
+ #$% Date:      June 1991
+ #$%
+ #$% Author:    Susan Miller
+ #$%
+ #######################################################
+ BBcommon
+ SM$Common
+
+Integer*4   JSTATE
+Integer*4   UNT$Status$i
+Integer*4   ACC$Pointer, ACC$ACNIndx$i
+
+ #$% get unit status
+ UNT$Status$i = XUNT$Status$I
+
+ #$% if unit is being deleted/AwaitingLaunch/Mooring
+ if (UNT$Status$i == $beingdeleted$code   |
+     UNT$Status$i == $AwaitingLaunch$Code )
+     { RETURN }
+ 
+ ACC$Pointer = XUNT$ACCPntr$i
+ ACC$ACNIndx$i = XACC$ACNIndx$I
+
+ if (ACC$ACNIndx$i <= 0 |                 #check for index into 
+     ACC$ACNIndx$i > ACC$Slots)           #aircraft noise table
+     { RETURN }
+    
+ DD_Count = DD_Count + 1                        #increment dd list counter
+
+ DD_View[DD_Count] = XUNT$View$I              #save view
+ DD_Seq[DD_Count] = 0                        #no buoys, so set sequence number to 0
+ DD_Pntr[DD_Count] = UNT$Pointer              #save UNT pointer
+ DD_Mode[DD_Count] = 0                        #aircraft cannot detect
+ DD_Flags[DD_Count] = $$$PDgn                  #init detectee word
+ JSTATE = 0                             #init search priority level
+
+ return
+ end            #  End Put_ACC_in_list
+
+
+ Subroutine get_ACC_targets
+
+ #######################################################
+ #$%
+ #$% Purpose:   get_ACC_targets finds all aircraft with
+ #$%            noise who are within 25nm of sub detector 
+ #$%            and puts them in the detector/detectee list.
+ #$%
+ #$% Called By: PRESON
+ #$%
+ #$% Calls:     PREPRX_M     PROXIM_M
+ #$%
+ #$% Tables:    UNT        ACC
+ #$%
+ #$% Date:      June 1991
+ #$%
+ #$% Author:    Susan Miller
+ #$%
+ #######################################################
+BBcommon
+SM$Common
+
+real*4   RANGE, BEAR
+Integer*4   ACC_Alt 
+
+if (trace$sonar$passive != $No)                               
+    {
+    call echov ("Inside get_ACC_targets")         
+    call echor
+    }
+
+call PREPRX_M ( _                           #prepare proximity routine
+             Dor_Unt_x,                        #detector index
+             Dor_Lat,                         #pass detector latitude
+             Dor_Lon,                         #pass detector longitude
+             Dor_CSLat,                        #pass cosine of detr latitude
+             FLOAT(25))                     #pass detection range for a/c
+
+for (Tgt_Index = DD_Ship + 1; 
+     Tgt_Index <= DD_Air; 
+     Tgt_Index = Tgt_Index + 1)                           #for each a/c entry in dd list 
+    {
+    if(PS_Count >= $MAXPSL) break               #quit if ps list full
+
+    UNT2$POINTER = DD_Pntr[Tgt_Index]               #set UNT pointer for target
+
+    if (Xunt2$NeverDetect$i == YES) next        #joa 3/05 per_never
+
+    Tgt_Unt_x = unt2$pointer$index            #target index
+
+    ACC_ALT = XUNT2$TRUEALTDEPTH$I         #get acc altitude
+
+    Tgt_Lat = XUNT2$TRUELATITUDE$F           #get target latitude
+    Tgt_Lon = XUNT2$TRUELONGITUDE$F          #get target longitude
+    
+    Tgt_CSLat = XUNT2$COSTRUELAT$F            #get cosine of tgt latitude
+
+    Tgt_Speed = XUNT2$TRUESPEED$F               #get tgt speed
+
+    call PROXIM_M ( _                      #call proximity routine
+                 Tgt_Unt_x,                    #tgt Index
+                 Tgt_Lat,                     #pass target latitude
+                 Tgt_Lon,                     #pass target longitude
+                 Tgt_CSLat,                    #pass cosine of target lat
+                 RANGE,                     #return range
+                 BEAR)                      #return bearing
+
+     if(RANGE < 0.) next                    #if out of range, skip
+
+     if (RANGE > ((Dor_Depth / 0.23) + (0.23 * ACC_Alt)) / 6000.)  next 
+
+     PS_Count = PS_Count + 1                        #increment ps list counter
+
+     PS_DD_x[PS_Count] = Tgt_Index                   #store dd list index for tgt
+
+     PS_Range[PS_Count] = RANGE                     #store tgt range
+
+     PS_Depth[PS_Count] = ACC_ALT                  #store tgt depth
+
+     PS_Bear[PS_Count] = BEAR                      #store tgt bearing
+
+     PS_Speed[PS_Count] = Tgt_Speed * .2 + .5            #store tgt speed index
+
+     If (PS_Speed[PS_Count] < 1) PS_Speed[PS_Count] = 1
+
+     else if (PS_Speed[PS_Count] > 6) PS_Speed[PS_Count] = 6
+
+     if (trace$sonar$passive != $No)                               
+        {
+         call echor
+         call echov ("Inside get_ACC_targets:  ")         
+         call echor
+         call echov ("Target range from detectee is ")
+         call echof (range,3)
+         call echov (" and bearing is ")
+         call echof (Bear,3)
+         call echor
+         call echov ("Target altitude is ")
+         call echoi (ACC_Alt)
+         call echov (" and speed is ")
+         call echof (Tgt_Speed,3)
+        }
+    }   #end for
+
+ PS_Targets = PS_Count                              #save number of targets
+
+ return
+ end    #end get_ACC_targets
+

@@ -1,0 +1,5632 @@
+
+######                  PLPLAY.RAT
+
+#$%
+#$%
+#$%    FLOWCHART FOR FILE PLAY REFER TO PLMAIN.HIR
+#$%    ============================================
+#$%
+
+include "macros.inc"         
+include "ascii.inc"         
+include "bbctl.inc"         
+include "bbcode.inc"         
+include "bbunt.inc"                   # jb Replaces DUP  4/5/89
+include "bbrte.inc"                   # reh 11/16/89
+include "plplay.inc"         
+include "orders.inc"                                    # For $lex$...$ def's   2/3/82
+include "bbsta.inc"              
+include "bbnrt.inc"              
+include "bbord.inc"              
+
+include "orders.spc"                  # joa 12/97 (E1832) - moved from plorders.rat
+
+define (BBimplicit,Implicit None)
+
+
+ subroutine parse_test_task (stat)            
+
+ #####################################################
+ #$%
+ #$% Purpose:   PARSE_TEST_TASK generates a test to validate
+ #$%            task numbers in format 0.0.0.00
+ #$%
+ #$% Called By: PARSE_TEST_ADDRESSEE
+ #$%
+ #$% Calls:     None
+ #$%
+ #$% Tables:    ORD
+ #$%
+ #$% Date:      JAN 82
+ #$%
+ #$% Author:    Dana Wills
+ #$%
+ #####################################################
+
+ BBimplicit           # DEW (E2145)             #   9 ::= 1-9
+ pr_common                                      #   0 ::= 0-9
+ integer n[5]
+ integer    num, cnt, i, stat
+ character  char
+
+ #$% initialize values
+ n[1] = 0
+ n[2] = 0
+ n[3] = 0
+ n[4] = 0
+ n[5] = 0
+ num = 0
+ cnt = 0
+
+ #$% for each task number entered
+ for (i=stack$line_level$pos+1; i <= line$length; i=i+1)
+   {
+    #$% increment count by one
+    cnt = cnt + 1
+
+    #$% if too many task force numbers and periods execeed allowed count
+    if (cnt > $$MaxLit)
+       {
+        #$% set status flag to "no good" and return 
+        stat =  $stat$nogood$
+        return
+       }
+
+    #$% get each character in the line
+    char = line$buf[i]
+
+    #$% if character count is 2, 4 or 6 (where a period should be)
+    if (cnt == 2 | cnt == 4 | cnt == 6)
+       {
+        #$% if the character is not a period
+        if (char != $period)
+           {
+            #$% set status to "no good" and return 
+            stat = $stat$nogood$
+            return
+           }
+        #$% if the character is a period, set status to ok
+        stat =  $stat$ok$
+       }
+    #$% else if the character count is at 1, 3, 5, 7, or 8 (should be number)
+    else
+       {
+        #$% if the character is less than 0 or greater than 9 (outside range)
+        if (char < $DIG0 | char > $DIG9)
+           {
+            #$% set status to "no good" and return
+            stat = $stat$nogood$
+            return
+           }
+        #$% increment number by one
+        num = num + 1
+        #$% convert character to number
+        n[num]  = char - $DIG0
+
+        #$% if task number has at least two characters, set status to complete
+        if (cnt >= 2) stat = $stat$complete$
+        #$% else set status to ok (and wait for more numbers)
+        else stat = $stat$ok$
+       }
+   }
+
+ #$% if the first character/number is a zero (should never be in task format)
+ if (n[1] == 0)                         # dont allow first digit to be zero
+    {
+     #$% set status to "no good" and return
+     stat = $stat$nogood$
+     return
+    }
+
+ #$% set task for numbers in their proper relation to each other
+ arg$value = n[1]*10000 + n[2]*1000 + n[3]*100 + n[4]*10 + n[5]
+
+ return
+ end
+
+
+
+ subroutine parse_test_addressee (stat)               
+
+ ##################################################################
+ #$%
+ #$% Purpose:   PARSE_TEST_ADDRESSEE generates a test to validate
+ #$%            addressee.
+ #$%
+ #$% Called By: NONE
+ #$%
+ #$% Calls:     PARSE_TEST_ALPHA     PARSE_TEST_TASK 
+ #$%            CHK_TYPE_ADDRESSEE 
+ #$%
+ #$% Tables:    ORD
+ #$%
+ #$% Date:      JAN 82
+ #$%
+ #$% Author:    Dana Wills
+ #$%
+ #$% Modified:  Susan Miller - 1/97 (E1732)
+ #$%            Added new 3rd parameter,iview, to chk_type_addressee.
+ #$%
+ #$%            Jim Allen  - 12/97 (E1833)
+ #$%            Allow wildcard in addressee field - replaced call
+ #$%            to parse_test_alpha with parse_test_wildcard.
+ #$%
+ #####################################################################
+
+ BBimplicit                                 # DEW 3/13/00 (E2145)
+ pr_common
+ integer    kstat, stat, iview
+
+ call parse_test_wildcard (stat)        # joa - 12/97 (E1833)
+
+ if (stat == $stat$nogood$)             # if it is, don't test for task number
+    {
+     call parse_test_task (stat)        # otherwise test for task number
+    }
+
+#$% if user input format is FOR <addressee>
+if (Last$arg$value == $LEX$For$)
+    {
+    #$% check blackboard to get unit type
+    call chk_type_addressee (arg$value,kstat,iview) 
+    #$% set parse to unit type
+    parse$Set$NotFor (kstat)
+    }
+
+ return                                 # names and task no's are mutually
+ end                                    # exclusive at the first character
+
+
+
+
+ subroutine parse_test_trakcd (stat)
+
+ #####################################################
+ #$%
+ #$% Purpose:   PARSE_TEST_TRAKCD tests track code entry.
+ #$%
+ #$% Called By: NONE
+ #$%
+ #$% Calls:     IGBYTE     PARSE_TEST_ALFA
+ #$%
+ #$% Tables:    ORD
+ #$%
+ #$% Date:      JAN 80
+ #$%
+ #$% Author:    Dana Wills
+ #$%
+ #####################################################
+
+ BBimplicit                                 # DEW 3/13/00 (E2145)
+ pr_common
+ integer    stat, igbyte
+
+ #$% test to see if a name
+ call parse_test_alpha(stat)
+
+ #$% if the second characters is not a spaces, status is "no good" 
+ if (igbyte(arg$value,2) != $space) stat = $stat$nogood$
+
+ return
+ end
+
+
+
+
+ subroutine parse_test_SideId (stat)
+
+ ##############################################################
+ #$%
+ #$% Purpose:   PARSE_TEST_SIDEID tests side identification.
+ #$%
+ #$% Called By: NONE
+ #$%
+ #$% Calls:     IGBYTE     PARSE_TEST_ALFA
+ #$%
+ #$% Tables:    ORD
+ #$%
+ #$% Date:      JAN 82
+ #$%
+ #$% Author:    Dana Wills
+ #$%
+ ##################################################################
+
+ BBimplicit                                 # DEW 3/13/00 (E2145)
+ pr_common
+ literal word
+ integer    stat, igbyte
+
+ #$% test to see if a name
+ call parse_test_alpha(stat)
+
+ #$% get command word (user input)
+ word = arg$value
+
+ #$% if the 2nd character is a space, and not a letter (a to z)
+ #$% and the 3rd character is not a space, set status to "no good"
+ if      (igbyte(word,2) == $space) stat = $stat$ok$
+ else if (igbyte(word,2) <  $LETA ) stat = $stat$nogood$
+ else if (igbyte(word,2) >  $LETZ ) stat = $stat$nogood$
+ else if (igbyte(word,3) != $space) stat = $stat$nogood$
+
+ return
+ end
+
+
+ subroutine parse_test_text (stat)
+
+ #####################################################
+ #$%
+ #$% Purpose:   PARSE_TEST_TEXT tests text message input.
+ #$%
+ #$% Called By: NONE
+ #$%
+ #$% Calls:     PARSE_TEST_ALFA
+ #$%
+ #$% Tables:    ORD
+ #$%
+ #$% Date:      JAN 82
+ #$%
+ #$% Author:    Dana Wills
+ #$%
+ #####################################################
+
+ BBimplicit                                 # DEW 3/13/00 (E2145)
+ pr_common
+ integer    dummy, stat, k, i
+
+ #$% test to see if a name
+ call parse_test_alpha (dummy)
+
+ #$% if max length of the text exceeds max allowed or the text is "BT",
+ #$% indicating end of message
+ if ((line$length-stack$line_level$pos) > max$length$of$text | 
+     arg$value == 'BT'                                     )
+    {
+    #$% set status as "no good"
+    stat = $stat$nogood$
+    }
+ else
+    {
+    k = 0
+    #$% move each character of text into an array ending with a null
+    for (i = stack$line_level$pos + 1; i <= line$length; i=i+1)
+        call smov (line$buf[i],arg$value,k)
+
+    call smov ($null,arg$value,k)
+    }
+
+ return
+ end
+
+
+
+
+ subroutine parse_test_name (stat)
+
+ #####################################################
+ #$%
+ #$% Purpose:   PARSE_TEST_NAME tests alpha name.
+ #$%
+ #$% Called By: NONE
+ #$%
+ #$% Calls:     PARSE_TEST_ALFA
+ #$%
+ #$% Tables:    ORD
+ #$%
+ #$% Date:      JAN 82
+ #$%
+ #$% Author:    Dana Wills
+ #$%
+ #####################################################
+
+ BBimplicit                                 # DEW 3/13/00 (E2145)
+ pr_common
+ integer    stat
+
+ #$% test to see if a name
+ call parse_test_alpha (stat)
+
+# #$% if user input is DP, BB, or CZ, set status to "no good"   #       29-SEP-83
+# if      (arg$value == 'DP') stat = $stat$nogood$           # 29-SEP-83
+# else if (arg$value == 'BB') stat = $stat$nogood$           # 29-SEP-83
+# else if (arg$value == 'CZ') stat = $stat$nogood$           # 29-SEP-83
+
+ return
+ end
+
+
+
+ subroutine parse_test_track (stat)               
+
+ ###################################################################
+ #$%
+ #$% Purpose:   PARSE_TEST_TRACK generates a test to validate
+ #$%            a track number.
+ #$%
+ #$% Called By: NONE
+ #$%
+ #$% Calls:     PARSE_TEST_ALFA
+ #$%
+ #$% Tables:    ORD
+ #$%
+ #$% Date:      JAN 82
+ #$%
+ #$% Author:    Dana Wills
+ #$%
+ #$% Modified:  Carol Kropp - 12/95 (E1469)
+ #$%            Modified to allow second character to be a number
+ #$%            if first is a "J".
+ #$%
+ #$%            Carol Kropp - 12/96 (E1721)
+ #$%            Modified to allow 5 integers following a track
+ #$%            number with the first letter "J".  Replaced call to
+ #$%            parse_test_alpha with parse_test_big_an, since the
+ #$%            JTIDS track number is longer than parse_test_alpha
+ #$%            allows.
+ #$%
+ #$%            Dane Wills  - 11/99 (E2160)
+ #$%            Expanded UNT/RMT requires larger track numbers
+ #$%            Format now allows 3-5 digits for numerics for
+ #$%            some track number types (A/E/I/P/S/U)
+ #$%            i.e. AANNNnn where the lower case n's are optional
+ #$%
+ #####################################################################
+
+ BBimplicit                                 # DEW 3/13/00 (E2145)
+ pr_common                              # format: A_999, where _ = A,S,U or E
+
+ integer    min_width, max_width, first_digit, jtids
+ integer    stat, cnt, i
+ character  char
+
+ #$% test to see if a name
+ call parse_test_big_an (stat)
+  
+ #$% initialize character count number
+ cnt = 0
+
+ first_digit= 3
+ min_width  = 5
+ max_width  = 5
+ jtids      = $NO
+
+ #$% for each character
+ for (i=stack$line_level$pos+1; i <= line$length; i=i+1)
+   {
+    #$% increment character count by one
+    cnt = cnt + 1
+
+    #$% get each character
+    char = line$buf[i]
+
+    #$% if first character 
+    if (cnt == 1)
+       {
+        #$% if charater is a letter (a to z), get next character
+        if (char == $LETJ) 
+            {
+            jtids = $YES
+            first_digit= 2
+            min_width  = 6
+            max_width  = 6
+
+            next
+            }
+        else if (char >= $LETA & char <= $LETZ  ) 
+            {
+            next
+            }
+
+        #$% set status to "no good" and return
+        stat = $stat$nogood$
+        return
+        }
+    #$% else if in numeric portion
+    else if (cnt >= first_digit & cnt <= max_width)
+        {
+        # for some reason, JTIDS track numbers must not have a 9 in the leading digit
+        if (jtids == $YES & cnt == first_digit)
+            {
+            if (char >= $DIG0 & char <= $DIG8) next
+            }
+        else if (char >= $DIG0 & char <= $DIG9) next
+
+        #$% set status to "no good" and return
+        stat = $stat$nogood$
+        return
+        }
+    #$% else if second LETTER
+    else if (cnt == 2)
+        {
+        #$% if character is A,E,H,I,O,P,S,T,U, or Z, get next character
+        if       (char == $LETA |       # ACTIVE AIR
+                  char == $LETE |       # ESM
+                  char == $LETI |       # EOIR
+                  char == $LETP |       # PASSIVE SONAR
+                  char == $LETS |       # ACTIVE SURFACE
+                  char == $LETU  )      # ACTIVE SUBSURFACE
+            {
+            max_width  = 7
+            next
+            }
+        else if  (char == $LETH |       # HFDF
+                  char == $LETO |       # ROTHR OTH
+                  char == $LETT |       # SWABS
+                  char == $LETZ )       # SOSUS
+            {
+            next
+            }
+
+        #$% none of the above characters
+        #$% set status to "no good" and return
+        stat = $stat$nogood$
+        return
+       }
+    #$% set status to "no good" and return
+    stat =  $stat$nogood$
+    return
+   }
+
+if (cnt < min_width)
+    stat = $stat$ok$
+
+ return
+ end
+
+
+subroutine parse_test_argument (stat)               
+
+####################################################################
+#$%
+#$% Purpose:   PARSE_TEST_ARGUMENT generates a test to validate
+#$%            for any valid condition
+#$%
+#$% Called By: NONE
+#$%
+#$% Calls:     PARSE_TEST_    (alfa,number,track,task,
+#$%                            latitude,longitude,dummy)
+#$% Tables:    ORD
+#$%
+#$% Date:      JUNE 83
+#$%
+#$% Author:    Dana Wills
+#$%
+#######################################################################
+
+BBimplicit                                 # DEW 3/13/00 (E2145)
+pr_common
+integer    stat, hstat
+
+#$% test to see if a name
+
+hstat = stat                                    # save  initial status
+
+stat = hstat    # (restore      initial setting)
+call parse_test_alpha (stat)                    # could be NAME...
+if (stat != $stat$nogood$) return               # It    Is !
+
+stat = hstat    # (restore      initial setting)
+call parse_test_number (stat)                   # could be a NUMBER...
+if (stat != $stat$nogood$) return               # It    Is !
+
+stat = hstat    # (restore      initial setting)
+call parse_test_track (stat)                    # could be a TRACK NUMBER...
+if (stat != $stat$nogood$) return               # It    Is !
+
+stat = hstat    # (restore      initial setting)
+call parse_test_task (stat)                     #       could be a TASK NUMBER...
+if (stat != $stat$nogood$) return               # It    Is !
+
+stat = hstat    # (restore      initial setting)
+call parse_test_latitude (stat)                 # could be a LATITUDE...
+if (stat != $stat$nogood$) return               # It    Is !
+
+stat = hstat    # (restore      initial setting)
+call parse_test_longitude (stat)                # could be a LONGITUDE...
+if (stat != $stat$nogood$) return               # It    Is !
+
+stat = hstat    # (restore      initial setting)
+call parse_test_dummy (stat)                    # could be a DUMMY VARIABLE...
+if (stat != $stat$nogood$) return               # It    Is !
+
+return
+end
+
+
+
+subroutine parse_test_dummy (stat)               
+
+####################################################################
+#$%
+#$% Purpose:   PARSE_TEST_dummy is a test for entry of a dummy variable
+#$%            
+#$%
+#$% Called By: NONE
+#$%
+#$% Calls:     PARSE_TEST_ALPHA
+#$%
+#$% Tables:    
+#$%
+#$% Date:      JUNE 83
+#$%
+#$% Author:    Dana Wills
+#$%
+#######################################################################
+
+BBimplicit                                 # DEW 3/13/00 (E2145)
+pr_common
+
+define ($MaxDummys,7)
+
+LitCharEquiv(dv, $MaxDummys)
+
+character       work1[10], work2[10]
+integer         equal,  almostequal
+integer         stat, kk, k
+
+data dvC/"$BEARING",
+         "$COURSE",
+         "$FORCE",
+         "$LAT",
+         "$LONG",
+         "$RANGE",
+         "$TRACK"/
+
+stat = $stat$nogood$
+
+kk = 0
+call smovhn (arg$value,$$MaxLit,work1,kk)
+call smov   (EOS,work1,kk)
+
+if (work1[1] != $DOLLAR) return
+
+for (k=1; k <= $MaxDummys; k=k+1)
+    {
+    kk = 0
+    call smovhn (dv[k],$$MaxLit,work2,kk)
+    call smov   (EOS,work2,kk)
+
+    if (equal(work1,work2) == YES)
+        {
+        stat = $stat$complete$
+        return
+        }
+    else if (almostequal(work1,work2) == YES)
+        {
+        stat = $stat$ok$
+        return
+        }
+    }
+
+return
+end
+
+
+
+subroutine parse_test_holder (stat)               
+
+####################################################################
+#$%
+#$% Purpose:   PARSE_TEST_holder is a test for entry of a place holding
+#$%            variable.
+#$%            Valid syntax is "@n[+a]" where
+#$%                 N is the digit 1..8 and is optionally followed by
+#$%                 plus/minus A, where A is 0..999
+#$%            
+#$%
+#$% Called By: NONE
+#$%
+#$% Calls:     
+#$%
+#$% Tables:    
+#$%
+#$% Date:      JUNE 83
+#$%
+#$% Author:    Dana Wills
+#$%
+#######################################################################
+
+bbcommon
+pr_common
+character       ichar
+integer         stat, icnt
+literal         word
+integer         i
+
+word = $blanklit
+icnt = 0
+
+if (game$minute > 0)                    # if during GAME        EXECUTION....
+    {
+    stat = $stat$nogood$                # return no good status
+    return
+    }
+
+stat = $stat$complete$ 
+
+# for each character entered
+for (i=stack$line_level$pos+1; i <= line$length; i=i+1)
+    {
+    icnt = icnt + 1                     #       increment count by one
+
+    ichar = line$buf[i]                 # get   each character in the line
+
+    if (icnt == 1)
+        {
+        if      (ichar != $ATSIGN) stat = $stat$nogood$
+        else           stat = $stat$ok$
+        }
+    else if (icnt == 2)
+        {
+        if      (ichar >= $DIG1 & ichar <= $DIG8) stat = $stat$complete$
+        else                          stat = $stat$nogood$
+        }
+    else if (icnt == 3)
+        {
+        if      (ichar == $PLUS | ichar == $MINUS) stat = $stat$ok$
+        else                          stat = $stat$nogood$
+        }
+    else if (icnt >= 4 & icnt <= 6)
+        {
+        if      (ichar >= $DIG0 & ichar <= $DIG9) stat = $stat$complete$
+        else                          stat = $stat$nogood$
+        }
+    else                                # too many characters....
+        {
+        if      (ichar == $SPACE) stat = $stat$complete$ 
+        else           stat = $stat$nogood$
+        }
+
+    call ipbyte(word,icnt,ichar)
+    }
+
+arg$value = word
+
+return
+end
+
+
+
+ subroutine parse_test_yesno (stat)               
+
+ ####################################################################
+ #$%
+ #$% Purpose:   PARSE_TEST_YESNO generates a test to validate
+ #$%            YES/NO.
+ #$%
+ #$% Called By: NONE
+ #$%
+ #$% Calls:     PARSE_TEST_ALFA
+ #$%
+ #$% Tables:    ORD
+ #$%
+ #$% Date:      JAN 82
+ #$%
+ #$% Author:    Dana Wills
+ #$%
+ #######################################################################
+
+BBimplicit                                 # DEW 3/13/00 (E2145)
+ pr_common
+ literal iword
+ integer  stat
+
+ #$% test to see if a name
+ call parse_test_alpha (stat)
+
+ #$% get user input word
+ iword = arg$value
+
+ #$% if input is Y, YE or YES, set word to YES
+ if      (iword == 'Y' |
+          iword == 'YE' |
+          iword == 'YES'  ) arg$value = $lex$yes$
+ #$% else if input is N or NO, set word to NO
+ else if (iword == 'N' |
+          iword == 'NO'  ) arg$value = $lex$no$
+ #$% else set status to "no good" and return
+ else
+    {
+     stat = $stat$nogood$
+     return
+    }
+ #$% set status to complete
+ stat = $stat$complete$
+
+ return
+ end
+
+
+
+subroutine parse_test_squadron (stat)               
+####################################################################
+#$%
+#$% Purpose:   PARSE_TEST_SQUADRON generates a test to validate the
+#$%            SQUADRON NAME input into the game.
+#$%            Valid is: XAAAA   
+#$%            Where: X is A-Z or 0-9
+#$%                   A is A-Z or 0-9 or '-' (or ' ')
+#$%
+#$% Called By: PARSE_TEST_SPECIAL
+#$%
+#$% Calls:     IPBYTE
+#$%
+#$% Tables:    NONE
+#$%
+#$% Date:      FEB 86
+#$%
+#$% Author:    SSGT D.A. SHEPHERD   (modified from parse_test_alpha)
+#$% Modified:  D.Wills 16-Nov-89 when folding code in from AWSIMS
+#$%
+#######################################################################
+
+BBimplicit                                 # DEW 3/13/00 (E2145)
+pr_common
+literal word
+integer     stat, cnt, i                   # DEW 3/13/00 (E2145)
+character   char                           # DEW 3/13/00 (E2145)
+
+word = $BLANKLIT
+cnt = 0
+
+for (i = stack$line_level$pos+1;i <= line$length;i = i + 1)
+  {
+    cnt = cnt + 1
+    char = line$buf[i]
+
+# akbar-14aug86-modified so that it will except any alpha or numeric character
+#               in 1st position, plus the minus in all other positions
+
+    if (char == $MINUS & cnt >= 2 & cnt <= $$MaxName)
+            {
+            continue
+            }
+
+    else if (cnt >= 1 & cnt <= $$MaxName &
+       ((char >= $LETA & char <= $LETZ)|          #$% 1st position can be
+        (char >= $DIG0 & char <= $DIG9)))         #$% either number or alpha
+            {                                     #$% but not minus sign
+            continue
+            }
+
+    else
+      {
+        stat = $stat$nogood$             #$% else set stat to nogood
+        return
+      }
+    call ipbyte(word,cnt,char)
+  } 
+
+if (word == 'TIME') stat = $stat$nogood$
+arg$value = word
+
+return
+end
+ 
+
+
+subroutine parse_test_Big_AN (stat)               
+####################################################################
+#$%
+#$% Purpose:   PARSE_TEST_BIG_AN generates a test to validate the
+#$%            NAME input into the game.
+#$%            Valid is: AXXXXXX
+#$%            Where: A is A-Z 
+#$%                   X is A-Z or 0-9 (or ' ')
+#$%
+#$% Called By: PARSE_TEST_SPECIAL
+#$%
+#$% Calls:     IPBYTE
+#$%
+#$% Tables:    NONE
+#$%
+#$% Date:      OCT 88
+#$%
+#$% Author:    Capt Chris Schiltz
+#$%
+#######################################################################
+
+BBimplicit                                  # DEW 3/13/00 (E2145)
+pr_common
+literal word
+integer     stat, cnt, i                    # DEW 3/13/00 (E2145)
+character   char                            # DEW 3/13/00 (E2145)
+
+word = $BLANKLIT
+cnt = 0
+
+for (i = stack$line_level$pos+1;i <= line$length;i = i + 1)
+  {
+    cnt = cnt + 1
+    char = line$buf[i]
+
+    if (cnt >= 2 & cnt <= $$MaxLit &
+        (char >= $DIG0 & char <= $DIG9))         #$% either number or alpha
+            {
+            continue
+            }
+
+    else if (cnt >= 1 & cnt <= $$MaxLit &
+        (char >= $LETA & char <= $LETZ))          #$% 1st position can be
+            {                           
+            continue
+            }
+
+    else
+      {
+        stat = $stat$nogood$             #$% else set stat to nogood
+        return
+      }
+    call ipbyte(word,cnt,char)
+  } 
+
+if (word == 'TIME') stat = $stat$nogood$
+arg$value = word
+
+return
+end
+
+
+
+subroutine parse_test_search (stat)               
+####################################################################
+#$%
+#$% Purpose:   PARSE_TEST_SEARCH allows and char in astab search text
+#$%            
+#$%
+#$% Called By: PARSE_TEST_SPECIAL
+#$%
+#$% Calls:     IPBYTE
+#$%
+#$% Tables:    NONE
+#$%
+#$% Date:      AUG 07
+#$%
+#$% Author:    James O. Allen
+#$%
+#######################################################################
+
+BBimplicit
+pr_common
+literal word
+integer     stat, cnt, i
+character   char        
+
+word = $BLANKLIT
+cnt = 0
+
+for (i = stack$line_level$pos+1;i <= line$length;i = i + 1)
+{
+    cnt = cnt + 1
+    char = line$buf[i]
+
+    if (cnt <= $$MaxLit)
+    {
+        continue
+    }
+    else
+    {
+        stat = $stat$nogood$             #$% else set stat to nogood
+        return
+    }
+    call ipbyte(word,cnt,char)
+} 
+
+arg$value = word
+
+return
+end
+
+
+
+subroutine parse_test_Big_NA (stat)               
+####################################################################
+#$%
+#$% Purpose:   PARSE_TEST_BIG_AN generates a test to validate the
+#$%            NAME input into the game.
+#$%            Valid is: AXXXXXX
+#$%            Where: A is A-Z or 0-9
+#$%                   X is A-Z or 0-9 or '-' (or ' ')
+#$%
+#$% Called By: PARSE_TEST_SPECIAL
+#$%
+#$% Calls:     IPBYTE
+#$%
+#$% Tables:    NONE
+#$%
+#$% Date:      OCT 88
+#$%
+#$% Author:    Capt Chris Schiltz
+#$%
+#######################################################################
+
+BBimplicit                                  # DEW 3/13/00 (E2145)
+pr_common
+literal word
+integer     stat, cnt, i                    # DEW 3/13/00 (E2145)
+character   char                            # DEW 3/13/00 (E2145)
+
+word = $BLANKLIT
+cnt = 0
+
+for (i = stack$line_level$pos+1;i <= line$length;i = i + 1)
+  {
+    cnt = cnt + 1
+    char = line$buf[i]
+
+    if (char == $MINUS & cnt >= 2 & cnt <= 7)
+            {
+            continue
+            }
+
+    else if (cnt >= 1 & cnt <= 7 &
+       ((char >= $LETA & char <= $LETZ)|          #$% 1st position can be
+        (char >= $DIG0 & char <= $DIG9)))         #$% either number or alpha
+            {                                     #$% but not minus sign
+            continue
+            }
+
+    else
+      {
+        stat = $stat$nogood$             #$% else set stat to nogood
+        return
+      }
+    call ipbyte(word,cnt,char)
+  } 
+
+if (word == 'TIME') stat = $stat$nogood$
+arg$value = word
+
+return
+end
+
+
+
+subroutine parse_test_time_ratio (stat)               
+####################################################################
+#$%
+#$% Purpose:   PARSE_TEST_time_ratio validates time-ratio from .15 to 999
+#$%
+#$% Called By: PARSE_TEST_SPECIAL
+#$%
+#$% Calls:     IPBYTE
+#$%
+#$% Tables:    NONE
+#$%
+#$% Date:      Mar 09
+#$%
+#$% Author:    Jim Allen
+#$%
+#######################################################################
+
+BBimplicit
+pr_common
+real*8      num
+integer     stat
+
+real low, high
+
+low = 0.149
+high = 999.0
+
+call parse_test_floating (stat)
+
+if (stat != $stat$nogood$) 
+    {
+    num = arg$value
+
+    if (num == 0.0)
+        {
+        if      (num < low ) stat = $stat$ok$
+        else if (num > high) stat = $stat$ok$
+        }
+    else if (num < 0.0)
+        {    
+        if      (low > 0   ) stat = $stat$nogood$
+        }
+    else # if (num > 0.0)
+        {    
+        if      (num  > high) stat = $stat$nogood$
+        else if (num  < low ) stat = $stat$ok$
+        }
+    }
+
+return
+end
+
+
+
+subroutine ordpar (itime,prompt,ordn,nargs) 
+
+###########################################################
+#$%
+#$% Purpose:   ORDPAR parses the order tables
+#$%            
+#$%
+#$% Called By: HANMSG     HANLNC     HANORD 
+#$%            HANSRC     ORDPRC
+#$%
+#$% Calls:     NONE
+#$%            
+#$%
+#$% Tables:    ORD
+#$%
+#$% Date:      JAN 82
+#$%
+#$% Author:    Dana Wills
+#$%
+###########################################################
+
+BBimplicit                                  # DEW 3/13/00 (E2145)
+Playcommon
+character       prompt[ARB]
+integer         itime, ordn, nargs          # DEW 3/13/00 (E2145)
+
+parse$common (orders)
+
+parse$command (orders,p_nargs,p_args,p_ordn,itime,prompt)
+
+ordn  = p_ordn
+nargs = p_nargs
+
+return
+end
+
+
+
+subroutine ordchk (nord,nargs,istat,station)
+
+###########################################################
+#$%
+#$% Purpose:   ORDCHK builds order into stack or calls
+#$%            HANORD if order is a multiple entry of
+#$%            commands.
+#$%
+#$% Called By: ORDPRC
+#$%
+#$% Calls:     BLDBAS     CHKFOR     HANLNC     hanMIS
+#$%            HANMSG     HANORD     HANSRC     Handle_NRT
+#$%
+#$% Tables:    ORD
+#$%
+#$% Date:      JAN 82
+#$%
+#$% Author:    Dana Wills
+#$%
+#$% Modified:  Susan Miller - 1/97 (E1732)
+#$%            Added parameter iview to chkfor and hanlnc 
+#$%            parameter lists
+#$%
+#$%            Jim Allen - 12/02 (E2319)
+#$%            Only process PAT, TOT or AT for specfied orders
+###########################################################
+
+BBimplicit                                  # DEW 3/13/00 (E2145)
+integer station
+playcommon
+integer     nord, nargs, istat, iview, hset # DEW 3/13/00 (E2145)
+
+call chkfor (nord,nargs,istat,iview)    # strip out FOR/TIME if present
+if (istat != $YES) return               # test for error in <addressee>
+
+parse$read$group (hset)                 # save the current ord set
+
+#$% if the command input is COMMTEXT or MESSAGE
+if (nord == COMMTEXT$order | 
+    nord == MESSAGE$order  |
+    nord == INTELL$order    )
+   {
+    #$% get message subcommands
+    call hanmsg (nord,nargs,istat)      
+   }
+else if (nord == ENTERPLAN$order    | 
+         nord == ENTERACTION$order       |
+         nord == ENTERORDERS$order        )
+   {
+    call hanord (nord,nargs,istat)      # Plan/Prestored Orders subcommands
+   }
+else if (nord == LAUNCH$order | 
+         nord == LAUNCHC$order)
+   {
+    call hanlnc (nord,nargs,istat,iview) # Launch subcommands
+   }
+else if (nord == FIRECRUISE$order)      # for adcru missiles Alex V. 8/93
+   {                                    # new Improved CM Model dropped ADCRU - joa 2/98 (E1864)
+    call bldbas (nord,nargs,p_args)     # Build into stack
+    }
+else if (nord == LAUNCHBOAT$order )
+   {
+    call hanlncboat (nord,nargs,istat)      # Launch boat subcommand
+   }
+else if (nord == ALLMISSION$order)      # jb            Activate        4/7/87
+   {
+    call hanmis (nord,nargs,istat)      # FOR MISSION subcommands
+   }
+else if (nord == ENTERSEARCH$order)
+   {
+    call hansrc (nord,nargs,istat)      # search plan subcommands
+   }
+else if (nord == DefinePIM$order) 
+    {
+    call hanpim (nord,nargs,istat) # define PIM subcommands jb E2208 istat 12/00
+    }
+else if (nord == DefineROUTE$order |
+         nord == ModifyROUTE$order)
+    {
+    call hanrte (nord,nargs,istat)
+    }
+else if ((nord == DefineNRT$order) |
+         (nord == ModifyNRT$order) )
+    {
+    if (station != 0)
+        call handle_NRT (nord,nargs,station)   # SMM 12/92 moved here 1/93
+    }
+else if (nord < NO$order$lo | 
+         nord > NO$order$hi)
+   {
+    if      (nord == ALERT$order    ) call hanlrt (nord,nargs)
+    else if (nord == INFORM$order   ) call haninf (nord,nargs)
+    else if (nord == ENTEROTG$order ) call hanotg (nord,nargs)
+    else if (nord == CREATE$order )   call hancreate (nord,nargs)
+
+    call bldbas (nord,nargs,p_args)     # Build into stack
+   }
+
+parse$set$group (hset)                  # restore the current ord set
+
+return
+end
+
+
+
+subroutine hanpim (nord,nargs,stat)     
+
+########################################################
+#$%
+#$% Purpose:   HANPIM processes PIM subcommands.
+#$%
+#$% Called By: ORDCHK     
+#$%
+#$% Calls:     BLDBAS     ECHOH      ECHOI
+#$%            ECHOR      ORDPAR     SMOVH
+#$%
+#$% Tables:    ORD
+#$%
+#$% Date:      NOV 83
+#$%
+#$% Author:    Dana Wills
+#$%
+########################################################
+
+BBimplicit                                 # DEW 3/13/00 (E2145)
+playcommon
+pr_common
+literal hord[$max$args]
+string prompt[30] "Enter STOP:"
+
+integer     HLDPNT, CNT, PCNT, I, NARGS, KMAX, KK, 
+            JORD, JARGS, STAT, NORD, SAVPNT, K 
+
+ hldpnt = stkpnt
+ cnt = 0
+ pcnt = -1
+
+ #$% for each order
+ for (i = 1; i <= nargs; i = i + 1)
+   {
+    hord[i] = p_args[i]                  # Save the PIM order
+   }
+
+
+kmax = max$points$in$pim 
+
+#$% display prompt message to user
+call echov ("Enter up to ")
+call echoi (kmax)
+call echov (" points for the PIM.  End with 'STOP'.")
+call echor
+
+parse$set$group ($grp$PIM)      # set to PIM    group
+
+#$% load prompt entries
+kk = 0
+call smovv  ("Point ",prompt,kk)
+call smovib (cnt+1   ,2,prompt,kk)
+call smovv   (':'       ,prompt,kk)
+call smov   (EOS       ,prompt,kk)
+
+repeat
+    {
+    #$% if space for only three lines of text left
+    if (stkpnt+3 >= $PLAY$STACK$MAX)
+      {
+       #$% send warning message to user
+       call echov ("WARNING -- Room for only ")
+       call echoi ($play$stack$max - stkpnt)
+       call echov (" more points.")
+       call echor
+      }
+
+    #$% parse the order tables 
+    call ordpar (60*1000,prompt,jord,jargs)
+
+    #$% if order is to cancel (^K)
+    if (jord == -1)
+       {
+        #$% save the stack pointer and return
+        stkpnt  = hldpnt        
+        return
+       }
+    #$% else if order is STOP (end of PIM)
+    else if (jord == STOP$order)
+       {
+        #$% if there is no text
+        if (cnt == 0)
+           {
+            #$% set status to not yes and display warning message to user
+            stat = ! $yes
+            call echov  ("No Points entered.  Command ignored!")
+            call echor
+            call echor
+           }
+        break
+       }
+    #$% else if order is text
+    else if (jord == PROCEED$order)
+       {
+        #$% if count is less than max lines available        
+        if (cnt < kmax)
+           {
+            #$% increment count by one line
+            cnt = cnt + 1
+            #$% if at the begining of the PIM
+            if  (cnt == 1)
+                {
+                call bldbas (nord,nargs,hord)     # Build into stack
+                #$% save the stackpoint
+                savpnt = stkpnt
+                }
+
+                 call bldbas (jord,jargs,p_args)         # Build into stack
+
+                 kk = 0
+                 call smovv  ("Point ",prompt,kk)
+                 call smovib (cnt+1   ,2,prompt,kk)
+                 call smovv   (':'       ,prompt,kk)
+                 call smov   (EOS       ,prompt,kk)
+           }
+        #$% else if max lines of text exceeded
+        else
+           {
+            #$% send warning message to user
+            call echov  ("Sorry, only first ")
+            call echoi  (kmax)
+            call echov  (" points accepted.")
+            call echor
+            call echov  ("End the PIM with STOP or Cancel with ^K.")
+            call echor
+           }
+
+        #$% if line count exceed
+        if (cnt >= kmax)
+           {
+            #$% reset prompt entry
+                 kk = 0
+                 call smovv  ("Enter STOP:",prompt,kk)
+                 call smov   (EOS             ,prompt,kk)
+           }
+       }
+     #$% repeat loop until max reached
+   } until (stkpnt >= $play$stack$max)
+
+ #$% if text entered
+ if (cnt > 0)   #       No Points <==> ERASE 
+   {
+    #$% increment count
+    cnt = cnt + 1
+    for (k = savpnt; k <= stkpnt; k = k + 1)
+       {
+        #$% save stack  segment and stack count
+        stack[$stk$seq,k] = k - savpnt + 1
+        stack[$stk$cnt,k] = cnt
+       }
+   }
+
+ return
+ end
+
+
+
+subroutine hanmsg (nord,nargs,stat)     
+
+########################################################
+#$%
+#$% Purpose:   HANMSG processes message subcommands.
+#$%
+#$% Called By: ORDCHK     HANORD
+#$%
+#$% Calls:     BLDBAS     ECHOH      ECHOI
+#$%            ECHOR      ORDPAR     SMOVH
+#$%
+#$% Tables:    ORD
+#$%
+#$% Date:      JAN 82
+#$%
+#$% Author:    Dana Wills
+#$%
+#$% Modified:  Carol Kropp - 7/96 (E1376)
+#$%            When the command is INTELL, provide a
+#$%            warning that the first line gets truncated
+#$%            so that the current zulu time can be moved
+#$%            into the message.
+#$%
+########################################################
+
+BBimplicit                                 # DEW 3/13/00 (E2145)
+playcommon
+pr_common
+literal hord[$max$args]
+string prompt "Enter BT:"
+integer     HLDPNT, CNT, PCNT, I, NARGS, NORD, KMAX, 
+            KK, JORD, JARGS, STAT, SAVPNT, K, K9
+
+ hldpnt = stkpnt
+ cnt = 0
+ pcnt = -1
+
+ #$% for each order
+ for (i = 1; i <= nargs; i = i + 1)
+   {
+    hord[i] = p_args[i]                  # Save the MESSAGE order
+   }
+
+
+if      (nord == COMMTEXT$order) kmax = max$lines$of$Commtext
+else if (nord == MESSAGE$order ) kmax = max$lines$of$Message
+else if (nord == INTELL$order  ) kmax = max$lines$of$Intell
+else                             kmax = max$lines$of$Message
+
+#$% load prompt entries
+kk = 0
+call smovib (cnt+1,2,prompt,kk)
+call smovv   (':',prompt,kk)
+call smov   (EOS,prompt,kk)
+
+ #$% display prompt message to user
+ call echov ("Enter up to ")
+ call echoi (kmax)
+ call echov (" lines of text.  End with 'BT'.")
+ call echor
+
+ if (nord == Intell$Order)   # clk 7/96 (E1376) - adding DTG to msg
+   {
+    call echov ("The first line of text will be truncated to 70 characters.")
+    call echor
+   }   # end of if an Intell Order
+
+ parse$set$group ($grp$CommText)        # set to message text group
+
+ repeat
+   {
+    #$% if space for only three lines of text left
+    if (stkpnt+3 >= $PLAY$STACK$MAX)
+      {
+       #$% send warning message to user
+       call echov ("WARNING -- Room for only ")
+       call echoi ($play$stack$max - stkpnt)
+       call echov (" more lines of text.")
+       call echor
+      }
+
+    #$% parse the order tables 
+    call ordpar (60*1000,prompt,jord,jargs)
+
+    #$% if order is to cancel (^K)
+    if (jord == -1)
+       {
+        #$% save the stack pointer and return
+        stkpnt  = hldpnt        
+        return
+       }
+    #$% else if order is BT (end of message)
+    else if (jord == BT$order)
+       {
+        #$% if there is no text
+        if (cnt == 0 &  nord != INTELL$order)
+           {
+            #$% set status to not yes and display warning message to user
+            stat = ! $yes
+            call echov  ("No text entered.  Command ignored!")
+            call echor
+            call echor
+           }
+        break
+       }
+    #$% else if order is text
+    else if (jord == TEXT$order)
+       {
+        #$% if count is less than max lines available        
+        if (cnt < kmax)
+           {
+            #$% increment count by one line
+            cnt = cnt + 1
+            #$% if at the begining of the text
+            if  (cnt == 1)
+                {
+                call bldbas (nord,nargs,hord)     # Build into stack
+                #$% save the stackpoint
+                savpnt = stkpnt
+                }
+
+            for (k=1; k <= $max$args; k=k+1)
+                {
+                hord[k] = 0                       # init destination area
+                }
+
+                 k9 = 0
+                 call smovh(line$buf[1],line$length,hord,k9)    # pack text into hord
+
+            call bldbas (jord,(line$length+7)/8,hord) # Build into stack
+
+            #$% convert from characters to numbers & increment by one
+                 kk = 0
+                 call smovib (cnt+1,2,prompt,kk)
+           }
+        #$% else if max lines of text exceeded
+        else
+           {
+            #$% send warning message to user
+            call echov  ("Sorry, only first ")
+            call echoi  (kmax)
+            call echov  (" lines accepted.")
+            call echor
+            call echov  ("Send the message with BT or Cancel with ^K.")
+            call echor
+           }
+        #$% if line count exceed
+        if (cnt >= kmax)
+           {
+            #$% reset prompt entry
+            kk  = 0
+                 call smovv ("Enter",prompt,kk)
+           }
+       }
+     #$% repeat loop until max reached
+   } until (stkpnt >= $play$stack$max)
+
+ #$% if text entered
+ if (cnt > 0 | nord == INTELL$order)    # INTELL w/No text      <==> ERASE 
+   {
+    #$% increment count
+    cnt = cnt + 1
+    for (k = savpnt; k <= stkpnt; k = k + 1)
+       {
+        #$% save stack  segment and stack count
+        stack[$stk$seq,k] = k - savpnt + 1
+        stack[$stk$cnt,k] = cnt
+       }
+   }
+
+ return
+ end
+
+
+
+subroutine hanlnc (nord,nargs,stat,iview)
+
+######################################################
+#$%
+#$% Purpose:   HANLNC processes all launch sub-
+#$%            commands.
+#$%
+#$% Called By: ORDCHK     HANORD
+#$%
+#$% Calls:     BLDBAS     CHKEQ      CHKFLT
+#$%            CHKFOR     ECHO       ECHOH
+#$%            ECHOHN     ECHOI      ECHOR
+#$%            ORDPAR
+#$%
+#$% Tables:    ORD
+#$%
+#$% Date:      JAN 82
+#$%
+#$% Author:    Dana Wills
+#$%
+#$% Modified:  Susan Miller - 1/97 (E1732)
+#$%            Added parameter iview, added parameter, iview, in
+#$%            call to chkfor, removed implicit definitions.  
+#$%            Added code to allow the setting of IFF modes in 
+#$%            the launch command.  
+#$%
+######################################################
+bbcommon       
+playcommon
+
+ integer nord, nargs, stat, iview
+
+
+ integer cnt, eqcnt2, istat, jstat, m2, m, savpnt
+ integer hldpnt, k, eqcnt, isl, jord
+ literal mname, newfor, typair
+ string prompt "Flt Plan:"
+ integer    OLDFLAG, LODPNT, JARGS, MQTY, IP
+
+ hldpnt = stkpnt                        # save the stack pointer
+ oldfor = curfor                        # save the prior addressee
+
+ parse$Read$NotFor (OldFlag)
+
+ typair = p_args[3]                     # grab the aircraft type
+ newfor = p_args[4]                     # grab the flight name
+
+ if (newfor == $lex$mission$)
+     newfor = p_args[5]                 # grab the mission name
+
+ call chkflt (_                         # search for aircraft/display options
+              typair,                    #    aircraft type name
+              stat,                      #    returned status $YES=ok(found it)
+              eqcnt)                     #    number of slots available
+
+ #$% if equipment not found, return
+ if (stat != $YES) return
+
+ #$% if equipment slots available
+ if (eqcnt != 0)
+   {
+    #$% display prompt message to user
+    call echov ("Enter the equipment LOAD (up to ")
+    call echoi (eqcnt)
+    call echov (" items).")
+    call echor
+   }
+ if (iview >= $FirstBlue$View & iview <= $LastBlue$View)   # smm 2/97 (E1732)
+   {
+    call echov ("Enter the IFF Mode and Code: (up to 3 Modes)")
+    call echov (" using 'SET IFF' command.")
+    call echor
+   }
+ call echov ("End the Flight Plan with a 'BINGO' or 'STOP' command.")
+ call echor
+ call echor
+
+ call bldbas (nord,nargs,p_args)        # Build LAUNCH into stack
+
+ savpnt = stkpnt                        # Mark first launch order
+
+ #$% get addressee
+ curfor = newfor
+ #$% initialize current time
+ curtim = 0
+
+ p_args[1] = $lex$load$
+
+ call bldbas (LOAD$order,1,p_args)      # Build empty load command into stack
+ lodpnt = stkpnt                        # Mark load order
+ stack[$stk$addressee,lodpnt] = oldfor  # grab the platform name
+
+ cnt = 2                                # count the orders put to the stack
+
+ parse$set$group ($grp$FlightPlan)      # orders to flight plan set
+ parse$Set$NotFor ($Not$AirCraft)       # ignore orders that are Not For AC
+
+ eqcnt2 = eqcnt                         # save the number of equipment loads
+                                        # available
+ repeat
+   {
+    #$% if orders within three of being full
+    if (stkpnt+3 >= $PLAY$STACK$MAX)
+      {
+       #$% send warning message to user
+       call echov ("WARNING -- Room for only ")
+       call echoi ($play$stack$max - stkpnt)
+       call echov (" more orders available.")
+       call echor
+      }
+    #$% parse orders
+    call ordpar (60*1000,prompt,jord,jargs)
+    call chkfor (jord,jargs,istat,iview)      # strip off TIME indicators
+
+    if (jord == -1)                     # CANCEL COMMAND
+       {
+        stkpnt  = hldpnt                 # restore the stack pointer
+        curfor  = oldfor                 #  and the prior addressee
+        parse$Set$NotFor (OldFlag)
+        return
+       }
+
+    else if (jord == STOP$order   |     # end of Flight Plan
+             jord == BINGO$order  |
+             jord == SEARCH$order  )
+       {
+        #$% if stop order given
+        if (jord != STOP$order)
+           {
+            call bldbas (jord,jargs,p_args)      # Build into stack
+            cnt = cnt + 1
+           }
+        #$% if nothing was loaded and equipment slot available
+        if (eqcnt2 == eqcnt & eqcnt !=  0)
+           {
+            #$% display warning message to user
+            call echov  ("NOTICE -- No Deployable Equipment Loaded.")
+            call echor
+           }
+        #$% if flight plan not entered
+        if (cnt == 2)
+           {
+            #$% display warning message to user
+            call echov  ("NOTICE -- No Flight Plan Entered.")
+            call echor
+           }
+        break
+       }
+    else if (jord == LOAD$order)        # add equipment to the list
+       {
+        for (m=2; m <=  jargs; m = m + 2)   # for each qty&name entered
+           {
+            mqty = p_args[m]
+            mname = p_args[m+1]
+            #$% if equipment slots available is exceeded
+            if  (eqcnt2 <= 0 & eqcnt <= 0)
+                {
+                #$% display warning message to user
+                call echov ("Sorry, Load limit reached.  Cannot load ")
+                call echohn (mname,$$MaxName)
+                call echo ($PERIOD)
+                call echor
+                }
+            #$% else if equipment slots available
+            else
+                {
+                #$% check equipment type, quantity, name, and   status
+                #$% if ok get next entry
+                call chkeq (typair,mqty,mname,jstat)
+                if (jstat != $YES) next
+
+                ip = 0
+
+                #$% for each equipment loaded
+                for (m2 = $stk$args; m2 <= stack[$stk$length,lodpnt];   m2=m2+2)
+                   {
+                    #$% if found
+                    if (stack[m2+2,lodpnt] ==   mname)
+                         {
+                        #$% display message to user
+                        ip =    m2
+                        call    echov ("Changing quantity of ")
+                        call    echohn (stack[m2+2,lodpnt],$$MaxName)
+                        call    echor
+                        break
+                         }
+                   }
+
+                #$% if limit reached but all equipment not loaded
+                if (ip==0 & eqcnt2 <=   0 & mqty != 0)
+                   {
+                    #$% display message to user
+                    call echov ("Sorry, Load limit reached.  Cannot load ")
+                    call echohn (mname,$$MaxName)
+                    call echo   ($PERIOD)
+                    call echor
+                    next
+                   }
+                
+                else if (ip==0 & mqty   != 0)
+                   {
+                    ip = stack[$stk$length,lodpnt]
+                    eqcnt2 = eqcnt2 -   1
+                    stack[$stk$length,lodpnt]   = ip+2
+                    stack[ip+2,lodpnt] = mname
+                   }
+
+                if (mqty != 0)
+                   {
+                    stack[ip+1,lodpnt] = mqty
+                   }
+                else if (ip != 0)
+                   {
+                    eqcnt2 = eqcnt2 +   1
+                    isl = stack[$stk$length,lodpnt]
+                    stack[$stk$length,lodpnt]   = isl-2
+
+                    stack[ip+2,lodpnt] = stack[isl  ,lodpnt]      # 09JUN80
+                    stack[ip+1,lodpnt] = stack[isl-1,lodpnt]      # 09JUN80
+                   }
+                }
+           }
+
+        call echov ("Current Load is:")
+
+        for (m2 = $stk$args; m2+1 < stack[$stk$length,lodpnt];  m2=m2+2)
+           {
+            if  (m2 > $stk$args) call echo ($COMMA)
+            call echo ($SPACE)
+            call echoi  (int(stack[m2+1,lodpnt]))
+            call echo ($SPACE)
+            call echohn (stack[m2+2,lodpnt],$$MaxName)
+           }
+        call echor
+       }
+    else if (jord < NO$order$lo | jord > NO$order$hi)
+       {
+        if      (jord == INFORM$order   ) call haninf (jord,jargs)
+        else if (jord == ENTEROTG$order ) call hanotg (nord,nargs)
+
+        call bldbas (jord,jargs,p_args)  # Build into stack
+        cnt = cnt + 1
+       }
+
+    else
+       {
+        call echov ("????")
+        call echor
+       }
+
+   } until (stkpnt >= $play$stack$max)
+
+ if (stkpnt >= $PLAY$STACK$MAX)
+   {
+    call echov ("Sorry, the Order Buffer is full.")
+    call echor
+   }
+
+ curfor = oldfor
+ parse$Set$NotFor (OldFlag)
+
+if (cnt > ord$count$size)           # exceed order count size
+{
+    #$% send error message to user
+    call echov ("Sorry, but number of orders in launch exceeds limit of ")
+    call echoi (ord$count$size)
+    call echor
+
+    stkpnt = hldpnt             #$% restore stack pointer
+    stat = ! $YES
+
+    nord = -1             #$% change order to cancel
+    return
+}    
+
+
+ for (k = savpnt; k <= stkpnt; k = k + 1)
+    {
+     stack[$stk$seq,k] = k - savpnt + 1
+     stack[$stk$cnt,k] = cnt
+    }
+
+ return
+ end
+
+
+
+subroutine hanord (nord,nargs,stat)     
+
+######################################################
+#$%
+#$% Purpose:   HANORD processes all plan sub-
+#$%            commands.
+#$%
+#$% Called By: ORDCHK
+#$%
+#$% Calls:     BLDBAS     CHKFOR     ECHO
+#$%            ECHOH      ECHOI      ECHOR
+#$%            HANLNC     HANMSG     ORDPAR
+#$%
+#$% Tables:    ORD
+#$%
+#$% Date:      JAN 82
+#$%
+#$% Author:    Dana Wills
+#$%
+#$% Modified:  Susan Miller - 1/97 (E1732)
+#$%            Added parameter, iview, in call to chkfor and hanlnc
+#$%
+######################################################
+
+BBimplicit                                 # DEW 3/13/00 (E2145)
+playcommon
+character prompt[10]
+integer   HLDPNT, NORD, NARGS, BASPNT, HSET, ISAVE, ISTAT, IVIEW, STAT
+
+ hldpnt = stkpnt                        # save the stack pointer
+ oldfor = curfor                        # save the current FOR
+
+ #$% if order is to enter plan
+ if (nord == ENTERPLAN$order)
+    {
+     curfor = -1                        # Flag curfor (as anyone)
+
+     #$% load prompt array
+     prompt[1] = $LETC
+     prompt[2] = $LitO
+     prompt[3] = $LitN
+     prompt[4] = $SPACE
+     prompt[5] = $LETP
+     prompt[6] = $LitL
+     prompt[7] = $LitA
+     prompt[8] = $LitN
+     prompt[9] = $COLON
+     prompt[10] = $null
+    }
+ else if (nord == ENTERACTION$order)
+    {
+     curfor = -1                        # Flag curfor (as anyone)
+
+     #$% load prompt array
+     prompt[1] = $LETA
+     prompt[2] = $Litc
+     prompt[3] = $Litt
+     prompt[4] = $SPACE
+     prompt[5] = $LETP
+     prompt[6] = $LitL
+     prompt[7] = $LitA
+     prompt[8] = $LitN
+     prompt[9] = $COLON
+     prompt[10] = $null
+    }
+ else
+    {
+     curfor = 0                         # Flag curfor (as to-be-entered)
+
+     #$% load prompt array
+     prompt[1] = $LETI
+     prompt[2] = $LitN
+     prompt[3] = $LitI
+     prompt[4] = $litT
+     prompt[5] = $SPACE
+     prompt[6] = $LETO
+     prompt[7] = $LitR
+     prompt[8] = $LitD
+     prompt[9] = $COLON
+     prompt[10] = $null
+    }
+
+ call bldbas (nord,nargs,p_args)        # Build into stack
+ baspnt = stkpnt                        # mark base of orders
+
+ parse$read$group (hset)                # save the current ord set
+
+ #$% display to user
+ call echov ("End Orders Input with 'STOP'.")
+ call echor
+
+ isave = nord
+
+ repeat
+   {
+    if (isave == ENTERACTION$order) parse$set$group ($grp$OPPlan) 
+    else                            parse$set$group ($grp$Prestored) 
+
+    #$% if stack getting full (within 3)
+    if (stkpnt+3 >= $PLAY$STACK$MAX)
+      {
+       #$% display warning message
+       call echov ("Warning- Room for only ")
+       call echoi ($play$stack$max - stkpnt)
+       call echov (" more orders available.")
+       call echor
+      }
+
+    call ordpar (60*1000,prompt,nord,nargs)
+    call chkfor (nord,nargs,istat,iview) # strip out FOR/TIME if present
+    if (istat != $YES) next             # test for error <addressee>
+
+    if (nord == -1)                     # CANCEL COMMAND
+       {
+        stkpnt  = hldpnt                 # restore the stack pointer
+        curfor  = oldfor                 #  and the prior addressee
+        return
+       }
+    else if (nord == STOP$order)        # end of order entry
+       {
+        #$% if no orders entered
+        if (stkpnt == baspnt)
+           {
+            #$% send warning message to user
+            call echov  ("No Orders Entered.  Command Canceled!")
+            call echor
+            
+            #$% restore the stack pointer
+            stkpnt = hldpnt
+            stat = ! $YES
+
+            #$% set order as cancelled and return
+            nord = -1
+            return
+           }
+        stat =  $yes
+        curfor  = oldfor
+        return
+       }
+
+    #$% if command is COMMTEXT or MESSAGE
+    if (nord == COMMTEXT$order | nord == MESSAGE$order)
+       {
+        call hanmsg (nord,nargs,istat)   # Message subcommands
+       }
+
+#    else if (nord == ALLMISSION$order)
+#       {
+#        call hanmis (nord,nargs,istat) # FOR MISSION subcommands
+#       }
+
+    #$% else if command is LAUNCH or LAUNCHC
+    else if (nord == LAUNCH$order | nord == LAUNCHC$order)
+       {
+        call hanlnc (nord,nargs,istat,iview)   # Launch subcommands
+       }
+
+    else if (nord == LAUNCHBoat$order )
+       {
+        call hanlncboat (nord,nargs,istat)   # Launch boat subcommand
+       }
+
+    #$% else if order is not in the stack
+    else if (nord < NO$order$lo | nord > NO$order$hi)
+       {
+        if      (nord == INFORM$order   ) call haninf (nord,nargs)
+        else if (nord == ENTEROTG$order ) call hanotg (nord,nargs)
+
+        call bldbas (nord,nargs,p_args) # Build into stack
+       }
+
+    else
+       {
+        #$% display ^G
+        call echo ($cntlG)
+       }
+     #$% repeat until buffer full
+   } until (stkpnt >= $play$stack$max)
+
+ #$% if buffer full
+ if (stkpnt >= $PLAY$STACK$MAX)
+   {
+    #$% send warning message to user
+    call echov ("Sorry, the Order Buffer is full.")
+    call echor
+   }
+
+ parse$set$group (hset)                 # restore the   current ord set
+ curfor = oldfor                        #  and the prior addressee
+
+ return
+ end
+
+
+subroutine hansrc (nord,nargs,stat)     
+
+######################################################
+#$%
+#$% Purpose:   HANSRC processes all search plan
+#$%            subcommands.
+#$%
+#$% Called By: ORDCHK
+#$%
+#$% Calls:     BLDBAS     CHKFOR     ECHOH
+#$%            ECHOI      ECHOR      ORDPAR
+#$%
+#$% Tables:    ORD
+#$%
+#$% Date:      JAN 82
+#$%
+#$% Author:    Dana Wills
+#$%
+#$% Modified:  Susan Miller - 1/97 (E1732)
+#$%            Added iview parameter to chkfor
+#$%
+######################################################
+
+BBimplicit                                 # DEW 3/13/00 (E2145)
+playcommon
+string prompt "Src Plan:"
+integer HLDPNT, NORD, NARGS, BASPNT, HSET, ISTAT, IVIEW, STAT
+
+ hldpnt = stkpnt                        # save the stack pointer
+ oldfor = curfor                        # save the current FOR
+ curfor = -1                            # Flag curfor
+
+ call bldbas (nord,nargs,p_args)        # Build into stack
+ baspnt = stkpnt                        # mark base of orders
+
+ parse$read$group (hset)                # save the current ord set
+
+ #$% display information message to user
+ call echov("End Search Plan Input with 'STOP' or 'SEARCH' or 'EXECUTE ROUTE.'")
+ call echor
+
+ repeat
+   {
+    parse$set$group ($grp$FlightPlan) 
+
+    #$% if stack is getting full (within 3 entries)
+    if (stkpnt+3 >= $PLAY$STACK$MAX)
+      {
+       #$% send warning message to user
+       call echov ("Warning- Room for only ")
+       call echoi ($play$stack$max - stkpnt)
+       call echov (" more orders available.")
+       call echor
+      }
+
+    call ordpar (60*1000,prompt,nord,nargs)
+    call chkfor (nord,nargs,istat,iview)# strip out FOR/TIME if present
+    if (istat != $YES) next             # test for error <addressee>
+
+    if (nord == -1)                     # CANCEL COMMAND
+       {
+        stkpnt  = hldpnt                 # restore the stack pointer
+        curfor  = oldfor                 #  and the prior addressee
+        return
+       }
+    #$% is order is to stop
+    else if (nord == STOP$order)        # end of order entry
+       {
+        #$% if stack pointer on empty
+        if (stkpnt == baspnt)
+           {
+            #$% send warning message to user
+            call echov  ("No Orders Entered.  Command Canceled!")
+            call echor
+
+            stkpnt = hldpnt             #$% restore stack pointer
+            stat = ! $YES
+
+            nord = -1             #$% change order to cancel
+            return
+           }
+        stat =  $yes
+        break
+       }
+
+    if (nord == LOAD$order)    #$% if load order attempted
+       {
+        call echov ("Sorry, but LOAD commands must be ")
+        call echov ("entered at LAUNCH time.")
+        call echor
+       }
+
+    else if (nord == EXECUTE$order)    #$% is execute order is attempted
+       {
+        call echov ("Sorry, but a SEARCH plan cannot ")
+        call echov ("invoke contingency plans.")
+        call echor
+       }
+    else if (nord < NO$order$lo | nord > NO$order$hi)
+       {
+        if (nord == INFORM$order) call haninf (nord,nargs)
+
+        call bldbas (nord,nargs,p_args) # Build into stack
+       }
+
+    else
+       {
+        call echov ("????")
+        call echor
+       }
+
+    if (nord == SEARCH$order | nord == PROCEEDROUTE$order)      
+       {
+        stat =  $yes
+        break
+       }
+
+     #$% repeat loop until stack is full
+   } until (stkpnt >= $play$stack$max)
+
+ if (stkpnt >= $PLAY$STACK$MAX)         #$% if  stack is full
+   {
+    call echov ("Sorry, the Order Buffer is full.")
+    call echor
+   }
+
+ parse$set$group (hset)                 # restore the current ord set
+ curfor = oldfor                        #  and the prior addressee
+
+ return
+ end
+
+
+subroutine hanmis (nord,nargs,stat)     # jb  Activated         4/7/87
+
+######################################################
+#$%
+#$% Purpose:   HANMIS processes all FOR MISSION xxx
+#$%            commands.
+#$%
+#$% Called By: ORDCHK
+#$%
+#$% Calls:     BLDBAS     CHKFOR     ECHOH
+#$%            ECHOI      ECHOR      ORDPAR
+#$%
+#$% Tables:    ORD
+#$%
+#$% Date:      APR 84
+#$%
+#$% Author:    Dana Wills
+#$%
+#$% Modified:  Susan Miller - 1/97 (E1732)
+#$%            Added iview parameter to chkfor
+#$%
+######################################################
+
+BBimplicit                                 # DEW 3/13/00 (E2145)
+playcommon
+string prompt "For Mission:"
+integer HLDPNT, CNT, NORD, NARGS, BASPNT, HSET, ISTAT, IVIEW, STAT, K
+
+
+ hldpnt = stkpnt                        # save the stack pointer
+ oldfor = curfor                        # save the current FOR
+ ##curfor = -1  # jb  DELETED:  defeats ALLMISSION order         4/14/87        
+
+ cnt = 1                                # jb  added     6/10/87
+ call bldbas (nord,nargs,p_args)        # Build into stack
+
+ baspnt = stkpnt                        # mark base of orders
+
+ parse$read$group (hset)                # save the current ord set
+
+ call echov ("End Mission Input with 'STOP'.")
+ call echor
+
+ repeat
+   {
+    parse$set$group ($grp$FlightPlan) 
+    parse$Set$NotFor ($Not$AirCraft)    # ignore orders that are Not For AC
+
+    #$% if stack is getting full (within 3 entries)
+    if (stkpnt+3 >= $PLAY$STACK$MAX)
+      {
+       call echov ("Warning- Room for only ")
+       call echoi ($play$stack$max - stkpnt)
+       call echov (" more orders available.")
+       call echor
+      }
+
+    call ordpar (60*1000,prompt,nord,nargs)
+      # Note:  CHKFOR puts the addressed MISSION into CURFOR (playcommon),
+      #        --and sets CURTIM.
+    call chkfor (nord,nargs,istat,iview)# strip out FOR/TIME if present
+    if (istat != $YES) next             # test for error <addressee>
+
+    if (nord == -1)                     # CANCEL COMMAND
+       {
+        stkpnt  = hldpnt                 # restore the stack pointer
+        curfor  = oldfor                 #  and the prior addressee
+        return
+       }
+    else if (nord == STOP$order)        # end of order entry
+       {
+        if (stkpnt == baspnt)         #$% if stack pointer on empty
+           {
+            call echov  ("No Orders Entered.  Command Canceled!")
+            call echor
+
+            stkpnt = hldpnt             #$% restore stack pointer
+            stat = ! $YES
+
+            nord = -1             #$% change order to CANCEL
+            return
+           }
+        stat =  $yes
+        break
+       }
+
+    if (nord == LOAD$order)
+       {
+        call echov ("Sorry, but LOAD commands must be ")
+        call echov ("entered at LAUNCH time.")
+        call echor
+       }
+
+    else if (nord < NO$order$lo | nord > NO$order$hi)
+       {
+        if (nord == INFORM$order ) call haninf (nord,nargs)
+
+        call bldbas (nord,nargs,p_args) # Build into stack
+        cnt = cnt + 1                   # jb  added     6/10/87
+       }
+
+    else
+       {
+        call echov ("????")
+        call echor
+       }
+
+     #$% repeat loop until stack is full
+   } until (stkpnt >= $play$stack$max)
+
+ if (stkpnt >= $PLAY$STACK$MAX)
+   {
+    call echov ("Sorry, the Order Buffer is full.")
+    call echor
+   }
+
+ for (k = BASpnt; k <= stkpnt; k = k + 1)# jb BASpnt vs SAVpnt 6/10/87  
+    {
+     stack[$stk$seq,k] = k - BASpnt + 1 # jb BASpnt vs SAVpnt 6/10/87   
+     stack[$stk$cnt,k] = cnt
+    }
+
+ parse$set$group (hset)                 # restore the current ord set
+ curfor = oldfor     #  and the prior addressee
+
+ return
+ end   # End hanMIS
+
+
+subroutine hanlrt (nord,nargs)     
+
+######################################################
+#$%
+#$% Purpose:   HANLRT processes ALERT Commands to 
+#$%            insure that the <text> argument is maintained 
+#$%                at the correct length.
+#$%
+#$% Called By: ORDCHK
+#$%
+#$% Calls:     
+#$%
+#$% Tables:    
+#$%
+#$% Date:      FEB 83
+#$%
+#$% Author:    Dana Wills
+#$%
+######################################################
+
+BBimplicit                                 # DEW 3/13/00 (E2145)
+PlayCommon
+pr_common
+integer sindex
+
+integer     IPOS, K, LENGTH, KK, NARGS, NORD
+# NORD   	**** UNUSED ****
+
+
+# Command Syntax: ALERT <type> <ready1> <ready2> <ready3> (ordnance) <text>
+
+ipos = sindex(line$buf,"(ordnance)") + 10
+
+k = length (line$buf[ipos])             # determine amount      of text entered
+
+kk = 0                                          ##      TPA 4/6/83
+call smovh (line$buf[ipos], k, p_args[6], kk)   ## TPA 4/6/83
+call smov  (EOS,               p_args[6], kk)   ## TPA 4/6/83
+
+nargs = 5 + (k+7)/$$MaxLit
+
+return
+end
+
+
+subroutine haninf (nord,nargs)     
+
+######################################################
+#$%
+#$% Purpose:   HANINF processes INFORM Commands to 
+#$%            insure that the <text> argument is maintained 
+#$%                at the correct length.
+#$%
+#$% Called By: ORDCHK
+#$%
+#$% Calls:     
+#$%
+#$% Tables:    
+#$%
+#$% Date:      JUNE 83
+#$%
+#$% Author:    Dana Wills
+#$%
+######################################################
+
+BBimplicit                                 # DEW 3/13/00 (E2145)
+PlayCommon
+pr_common
+integer sindex
+integer IPOS, K, LENGTH, KK, NARGS, NORD
+#    NORD   	**** UNUSED ****
+
+# Command Syntax: INFORM (player) <text> 
+
+ipos = sindex(line$buf,"(player)") + 8
+
+k = length (line$buf[ipos])             # determine amount      of text entered
+
+kk = 0
+call smovh (line$buf[ipos], k, p_args[2], kk)
+call smov  (EOS,               p_args[2], kk)
+
+nargs = 1 + (k+7)/$$MaxLit
+
+return
+end
+
+subroutine hanotg (nord,nargs)     
+
+######################################################
+#$%
+#$% Purpose:   HANOTG processes ENTER OTG Commands to 
+#$%            insure that the <fullname> argument is maintained 
+#$%            at the correct length.
+#$%
+#$% Called By: ORDCHK
+#$%
+#$% Calls:     
+#$%
+#$% Tables:    
+#$%
+#$% Date:      Nov 2000 
+#$%
+#$% Author:    Dane Wills
+#$%
+######################################################
+
+BBimplicit                                 # DEW 3/13/00 (E2145)
+PlayCommon
+pr_common
+integer sindex
+integer IPOS, K, LENGTH, KK, NARGS, NORD, JJ
+#    NORD   	**** UNUSED ****
+
+# Command Syntax: ENTER OTG <name> ... NAMED <fullname>
+
+ipos = sindex(line$buf,"NAMED") + 6
+
+k = length (line$buf[ipos])             # determine amount      of text entered
+
+for (jj = 4; jj <= nargs; jj=jj+1)
+    {
+    if (p_args[jj] != $lex$named$) next
+    
+    kk = 0
+    call smovh (line$buf[ipos], k, p_args[jj+1], kk)
+    call smov  (EOS,               p_args[jj+1], kk)
+
+    nargs = jj + (k+7)/$$MaxLit
+    break
+    }
+
+return
+end
+
+subroutine hancreate (nord,nargs)     
+
+######################################################
+#$%
+#$% Purpose:   HANCREATE processes CREATE SHIP Commands to 
+#$%            insure that the <fullname> argument is maintained 
+#$%            at the correct length.
+#$%
+#$% Called By: ORDCHK
+#$%
+#$% Calls:     
+#$%
+#$% Tables:    
+#$%
+#$% Date:      June 2008 
+#$%
+#$% Author:    James O. Allen
+#$%
+######################################################
+
+BBimplicit
+PlayCommon
+pr_common
+integer sindex
+integer IPOS, K, LENGTH, KK, NARGS, NORD, JJ
+#    NORD   	**** UNUSED ****
+
+# Command Syntax: CREATE SHIP <name> ... NAMED <fullname>
+
+ipos = sindex(line$buf,"NAMED") + 6
+
+k = length (line$buf[ipos])             # determine amount      of text entered
+
+for (jj = 4; jj <= nargs; jj=jj+1)
+    {
+    if (p_args[jj] != $lex$named$) next
+    
+    kk = 0
+    call smovh (line$buf[ipos], k, p_args[jj+1], kk)
+    call smov  (EOS,               p_args[jj+1], kk)
+
+    nargs = jj + (k+7)/$$MaxLit
+    break
+    }
+
+return
+end
+
+
+subroutine hanlncboat (nord,nargs,stat)     
+
+######################################################
+#$%
+#$% Purpose:   HANLNC processes boat launch sub-
+#$%            commands.
+#$%
+#$% Called By: ORDCHK     HANORD
+#$%
+#$% Calls:     BLDBAS     CHKEQ      CHKFLT
+#$%            CHKFOR     ECHO       ECHOH
+#$%            ECHOHN     ECHOI      ECHOR
+#$%            ORDPAR
+#$%
+#$% Tables:    ORD
+#$%
+#$% Date:      JAN 82
+#$%
+#$% Author:    Dana Wills
+#$%
+#$% Modified:  Susan Miller - 1/97 (E1732)
+#$%            Added iview parameter to chkfor
+#$%
+######################################################
+
+BBimplicit                                 # DEW 3/13/00 (E2145)
+playcommon
+literal mname, newfor
+string prompt "Sortie Plan:"
+integer HLDPNT, OLDFLAG, STAT, EQCNT, NORD, NARGS, SAVPNT, LODPNT, 
+        CNT, EQCNT2, JORD, JARGS, ISTAT, IVIEW, M, MQTY, IP, M2, ISL, K
+
+
+ hldpnt = stkpnt                        # save the stack pointer
+ oldfor = curfor                        # save the prior addressee
+
+ parse$Read$NotFor (OldFlag)
+
+ newfor = p_args[5]                      # grab the boat name
+ stat   = $yes
+ eqcnt  = 8
+
+ #$% if equipment slots available
+ if (eqcnt != 0)
+   {
+    #$% display prompt message to user
+    call echov ("Enter the equipment LOAD (up to ")
+    call echoi (eqcnt)
+    call echov (" items).")
+    call echor
+   }
+ call echov ("End the Sortie Plan with a 'MOOR', ")
+ call echov ("'STOP' or 'SEARCH' command.")
+ call echor
+ call echor
+
+ call bldbas (nord,nargs,p_args)        # Build LAUNCH into stack
+
+ savpnt = stkpnt                        # Mark first launch order
+
+ #$% get addressee
+ curfor = newfor
+ #$% initialize current time
+ curtim = 0
+
+ p_args[1] = $lex$load$
+
+ call bldbas (LOAD$order,1,p_args)      # Build empty load command into stack
+ lodpnt = stkpnt                        # Mark load order
+ stack[$stk$addressee,lodpnt] = oldfor  # grab the platform name
+
+ cnt = 2                                # count the orders put to the stack
+
+ parse$set$group ($grp$FlightPlan)      # orders to Launch plan set
+ parse$Set$NotFor ($Not$SmallBoat)      # ignore orders that are Not For Boats
+
+ eqcnt2 = eqcnt                         # save the number of equipment loads
+                                        # available
+ repeat
+   {
+    #$% if orders within three of being full
+    if (stkpnt+3 >= $PLAY$STACK$MAX)
+      {
+       #$% send warning message to user
+       call echov ("WARNING -- Room for only ")
+       call echoi ($play$stack$max - stkpnt)
+       call echov (" more orders available.")
+       call echor
+      }
+    #$% parse orders
+    call ordpar (60*1000,prompt,jord,jargs)
+    call chkfor (jord,jargs,istat,iview)# strip off TIME indicators
+
+    if (jord == -1)                     # CANCEL COMMAND
+       {
+        stkpnt  = hldpnt                 # restore the stack pointer
+        curfor  = oldfor                 #  and the prior addressee
+        parse$Set$NotFor (OldFlag)
+        return
+       }
+
+    else if (jord == STOP$order   |     # end of Sortie Plan
+             jord == MOOR$order   |
+             jord == SEARCH$order  )
+       {
+        #$% if stop order given
+        if (jord != STOP$order)
+           {
+            call bldbas (jord,jargs,p_args)      # Build into stack
+            cnt = cnt + 1
+           }
+        #$% if nothing was loaded and equipment slot available
+        if (eqcnt2 == eqcnt & eqcnt !=  0)
+           {
+            #$% display warning message to user
+            call echov  ("NOTICE -- No Deployable Equipment Loaded.")
+            call echor
+           }
+        #$% if flight plan not entered
+        if (cnt == 2)
+           {
+            #$% display warning message to user
+            call echov  ("NOTICE -- No Sortie Plan Entered.")
+            call echor
+           }
+        break
+       }
+    else if (jord == LOAD$order)        # add equipment to the list
+       {
+        for (m=2; m <=  jargs; m = m + 2)   # for each qty&name entered
+           {
+            mqty = p_args[m]
+            mname = p_args[m+1]
+            #$% if equipment slots available is exceeded
+            if  (eqcnt2 <= 0 & eqcnt <= 0)
+                {
+                #$% display warning message to user
+                call echov ("Sorry, Load limit reached.  Cannot load ")
+                call echohn (mname,$$MaxName)
+                call echo ($PERIOD)
+                call echor
+                }
+            #$% else if equipment slots available
+            else
+                {
+                ip = 0
+
+                #$% for each equipment loaded
+                for (m2 = $stk$args; m2 <= stack[$stk$length,lodpnt];   m2=m2+2)
+                   {
+                    #$% if found
+                    if (stack[m2+2,lodpnt] ==   mname)
+                         {
+                        #$% display message to user
+                        ip =    m2
+                        call    echov ("Changing quantity of ")
+                        call    echohn (stack[m2+2,lodpnt],$$MaxName)
+                        call    echor
+                        break
+                         }
+                   }
+
+                #$% if limit reached but all equipment not loaded
+                if (ip==0 & eqcnt2 <=   0 & mqty != 0)
+                   {
+                    #$% display message to user
+                    call echov ("Sorry, Load limit reached.  Cannot load ")
+                    call echohn (mname,$$MaxName)
+                    call echo   ($PERIOD)
+                    call echor
+                    next
+                   }
+                
+                else if (ip==0 & mqty   != 0)
+                   {
+                    ip = stack[$stk$length,lodpnt]
+                    eqcnt2 = eqcnt2 -   1
+                    stack[$stk$length,lodpnt]   = ip+2
+                    stack[ip+2,lodpnt] = mname
+                   }
+
+                if (mqty != 0)
+                   {
+                    stack[ip+1,lodpnt] = mqty
+                   }
+                else if (ip != 0)
+                   {
+                    eqcnt2 = eqcnt2 +   1
+                    isl = stack[$stk$length,lodpnt]
+                    stack[$stk$length,lodpnt]   = isl-2
+
+                    stack[ip+2,lodpnt] = stack[isl  ,lodpnt]      # 09JUN80
+                    stack[ip+1,lodpnt] = stack[isl-1,lodpnt]      # 09JUN80
+                   }
+                }
+           }
+
+        call echov ("Current Load is:")
+
+        for (m2 = $stk$args; m2+1 < stack[$stk$length,lodpnt];  m2=m2+2)
+           {
+            if  (m2 > $stk$args) call echo ($COMMA)
+            call echo ($SPACE)
+            call echoi  (int(stack[m2+1,lodpnt]))
+            call echo ($SPACE)
+            call echohn (stack[m2+2,lodpnt],$$MaxName)
+           }
+        call echor
+       }
+    else if (jord < NO$order$lo | jord > NO$order$hi)
+       {
+        if      (jord == INFORM$order   ) call haninf (jord,jargs)
+        else if (jord == ENTEROTG$order ) call hanotg (nord,nargs)
+
+        call bldbas (jord,jargs,p_args)  # Build into stack
+        cnt = cnt + 1
+       }
+
+    else
+       {
+        call echov ("????")
+        call echor
+       }
+
+   } until (stkpnt >= $play$stack$max)
+
+ if (stkpnt >= $PLAY$STACK$MAX)
+   {
+    call echov ("Sorry, the Order Buffer is full.")
+    call echor
+   }
+
+ curfor = oldfor
+ parse$Set$NotFor (OldFlag)
+
+if (cnt > ord$count$size)           # exceed order count size
+{
+    #$% send error message to user
+    call echov ("Sorry, but number of orders in launch exceeds limit of ")
+    call echoi (ord$count$size)
+    call echor
+
+    stkpnt = hldpnt             #$% restore stack pointer
+    stat = ! $YES
+
+    nord = -1             #$% change order to cancel
+    return
+}    
+
+ for (k = savpnt; k <= stkpnt; k = k + 1)
+    {
+     stack[$stk$seq,k] = k - savpnt + 1
+     stack[$stk$cnt,k] = cnt
+    }
+
+ return
+ end
+
+
+# Locate subtring in string and return position.  return 0 if not found.
+Integer function sindex (str, mask)
+character str[ARB]
+vmschar*(*) mask
+vmschar*MAXCARD strV
+call rs2fs(str, strv)
+sindex = %index%(strV, mask) - 1
+return
+end
+
+
+
+
+subroutine bldbas (nord,nargs,args)     
+
+######################################################
+#$%
+#$% Purpose:   BLDBAS builds an order into a stack.
+#$%
+#$% Called By: HANLNC     HANMSG     HANORD
+#$%            HANSRC     ORDCHK
+#$%
+#$% Calls:     ECHOH      ECHOR
+#$%
+#$% Tables:    ORD
+#$%
+#$% Date:      JAN 82
+#$%
+#$% Author:    Dana Wills
+#$%
+######################################################
+
+BBimplicit                                 # DEW 3/13/00 (E2145)
+playcommon
+literal args[$max$args]
+integer NARGS, NORD, CNT, K
+
+if (stkpnt >= $play$stack$max)                          # if stack overflows
+    {
+    call echor
+    call echov ("Order Stack OverFlow, Command lost!")
+    call echor
+    return
+    }
+ 
+stkpnt = stkpnt + 1                                     # incriment stack count
+
+stack[$stk$length,stkpnt] = nargs + $stk$args - 1       # get   number of order
+
+stack[$stk$nord,stkpnt] = nord                          # get   order id
+
+stack[$stk$start,stkpnt] = curtim                       # get current time
+
+# khc,4/93,per# E1075
+#if (nord >= FOR$order$lo & nord <= FOR$order$hi)        # if addressee  in stack
+if ((nord >= FOR$order$lo & nord <= FOR$order$hi) |        # if addressee  in stack
+    nord == ORDERS$order)
+    stack[$stk$addressee,stkpnt] = curfor               # ..get addressee
+else                                                    # else indicate ..
+    stack[$stk$addressee,stkpnt] = 0                    # ..addressee not found
+
+stack[$stk$seq,stkpnt] = 1                              #       set stack sequence...
+stack[$stk$cnt,stkpnt] = 1                              #       ... & count
+
+cnt = 0                                                 #       initialize count
+ 
+for (k = $stk$args; k <= $stk$lastarg; k = k + 1)       # for   each order
+    {
+    cnt = cnt + 1                                       #       increment count
+
+    if (cnt <= nargs)  stack[k,stkpnt] = args[cnt]      # set args to count
+    else               stack[k,stkpnt] = 0
+    }
+
+return
+end
+
+
+
+subroutine chkfor (nord,nargs,istat,iview)    
+
+######################################################
+#$%
+#$% Purpose:   CHKFOR validates for <addressee>
+#$%            and time <start minute> entries.
+#$%
+#$% Called By: HANLNC   HANORD     HANSRC 
+#$%            ORDCHK   hanMIS
+#$%
+#$% Calls:     ECHOH      ECHOR
+#$%
+#$% Tables:    ORD
+#$%
+#$% Date:      JAN 82
+#$%
+#$% Author:    Dana Wills
+#$%
+#$% Modified:  Susan Miller - 1/97 (E1732)
+#$%            Added parameter, iview.  Added include of pr_common.
+#$%            Uncommented out call to chk_type_addressee (we need the
+#$%            value iview returned from this routine). Added 3rd 
+#$%            parameter, iview, to chk_type_addressee.
+#$%
+#$%            Jim Allen - 12/02 (E2319)
+#$%            Process PAT, TOT and AT only for orders containing keywords
+#$%            This means that this routine MUST be modified if orders.syn
+#$%            is modified in the area of PAT, TOT, AT.
+#$%
+######################################################
+BBimplicit                                 # DEW 3/13/00 (E2145)
+                                        #     and TIME <start-minute>
+
+integer iview
+playcommon
+pr_common
+integer ISTAT, NARGS, KSTAT, I, NORD
+
+#$% intialize current time and status
+curtim = 0
+istat = $YES
+
+#$% if less than two entries, return
+if (nargs < 2) return
+
+# the entry may have a FOR <addressee> and/or TIME <start-minute> construct
+
+if (p_args[1] ==$LEX$FOR$ | p_args[1] ==$LEX$ALLMISSION$) # is this "FOR ..."?
+   {                                    #    yes
+    curfor = p_args[2]          # save the addressee(s)
+
+    # uncomment out this call, we need the view so we can limit
+    # the allowed launch orders to be entered for orange a/c
+    # SMM 1/27/97 E1732
+    call chk_type_addressee (curfor,kstat,iview) 
+    #parse$Set$NotFor (istat)
+    
+    for (i = 3;i <= nargs; i = i + 1)
+     {
+      p_args[i-2] = p_args[i]   #       shift args left 2
+     }
+
+    nargs = nargs - 2           # decrement arg count
+   }
+
+#if (nord <= FOR$order$lo | nord >= FOR$order$hi) return
+if ((nord <= FOR$order$lo | nord >= FOR$order$hi) &
+     nord != ORDERS$order)                         #khc,4/93,E1075
+     return
+
+if (curfor == $null)                            # if there is no        addressee
+    {
+    call echor
+    call echov ("The command requires an addressee and none have")
+    call echov (" been entered.")
+    call echor
+    call echov ("Enter 'FOR <addressee>'.")
+    call echor
+    istat = ! $yes
+    return
+   }
+
+if (nargs < 2) return                   # no need to check TIME if too few
+                                        # arguments
+if (p_args[nargs-1] == $LEX$TIME$)
+   {
+    curtim = p_args[nargs]              # save the delay-minutes
+    nargs = nargs - 2                   # decrement arg count
+   }
+if (nord == BINGO$Order        |        # Orders with PAT, TOT or AT
+    nord == CAPSTATION$order   | 
+    nord == ORBIT$order        |
+    nord == PROCEED$order      |
+    nord == PROCEEDROUTE$order |
+    nord == STRIKE$order       |
+    nord == FIRECRUISE$order   |
+    nord == TAKE$order         |
+    nord == LAUNCHC$order      |
+    nord == RECONN$order)
+{
+    if (p_args[nargs-1] == $LEX$AT$)
+    {                                 
+        curtim = p_args[nargs]              # save the dtg
+        nargs = nargs - 2                   # decrement arg count
+    }
+    else if (p_args[nargs-1] == $LEX$PAT$ |
+         p_args[nargs-1] == $LEX$TOT$  )
+    {
+        curtim = - p_args[nargs]            # save the planned dtg
+        nargs = nargs - 2                   # decrement arg count
+    }
+}
+
+return
+end
+
+
+Subroutine chk_type_addressee (name,istat,iview)
+
+######################################################
+#$%
+#$% Purpose:   CHK_TYPE_ADDRESSEE checks blackboard for valid name
+#$%            and return NOTFOR code a/a
+#$%
+#$% Called By: PARSE_TEST_ADDRESSEE 
+#$%
+#$% Calls:     NONE
+#$%
+#$% Tables:    NONE
+#$%
+#$% Date:      JAN 82
+#$%
+#$% Author:    Dana Wills
+#$%
+#$% Modified:  Susan Miller  - 1/97 (E1732)
+#$%            Added iview to parameter list, since when
+#$%            a command is being entered during a
+#$%            launch sequence the parser does not
+#$%            preclude sides (i.e. SET IFF command\
+#$%            is for blue and control only, but the
+#$%            parser allowed orange stations to enter
+#$%            it if in a launch sub-command sequence.
+#$%
+#$%            James Allen - 12/97 (E1832)
+#$%            Added Torpedo and Cruise Missile
+#$%            addressee restrictions.
+#$%
+#$%            James Allen - 12/97 (E1833)
+#$%            Added handling of wildcard addressing.
+#$%
+#$%            James Allen - 8/11
+#$%            Boats use Force Name for alsp message.
+#$%            Temporarily comment out force name check
+#$%
+######################################################
+               
+bbcommon       
+# playcommon
+literal         name, id
+integer iview
+character       namec[8]
+literal         namel
+integer         i
+
+equivalence (namec, namel)
+integer ISTAT, UNT$Pointer
+# IVIEW   	**** UNUSED ****
+literal     CSTRIP8
+
+istat = $clear$NotFor
+
+id = aint(name)                                 # is addressee a task number?
+if (id == name & (id >= 1000 & id <= 99999))
+    {
+    istat = $Not$TaskGroup                      # yes
+    return
+    }
+
+namel = name                            # Wildcard names have same restrictions
+for (i=1; i<=$$MaxLit; i=i+1)           # as task hierarchies - joa 12/97 (E1833)
+{
+    if (namec[i] == $PERCENT |
+        namec[i] == $ASTER)
+    {
+        istat = $Not$TaskGroup
+        return
+    }
+}
+
+# for (UNT$pointer$first; UNT$pointer$ok; UNT$pointer$next)       # look for it
+for_all_ok (UNT)
+    {
+    if (XUNT$InUse$i == 0) next
+
+    if (name == XUNT$Name$C)               # is    this the unit ?
+    {
+        call unit_notfor_offset (unt$pointer, istat)    # joa 12/97 (E1832)
+        break
+    }
+    if (name == XUNT$ForceName$C) 
+    {
+        istat = $Not$TaskGroup                  # in a FORCE is same as
+        break                                   # a task group
+    }
+}
+
+return
+end
+
+
+
+
+
+Subroutine synbld (_                    # Build text from lex data
+                   itime,               # game minute when to be executed
+                   ind,                 # $yes/$no if time is phase dependant
+                   nord,                # order number (code)
+                   nargs,               # number of words in the lex array
+                   args,                # lex code(s) array
+                   dest,                # array to receive text (30 words)
+                   len)                 # value for number of bytes in dest
+                                        # and incremented by those added
+
+######################################################
+#$%
+#$% Purpose:   SYNBLD builds a text message from
+#$%            lexical data.
+#$%
+#$% Called By: DISP       FPORDS     PUTORD
+#$%
+#$% Calls:     CHKLL      SMOV       SMOVH
+#$%            SMOVHN     SMOVI
+#$%
+#$% Tables:    ORD
+#$%
+#$% Date:      JAN 82
+#$%
+#$% Author:    Dana Wills
+#$%
+#$% Modified:  Susan Miller - 3/97 (E1746)
+#$%            If the 2nd argument of the CREATE order is
+#$%            not AIRCRAFT, then it is okay to format the
+#$%            5th argument as a task number.
+#$%
+#$%            James Allen - 2/98 (E1864)
+#$%            Dropped the special case for FIRE CRUISE
+#$%            at a base since the command was redone.
+#$%
+######################################################
+
+pr_common       # located in parser.int
+playcommon      # located in plplay.inc
+
+integer         itime,  ind, nord, nargs, len, token$index, nlexargs
+literal         args[$max$args], icd, ITASKN, prev_arg  # E2284 JOA UFL02 needs to be literal 
+character       dest[ARB]
+logical         chkll2, chktot
+integer         ITEXT, IPNT, ISNUMBER, IS_ALL_ASCII, ktime, jj
+integer         litcmp
+
+parse$common (orders)
+define(table,p_tbl_orders)
+
+# Check for valid order
+if (nargs > $max$args) return                   # joa ufg09
+
+#$% if order is text, set itext to yes 
+if (nord == TEXT$order) itext = $yes
+#$% else set to no
+else                    itext = $no
+
+if (itext == $yes)
+    nlexargs = 0
+else
+{
+	#$% find separator between lex and text, if any
+	nlexargs = nargs
+	for (ipnt = 1; ipnt <= nargs; ipnt = ipnt + 1)
+   	{
+    	#$% get code input
+    	icd = args[ipnt]
+
+    	#$% if code is <TXT>, set text YES, get next
+    	if (lcomp_v(icd, "<TXT>") == 0) { itext = $yes; nlexargs = ipnt-1; break }
+    }
+}
+prev_arg = 0
+#$% for each input entered
+for (ipnt = 1; ipnt <= nlexargs; ipnt = ipnt + 1)
+{
+	if (ipnt > 1) prev_arg = args[ipnt-1]
+
+    #$% get code input
+    icd = args[ipnt]
+
+    if (icd >= -20999 & icd <= -20000)  # if code is lex        type
+    {
+        token$index = abs(icd)-20000            #       convert to index if lex code
+
+        if (token$index > table$tokenCount)     #       check for gross error
+            token$index = 0
+
+        call smovhn (token$text,30,dest,len)
+
+        if (icd == $lex$BE$)     # clk 7/95 (E1419) - Special case for BE, since
+        {                        # the <be-number> value may be in two words
+           call Synbld_BE (ipnt, nargs, args, dest, len)
+        }
+        else
+          call chkll (icd,ipnt,nord,args,dest,len)# check for lat/lon (next arg)
+    }
+    else if (nord == INFORM$order) 
+    {
+        call smovh (icd,$$MaxLit,dest,len)     #           Alpha
+    }
+    else if (nord == SCRAMBLE$order & prev_arg == $lex$END$)
+	{
+    	call smoviz (int(args[ipnt]),6,dest,len)
+	}
+	else if (nord == ENTEROTG$order & prev_arg == $lex$NAMED$)
+	{
+        jj = (nlexargs - ipnt + 1) * 8
+        call vmovh (args[ipnt], jj, dest, len)
+		ipnt = ipnt + 2			
+	}
+    else if (nord == ALERT$order &      # clk 11/16/92
+             ipnt >= 6)                 # the 6th and on arguments of
+    {                                   # the ALERT order are just text
+        call smovh (icd,$$MaxLit,dest,len)
+        next
+    }
+    else if (chkll2 (icd,ipnt,nord,args))   # check for lat/lon (this arg)
+    {
+        call fmtll (icd,ipnt,nord,args,dest,len)
+    }
+    #$% Was this a create order?  SMM 11/24/92 
+    #$% But not a CREATE AIRCRAFT order - smm 3/97 (E1746)
+    else if ((ipnt == 5) & $isNumeric(icd) &
+            ((args[1] == $lex$CREATE$) & (args[2] != $lex$AIRCRAFT$)))
+    {
+        #$% format task number to X.X.X.X and move FOR and formatted 
+        #$% task number into array
+        call fgtask (int(icd),itaskn)
+        call smovhn (itaskn,$$MaxLit,dest,len)
+    }
+    else if ((args[1] == $lex$Relocate$) &      # if a RELOCATE command
+             ((ipnt == 2) & $isNumeric(icd)))   # to a task id - clk 4/9/94 (E1261)
+    {
+        call fgtask (int(icd), itaskn)
+        call smovhn (itaskn, $$MaxLit, dest, len)
+    }
+    else                                # argument
+    {
+        if (is_all_ascii(icd) == $YES)
+            call smovhn (icd,$$MaxLit,dest,len)           # Alpha
+
+        else if (icd == Aint(icd))
+            call smovi  (int(icd),dest,len)        # integer
+
+        else if (icd*10.0 == Aint(icd*10.0))
+            call smovf  (real(icd),1,dest,len)     # Floating 
+
+        else if (icd*100.0 == Aint(icd*100.0))
+            call smovf  (real(icd),2,dest,len)
+
+        else if (icd*1000.0 == Aint(icd*1000.0))
+            call smovf  (real(icd),3,dest,len)
+
+        else if (icd*10000.0 == Aint(icd*10000.0))
+            call smovf  (real(icd),4,dest,len)
+
+        else 
+            call smovf  (real(icd),5,dest,len)
+    }
+
+    call smov ($space,dest,len)
+}
+
+#$% if game has stated
+if (itime != 0)
+   {
+    #$% move TIME to array for display
+    if      (itime >  9999           ) call smovv ("AT ",dest,len)
+    else if (itime >= 0              ) call smovv ("TIME ",dest,len)
+    else if (chkTOT(nord,nargs,args) ) call smovv ("TOT ",dest,len)
+    else                               call smovv ("PAT ",dest,len)
+
+    ktime = abs(itime)
+
+    if (ind == $yes)            # if time value is relative..
+        {
+        call smov ($PLUS,dest,len)
+        }
+
+    if (ktime <= 9999)
+        {
+        call smovi (ktime,dest,len)
+        }
+    else # (itime < 0 | itime > 9999) i.e. DTG
+        {
+        call smoviz (ktime,6,dest,len)
+        }
+   }
+
+for ( ; ipnt <= nargs; ipnt = ipnt + 1)         # pick  up remaining text
+   {
+    #$% move text to array for display
+    call smovh (args[ipnt],$$MaxLit,dest,len)
+   }
+
+return
+end
+
+
+subroutine chkll (icd,ipnt,nord,args,dest,len) 
+
+######################################################
+#$%
+#$% Purpose:   CHKLL performs a check for latitude
+#$%            and longitude in the following argument (ipnt).  
+#$%            This means right after a KEYWORD of a known command.
+#$%            This code is highly dependant on the syntax of the 
+#$%            commands in the ORDERS.SYN file.  It must be updated as
+#$%            commands are added, removed or modified.
+#$%            This handles the majority of Lat/Long pairs because most
+#$%            of them occur after the keyword POSITION.  If the Lat/Long
+#$%            are not immediatly following a keyword, put the recognition
+#$%            logic into the routine CHKLL2.
+#$%
+#$% Called By: SYNBLD
+#$%
+#$% Calls:     SMOV       SMOVI
+#$%
+#$% Tables:    None
+#$%
+#$% Date:      JAN 89
+#$%
+#$% Author:    Dana Wills
+#$%
+######################################################
+
+integer         ipnt, nord, len
+character       dest[ARB]
+literal         args[$max$args], icd
+
+#$% if mark track, relocate, barrier order, or report position 
+#$% involved, continue else return
+if ((nord == MarkTrack$order      & ipnt == 4)  |
+    (nord != Report$order         & icd  == $lex$position$) |
+    (nord == Barrier$order        & ipnt == 2 & args[1] == $lex$barrier$) |
+    (nord == Perform$Order        & ipnt == 5))
+   {
+    ipnt = ipnt + 1
+    call fmtll (icd,ipnt,nord,args,dest,len) 
+   }
+
+return
+end
+
+
+
+logical function chkll2 (icd,ipnt,nord,args) 
+
+######################################################
+#$%
+#$% Purpose:   CHKLL2 performs a check for latitude and longitude
+#$%            in the current position of a given command
+#$%            This code is highly dependant on the syntax of the 
+#$%            commands in the ORDERS.SYN file.  It must be updated as
+#$%            commands are added, removed or modified.
+#$%
+#$% Called By: SYNBLD
+#$%
+#$% Calls:     SMOV       SMOVI
+#$%
+#$% Tables:    None
+#$%
+#$% Date:      NOV 89
+#$%
+#$% Author:    Dane Wills
+#$%
+#$% Modified:  Susan Miller 3/97 (E1746)
+#$%            Added handling for CREATE AIRCRAFT command
+#$%            positioning of latitude and longitude.
+#$%
+#$%            Jim Allen - 2/15/98 (E1864)
+#$%            Fire cruise handles waypoints according
+#$%            to new syntax
+#$%
+######################################################
+
+BBimplicit                      # DEW (E2145)
+
+integer         ipnt, nord
+literal         args[$max$args], icd
+integer         I_SWITCH_1, I
+#   ICD   	**** UNUSED ****
+
+
+chkll2 = .FALSE.            # assume this is not a Lat/Long pair here
+
+if (nord == DefineLanding$order)
+    {
+    switch (ipnt)
+        {
+        case  4, 7, 9, 11, 13, 15, 17, 19:  chkll2 = .TRUE.
+        }
+    }
+else if (nord == Minefield$order)
+    {
+    switch (ipnt)
+        {
+        case  7, 9, 11, 13, 15, 17:  chkll2 = .TRUE.
+        }
+    }
+else if (nord == Define$order & args[2] == $lex$SWABS$) 
+    {
+    switch (ipnt)
+        {
+        case  6, 8, 10, 12, 14, 16:  chkll2 = .TRUE.
+        }
+    }
+else if (nord == DefineSPA$order)
+    {
+    if (args[4] == $lex$BLUE$ | args[4] == $lex$ORANGE$) 
+        {
+        switch (ipnt)
+            {
+            case  6, 8, 10, 12, 14, 16:  chkll2 = .TRUE.
+            }
+        }
+    else
+        {
+        switch (ipnt)
+            {
+            case  4, 6, 8, 10, 12, 14:  chkll2 = .TRUE.
+            }
+        }
+    }
+else if (nord == Define$order)
+    {
+    if (args[2] == $lex$TERRAIN$ & args[3] == $lex$ELEVATION$)
+        {
+        switch (ipnt)
+            {
+            case  5, 7, 9, 11, 13, 15, 17, 19:  chkll2 = .TRUE.
+            }
+        }
+    }
+else if (nord == Define$order & args[2] == $lex$NRT$)
+    {
+    if ((args[3] == $lex$BLUE$) | (args[3] == $lex$ORANGE$))
+        {
+        switch (ipnt)
+            {
+            case 5: chkll2 = .TRUE.
+            }
+        }
+    else 
+        switch (ipnt)
+            {
+            case 7: chkll2 = .TRUE.
+            }
+    }
+else if (args[1] == $lex$CREATE$)
+    {
+     if (args[2] != $lex$AIRCRAFT$)     # smm 3/97 (E1746)
+        {
+         switch (ipnt)
+            {
+            case  6:  chkll2 = .TRUE.
+            }
+        }   # end of if not CREATE AIRCRAFT
+     else 
+        {
+         switch (ipnt)
+            {
+            case  7:  chkll2 = .TRUE.
+            }
+        }   # end of if CREATE AIRCRAFT
+    }   # end of if a CREATE command
+else if (nord == DefinePim$order)
+    {
+    switch (ipnt)
+        {
+        case  4:  chkll2 = .TRUE.
+        }
+    }
+else if (nord == Orbit$order)
+    {
+    switch (ipnt)
+        {
+        case  3,5:  chkll2 = .TRUE.
+        }
+    }
+#else if (nord == ModifyRoute$order)
+#    {
+#    if (ipnt == 8 & args[5] == $lex$REFUEL$) chkll2 = .TRUE.
+#    }
+else if (nord == Refuel$order)
+    {
+    if (ipnt == 4 & args[1] == $lex$REFUEL$) 
+        {
+        if      (args[4] == $lex$ONLOAD$) chkll2 = .FALSE.
+        else if (args[3] == $lex$ONLOAD$) chkll2 = .FALSE.
+        else                              chkll2 = .TRUE.
+        }
+    }
+else if (nord == Relocate$order)
+    {
+    if (ipnt == 3) chkll2 = .TRUE.
+    }
+else if (nord == FireCruise$order)
+    {
+    for (i = 1; i <= ipnt; i = i + 1)
+        {
+        if (args[i] == $lex$WAYPOINTS$ &
+            args[ipnt] != $lex$EXECUTE$) chkll2 = .TRUE.
+        }
+    }
+
+return 
+end
+
+
+
+subroutine fmtll (icd,ipnt,nord,args,dest,len) 
+
+######################################################
+#$%
+#$% Purpose:   FMTLL formats latitude and longitude from ARGS[IPNT] & [IPNT+1].
+#$%            Expanded to output DDD-MM-SSh
+#$%
+#$% Called By: SYNBLD
+#$%
+#$% Calls:     SMOV       SMOVI
+#$%
+#$% Tables:    None
+#$%
+#$% Date:      NOV 89
+#$%
+#$% Author:    Dane Wills
+#$%
+######################################################
+
+integer         ipnt, nord, len
+character       dest[ARB], char
+literal         args[$max$args], icd
+
+integer         I, IARG, ISEC
+#    ICD   	**** UNUSED ****
+#    NORD   	**** UNUSED ****
+
+ipnt = ipnt - 1   # decrement once cause we add one at the top of the loop
+
+#$% loop through two increments
+for (i = 1; i <= 2; i=i+1)
+   {
+    #$% move space into array
+    call smov ($space,dest,len)
+
+    #$% increment point
+    ipnt = ipnt + 1
+    #$% make position numbers absolute values (all positive)
+    iarg = abs(args[ipnt])
+    isec = abs(args[ipnt]*100) - (iarg * 100)
+
+    call smovi (iarg/100,dest,len)              # put degrees
+    call smov ($minus,dest,len)
+    call smov (mod(iarg/10,10)+$dig0,dest,len)  # put minutes
+    call smov (mod(iarg   ,10)+$dig0,dest,len)  # put minutes
+
+    if (isec .gt. 0)
+       {
+        call smov ($minus,dest,len)
+        call smov (mod(isec/10,10)+$dig0,dest,len)  # put seconds 
+        call smov (mod(isec   ,10)+$dig0,dest,len)  # put seconds 
+       }
+
+    if (i==1)
+       {                                        # lat
+        if (args[ipnt]  >= 0) char = $LETN       #   North
+        else                  char = $LETS       #   South
+       }
+    else
+       {                                        # long
+        if (args[ipnt]  >= 0) char = $LETE       #   East
+        else                  char = $LETW       #   West
+       }
+
+    call smov (char,dest,len)                   # put Hemisphere
+   }
+
+return
+end
+
+
+subroutine hanrte (nord,nargs,stat)
+########################################################
+#$%
+#$% Purpose:   HANRTE processes ROUTE subcommands.
+#$%
+#$% Called By: ORDCHK     
+#$%
+#$% Calls:     BLDBAS     ECHOH      ECHOI
+#$%            ECHOR      ORDPAR     SMOVH
+#$%
+#$% Tables:    ORD
+#$%
+#$% Date:      JUN 85
+#$%
+#$% Author:    James O. Allen
+#$% Plagerized from HANSRC Dana Wills
+#$%
+#$%
+########################################################
+BBimplicit
+playcommon
+string prompt "Rte Plan:"
+integer HLDPNT, NORD, NARGS, HSET, ISTAT, IVIEW, STAT, oldflag
+integer savpnt, cnt, k
+literal firstOrdLex
+ hldpnt = stkpnt                        # save the stack pointer
+ oldfor = curfor                        # save the current FOR
+ curfor = -1                            # Flag curfor
+ firstOrdLex = p_args[1]
+ call bldbas (nord,nargs,p_args)        # Build into stack
+ savpnt = stkpnt                        # mark base of orders
+ cnt = 1
+
+ parse$read$group (hset)                # save the current ord set
+ parse$Read$NotFor (OldFlag)
+
+ #$% display information message to user
+ if (firstOrdLex == $lex$DEFINE$ | firstOrdLex == $lex$CHANGE$)
+     call echov ("End Route Plan Input with 'STOP', 'REPEAT', 'MOOR', or 'BINGO'.")
+ else 
+     call echov ("End Route Plan Input with 'STOP'.")
+
+ call echor
+
+ repeat
+   {
+    parse$set$group ($grp$FlightPlan) 
+    parse$Set$NotFor ($clear$NotFor)
+
+    #$% if stack is getting full (within 3 entries)
+    if (stkpnt+3 >= $PLAY$STACK$MAX)
+      {
+       #$% send warning message to user
+       call echov ("Warning- Room for only ")
+       call echoi ($play$stack$max - stkpnt)
+       call echov (" more orders available.")
+       call echor
+      }
+
+    call ordpar (60*1000,prompt,nord,nargs)
+    call chkfor (nord,nargs,istat,iview)# strip out FOR/TIME if present
+    if (istat != $YES) next             # test for error <addressee>
+
+    if (nord == -1)                     # CANCEL COMMAND
+       {
+        stkpnt  = hldpnt                 # restore the stack pointer
+        curfor  = oldfor                 #  and the prior addressee
+        return
+       }
+    #$% is order is to stop
+    else if (nord == STOP$order)        # end of order entry
+       {
+        #$% if stack pointer on empty
+        if (stkpnt == savpnt)
+           {
+            #$% send warning message to user
+            call echov  ("No Orders Entered.  Command Canceled!")
+            call echor
+
+            stkpnt = hldpnt             #$% restore stack pointer
+            stat = ! $YES
+
+            nord = -1             #$% change order to cancel
+            return
+           }
+        stat =  $yes
+        break
+       }
+
+    if (nord == LOAD$order)    #$% if load order attempted
+       {
+        call echov ("Sorry, but LOAD commands must be ")
+        call echov ("entered at LAUNCH time.")
+        call echor
+       }
+
+    else if (nord == EXECUTE$order)    #$% is execute order is attempted
+       {
+        call echov ("Sorry, but a route plan cannot ")
+        call echov ("invoke contingency plans.")
+        call echor
+       }
+    else if (nord < NO$order$lo | nord > NO$order$hi)
+       {
+        if (nord == INFORM$order) call haninf (nord,nargs)
+
+        call bldbas (nord,nargs,p_args) # Build into stack
+        cnt = cnt + 1
+       }
+
+    else
+       {
+        call echov ("????")
+        call echor
+       }
+
+    if ((nord == REPEAT$order | nord == MOOR$order | nord == BINGO$order) &
+         (firstOrdLex == $lex$DEFINE$ | firstOrdLex == $lex$CHANGE$))      
+       {
+        stat =  $yes
+        break
+       }
+     #$% repeat loop until stack is full
+   } until (stkpnt >= $play$stack$max)
+
+ if (stkpnt >= $PLAY$STACK$MAX)         #$% if  stack is full
+   {
+    call echov ("Sorry, the Order Buffer is full.")
+    call echor
+   }
+
+ parse$set$group (hset)                 # restore the current ord set
+ curfor = oldfor                        #  and the prior addressee
+ parse$Set$NotFor (OldFlag)
+
+if (cnt > ord$count$size)           # exceed order count size
+{
+    #$% send error message to user
+    call echov ("Sorry, but number of orders in route exceeds limit of ")
+    call echoi (ord$count$size)
+    call echor
+
+    stkpnt = hldpnt             #$% restore stack pointer
+    stat = ! $YES
+
+    nord = -1             #$% change order to cancel
+    return
+}    
+
+ for (k = savpnt; k <= stkpnt; k = k + 1)
+    {
+     stack[$stk$seq,k] = k - savpnt + 1
+     stack[$stk$cnt,k] = cnt
+    }
+
+ return
+ end
+
+
+subroutine parse_test_Zulu (stat)
+
+#####################################################
+#$%
+#$% Purpose:   PARSE_TEST_ZULU tests Zulu time entries.
+#$%            The zulu time is written in the form
+#$%            ddhhmm, where dd is a number from 01 to 99,
+#$%            hh is a number from 00-23, and mm is a 
+#$%            number from 00-59.
+#$%
+#$% Calls:     None
+#$%
+#$% Tables:    None
+#$%
+#$% Date:      October 1991
+#$%
+#$% Author:    Carol L. Kropp
+#$%
+#####################################################
+
+BBimplicit                                 # DEW 3/13/00 (E2145)
+pr_common
+integer     STAT, COUNT, I, DAY_NUM, HOUR_NUM, MINUTE_NUM
+character   CHAR
+    
+  stat  = $stat$ok$
+  count = 0
+
+  for (i = stack$line_level$pos + 1; i <= line$length; i = i + 1)
+    {
+     char = line$buf[i]
+     count = count + 1
+
+     if (count == 1 & char >= $DIG0 & char <= $DIG9)
+       day_num = char - $DIG0
+     else if (count == 2 & char >= $DIG0 & char <= $DIG9)
+       {
+        if (day_num == 0 & char == $DIG0)
+          {
+           stat = $stat$nogood$
+           break
+          }
+        day_num = day_num * 10 + (char - $DIG0)
+       }
+     else if (count == 3 & char >= $DIG0 & char <= $DIG2)
+       hour_num = char - $DIG0
+     else if (count == 4 & char >= $DIG0 & char <= $DIG9)
+       {
+        if (hour_num == 2 & char > $DIG3)
+          {
+           stat = $stat$nogood$
+           break
+          }
+        hour_num = hour_num * 10 + (char - $DIG0)
+       }
+     else if (count == 5 & char >= $DIG0 & char <= $DIG5)
+       minute_num = char - $DIG0
+     else if (count == 6 & char >= $DIG0 & char <= $DIG9)
+       {
+        minute_num = minute_num * 10 + (char - $DIG0)
+        stat = $stat$complete$
+       }
+     else
+       {
+        stat = $stat$nogood$
+        break
+       }
+    }
+
+  if (stat == $stat$complete$)
+    arg$value = day_num * 10000 + hour_num * 100 + minute_num
+
+return
+end
+
+subroutine parse_test_ddhhmm (stat)
+
+#####################################################
+#$%
+#$% Purpose:   PARSE_TEST_ddhhmm tests zero oriented dtg entries.
+#$%            The dtg time is written in the form
+#$%            ddhhmm, where dd is a number from 00 to 99,
+#$%            hh is a number from 00-23, and mm is a 
+#$%            number from 00-59.
+#$%
+#$% Calls:     None
+#$%
+#$% Tables:    None
+#$%
+#$% Date:      August 2007
+#$%
+#$% Author:    James O. Allen
+#$%
+#####################################################
+
+BBimplicit
+pr_common
+integer     STAT, COUNT, I, DAY_NUM, HOUR_NUM, MINUTE_NUM
+character   CHAR
+    
+  stat  = $stat$ok$
+  count = 0
+
+  for (i = stack$line_level$pos + 1; i <= line$length; i = i + 1)
+    {
+     char = line$buf[i]
+     count = count + 1
+
+     if (count == 1 & char >= $DIG0 & char <= $DIG9)
+       day_num = char - $DIG0
+     else if (count == 2 & char >= $DIG0 & char <= $DIG9)
+       {
+        day_num = day_num * 10 + (char - $DIG0)
+       }
+     else if (count == 3 & char >= $DIG0 & char <= $DIG2)
+       hour_num = char - $DIG0
+     else if (count == 4 & char >= $DIG0 & char <= $DIG9)
+       {
+        if (hour_num == 2 & char > $DIG3)
+          {
+           stat = $stat$nogood$
+           break
+          }
+        hour_num = hour_num * 10 + (char - $DIG0)
+       }
+     else if (count == 5 & char >= $DIG0 & char <= $DIG5)
+       minute_num = char - $DIG0
+     else if (count == 6 & char >= $DIG0 & char <= $DIG9)
+       {
+        minute_num = minute_num * 10 + (char - $DIG0)
+        stat = $stat$complete$
+       }
+     else
+       {
+        stat = $stat$nogood$
+        break
+       }
+    }
+
+  if (stat == $stat$complete$)
+    arg$value = day_num * 10000 + hour_num * 100 + minute_num
+
+return
+end
+
+subroutine parse_test_dtg (stat)
+
+#####################################################
+#$%
+#$% Purpose:   PARSE_TEST_DTG tests Date-time-group entries.
+#$%            The DTG is written in the form
+#$%            ddhhmm, where dd is a number from 01 to 31,
+#$%            hh is a number from 00-23, and mm is a 
+#$%            number from 00-59.
+#$%
+#$% Calls:     None
+#$%
+#$% Tables:    None
+#$%
+#$% Date:      June 2000
+#$%
+#$% Author:    Dane Wills
+#$%            Modified *_ZULU by Carol L. Kropp
+#$%
+#####################################################
+
+BBimplicit                                 # DEW 3/13/00 (E2145)
+pr_common
+integer     STAT, COUNT, I, DAY_NUM, HOUR_NUM, MINUTE_NUM
+character   CHAR
+    
+  stat  = $stat$ok$
+  count = 0
+
+  for (i = stack$line_level$pos + 1; i <= line$length; i = i + 1)
+    {
+     char = line$buf[i]
+     count = count + 1
+
+     if      (count == 1 & char >= $DIG0 & char <= $DIG9)
+       day_num = char - $DIG0
+     else if (count == 2 & char >= $DIG0 & char <= $DIG9)
+       {
+        day_num = day_num * 10 + (char - $DIG0)
+        if (day_num < 1 | day_num >31)
+          {
+           stat = $stat$nogood$
+           break
+          }
+       }
+     else if (count == 3 & char >= $DIG0 & char <= $DIG2)
+       hour_num = char - $DIG0
+     else if (count == 4 & char >= $DIG0 & char <= $DIG9)
+       {
+        hour_num = hour_num * 10 + (char - $DIG0)
+        if (hour_num < 0 | hour_num > 23) 
+          {
+           stat = $stat$nogood$
+           break
+          }
+       }
+     else if (count == 5 & char >= $DIG0 & char <= $DIG5)
+       minute_num = char - $DIG0
+     else if (count == 6 & char >= $DIG0 & char <= $DIG9)
+       {
+        minute_num = minute_num * 10 + (char - $DIG0)
+        stat = $stat$complete$
+       }
+     else
+       {
+        stat = $stat$nogood$
+        break
+       }
+    }
+
+  if (stat == $stat$complete$)
+    arg$value = day_num * 10000 + hour_num * 100 + minute_num
+
+return
+end
+
+
+subroutine parse_test_ir_track (stat)               
+
+###################################################################
+#$%
+#$% Purpose:   PARSE_TEST_IR_TRACK generates a test to validate
+#$%            a IR track number.
+#$%
+#$% Called By: NONE
+#$%
+#$% Calls:     PARSE_TEST_ALFA
+#$%
+#$% Tables:    ORD
+#$%
+#$% Date:      Aug 92
+#$%
+#$% Author:    Charlie Farbstein
+#$%
+#####################################################################
+
+BBimplicit                                 # DEW 3/13/00 (E2145)
+pr_common                              # format: AI999
+integer     STAT, CNT, I
+character   CHAR
+
+#$% test to see if a name
+call parse_test_alpha (stat)
+  
+#$% initialize character count number
+cnt = 0
+
+#$% for each character
+for (i=stack$line_level$pos+1; i <= line$length; i=i+1)
+   {
+   #$% increment character count by one
+   cnt = cnt + 1
+
+   #$% get each character
+   char = line$buf[i]
+
+   #$% if first character 
+   if (cnt == 1)
+       {
+       #$% if charater is a letter (a to z), get next character
+       if (char >= $LETA &
+           char <= $LETZ) next
+       else
+           {
+           #$% set status to "no good" and return
+           stat = $stat$nogood$
+           return
+           }
+       }
+   #$% else if second character
+   else if (cnt == 2)
+       {
+       #$% if character is I get next character
+       if       (char == $LETI ) next
+       else
+           {
+           #$% set status to "no good" and return
+           stat = $stat$nogood$
+           return
+           }
+       }
+   #$% else if between 3rd and 5th character
+   else if (cnt >= 3 & cnt <= 5)
+       {
+       #$% if character is between 0 and 9, get next character
+       if (char >= $DIG0 &
+           char <= $DIG9) next
+       else
+           {
+           #$% else if 3rd character (3rd one cannot be a letter)
+           cnt = 3
+           #$% set status to "no good" and return
+           stat = $stat$nogood$
+           return
+           }
+       }
+
+   else
+       {
+       #$% set status to "no good" and return
+       stat =  $stat$nogood$
+       return
+       }
+   }
+
+if (cnt != 5) stat = $stat$ok$          # must have 5 characters input
+
+return
+end
+
+
+# December 1992
+# The following five subroutines are for the Non-Realtime track define,
+# change, and delete commands.
+
+define ($NRT$Orange$Offset,100)
+
+Subroutine Handle_NRT (nord,           # input - order number
+                       nargs,          # input - number of elements in args
+                       station)        # input - station number
+
+################################################################
+#$%
+#$% Purpose:   Handle_NRT does order-processing for DEFINE NRT and
+#$%            DELETE or CHANGE NRT commands.
+#$%
+#$% Called By: ORDCHK
+#$%
+#$% Calls:     Define_NRT   Modify_NRT
+#$%
+#$% Tables:    None
+#$%
+#$% Date:      December 1992
+#$%
+#$% Author:    Susan Miller
+#$%
+################################################################
+BBcommon
+
+# parameters
+integer   nord, nargs, station
+
+  if (nord == DefineNRT$Order)
+    call Define_NRT (nord, nargs, station)
+  else    # DELETE or CHANGE NRT command
+    call Modify_NRT (nord, nargs, station)
+
+return
+end
+
+
+Subroutine Define_NRT (nord,           # input - order number
+                       nargs,          # input - number of elements in args
+                       station_number) # input - the station number 
+
+################################################################
+#$%
+#$% Purpose:   Define_NRT processes the DEFINE NRT command.
+#$%
+#$% Called By: Handle_NRT
+#$%
+#$% Calls:     ECHOV    ECHOR   ECHOHN
+#$%
+#$% Tables:    NRT
+#$%
+#$% Date:      December 1992
+#$%
+#$% Author:    Susan Miller
+#$%
+################################################################
+BBCommon
+Playcommon
+
+# parameters
+integer  nord, nargs, station_number
+
+# local variables
+integer   NRT_view, view
+integer   available_NRT_slot
+literal   NRT$Name1$C, NRT$Name2$C
+literal   Name1, Name2
+integer   NRT$Pointer, NRT$View$I, NRT$Type$I 
+integer   NRT$Cat$I, NRT$Speed$I, NRT$Station$I
+integer   STA$Pointer, type, cat, speed
+real*4    NRT$Course$F, NRT$Latitude$F, NRT$Longitude$F
+real*4    course
+real*8    latitude, longitude
+integer   single, already_exists
+
+# functions
+real*4    DMS2RAD
+
+# DEFINE order:
+#  [1] $lex$DEFINE$
+#  [2] $lex$NRT$
+
+# From a Blue or Orange station
+#  [3] $lex$ENEMY$ or $lex$FRIENDLY$ or $lex$NEUTRAL$ or $lex$UNKNOWN$
+#  [4] $lex$AIR$ or $lex$SUBMARINE$ or $lex$SURFACE$
+#  [5] Latitude        [6] Longitude
+#  [7] Degrees
+#  [8] Knots
+#  [9] Name1          [10] Name2
+#
+# From the CONTROL station
+#  [3] $lex$BLUE$ or $lex$ORANGE$  [4] View
+#  [5] $lex$ENEMY$ or $lex$FRIENDLY$ or $lex$NEUTRAL$ or $lex$UNKNOWN$
+#  [6] $lex$AIR$ or $lex$SUBMARINE$ or $lex$SURFACE$
+#  [7] Latitude                    [8] Longitude
+#  [9] Degrees
+# [10] Knots
+# [11] Name1                      [12] Name2
+
+ STA$Pointer$To station_number
+ view = xSTA$View$I
+
+ if (view == $Neutral$View)     # If the order came from control, check
+    {                           # to see what view the NRT is intended for
+     if (p_args[3] == $Lex$BLUE$) # if the NRT is intended for BLUE
+       {
+        NRT_view = $FirstBlue$View - 1 + p_args[4]    # compute the view number
+
+        if (NRT_view < $FirstBlue$View | NRT_view > $LastBlue$View)
+          NRT_view = $LastOrange$View + 1
+       } # end of if (...$Lex$BLUE$)
+     else                       # The NRT is intended for ORANGE
+       {
+        NRT_view = $FirstOrange$View - 1 + p_args[4]  # compute the view number
+ 
+        if (NRT_view < $FirstOrange$View | NRT_view > $LastOrange$View)
+          NRT_view = $LastOrange$View + 1
+       } # end of if ($Lex$ORANGE$)
+   
+     if (NRT_view > $LastOrange$View)  # if the view specified was invalid
+       {
+        call echov  ("Invalid view specification for NRT ")
+        call echohn (p_args[11],$$MaxName)
+        call echor
+        return                            
+       }
+    } # end of if (view == 0)
+ else
+    {
+     NRT_view = view
+    }
+
+ if (view == $Neutral$View)     # If the order came from control
+    {
+     type = p_args[5]
+     cat = p_args[6]
+     latitude = p_args[7]
+     longitude = p_args[8]
+     course = p_args[9]
+     speed = p_args[10]
+     name1 = p_args[11]
+     if (nargs == 12)
+        name2 = p_args[12]
+    }
+ else 
+    {
+     type = p_args[3]
+     cat = p_args[4]
+     latitude = p_args[5]
+     longitude = p_args[6]
+     course = p_args[7]
+     speed = p_args[8]
+     name1 = p_args[9]
+     if (nargs == 10)
+        name2 = p_args[10]
+    }
+
+ #$% before we define a new NRT, check for duplicate name already in table
+ single = $no
+ if (view == $Neutral$View) 
+    {
+     if (nargs < 12)
+        { 
+         single = $yes
+         name2 = $BLANKLIT
+        }
+    }
+ else
+    {
+     if (nargs < 10) 
+        {
+         single = $yes
+         name2 = $BLANKLIT
+        }
+    } 
+ #$% search table for duplicate name
+ call duplicate_NRT(view, name1, name2, single, already_exists)
+ if (already_exists == $YES)  # send message
+    {
+     call echov("NRT named ")
+     call echohn(name1,$$MaxName)
+     if (single == $no)
+        {
+         call echov(" ")
+         call echohn(name2,$$MaxName)
+        }
+     call echov(" exists for this view.  Order ignored.")
+     call echor
+     return
+    }
+
+ available_NRT_slot  = $no                      # flag for slot in NRT table
+ #$% Find an empty slot for the new NRT 
+ if (NRT_view >= $FirstBlue$View & NRT_view <= $LastBlue$View)
+    {
+     for (NRT$Pointer$First; 
+          NRT$Pointer$Index < $NRT$Orange$Offset; 
+          NRT$Pointer$Next)
+        {
+         if (xNRT$InUse$I == $no)   
+            {
+             if (available_NRT_slot == $no) 
+                 available_NRT_slot = NRT$Pointer
+             if (Still_ok (NRT)) next               # check next NRT slot
+             break                                  # found an empty
+            }
+        } # end of while NRT$Pointer < 100
+
+     if (available_NRT_slot == 0)       # no empty slots
+        {
+         call echov ("Table full:  No room for new BLUE NRT.")
+         call echor
+         return
+        }
+    } # end of if NRT is for blue
+
+ if (NRT_view >= $FirstOrange$View & NRT_view <= $LastOrange$View)
+    {
+     for (NRT$Pointer$To $NRT$Orange$Offset; 
+          NRT$Pointer$Valid; 
+          NRT$Pointer$Next)
+        {
+         if (xNRT$InUse$I == $no)   
+            {
+             if (available_NRT_slot == $no) 
+                 available_NRT_slot = NRT$Pointer
+             if (Still_ok (NRT)) next               # check next NRT slot
+             break                                  # found an empty
+            }
+        } # end of for loop through NRT table
+
+     if (available_NRT_slot == 0)       # no empty slots
+        {
+         call echov ("Table full:  No room for new ORANGE NRT.")
+         call echor
+         return
+        }
+    } # end of if NRT is for orange
+
+ if      (type == $lex$ENEMY$)    NRT$Type$I = $ENEMY$CODE
+ else if (type == $lex$FRIENDLY$) NRT$Type$I = $FRIENDLY$CODE
+ else if (type == $lex$NEUTRAL$)  NRT$Type$I = $NEUTRAL$CODE
+ else if (type == $lex$UNKNOWN$)  NRT$Type$I = $UNKNOWN$CODE
+
+ if      (cat == $lex$AIR$)       NRT$Cat$I = $AIR$CODE
+ else if (cat == $lex$SUBMARINE$) NRT$Cat$I = $SUB$CODE
+ else if (cat == $lex$SURFACE$)   NRT$Cat$I = $SURFACE$CODE
+
+ putNRT$Type$I
+ putNRT$Cat$I
+
+ NRT$Latitude$F  = DMS2rad (latitude)
+ putNRT$Latitude$F
+ NRT$Longitude$F = DMS2rad (longitude)
+ putNRT$Longitude$F
+
+ NRT$Course$F = course
+ putNRT$Course$F
+
+ NRT$Speed$I = speed
+ putNRT$Speed$I
+
+ NRT$Name1$C = name1
+ putNRT$Name1$C
+
+ if ((nargs == 10) | (nargs == 12))
+    {
+     NRT$Name2$C = name2
+     putNRT$Name2$C
+    }
+ else 
+    {
+     NRT$Name2$C = $BLANKLIT
+     putNRT$Name2$C
+    }
+
+ NRT$View$I = NRT_view
+ putNRT$View$I
+
+ NRT$Station$I = station_number
+ putNRT$Station$I
+
+return
+end  # of Define_NRT
+
+include "plnrt.rin"         
+
+Subroutine Modify_NRT (nord,           # input - order number
+                       nargs,          # input - number of elements in args
+                       station_number) # input - station number
+
+################################################################
+#$%
+#$% Purpose:   Modify_NRT processes the DELETE or CHANGE NRT command.
+#$%
+#$% Called By: Handle_NRT
+#$%
+#$% Calls:     Change_NRT   ECHOV   ECHOI   ECHOR   ECHOHN
+#$%            Switch_NRT_index
+#$%
+#$% Tables:    NRT
+#$%
+#$% Date:      December 1992
+#$%
+#$% Author:    Susan Miller
+#$%
+################################################################
+BBCommon
+Playcommon
+
+# parameters
+integer   nord, nargs, station_number
+
+# local variables
+integer   NRT$Pointer, NRT$Station$I
+integer   STA$Pointer
+literal   NRT_name1, NRT_name2, NRT$Name1$C, NRT$Name2$C
+integer   NRT_found, name1_result, name2_result
+integer   delete_count, h_indx
+
+# functions
+integer   lcomp
+literal   CSTRIP8
+
+# DELETE order:
+#  [1] $lex$DELETE$
+#  [2] $lex$NRT$
+#  [3] $lex$ALL$ or $lex$NAMED$ [4] Name1 or [5] Name2
+
+ NRT_found = $no
+
+ # if it is the delete NRT command...
+ if (p_args[1] == $lex$DELETE$)
+    {
+     delete_count = 0
+     # loop through the NRT table
+     for (NRT$Pointer$First; NRT$Pointer$Valid; NRT$Pointer$Next)
+        {
+         name1_result = 0
+         name2_result = 0
+
+         # if the slot is not in use, check the next slot
+         if (xNRT$InUse$I == $no)
+            next                 
+         
+         # if this station didn't create the NRT, it can't delete it
+         NRT$Station$I = xNRT$Station$I
+         if (NRT$Station$I != station_number)
+            next                 
+
+         # if user entered DELETE NRT ALL for that station, we don't
+         # care about the name, just delete it
+         if (p_args[3] == $lex$ALL$)
+            {            
+             NRT$Zero    # delete the entry from the NRT table
+             delete_count = delete_count + 1
+             NRT_found = $yes
+             next
+            }
+         # if user entered DELETE NRT NAMED, then we do care about the
+         # name or names.  
+         else # if (p_args[3] == $lex$NAMED$)
+            {
+             # get the name or names entered
+             if (p_args[3] == $lex$NAMED$)
+                {
+                 NRT_name1 = p_args[4]
+                 if (nargs == 5) NRT_name2 = p_args[5]
+                 else            NRT_name2 = $BLANKLIT
+                }
+             NRT$Name1$C = xNRT$Name1$C
+             name1_result = (lcomp(NRT$Name1$C,NRT_name1))
+             # look for name to match user input
+             if ((nargs < 5) & (name1_result != 0))
+                next
+             else # it has to be nargs >= 5
+                { # do a literal compare
+                 NRT$Name2$C = xNRT$Name2$C
+                 name2_result = (lcomp(NRT$Name2$C,NRT_name2))
+                 if ((name1_result != 0) | (name2_result != 0))
+                    next
+                }
+             # if we are here we found a match
+             H_indx = NRT$Pointer$Index
+             STA$Pointer$To NRT$Station$I
+             call Switch_NRT_index(STA$Pointer, h_indx)
+            } # end if DELETE NRT NAMED 
+    
+         NRT$Zero    # delete the entry from the NRT table
+         delete_count = delete_count + 1
+         NRT_found = $yes
+        } # end of for loop through NRT table
+
+     if (delete_count > 0) # send message of deleted NRT
+        {
+         call echov("Deleted ")
+         call echoi(delete_count)
+         call echov(" ")
+         if (delete_count == 1)
+            {
+             call echov("NRT with name ")
+             call echohn(NRT_name1,$$MaxName)
+             if (nargs >= 5) 
+                {
+                 call echov(" ")
+                 call echohn(NRT_name2,$$MaxName)
+                }
+            }
+         else             
+            call echov("NRTs")
+         call echov(" for station ")
+         call echoi(station_number)
+         call echor
+         return
+        }
+     else # none were deleted
+        {
+         if (NRT_found == $no)
+            {
+             if (p_args[3] == $lex$ALL$)
+                call echov ("No NRTs deleted ")
+             else # name was specified
+                {
+                 call echov("No NRTs deleted with name ")
+                 call echohn(NRT_name1,$$MaxName)
+                 call echov(" ")
+                 if (nargs >= 5) 
+                    {
+                     call echohn(NRT_name2,$$MaxName)
+                     call echov(" ")
+                    }
+                }
+             call echov("for station ")
+             call echoi(station_number)
+             call echor
+             return
+            }   
+        } # end if none found to delete    
+    } # end if a delete order
+ # if it is a change NRT command
+ else if (p_args[1] == $lex$CHANGE$)
+    {
+     call Change_NRT(nargs,station_number)
+    } # end of else it was a change order
+
+return
+end  # of subroutine Modify_NRT
+
+
+
+Subroutine Change_NRT (nargs,          # input - number of elements in args
+                       station_number) # input - station number
+
+################################################################
+#$%
+#$% Purpose:   Change_NRT processes the DELETE or CHANGE NRT command.
+#$%
+#$% Called By: Modify_NRT
+#$%
+#$% Calls:     Cat_or_Type
+#$%
+#$% Tables:    NRT
+#$%
+#$% Date:      December 1992
+#$%
+#$% Author:    Susan Miller
+#$%
+################################################################
+BBCommon
+Playcommon
+
+# parameters
+integer   nargs, station_number
+
+# local variables
+integer   NRT$Pointer, NRT$Station$I
+integer   NRT$Speed$I
+real*4    NRT$Course$F, NRT$Latitude$F, NRT$Longitude$F
+integer   two_names
+literal   NRT_name1, NRT_name2, NRT$Name1$C, NRT$Name2$C
+integer   NRT_found, name1_result, name2_result
+
+# functions
+integer   lcomp
+real*4    DMS2RAD
+literal   CSTRIP8
+
+# CHANGE order:
+#  [1] $lex$CHANGE$   [2] $lex$NRT$
+    # [3] $lex$SPEED$ (to)    [4] speed 
+    # [3] $lex$COURSE$ (to)   [4] degrees 
+    # [3] $lex$POSITION$ (to) [4] latitude [5] longitude
+    # [3] $lex$CATEGORY$ (to)
+        # [4] [$lex$AIRCRAFT$ or $lex$SUBMARINE$ or $lex$SURFACE$]
+    # [3] $lex$DESIGNATION$ (to)
+        # [4] [$lex$ENEMY$ or $lex$FRIENDLY$ or $lex$NEUTRAL$ or $lex$UNKNOWN$]
+    # (for) [5 or 6] Name1 [6 or 7] Name2
+
+ NRT_found = $no
+ two_names = $no
+
+ # get the entered name or names
+ if ((p_args[3] == $lex$COURSE$)  | (p_args[3] == $lex$SPEED$) |
+     (p_args[3] == $lex$CATEGORY$) | (p_args[3] == $lex$DESIGNATION$))
+    {
+     NRT_name1 = p_args[5]
+     if (nargs == 6)
+        {
+         NRT_name2 = p_args[6]
+         two_names = $yes
+        }
+    }
+ else if (p_args[3] == $lex$POSITION$)
+    {
+     NRT_name1 = p_args[6]
+     if (nargs == 7)
+        {
+         NRT_name2 = p_args[7]
+         two_names = $yes
+        }
+    }
+
+ # search the NRT table for a match of name if only one is entered,
+ # or of both names if two were entered. 
+ for (NRT$Pointer$First; NRT$Pointer$Valid; NRT$Pointer$Next)
+    {
+     name1_result = 0
+     name2_result = 0
+
+     if (xNRT$InUse$I == $no) # if the slot is not in use
+        next                  # check the next slot
+
+     NRT$Station$I = xNRT$Station$I
+     # if this station didn't create the NRT, it can't delete it
+     if (NRT$Station$I != station_number)
+        next                 
+
+     NRT$Name1$C = xNRT$Name1$C
+     name1_result = (lcomp(NRT$Name1$C,NRT_name1))
+     # look for name to match user input
+     if (two_names != $yes)
+        {
+         if (name1_result != 0)
+            next
+         else  # found a match
+            {
+             NRT_found = $yes
+             break
+            }
+        }
+     else # it has two names
+        {
+         NRT$Name2$C = xNRT$Name2$C
+         name2_result = (lcomp(NRT$Name2$C,NRT_name2))
+         if ((name1_result != 0) | (name2_result != 0))
+            next
+         else  # found a match
+            {
+             NRT_found = $yes
+             break
+            }
+        }
+    } # end of loop through NRT table
+
+ # if we are here, we found a match
+ if (NRT_found == $yes) # found a match, time to change it 
+    {
+     if (p_args[3] == $lex$SPEED$)
+        {
+         NRT$Speed$I = p_args[4]
+         putNRT$Speed$I
+        }
+     else if (p_args[3] == $lex$COURSE$)
+        {
+         NRT$Course$F = p_args[4]
+         putNRT$Course$F
+        }
+     else if (p_args[3] == $lex$POSITION$)
+        {
+         NRT$Latitude$F  = DMS2rad (p_args[4])
+         putNRT$Latitude$F
+         NRT$Longitude$F = DMS2rad (p_args[5])
+         putNRT$Longitude$F
+        }
+     else if ((p_args[3] == $lex$CATEGORY$) | (p_args[3] == $lex$DESIGNATION$))
+        {
+         call Cat_or_Type (NRT$Pointer, p_args[4])
+        }
+    } # end if NRT_found == $yes
+ else # did not find a match for that station
+    {
+     call echov(" No NRT found named ")
+     call echohn(NRT_name1,$$MaxName)
+     call echov(" ")
+     if (two_names == $yes)
+        {
+         call echohn(NRT_name2,$$MaxName)
+         call echov(" ")
+        }
+     call echov("for station ")
+     call echoi(station_number)
+     call echor
+    }
+
+return
+end  # of subroutine Change_NRT
+
+
+
+Subroutine Cat_or_Type (NRT$Pointer,  # input 
+                        argument)     # input 
+
+################################################################
+#$%
+#$% Purpose:   Cat_or_Type processes category or type changes
+#$%
+#$% Called By: Change_NRT
+#$%
+#$% Tables:    NRT
+#$%
+#$% Date:      December 1992
+#$%
+#$% Author:    Susan Miller
+#$%
+################################################################
+BBCommon
+
+# parameters
+integer     NRT$Pointer
+literal     argument
+
+# local variables
+integer   NRT$Cat$I, NRT$Type$I
+
+ if (argument == $lex$SURFACE$)
+    {
+     NRT$Cat$I = $SURFACE$CODE
+     putNRT$Cat$I
+    }
+ else if (argument == $lex$SUBMARINE$)
+    {
+     NRT$Cat$I = $SUB$CODE
+     putNRT$Cat$I
+    }
+ else if (argument == $lex$AIR$)
+    {
+     NRT$Cat$I = $AIR$CODE
+     putNRT$Cat$I
+    }
+ else if (argument == $lex$UNKNOWN$)
+    {
+     NRT$Type$I = $UNKNOWN$CODE
+     putNRT$Type$I
+    }
+ else if (argument == $lex$NEUTRAL$)
+    {
+     NRT$Type$I = $NEUTRAL$CODE
+     putNRT$Type$I
+    }
+ else if (argument == $lex$FRIENDLY$)
+    {
+     NRT$Type$I = $FRIENDLY$CODE
+     putNRT$Type$I
+    }
+ else if (argument == $lex$ENEMY$)
+    {
+     NRT$Type$I = $ENEMY$CODE
+     putNRT$Type$I
+    }
+
+return
+end
+
+subroutine HANDADCRU (nord, nargs, istatus)
+##########################################################################
+#$%
+#$% Purpose:   HANDADCRU   processes advanced cruise missile subcommands
+#$%
+#$% Called By: ORDCHK
+#$%
+#$% Tables:    ORD    
+#$%
+#$% Date:      July 1993
+#$%
+#$% Author:    Alex Vagus
+#$%
+#$% Note:      A revamp version of hanrte
+#$%
+########################################################################
+
+BBimplicit                                 # DEW 3/13/00 (E2145)
+playcommon
+pr_common
+literal hord[$max$args]
+string prompt[30] "Enter STOP:"
+integer     HLDPNT, CNT, PCNT, I, NARGS, KMAX, KK, JORD,
+            JARGS, ISTATUS, NORD, SAVPNT, K
+
+hldpnt = stkpnt
+cnt = 0
+pcnt = -1
+
+#$% for each order
+for (i = 1; i <= nargs; i = i + 1)
+   {
+   hord[i] = p_args[i]                  # Save the way-point order
+   }
+
+kmax = 5
+
+#$% display prompt message to user
+call echov (" Enter Way-Points.  End with 'STOP'.")
+call echor
+
+#parse$set$group ($grp$WAYPOINT)    # set to WAYPOINT group
+
+#$% load prompt entries
+kk = 0
+call smovv  ("Way-Point ",prompt,kk)
+call smovib (cnt+1   ,2,prompt,kk)
+call smovv   (':'       ,prompt,kk)
+call smov   (EOS       ,prompt,kk)
+
+repeat
+    {
+    #$% if space for only three lines of text left
+    if (stkpnt+3 >= $PLAY$STACK$MAX)
+        {
+        #$% send warning message to user
+        call echov ("WARNING -- Room for only ")
+        call echoi ($play$stack$max - stkpnt)
+        call echov (" more points.")
+        call echor
+        }
+
+    #$% parse the order tables 
+    call ordpar (60*1000,prompt,jord,jargs)
+
+    #$% if order is to cancel (^K)
+    if (jord == -1)
+        {
+        #$% save the stack pointer and return
+        stkpnt = hldpnt        
+        return
+        }
+    #$% else if order is STOP (end of ROUTE)
+    else if (jord == STOP$order)
+        {
+        #$% if there is no text
+        if (cnt == 0)
+            {
+            #$% set status to not yes and display warning message to user
+            istatus = $no
+            call echov ("No Way-Points entered.  Command ignored!")
+            call echor
+            call echor
+            }
+        break
+        }
+     #$% else if order is text
+    else if (jord == PROCEED$order) 
+             
+        {
+        #$% if count is less than max lines available        
+        if (cnt < kmax)
+            {
+            #$% increment count by one line
+            cnt = cnt + 1
+            #$% if at the begining of the PIM
+            if (cnt == 1)
+                {
+                call bldbas (nord,nargs,hord)   # Build into stack
+                #$% save the stackpoint
+                savpnt = stkpnt
+                }
+
+            call bldbas (jord,jargs,p_args)         # Build into stack
+
+            kk = 0
+            call smovv  ("Way-Point ",prompt,kk)
+            call smovib (cnt+1   ,2,prompt,kk)
+            call smovv   (':'       ,prompt,kk)
+            call smov   (EOS       ,prompt,kk)
+            }
+        #$% else if max lines of text exceeded
+        else
+            {
+            #$% send warning message to user
+            call echov ("Sorry, only first ")
+            call echoi (kmax)
+            call echov (" points accepted.")
+            call echor
+            call echov ("End with STOP or Cancel with ^K.")
+            call echor
+            }
+
+        #$% if line count exceed
+        if (cnt >= kmax)
+            {
+            #$% reset prompt entry
+            kk = 0
+            call smovv  ("Enter STOP:",prompt,kk)
+            call smov   (EOS             ,prompt,kk)
+            }
+        }
+     #$% repeat loop until max reached
+    } until (stkpnt >= $play$stack$max)
+
+#$% if text entered
+if (cnt > 0)    # No Points <==> ERASE 
+    {
+    #$% increment count
+    cnt = cnt + 1
+    for (k = savpnt; k <= stkpnt; k = k + 1)
+        {
+        #$% save stack segment and stack count
+        stack[$stk$seq,k] = k - savpnt + 1
+        stack[$stk$cnt,k] = cnt
+        }
+    }
+
+return
+end
+
+ 
+subroutine Parse_Test_BE (stat)               
+################################################################################
+#$%
+#$% Purpose:    Parse_Test_BE validates the BE (Basic Encyclopedia) number
+#$%             being entered with various ground attack commands.  BE numbers
+#$%             are 1-16 alphanumeric characters long - the first character
+#$%             must be a number or letter, the other characters may be a
+#$%             letter, number, or minus sign.
+#$%
+#$% Called By:  Parse_Test_Special
+#$%
+#$% Calls:      ipbyte
+#$%
+#$% Tables:     none
+#$%
+#$% Date:       May 89
+#$%
+#$% Author:     TSgt Kim Harris  (Air Force AWSIM Model)
+#$%
+#$% Modified:   Carol Kropp - 6/95 (E1419)
+#$%             Integrated into RESA - removed implicit declarations.
+#$%
+################################################################################
+BBimplicit                                 # DEW 3/13/00 (E2145)
+pr_common   # variables: pr_next, char
+ 
+literal  word1, word2     # since the BE number can be 12 characters long
+                          # two literal (8 character) values are needed.
+integer  char_count       # count of the number of characters entered
+integer  i                # loop control variable
+integer     PR_NEXT, STAT
+character   CHAR
+ 
+  word1 = $BLANKLIT
+  word2 = $BLANKLIT
+ 
+  if (Last$Arg$Value < 0)
+    pr_next = no
+ 
+  char_count = 0
+ 
+  for (i = stack$line_level$pos + 1; i <= line$length; i = i + 1)
+    {
+     char_count = char_count + 1
+     char = line$buf[i]
+ 
+     if (char_count == 1)       # if the first character of the BE
+       {
+        if ((char >= $LETA & char <= $LETZ) | (char >= $DIG0 & char <= $DIG9))
+           call ipbyte (word1, 1, char)
+        else
+          {
+           stat = $stat$nogood$
+           return
+          }
+       }    # end of if the first character of the BE number
+     else if ((char >= $LETA & char <= $LETZ) |
+              (char >= $DIG0 & char <= $DIG9) |
+              (char == $MINUS)                )
+       {
+        if (char_count <= 8)        # if within the 1st word
+          call ipbyte (word1, char_count, char)
+        else if (char_count <= 16)  # if within the 2nd word # dew 1/00 (E2206)
+          call ipbyte (word2, char_count - 8, char)
+        else
+          {
+           stat = $stat$nogood$
+           return
+          }     # end of if within the number of characters limit
+       }     # end of a valid character entry
+     else    # character entry is not valid
+       {
+        stat = $stat$nogood$
+        return
+       }
+    }     # end of loop
+ 
+  if (char_count < 9)          # if only one word of data has been entered
+    {
+     if (pr_next == yes)       # if there is another entry
+       {
+        stack$ArgCount = stack$ArgCount - 1
+        pr_next = no
+       }
+     arg$value = word1
+    }
+  else
+    {
+     if (pr_next == no)
+       {
+        stack$ArgCount = stack$ArgCount + 1
+        pr_next = yes
+       }
+     arg$value = word2
+    }
+ 
+return
+end     #$% end of Parse_Test_BE
+
+
+subroutine Parse_Test_TIN (stat)               
+################################################################################
+#$%
+#$% Purpose:    Parse_Test_TIN validates the TIN (Target Identification Number)
+#$%             being entered with various ground attack commands.  TINs are
+#$%             1-8 alphanumeric characters long - the first character must be
+#$%             a number or letter, the other characters may be a letter,
+#$%             number, or minus sign.
+#$%
+#$% Called By:  Parse_Test_Special
+#$%
+#$% Calls:      ipbyte
+#$%
+#$% Tables:     none
+#$%
+#$% Date:       May 89
+#$%
+#$% Author:     TSgt Kim Harris  (Air Force AWSIM Model)
+#$%
+#$% Modified:   Carol Kropp - 6/95 (E1419)
+#$%             Integrated into RESA - removed implicit declarations.
+#$%
+################################################################################
+BBimplicit                                 # DEW 3/13/00 (E2145)
+pr_common   # variables: pr_next, char
+
+literal word
+integer  char_count       # count of the number of characters entered
+integer  i                # loop control variable
+integer     STAT
+character   char
+
+word = $BLANKLIT
+char_count = 0
+
+  for (i = stack$line_level$pos + 1; i <= line$length; i = i + 1)
+    {
+     char_count = char_count + 1
+     char = line$buf[i]
+
+     if ((char_count == 1) &
+         ((char >= $LETA & char <= $LETZ) |
+           char == $Pound                 |     # E2226 JOA 7/19/01
+          (char >= $DIG0 & char <= $DIG9) ))
+       {
+        call ipbyte (word, char_count, char)
+       }
+     else if ((char_count > 1 & char_count < 9) &
+              ((char >= $LETA & char <= $LETZ) | 
+               (char >= $DIG0 & char <= $DIG9) |
+               (char == $MINUS)                ))
+       {
+        call ipbyte (word, char_count, char)
+       }
+     else
+       {
+        stat = $stat$nogood$
+        return
+       }
+    }     # end of loop
+
+arg$value = word
+
+return
+end     #$% end of PARSE_TEST_TIN
+
+
+subroutine Synbld_BE (ipnt,   # in/out:  current arg index into args
+                      nargs,  # in:      number of arguments in args
+                      args,   # in:      command arguments
+                      dest,   # in/out:  command string
+                      len)    # in/out:  string length of dest 
+############################################################################
+#$%
+#$% Purpose:   Synbld_BE is called when the keyword is BE, since the entered
+#$%            <be-number> may be contained in one or two words.  If the
+#$%            number of arguments (nargs) equals the position of the BE
+#$%            keyword (ipnt) plus one then the <be-number> is in one word.
+#$%            If nargs equals ipnt plus two, then the value is in two words.
+#$%            If nargs is greater than this, then the optional TIN was also
+#$%            entered and the number of words the BE value occupies is based
+#$%            on the location of the TIN keyword.
+#$%
+#$% Called By: synbld
+#$%
+#$% Calls:     smov..
+#$%
+#$% Tables:    none
+#$%
+#$% Date:      July 1995 (E1419)
+#$%
+#$% Author:    Carol L. Kropp
+#$%
+############################################################################
+
+integer    ipnt, nargs
+literal    args[$max$args]
+character  dest[ARB]
+integer    len
+
+literal    value
+
+  call smovv (" ", dest, len)
+
+  if (nargs == ipnt + 1)        # no TIN, BE is only one word
+    {
+     value = args[ipnt+1]
+     call smovhn (value, $$MaxLit, dest, len)
+     ipnt = ipnt + 2     # set past the keyword and value
+    }
+  else if (nargs == ipnt + 2)   # not TIN, BE is two words
+    {
+     value = args[ipnt+1]
+     call smovhn (value, $$MaxLit, dest, len)
+     value = args[ipnt+2]
+     call smovhn (value, $$MaxLit, dest, len)
+     ipnt = ipnt + 3     # set past the keyword and value
+    }
+  else    # a TIN was entered
+    {
+     if (args[ipnt+2] == $lex$TIN$)  # one word BE
+       {
+        value = args[ipnt+1]
+        call smovhn (value, $$MaxLit, dest, len)
+        ipnt = ipnt + 2     # set past the keyword and value (to TIN)
+       }
+     else  # two word value of BE and TIN entered
+       {
+        value = args[ipnt+1]
+        call smovhn (value, $$MaxLit, dest, len)
+        value = args[ipnt+2]
+        call smovhn (value, $$MaxLit, dest, len)
+        ipnt = ipnt + 3     # set past the keyword and value (to TIN)
+       }
+
+     call smovv (" TIN ", dest, len)
+
+     value = args[ipnt+1]
+     call smovhn (value, $$MaxLit, dest, len)
+     ipnt = ipnt + 2     # set past the keyword TIN and value
+    }
+
+return
+end     # end of Check_BE
+
+
+subroutine parse_test_Big_5A (stat)               
+####################################################################
+#$%
+#$% Purpose:   PARSE_TEST_BIG_5A generates a test to validate the
+#$%            launch-event input into the game.
+#$%            Valid is: AXXXX
+#$%            Where: A is A-Z or 0-9
+#$%                   X is A-Z or 0-9 or '-' (or ' ')
+#$%
+#$% Called By: PARSE_TEST_SPECIAL
+#$%
+#$% Calls:     IPBYTE
+#$%
+#$% Tables:    NONE
+#$%
+#$% Date:      Feb 98
+#$%
+#$% Author:    reused parse_test_big_na code - Susan Miller 2/98 (E1657)
+#$%
+#######################################################################
+
+BBimplicit                                 # DEW 3/13/00 (E2145)
+pr_common
+literal word
+integer     CNT, I, STAT
+character   CHAR
+
+word = $BLANKLIT
+cnt = 0
+
+for (i = stack$line_level$pos+1;i <= line$length;i = i + 1)
+  {
+    cnt = cnt + 1
+    char = line$buf[i]
+
+    if (char == $MINUS & cnt >= 2 & cnt <= $$MaxName)
+            {
+            continue
+            }
+
+    else if (cnt >= 1 & cnt <= $$MaxName &
+       ((char >= $LETA & char <= $LETZ)|          #$% 1st position can be
+        (char >= $DIG0 & char <= $DIG9)))         #$% either number or alpha
+            {                                     #$% but not minus sign
+            continue
+            }
+
+    else
+      {
+        stat = $stat$nogood$             #$% else set stat to nogood
+        return
+      }
+    call ipbyte(word,cnt,char)
+  } 
+
+if (word == 'TIME') stat = $stat$nogood$
+arg$value = word
+
+return
+end
+
+
+
+subroutine parse_test_name6 (stat)               
+####################################################################
+#$%
+#$% Purpose:   PARSE_TEST_NAME6 validates the
+#$%            NAME6 input into the game.
+#$%            Valid is: XXXXXX
+#$%            Where: 
+#$%                   X is A-Z or 0-9
+#$%
+#$% Called By: PARSE_TEST_SPECIAL
+#$%
+#$% Calls:     IPBYTE
+#$%
+#$% Tables:    NONE
+#$%
+#$% Date:      JUN 03
+#$%
+#$% Author:    James O. Allen
+#$%
+#######################################################################
+
+BBimplicit                   
+pr_common
+literal word
+integer     stat, cnt, i     
+character   char             
+
+word = $BLANKLIT
+cnt = 0
+
+for (i = stack$line_level$pos+1;i <= line$length;i = i + 1)
+  {
+    cnt = cnt + 1
+    char = line$buf[i]
+
+    if (cnt >= 1 & cnt <= 6 &
+       ((char >= $LETA & char <= $LETZ)|          #$% 1st position can be
+        (char >= $DIG0 & char <= $DIG9)))         #$% either number or alpha
+            {                                     #$% but not minus sign
+            continue
+            }
+    else
+      {
+        stat = $stat$nogood$             #$% else set stat to nogood
+        return
+      }
+    call ipbyte(word,cnt,char)
+  } 
+
+if (word == 'TIME') stat = $stat$nogood$
+arg$value = word
+
+return
+end
+
+# The routines placed here to replace the versions in PARSE_TOOLS:PARSER
+#
+# This version allows larger names (via $$MaxName)          DEW 26-Jan-2000
+#
+# I.E.  All alpha-numeric entries will now default to $$MaxName length!!!!
+
+subroutine parse_test_alpha (stat)
+BBimplicit                                 # DEW 3/13/00 (E2145)
+pr_common
+literal         word
+integer     CNT, I, STAT
+character   CHAR
+
+word = $BLANKLIT
+cnt = 0
+
+for (i = stack$line_level$pos + 1; i <= line$length; i=i+1)
+    {
+    cnt = cnt + 1
+    char = line$buf[i]
+
+    if (cnt  == 1     &                         # first letter alpha
+        char >= $LETA &
+        char <= $LETZ)  continue
+
+    else if (cnt>1 & cnt<= $$MaxName &          # other letters (2-n) alpha
+             ((char >= $LETA & char <= $LETZ)|  #                  or numeric
+              (char >= $DIG0 & char <= $DIG9) )
+            ) continue
+
+    else
+        {
+        stat = $stat$nogood$                     # set stat to nogood
+        return
+        }
+
+    call ipbyte(word,cnt,char)
+    }
+
+if (word == 'TIME') stat = $stat$nogood$
+
+arg$value = word
+
+return
+end
+
+# This routine here, to replace the 5-byte name version in PARSE_TOOLS:PARSER
+
+subroutine parse_test_wildcard (stat)       # This subroutine checks to determine
+implicit None                               # if the name uses wildcards (% and *).
+pr_common                                   # joa 11/97 (E1833)
+
+literal     word
+integer     stat, cnt, i
+character   CHAR
+
+  word = $BLANKLIT
+  cnt = 0
+
+  for (i = stack$line_level$pos + 1; i <= line$length; i=i+1)
+    {
+     cnt = cnt + 1
+     char = line$buf[i]
+
+     if (cnt == 1)                               # first letter alpha,%,*,#
+       {
+        if ((char >= $LETA & char <= $LETZ)|  
+            (char == $ASTER | char == $PERCENT | char == $POUND)) # E2226
+          continue
+       }
+     else if (cnt>1 & cnt <= $$MaxName &         # other letters (2-n) alpha
+              ((char >= $LETA & char <= $LETZ)|  #                  or numeric
+               (char >= $DIG0 & char <= $DIG9)| 
+               (char == $ASTER | char == $PERCENT)))
+        continue
+     else
+       {
+        stat = $stat$nogood$                     # set stat to nogood
+        return
+       }
+
+     call ipbyte(word,cnt,char)
+    }
+
+  if (word == 'TIME') stat = $stat$nogood$
+
+  arg$value = word
+
+return
+end
+
+# This routine here combines Lat and Long input and replaces both 
+# PARSE_TEST_LATITUDE and PARSE_TEST_LONGITUDE in PARSE_TOOLS:PARSER
+# with an enhanced Lat/Long validation syntax.
+
+define ($$none,0)
+define ($$Deg ,1)
+define ($$Min ,2)
+define ($$Sec ,3)
+define ($$Thou,4)
+define ($$Oops,5)
+
+
+define ($$let,1)
+define ($$num,2)
+define ($$sep,3)
+define ($$dec,4)
+
+
+Subroutine parse_test_latlon (stat,hems)
+
+#----------------------------------------
+#
+# Revised to allow AWSIMS syntax for Hemisphere First, and
+# to still allow original format. And add Tenths-of-Seconds.
+#
+# Original syntax:  DDD-MM-SSH
+# Enhanced syntax:  DDD-MM-SS.TH
+# AWSIMS syntax:    HDDD-MM-SS.T
+#
+# In all cases, -MM and -SS are optional
+#               .T is optional tenths-of-seconds
+#
+# PER E2206 (ATI/ATO Interface)     DEW 24-Aug-2000
+#----------------------------------------
+# Additional logic added (using CNT) to insure
+# at least 1 and no more than 3/2/1 digits for each 
+# deg/min/sec/tenths field.
+#
+# i.e. - Don't allow separators without at least one 
+#        digit specified.
+#      - Don't allow unlimited preceeding zeros.
+#
+#                                   DEW 28-Aug-2000
+#----------------------------------------
+
+implicit none # integer (a-z)
+
+pr_common
+integer         stat
+VMSchar*(*)     hems
+
+integer         max_degrees, deg, min,  hem, icase, kk, i, 
+                itype, cnt, mdeg 
+character       char, hem1, hem2
+real*8          sec, ten
+
+if (hems == "NS") max_degrees = 90
+else              max_degrees = 180
+
+hem1 = ichar(hems[1:1])
+hem2 = ichar(hems[2:2])
+
+repeat
+    {
+    break
+    entry parse_test_latitude (stat)
+
+    max_degrees = 90
+    hem1 = ichar("N")
+    hem2 = ichar("S")
+    break
+
+    entry parse_test_longitude (stat)
+
+    max_degrees = 180
+    hem1 = ichar("E")
+    hem2 = ichar("W")
+    }
+
+if (max_degrees <= 99) mdeg = 2     # Max digits
+else                   mdeg = 3
+
+stat = $stat$ok$
+deg = 0
+min = 0
+sec = 0
+ten = 0
+hem = 0
+cnt = 0         # Numeric-Character count
+icase = $$None
+
+# possible cases
+#   $$None
+#   $$Deg 
+#   $$Min 
+#   $$Sec 
+#   $$Thou 
+
+kk = 0
+for (i = stack$line_level$pos + 1; i <= line$length; i=i+1)
+    {
+    if (stat == $stat$nogood$) break
+
+    kk = kk + 1
+    char = line$buf[i]
+
+    if      (char >= $DIG0 & char <= $DIG9) itype = $$num
+    else if (hem == 0 & 
+            (char == hem1  | char == hem2)) itype = $$let
+    else if (cnt >= 1 & char == $MINUS)     itype = $$sep
+    else if (cnt >= 1 & char == $PERIOD)    itype = $$dec
+    else
+       {
+        stat = $stat$nogood$
+        break
+       }
+
+    if (hem != 0)                       # We have Hemisphere...
+        {
+        if (kk >= 2)                    # and 2 or more chars...
+            {
+            stat = $stat$complete$      # We are complete...
+            }
+        }
+    else if (itype == $$Let)        # ELSE we are getting Hemisphere
+        {
+        if      (char == hem1) hem =  1     
+        else if (char == hem2) hem = -1
+
+        if (icase == $$none)        # 1st-char Hemisphere...
+            {
+            icase = $$deg
+            }
+        else                        # Last-char Hemisphere...
+            {
+            stat = $stat$complete$
+            icase = $$oops
+            }
+        next
+        }
+
+    if (itype == $$num) cnt = cnt + 1   # Count digits
+
+    if (icase == $$deg | icase == $$none) # degrees
+        {
+        icase = $$deg
+
+        if (itype == $$num)         #   Number
+            {
+            deg = deg * 10 + char - $DIG0
+
+            if (cnt > mdeg | deg > max_degrees)
+                {
+                stat = $stat$nogood$
+                }
+            }
+        else if (itype == $$sep)    #   minus
+            {
+            icase = $$min
+            cnt = 0
+            }
+        else
+            {
+            stat = $stat$nogood$
+            }
+        }
+    else if (icase == $$min)         # minutes
+        {
+        if (itype == $$num)         #   number
+            {
+            min = min * 10 + char - $DIG0
+            if (cnt > 2 | min > 59)
+                {
+                stat = $stat$nogood$
+                }
+            }
+        else if (itype == $$sep)    #   minus
+            {
+            icase = $$sec
+            cnt = 0
+            }
+        else
+            {
+            stat = $stat$nogood$
+            }
+        }
+    else if (icase == $$sec)         # seconds
+        {
+        if (itype == $$num)         #   number
+            {
+            sec = sec * 10 + char - $DIG0
+
+            if (cnt > 2 | sec > 59)
+                {
+                stat = $stat$nogood$
+                }
+            }
+        else if (itype == $$dec)    #   period
+            {
+            cnt = 0
+            icase = $$thou
+            }
+        else
+            {
+            stat = $stat$nogood$
+            }
+        }
+    else if (icase == $$Thou)         # seconds
+        {
+        if (itype == $$num)         #   number
+            {
+            ten = ten * 10 + char - $DIG0
+
+            if (cnt > 3 | ten > 999)
+                stat = $stat$nogood$
+            }
+        else
+            {
+            stat = $stat$nogood$
+            }
+        }
+    else if (icase == $$Oops)
+        {
+        stat = $stat$nogood$
+        }
+   } # End for loop
+
+arg$value = (deg*100.0 + min + sec/100.0 + ten/100000.0) 
+
+if (arg$value > max_degrees * 100.0)
+    {
+    stat = $stat$nogood$
+    }
+
+arg$value = arg$value * hem         # apply hemishere
+
+return
+end
+
+
+logical function chktot (nord,nargs,args) 
+
+######################################################
+#$%
+#$% Purpose:   CHKTOT performs a check for if this order typically 
+#$%            uses the TOT time Vs the PAT time indicator.
+#$%
+#$% Called By: SYNBLD
+#$%
+#$% Date:      Sep 2000
+#$%
+#$% Author:    Dane Wills
+#$%
+######################################################
+
+implicit none
+integer         nord, nargs
+literal         args[$max$args]
+logical         rc
+
+rc = .false.
+if      (nord == RECONN$order) rc = .true.
+else if (nord == ATTACK$order) rc = .true.
+else if (nord == STRIKE$order) rc = .true.
+else if (nord == TAKE$order)   rc = .true.
+else if (nord == FIRECRUISE$order)   rc = .true.
+else if (nord == JTMDAttackModel$Order) rc = .true.
+
+return (rc)
+end
+
+
+ 
+subroutine Parse_Test_fullname (stat)               
+################################################################################
+#$%
+#$% Purpose:    Parse_Test_FullName validates a string input of up to 24 bytes
+#$%
+#$% Called By:  Parse_Test_Special
+#$%
+#$% Calls:      ipbyte
+#$%
+#$% Tables:     none
+#$%
+#$% Date:       Nov 2000
+#$%
+#$% Author:     Dane Wills
+#$%
+################################################################################
+ BBimplicit                                 # DEW 3/13/00 (E2145)
+ pr_common
+ integer    dummy, stat, k, i
+
+ #$% test to see if a name
+ call parse_test_alpha (dummy)
+
+ #$% if max length of the text exceeds max allowed
+ if ((line$length-stack$line_level$pos) > 24)
+    {
+    #$% set status as "no good"
+    stat = $stat$nogood$
+    }
+ else
+    {
+    k = 0
+    #$% move each character of text into the array, end with a null
+    for (i = stack$line_level$pos + 1; i <= line$length; i=i+1)
+        call smov (line$buf[i],arg$value,k)
+
+    call smov ($null,arg$value,k)
+    }
+
+ return
+ end
+
+
+
+
+subroutine askqst (promptX,nans)    # jb E2144 (X)  8/1/00        
+
+########################################################
+#$%
+#$% Purpose:   ASKQST displays a text question
+#$%            and accepts a YES/NO answer.
+#$%
+#$% Called By: INITOM     START0
+#$%            START1     START3     TESTX
+#$%            WARGAM
+#$%
+#$% Calls:     ORDPAR
+#$%
+#$% Tables:    None
+#$%
+#$% Date:      OCT 80
+#$%
+#$% Author:    Dana Wills
+#$%
+########################################################
+BBimplicit              # jb E2145  7/27/00
+
+parse$common(orders)             # tell the parser the          #VAX00
+                                 # symbolic name of the parse table
+literal pvlex[$max$args]                                       #VAX00
+integer NARGS,NORD               # MJC 5/1/2000 (E-2145)
+integer nans
+VMSchar*(*) promptX               # jb E2144 (argument)  8/1/00
+##character prompt[ARB]
+
+repeat
+   {
+    nans = -1
+
+    parse$set$group($grp$InitYN)     # parse only the wargame initialization
+                                     # yes/no command          #VAX00
+
+    #$% receive command entered by player from parser            #VAX00
+    parse$command(orders,    # symbolic name used in parse$common
+                  nargs,     # variable to receive the argument count
+                  pvlex,     # literal array to receive the arguments
+                  nord,      # variable to receive the order code number
+                  3,         # time in seconds to return in if no input given
+                  %%REF(promptX) )    # string to display prior to input
+                  ## jb E2144 (%%REF, for new argument) 8/1/00
+
+    #$% if input is ^K command to cancel
+    if (nord < 0) return
+
+    #$% if command input is YES, set nans accordingly
+    if (pvlex[1] == $LEX$YES$) nans = $YES
+    #$% else set nans to NO
+    else                       nans = $NO
+
+    #$% if order code # not a zero, break from loop (string inputted)
+    if (nord != 0) break
+   }
+
+return
+end
+
+Subroutine check_active (ierr)  # Check for game already running
+bbcommon
+integer   ierr, ians
+
+ierr = NO
+
+if (halt$request == $no)
+{
+    call echo ($bell); call echo ($bell)
+
+    call askqst ("WARNING: Game active in directory. Do you wish to continue? ",ians)  # jb E2144
+
+    if (ians == $no) ierr = YES
+}
+
+return
+end
+

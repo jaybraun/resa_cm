@@ -1,0 +1,1995 @@
+#####   version 3.1  dated-  7apr81
+ 
+ 
+#####   version 3.0  dated- 22dec80
+ 
+ 
+# 
+ 
+#$%     MODULE                        UTILITY                     DATA
+#$%   SUBROUTINES                   SUBROUTINES                  TABLES
+#$%   ===========                   ===========                  ======
+#$%
+#$%     OACTIV                         SEND                        UNT
+#$%     CHKDEQ                                                     DEQ
+#$%     SONEQ                                                      SON
+#$%     RADEQ                                                      BOY
+#$%     ESMEQ
+#$%     ONOFF
+#$%     ACTERR
+#$%     SILERR
+#$%     UPDBOY
+#$%
+#$%
+#$%
+#$%   NOTES
+#$%   =====
+#$%
+#$%   1.  <FILENAME> INDICATES WHERE SUBROUTINE IS LOCATED.
+#$%
+#$%   2.  UTILITY SUBROUTINES NOT SHOWN ON FLOWCHART.
+#$%
+#$%   3.  * INDICATES NO OTHER SUBROUTINES CALLED.
+#$%
+#$%
+#$%
+#$%   FLOWCHART FOR FILE OACTIV
+#$%   =========================
+#$%
+#$%   EXEORD <WGORDP> - OACTIV - CHKDEQ - RADEQ*
+#$%                                     - SONEQ*
+#$%                                     - ESMEQ*
+#$%                                     - IFFEQ*
+#$%                            - ONOFF *
+#$%                            - UPDBOY*
+#$%                            - ACTERR*
+#$%                            - SILERR*
+ 
+
+ 
+ include "ascii.inc"
+ include "bbctl.inc"                           #general
+ include "bbcode.inc"                          #      definitions
+ include "orders.inc"                          #player command definitions
+                                      #plus definitions for:
+ include "bbacc.inc"                           #aircraft characteristics table
+ include "bbdeq.inc"
+ include "bbboy.inc"                           #buoy table
+ include "bbesm.inc"                           #esm characteristics table
+ include "bbfls.inc"                           #jb FlsTgt parameters 12/26/90
+ include "bbiff.inc"                           #cl IFF characteristics 3/20/91
+ include "bbord.inc"                           #pending orders table
+ include "bbpng.inc"                           # clk 7/12/91
+ include "bbrad.inc"                           #radar characteristics table
+ include "bbsob.inc"                           #sonobuoy characteristics table
+ include "bbson.inc"                           #sonar characteristics table
+ include "bbshc.inc"                           #ship characteristics table
+ include "bbunt.inc"                           #unit table
+ include "bbrth.inc"                           #rothr table
+ include "bbjew.inc"                           # jecewsi - JFR 8/31/94
+ include "bbjam.inc"                           # jecewsi - JFR 9/6/94
+ include "wgmdrot.inc"                         #rothr constants
+ define (BBImplicit, Implicit None)            # MJC 6/21/2K (E2145 - Implicit None)
+ 
+ 
+ define(OAcommon,common/OACT/UNT$POINTER,IORDER,IEQTYP,IMODE,ieq,
+                 ALLFLG,OKFLAG,NOSUCH,EQFIND,SENFND,NFOUND[7]
+                 literal ieq
+                 logical ALLFLG,OKFLAG,NOSUCH,EQFIND,SENFND)
+ 
+
+ 
+ 
+ 
+ Subroutine OACTIV(NORD,      #process Order to ACTIVate or silence
+                   IPNTR,     #NORD = id number of order (input)
+                   NWRDS,     #IPNTR = unit pointer for addressee (input)
+                   ILEX)      #NWRDS = number of words being passed (input)
+                              #ILEX = order content (input)
+ 
+#######################################################
+ #$%
+ #$% Purpose:   OACTIV processes activate and silence
+ #$%            commands to activate or silence gen-
+ #$%            eral types of equipment.
+ #$%
+ #$% Called By: EXEORD  OCOVER  OTAKE                   #       1/24/84
+ #$%
+ #$% Calls:     CHKDEQ     ONOFF      UPDBOY
+ #$%            ACTERR     SILERR
+ #$%
+ #$% Tables:    UNT        DEQ        SON
+ #$%            BOY        JAM
+ #$%
+ #$% Date:      APRIL 80
+ #$%
+ #$% Author:    Dana Wills
+ #$%
+ #$% Modified:  Carol Kropp - 3/96 (E1561)
+ #$%            Added processing of ACTIVATE/SILENCE
+ #$%            SOF/UGS - JTMD Models.
+ #$%
+ #$%            Carol Kropp - 3/96 (E1536)
+ #$%            Added processing of ACTIVATE/SILENCE
+ #$%            UAV - JTMD Pioneer/Hunter UAV Model.
+ #$%
+ #$%            Carol Kropp - 4/97 (E1785)
+ #$%            Added keywords ATARS and TARPS to the
+ #$%            branch for processing JTMD commands.
+ #$%
+ #$%            James Allen - 12/97 (E1852)
+ #$%            Added new activate/silence command codes
+ #$%            for separation of orders for appropriate
+ #$%            unit types.
+ #$%
+ #######################################################
+ 
+ BBcommon
+ OAcommon
+ 
+ BBDeclare  (UNT$Pointer,
+             DEQ$Pointer,
+             DEQ$Pntr$I,
+             DEQ$Oktosend$I,
+             DEQ2$Pointer,
+             DEQ$On$I,
+             DEQ$Lfapingindex$I,
+             DEQ$Emitterindx$I,
+             SON$Pulselengthsecs$I,
+             SON$Pulseintervalmin$I,
+             SON$Pointer,
+             PNG$Pointer,
+             PNG$Deqindx$I,
+             PNG$Untindx$I,
+             PNG$Pulselength$I,
+             PNG$Pinginterval$I,
+             PNG$Timeofnextping$F)                   # MJC 6/21/2K (E2145 - Implicit None)
+ BBDeclare  (RAD$Pointer,
+             RAD$CH$Index,
+             JEW$OR$long$F,
+             JEW$Pointer,
+             JEW$OR$Index,
+             JEW$BLL$Index,
+             JEW$OR$bearing$F,
+             JEW$OR$allnets$I,
+             JEW$OR$lat$F,
+             IFF$Pointer,
+             UNT2$Pointer,
+             SHC$Pointer)                            # MJC 6/21/2K (E2145 - Implicit None)
+ literal CSTRIP8                                     # MJC 6/21/2K (E2145 - Implicit None)
+ integer NWRDS,
+         IPNTR,
+         NORD,
+         ICOMMNET,
+         IORDER,
+         IEQTYP,
+         K,
+         IMODE,
+         NEM,
+         I,
+         NFOUND,
+         IDENT,
+         IWASON,
+         KKLEN,
+         OFFSET,                    # jb E2145  9/27/00
+         NEW_ON_OFF_SETTING                          # MJC 6/21/2K (E2145 - Implicit None)
+ real    DMS2RAD                                        # MJC 6/21/2K (E2145 - Implicit None)
+ literal ILEX[NWRDS]
+ 
+ integer radfound
+## Character msg[ARB] # jb aai01 - 2 possible logic paths appear to require
+ Character msg[200]   # jb aai01 - 101 or 147 characters, vice 100  2/1/01
+ 
+ LOGICAL*1   frequency_found       # jecewsi - JFR 11/23/94
+ integer     jecewsi_jammable      # jecewsi - JFR 11/23/94
+ 
+ UNT$POINTER = IPNTR                    #set unit pointer
+ 
+ if (Xunt$Type$i == $CruiseMissile$Code) # for TomHk    6/6/85
+  {
+   if (nord == ACTIVATE$order         |
+       nord == ACTIVATEASMD$order     |   # joa 12/97 (E1832) - additional codes
+       nord == ACTIVATESONAR$order)       # because of unit type restrictions
+    {
+     PUTunt$TimeSeek$f (game$time)
+    }
+   else if (nord == SILENCE$order     |
+            nord == SILENCEASMD$order |   # joa 12/97 (E1832) - additional codes
+            nord == SILENCESONAR$order)   # because of unit type restrictions
+    {
+     PUTunt$TimeSeek$f (3000.)
+     PUTunt$AttackIndx$I ($NO)          #               12/17/85
+     PUTunt$AssignedTarget$I ($NO)      #               12/17/85
+     PUTunt$Status$I ($Proceeding$Code) #               12/17/85
+    }
+   RETURN
+  }
+ 
+ if (ilex[2] == $lex$JAMMER$ & jecewsi$game != $yes) # JFR 8/10/94
+    {
+     offset = 0
+     call smovv ("ACTIVATE/SILENCE JAMMER COMMANDS ONLY ", msg, offset)
+     call smovv ("VALID DURING JECEWSI GAME.", msg, offset)
+     call send_  (xUNT$View$I, 0, offset, msg)
+     offset = 0
+     call smovv ("     USE JAM/CEASE JAM COMMAND.<<", msg, offset)
+     call send_  (xUNT$View$I, 0, offset, msg)
+     return
+    }
+ 
+ icommnet = $no
+ if (NWRDS >= 6)                     # E2231 joa UFL01
+    {
+        if ((ilex[2] == $lex$JAMMER$ & jecewsi$game == $yes) &     # JFR 8/10/94
+         (ilex[5] == $lex$COMMNET$ | ilex[6] == $lex$COMMNET$)) # commnet specified
+        {
+         icommnet = $yes
+        }
+    }
+ IORDER = int(ILEX[1])   #activate or silence code
+ 
+ IEQTYP = int(ILEX[2])      #general type of equipment
+ 
+ if ((ieqtyp == $lex$ROTHR$) | (ieqtyp == $lex$DIR$))
+   {
+    call oactrot(ipntr,nord,nwrds,ilex)
+    return
+   }
+ 
+ K = 0                                  #number of emitters found
+ 
+ IMODE = 0                          #indicate no mode specified
+ if (NWRDS >= 3)                      #if mode specified
+    {
+    if ((ILEX[3] == $LEX$DP$ |
+         ILEX[3] == $LEX$BB$ |
+         ILEX[3] == $LEX$CZ$ |
+         ILEX[3] == $LEX$PASSIVE$ |         # H1052 -cpa 9/92
+         ILEX[3] == $LEX$ACTIVE$))          # added active/passive options
+ 
+        IMODE = ILEX[3]                    #get it
+    }
+ 
+ ALLFLG = (NWRDS <= 2 |                 #flag to indicate no particular
+        (ILEX[1] == $LEX$ACTIVATE$ &_
+         ILEX[NWRDS-1] != $LEX$USING$)) #    equipment specified
+ 
+ # if allflg is false and it is a SONAR order, check to see if
+ # ACTIVE or PASSIVE was entered, if so set allflg to true
+ # for subroutine soneq, which will determine if a particular
+ # sonar is to be activated or silenced.  RE: H1052 - cpa 9/92
+ if ((NWRDS >= 3) &
+     !ALLFLG & ilex[2] == $lex$SONAR$ &
+    (ilex[3] == $lex$Passive$ | ilex[3] == $lex$Active$))
+   ALLFLG = .true.
+ 
+ if (!ALLFLG & ilex[2] != $lex$PING$)   # if particular equip specified, get it
+    IEQ = ILEX[NWRDS]
+ 
+ NOSUCH = .true.                        #initialize no-such-equipment flag
+ 
+ eqfind = .false.                       #initialize equipment-found flag
+ 
+ senfnd = .false.                       #initialize sensor-found flag
+ 
+ if (ieqtyp == $lex$emitter$)
+    {
+     nem = nwrds-2
+ 
+     for (i=1;i<=nem;i=i+1)             #clear list of emitter-found flags
+        {
+         nfound[i] = $no
+        }
+    }
+ 
+FOR_DEQ_CHAIN
+    {
+     DEQ$PNTR$I = XDEQ$PNTR$I            # jb                12/18/90
+     ident      = XDEQ$IDENT$I
+ 
+     call CHKDEQ(DEQ$pointer,           #see if order applies to it
+                 IDENT,                 #pass general type of equip
+                 DEQ$PNTR$I,            #pass equip characteristics pntr
+                 icommnet,              # jecewsi commnet flag - JFR 9/15/94
+                 ilex,                  #pass order content
+                 NWRDS)                 #pass  number of words in command
+ 
+     if (!OKFLAG)  next                 #skip if order does not apply
+ 
+     #$% reset the hidden object's status when activate command is apply    # khc 9/92
+     if (xUNT$STATUS$I == $HIDING$CODE & iorder == $lex$activate$)
+        {
+         putUnt$Status$I  ($Proceeding$Code)   # reset unit status
+         putUnt$HideStatus$I  ($NoHideStatus)
+         putUnt$HideSiteIndx$I  (0)            # reset the Hide Site Indx
+ 
+         putUnt$Orderedlatitude$F  ($Pi)       # reset lon and lat order
+         putUnt$Orderedlongitude$F (0)
+        }
+ 
+     if (ident == $commsuite$code |    #if commsuite
+         ident == $acousticcomm$code)
+        {
+         call ONOFF(DEQ$OkToSend$I, DEQ$Pointer)  #set transmission-ok
+         PUTDEQ$OkToSend$I           #        on or off accordingly
+        }
+     else                               #in all other cases
+        {
+         IwasON = xDEQ$ON$I          # jb                12/18/90
+         call ONOFF(DEQ$ON$I, DEQ$Pointer)        #turn equipment
+         PUTDEQ$ON$I                 #on or off accordingly
+ 
+         if (ident == $sonar$code |
+             ident == $passonar$code)
+            {
+             son$pointer = deq$pntr$i    # jb (No x)    12/18/90
+ 
+             if (xSON$ActiveLFA$I == $yes)         # if Active LFA source
+               {
+                if (ilex[1] == $lex$ACTIVATE$ &     # if an activate command
+                    ilex[2] == $lex$PING$)
+                  {
+                   kklen = 0
+                   if (xDEQ$LFAPingIndex$I == 0)
+                     {
+                      for (PNG$Pointer$First; PNG$Pointer$Valid; PNG$Pointer$Next)
+                        {
+                         if (xPNG$InUse$I == $no)  # if available
+                         break
+                        }
+                      if (!PNG$Pointer$Valid)       # if no empty slots
+                        {
+                         call smovv ("No table space available", msg, kklen)
+                         call smovv ("for ping information.", msg, kklen)
+                         call send_ (xunt$view$i, 0, kklen, msg)
+                         return
+                        }
+                      else
+                        {
+                         DEQ$LFAPingIndex$I = PNG$Pointer$Index
+                         putDEQ$LFAPingIndex$I
+                         PNG$DEQIndx$I = DEQ$Pointer$Index
+                         putPNG$DEQIndx$I
+                         PNG$UNTIndx$I = UNT$Pointer$Index
+                         putPNG$UNTIndx$I
+                        }
+                     }
+                   else
+                     PNG$Pointer$To xDEQ$LFAPingIndex$I
+ 
+                   SON$PulseLengthSecs$I = xSON$PulseLengthSecs$I
+                   if (SON$PulseLengthSecs$I >= ilex[3])
+                     PNG$PulseLength$I = ilex[3]
+                   else
+                     {
+                      call smovv ("Pulse length > BUILD ", msg, kklen)
+                      call smovv ("maximum:  Length set to ", msg, kklen)
+                      call smovib (SON$PulseLengthSecs$I, 3, msg, kklen)
+                      call smov  ($return, msg, kklen)
+                      PNG$PulseLength$I = SON$PulseLengthSecs$I
+                     }
+                   putPNG$PulseLength$I
+                   SON$PulseIntervalMin$I = xSON$PulseIntervalMin$I
+                   if (SON$PulseIntervalMin$I <= ilex[4])
+                     PNG$PingInterval$I = ilex[4]
+                   else
+                     {
+                      call smovv ("Pulse interval < BUILD", msg, kklen)
+                      call smovv ("minimum:  Interval set to ", msg, kklen)
+                      call smovib (SON$PulseIntervalMin$I, 3, msg, kklen)
+                      PNG$PingInterval$I = SON$PulseIntervalMin$I
+                     }
+                   putPNG$PingInterval$I
+                   putPNG$PingSchedule$I ($no)
+                   png$TimeOfNextPing$f = game$time
+                   putpng$TimeOfNextPing$f
+                   if (kklen > 0)
+                     call send_ (xunt$view$i, 0, kklen, msg)
+                  }
+                else if (ilex[1] == $lex$SILENCE$ &    # if a silence comand
+                         ilex[2] == $lex$PING$)
+                  {
+                   DEQ$LFAPingIndex$I = xDEQ$LFAPingIndex$I
+                   if (DEQ$LFAPingIndex$I != 0)
+                     {
+                      PNG$Pointer$To  DEQ$LFAPingIndex$I
+                      putPNG$PingSchedule$I ($no)
+                      putpng$TimeOfNextPing$f (0)
+                      putPNG$NmbrRemainingPings$I (0)
+                      putPNG$NextScheduledPing$I (0)
+                     }
+                  }
+               }
+ 
+             if (XSON$VARIABLEDEPTH$I == $YES)    #if VDS
+                 ident = $vds$code
+ 
+             else if (XSON$TOWEDARRAY$I == $YES)  #if towed array
+                 ident = $towedarray$code
+ 
+             if (ident == $vds$code |       #if VDS or towed array
+                 ident == $towedarray$code)
+                 call UPDBOY(unt$POINTER,  #create/delete BOY table entry
+                             son$pointer,  #unt$POINTER = platform unit pntr
+                             iorder,       #son$pointer = sonar char pntr
+                             ident)        #iorder = activate or silence code
+                                           #ident = vds or towed array code
+ 
+             else if (ident ==$sonar$code & IwasON ==$NO &
+                     (nord == ACTIVATESONAR$order |    # was ACTIVATE$Order - joa 12/97 (E1852)
+                     (nord == PING$order & ilex[1] == $LEX$ACTIVATE$))) #8/13/91
+              {
+               call FALSEslot(UNT$Pointer$INDEX,
+                              SON$Pointer$INDEX ) # jb $INDEX 1/28/91
+              }
+            }    # End of if $sonar$code or $passonar$code..
+ 
+         else if ( ident == $RADAR$Code)     # else added 12/3/90 reh
+            {
+             if (xDEQ$AllBands$i == 0 )
+               {
+               #$% set default channel
+               putDEQ$AllBands$i ( 1 )
+               }
+             if (IwasOn == $YES & DEQ$ON$I == $NO)   # WB - ZR 7/6/93 -- clf
+               putDEQ$JustTurnedOff$I ($YES)
+             else
+               putDEQ$JustTurnedOff$I ($NO)
+ 
+             # Do not allow subs to activate radar if below periscope depth
+             if (Xunt$Type$i == $sub$code)
+                {
+                if (Xdeq$justTurnedOff$i == $NO)
+                   {
+                     Shc$pointer = Xunt$SHCPntr$i
+                     if (Xunt$TrueAltDepth$i > Xshc$ScopeDepth$i)
+                        {
+                        PUTdeq$ON$i ($NO)
+                        kklen = 0
+                        call SMOVHN(Xunt$Name$c,$$MaxLit,msg,kklen)
+                        call SMOVV(" below periscope depth  RADAR not activated.",msg,kklen)
+                        call send_(xUNT$View$i,0,kklen,msg)
+                        }
+                   }
+                }
+           }
+ 
+         else if (ident == $IFF$Code &       # else added 4/4/91 cml
+                  nord == ACTIVATE$order)
+           {
+            IFF$Pointer = DEQ$Pntr$i
+            if (xIFF$Function$i != $INTERROGATOR$Code) next
+ 
+            #$%  activate order has been given for an interrogator;
+            #$%  search for an active radar
+            radfound = $NO
+            for_DEQ2_CHAIN (UNT$Pointer$Index)   # search deq chain for a
+                                              # search radar that is turned on
+              {
+               if (xDEQ2$Ident$i == $Radar$Code &
+                   xDEQ2$On$i == $YES) # radar found
+                 {
+                  RAD$Pointer = xDEQ2$Pntr$i   # pointer to radar characteristics
+                  if (xRAD$RadarType$i == $Air$Code |
+                      xRAD$RadarType$i == $Surface$Code)  # search radar found
+                  radfound = $YES
+                 }
+              }
+ 
+            if (radfound == $NO)   # no search radar is on and
+              {
+               kklen = 0
+               call SMOVHN(xUNT$Name$c,$$MaxLit,msg,kklen)
+               call SMOVV(" IFF Interrogate active.  All search radars are OFF.",msg,kklen)
+               call send_(xUNT$View$i,0,kklen,msg)
+              }
+           }
+         else if (ident == $IR$Code & level$ir > 0)   # else added 8/13/92 clf
+             {
+             if (ilex[1] == $lex$ACTIVATE$)
+                 {
+                 putDEQ$FieldOfView$I ($FOV_Wide)  # wide field of view
+                 putDEQ$HorizSect$I (0)            # centered
+                 putDEQ$VertSect$I (0)
+                 putDEQ$ScanRate$F (0.0)           # no scan
+                 putDEQ$Scan$I ($NO)               # no scan
+                 }
+             }
+         else if (ident == $ASMD$Code)   # else added 4/19/93 jms
+             {
+             if (ilex[1] == $lex$ACTIVATE$)
+                 {
+                 call UNTFND(xUNT$VIEW$I,ilex[3],UNT2$POINTER)
+                 if (UNT2$POINTER == 0)
+                    {
+                    kklen = 0
+                    call SMOVHN(ilex[3],$$MaxLit,msg,kklen)
+                    call SMOVV(" not found in same view with ",msg,kklen)
+                    call SMOVHN(xUNT$Name$C,$$MaxLit,msg,kklen)
+                    call send_(xUNT$View$i,0,kklen,msg)
+                    }
+                 else if (xUNT2$Type$i != $Surface$Code)
+                    {
+                    kklen = 0
+                    call SMOVHN(ilex[3],$$MaxLit,msg,kklen)
+                    call SMOVV(" must be a ship.",msg,kklen)
+                    call send_(xUNT$View$i,0,kklen,msg)
+                    }
+                 else
+                    {
+                    SHC$Pointer = xUNT2$SHCpntr$i
+                    putDEQ$CrossSect$i(xSHC$CrossSect$i)
+                    putUNT$ASMDactive$i(1)
+                    }
+                 }
+             else putUNT$ASMDactive$i(0)   # Silence ASMD
+             }
+         # if activate jammer bearing or position for radar/comms/both jammer - JFR 8/11/94
+         else if ((ident == $radarjammer$code |
+                   ident == $communicationjammer$code |
+                   ident == $radcomjammer$code) &
+                   (ilex[2] == $lex$JAMMER$))
+              { # note: $jammer$code is assigned during non jecewsi games
+               jecewsi_jammable = $no
+               deq$on$i = Xdeq$on$i
+               call ONOFF(deq$on$i, deq$pointer)
+               new_on_off_setting = deq$on$i
+               # First find jammable radars
+               FOR ( RAD$Pointer$First;
+                     RAD$Pointer$Ok ;
+                     RAD$Pointer$Next )
+                   {# jecewsi activate jammer command activates the jammer
+                    # for all channels that exist on all radars
+                    FOR( RAD$CH$Index = 1;
+                         RAD$CH$Index$OK;
+                         RAD$CH$Index = RAD$CH$Index + 1)
+                       {
+                        if ( EMI$Analysis != $no )
+                           {
+                            #$% if user is trying to jam a non-BEES channel
+                            if (xRAD$CH$Sensitivity$i == 0 |
+                                xRAD$CH$ModulationCode$i == 0 )
+                               {
+                                next
+                               }
+                           }
+ 
+                        # passes UNT$Pointer
+                        # Note: set_jecewsi_jammer_bands will turn equipment
+                        #       on again but will turn it off if no chanels are
+                        #       found in any of the radars in scenario
+                        CALL set_jecewsi_jammer_bands (_
+                                               UNT$Pointer,
+                                               xRAD$CH$Frequency$F,
+                                               new_on_off_setting,
+                                               frequency_found,
+                                               deq$pointer )
+                        if (frequency_found) jecewsi_jammable = $yes
+                       }
+                   }
+               if (jecewsi_jammable == $no) next # could not find jammable channel
+ 
+               # now orient the jammer and flag jecewsi commnets if needed
+               deq$emitterindx$i = xdeq$emitterindx$i
+               jew$pointer$to (UNT$POINTER$INDEX)
+               JEW$OR$INDEX = deq$emitterindx$i # store it in slot in ORientation subtable
+               JEW$BLL$INDEX = deq$emitterindx$i # flag for bearing or position
+               if (ilex[3] == $lex$BEARING$)
+                  { # store it as a bearing relative to unit course
+                   JEW$OR$Bearing$f = ILEX[4]/180. * $PI
+                   putJEW$OR$Bearing$f
+                   putJEW$BLL$Flags$i ($no) # flag as bearing
+                   if (NWRDS > 5)          # JOA 6/04
+                      {
+                       if (ilex[5]==$lex$COMMNET$)
+                          { # store jecewsi nets that will be mapped via ALSP
+                           if (ilex[6]==$lex$ALL$)
+                              {
+                               JEW$OR$AllNets$I = 511 # set all bits to 1
+                               PUTJEW$OR$AllNets$I
+                              }
+                           else if (ilex[6]==$lex$NET1$) PUTJEW$OR$Net1$I($yes)
+                           else if (ilex[6]==$lex$NET2$) PUTJEW$OR$Net2$I($yes)
+                           else if (ilex[6]==$lex$NET3$) PUTJEW$OR$Net3$I($yes)
+                           else if (ilex[6]==$lex$NET4$) PUTJEW$OR$Net4$I($yes)
+                           else if (ilex[6]==$lex$NET5$) PUTJEW$OR$Net5$I($yes)
+                           else if (ilex[6]==$lex$NET6$) PUTJEW$OR$Net6$I($yes)
+                           else if (ilex[6]==$lex$NET7$) PUTJEW$OR$Net7$I($yes)
+                           else if (ilex[6]==$lex$NET8$) PUTJEW$OR$Net8$I($yes)
+                           else if (ilex[6]==$lex$NET9$) PUTJEW$OR$Net9$I($yes)
+                          }
+                      }
+                  }
+               if (ilex[3] == $lex$POSITION$)
+                  { # store it as a bearing from unit to a position
+                   JEW$OR$Lat$f = DMS2rad(ILEX[4])
+                   putJEW$OR$Lat$f   # store relative orientation of jammer
+                   JEW$OR$Long$f = DMS2rad(ILEX[5])
+                   putJEW$OR$Long$f  # store releative orientation of jammer
+                   putJEW$BLL$Flags$i ($yes) # flag as position
+                   if (NWRDS > 6)          # JOA 6/04
+                      {
+                       if (ilex[6]==$lex$COMMNET$)
+                          {
+                           if (ilex[7]==$lex$ALL$)
+                              {
+                               JEW$OR$AllNets$I = 511 # set all bits to 1
+                               PUTJEW$OR$AllNets$I
+                              }
+                           else if (ilex[7]==$lex$NET1$) PUTJEW$OR$Net1$I($yes)
+                           else if (ilex[7]==$lex$NET2$) PUTJEW$OR$Net2$I($yes)
+                           else if (ilex[7]==$lex$NET3$) PUTJEW$OR$Net3$I($yes)
+                           else if (ilex[7]==$lex$NET4$) PUTJEW$OR$Net4$I($yes)
+                           else if (ilex[7]==$lex$NET5$) PUTJEW$OR$Net5$I($yes)
+                           else if (ilex[7]==$lex$NET6$) PUTJEW$OR$Net6$I($yes)
+                           else if (ilex[7]==$lex$NET7$) PUTJEW$OR$Net7$I($yes)
+                           else if (ilex[7]==$lex$NET8$) PUTJEW$OR$Net8$I($yes)
+                           else if (ilex[7]==$lex$NET9$) PUTJEW$OR$Net9$I($yes)
+                          }
+                      }
+                  }
+              }
+        }    # End if NOT $commsuite$code  or  $acousticcomm$code
+    }    # End FOR_DEQ_CHAIN
+ 
+ 
+#$% if equipment type is emitter
+ if (ieqtyp == $lex$emitter$)
+    {
+     #$% for each emmiter
+     for (i=1;i<=nem;i=i+1)
+        {
+         #$% if none found generate error message
+         if (nfound[i] == $no) call silerr (ilex[i+2])
+        }
+    }
+ 
+ else if (NOSUCH &
+          NORD != ATTACK$order &
+          NORD != TAKE$order &
+          NORD != TAKEUSINGSAM$order &      # joa 12/97 (E1852)
+          NORD != COVER$order &
+          NORD != HIDE$order)                          # 9/92 khc
+    call ACTERR
+ 
+ return
+ end
+ 
+
+ 
+ 
+ Subroutine CHKDEQ (DEQ$pointer,        #CHeck EQuipment
+                    IDENT,              #general type of equipment (input)
+                    IPNTR,              #pointer to characteristics (input)
+                    ICOMM,              # flag for jecewsi commnet
+                    ILEX,               #order content
+                    NWRDS)              #number of words in command
+ 
+#######################################################
+ #$%
+ #$% Purpose:   CHKDEQ generates a routine to check
+ #$%            radar, sonar, and ESM equipment.
+ #$%
+ #$% Called By: OACTIV
+ #$%
+ #$% Calls:     RADEQ      SONEQ      ESMEQ
+ #$%
+ #$% Tables:    DEQ
+ #$%
+ #$% Date:      APRIL 80
+ #$%
+ #$% Author:    Dana Wills
+ #$%
+ #$% Modified:  John Richardson - 8/94
+ #$%            Added equipment type check for Jammers.
+ #$%
+ #######################################################
+ 
+ BBcommon
+ OAcommon
+ literal CSTRIP8                        # MJC 6/21/2K (E2145 - Implicit None)
+ integer NWRDS, litcmp,
+         IEQTYP,
+         IDENT,
+         IPNTR,
+         ICOMM,
+         OFFSET,
+         MSG,
+         I,
+         NFOUND,
+         IORDER,
+         IMODE                          # MJC 6/21/2K (E2145 - Implicit None)
+ BBDeclare  (SON$Pointer,
+             JAM$Pointer,
+             UNT$Pointer,
+             DEQ$Pointer)               # MJC 6/21/2K (E2145 - Implicit None)
+ 
+ literal ILEX[NWRDS]
+ 
+ OKFLAG = .false.                       #initialize flags
+ 
+ if ((IEQTYP == $LEX$AIR$ |             #if order for some type of radar
+      IEQTYP == $LEX$SURFACE$ |
+      IEQTYP == $LEX$APPROACH$ |        # 1/8/86 <SCC>
+      IEQTYP == $LEX$RADAR$) &
+     (IDENT == $RADAR$CODE))            #    and this equipment is a radar
+ 
+     call RADEQ(IPNTR)                  #see if order specifically applies
+                                        #pass characteristics pointer
+ 
+ else if (IEQTYP == $LEX$PING$ &
+          IDENT == $SONAR$CODE)         # order is to activate an LFA source
+    {
+     SON$Pointer = IPNTR
+     if (xSON$ActiveLFA$I == $yes)
+       {
+        OKFLAG = .true.                    # OK to switch on or off
+        eqfind = .true.                    # indicate equipment found
+       }
+    }
+ 
+ else if ((IEQTYP == $LEX$SONAR$) &     #if order for sonar
+          (IDENT == $SONAR$CODE |       #   and this equipment is an active
+           IDENT == $PASSONAR$CODE))    #      or passive sonar
+ 
+     call SONEQ(IPNTR)                  #see if order specifically applies
+                                        #pass characteristics pointer
+ 
+ else if (IEQTYP == $LEX$ESM$ &         #if order for esm
+          IDENT == $ESM$CODE)           #   and this equipment is an esm
+ 
+     call ESMEQ(IPNTR)                  #see if order specifically applies
+                                        #pass characteristics pointer
+ 
+ else if ((IEQTYP == $LEX$JAMMER$)            &    # if order for jammer and
+          (IDENT == $RADARJAMMER$CODE        |     # equipment is a JAMMER- JFR 8/10/94 (Jecewsi)
+           IDENT == $RADCOMJAMMER$CODE       |
+           IDENT == $COMMUNICATIONJAMMER$CODE))
+         {
+          # if it gets here then it has some sort of equipment for jamming
+          nosuch = .false.
+          if ((ICOMM == $yes) & (IDENT == $RADARJAMMER$CODE)) # commnet and radar jammer
+             {
+              offset = 0
+              jam$pointer = ipntr
+              if (ALLFLG |            # if no particular JAMMER specified
+                  litcmp(XJAM$TYPE$C, IEQ) == 0) # or this particular one specified
+                 { # PER 1338 (jecewsi)
+                  call smovhn (xJAM$Type$C, $$MaxLit, msg, offset)
+                  call smovv  (" is not a COMM Jammer.", msg, offset)
+                  call send_   (xUNT$View$I, 0, offset, msg)
+                 }
+             }
+          else
+             {
+              call JAMEQ(IPNTR)     #see if order specifically applies - JFR 8/10/94 (Jecewsi)
+             }
+         }
+ 
+ else if (IEQTYP == $LEX$IFF$ &         # if order for iff
+          IDENT == $IFF$CODE)           #   and this equipment is an iff
+ 
+     call IFFEQ(IPNTR)                  # see if order specifically applies
+                                        # pass characteristics pointer
+ 
+ else if (IEQTYP == $LEX$EOIR$ &        #if order for EOIR
+          IDENT == $EOIR$CODE)          #   and this equipment is an EOIR
+ 
+    {
+     OKFLAG = .true.                    #OK to switch on or off
+     eqfind = .true.                    #indicate equipment found
+    }
+ 
+ else if (IEQTYP == $LEX$MAD$ &        # if order is for MAD
+          IDENT == $MAD$CODE)          # and the equipment is a MAD
+ 
+    {
+     OKFLAG = .true.                    #OK to switch on or off
+     eqfind = .true.                    #indicate equipment found
+    }
+ 
+ else if (IEQTYP == $LEX$LIDAR$ &        # if order is for LIDAR
+          IDENT == $LIDAR$CODE)          # and the equipment is LIDAR
+ 
+    {
+     OKFLAG = .true.                    #OK to switch on or off
+     eqfind = .true.                    #indicate equipment found
+    }
+ 
+ else if (IEQTYP == $LEX$ASMD$ &        # if order is for ASMD
+          IDENT == $ASMD$CODE)          # and the equipment is ASMD
+ 
+    {
+     OKFLAG = .true.                    #OK to switch on or off
+     eqfind = .true.                    #indicate equipment found
+    }
+ 
+ else if (ieqtyp == $lex$emitter$)
+ 
+    {
+     if (ident == $radar$code |         #if emitter code
+         ident == $sonar$code |
+         ident == $commsuite$code |
+         ident == $acousticcomm$code)
+ 
+       {
+        if (nwrds == 2)         #if no particular emitters specified
+           {
+            eqfind = .true.     #indicate equipment found
+            okflag = .true.     #OK to switch on or off
+           }
+ 
+        else                    #if particular emitters specified
+ 
+           {
+            for (i=3; i<=nwrds; i=i+1)  #cycle thru emitters in command
+ 
+               {
+               if (litcmp(xdeq$type$c, ilex[i]) == 0)
+                   {
+                    eqfind = .true.     #indicate equipment found
+                    okflag = .true.     #OK to switch on or off
+                    nfound[i-2] = $yes
+                   }
+               }
+ 
+           }
+ 
+       }
+ 
+    }
+ 
+ return
+ end
+ 
+
+ 
+ 
+ 
+ Subroutine SONEQ(SON$POINTER)          #check SONar EQuipment
+                                        #sonar characteristics pointer (input)
+ 
+ 
+#######################################################
+ #$%
+ #$% Purpose:   SONEQ generates a check of sonar
+ #$%            equipment.
+ #$%
+ #$% Called By: CHKDEQ
+ #$%
+ #$% Calls:     None
+ #$%
+ #$% Tables:    SON
+ #$%
+ #$% Date:      APRIL 80
+ #$%
+ #$% Author:    Dana Wills
+ #$%
+ #######################################################
+ 
+ BBcommon
+ OAcommon
+ literal CSTRIP8                            # MJC 6/21/2K (E2145 - Implicit None)
+ integer IMODE, litcmp,
+         IORDER,
+         IEQTYP,
+         NFOUND                             # MJC 6/21/2K (E2145 - Implicit None)
+ BBDeclare (SON$Pointer,
+            UNT$Pointer)                    # MJC 6/21/2K (E2145 - Implicit None)
+ 
+ senfnd = .true.                        #indicate desired sensor found
+ 
+ if (ALLFLG |                           #if no particular sonar specified
+     litcmp(XSON$TYPE$C, IEQ) == 0)     #   or this particular one specified
+    {
+     eqfind = .true.                          #indicate equipment found
+ 
+     if ((IMODE == 0) |                       #if no mode specified
+         (IMODE == $LEX$DP$ &                 # or if
+            XSON$DIRECTPATH$I == $YES) |      #  this sonar
+         (IMODE == $LEX$BB$ &                 #   has the
+            XSON$BOTTOMBOUNCE$I == $YES) |    #    desired
+         (IMODE == $LEX$CZ$ &                 #     mode
+            XSON$CONVERGENCEZONE$I == $YES) | #      capability
+         (IMODE == $LEX$PASSIVE$ &            # H1052 - cpa 9/92
+            XSON$ACTIVESONAR$I == $NO) |      # added ability to
+         (IMODE == $LEX$ACTIVE$  &            # specify all active
+            XSON$ACTIVESONAR$I == $YES))      # or passive sonars
+ 
+        {
+         OKFLAG = .true.                      #OK to switch to desired mode
+        }                                     #end if mode OK
+ 
+    }                                   #end if equipment OK
+ 
+ return
+ end
+ 
+
+ 
+ 
+ Subroutine RADEQ(RAD$POINTER)          #check RADar EQuipment
+                                        #radar characteristics pointer (input)
+ 
+ 
+#######################################################
+ #$%
+ #$% Purpose:   RADEQ generates a check of radar
+ #$%            equipment.
+ #$%
+ #$% Called By: CHKDEQ
+ #$%
+ #$% Calls:     None
+ #$%
+ #$% Tables:    RAD
+ #$%
+ #$% Date:      APRIL 80
+ #$%
+ #$% Author:    Dana Wills
+ #$%
+ #######################################################
+ 
+ BBcommon
+ OAcommon
+ literal CSTRIP8                        # MJC 6/21/2K (E2145 - Implicit None)
+ integer IEQTYP, litcmp,
+         IORDER,
+         IMODE,
+         NFOUND                         # MJC 6/21/2K (E2145 - Implicit None)
+ BBDeclare (RAD$Pointer,
+            UNT$Pointer)                # MJC 6/21/2K (E2145 - Implicit None)
+ 
+ senfnd = .true.                        #indicate desired sensor found
+ 
+ if (ALLFLG |                           #if no particular radar specified
+     litcmp(XRAD$TYPE$C, IEQ) == 0)     #   or this particular one specified
+    {
+     eqfind = .true.
+ 
+     if ((IEQTYP == $LEX$RADAR$) |               #if air/surface not specified
+         (IEQTYP == $LEX$AIR$ &                  # or if this
+            XRAD$RADARTYPE$I == $AIR$CODE) |     #  radar is of
+         (IEQTYP == $LEX$SURFACE$ &              #   the type
+            XRAD$RADARTYPE$I == $SURFACE$CODE) | #     specified
+         (IEQTYP == $LEX$APPROACH$ &             #   1/7/86 <SCC>
+            XRAD$RADARTYPE$I == $APPROACH$CODE)) #   1/7/86 <SCC>
+ 
+          OKFLAG = .true.                     #OK to switch on or off
+ 
+    }                                   #end if equipment OK
+ 
+ return
+ end
+ 
+
+ 
+ 
+ Subroutine ESMEQ(ESM$POINTER)          #check ESM EQuipment
+                                        #esm characteristics pointer (input)
+ 
+#######################################################
+ #$%
+ #$% Purpose:   ESMEQ generates a check of ESM
+ #$%            equipment.
+ #$%
+ #$% Called By: CHKDEQ
+ #$%
+ #$% Calls:     None
+ #$%
+ #$% Tables:    ESM
+ #$%
+ #$% Date:      APRIL 80
+ #$%
+ #$% Author:    Dana Wills
+ #$%
+ #######################################################
+ 
+ BBcommon
+ OAcommon
+ literal CSTRIP8                                # MJC 6/21/2K (E2145 - Implicit None)
+ BBDeclare (ESM$Pointer,
+            UNT$Pointer)                        # MJC 6/21/2K (E2145 - Implicit None)
+ integer IORDER, litcmp,
+         IEQTYP,
+         IMODE,
+         NFOUND                                 # MJC 6/21/2K (E2145 - Implicit None)
+ 
+ senfnd = .true.                        #indicate desired sensor found
+ 
+ if (ALLFLG |                           #if no particular esm specified
+     litcmp(XESM$TYPE$C, IEQ) == 0)     #   or this particular one specified
+    {
+     OKFLAG = .true.                    #OK to switch on or off
+ 
+     eqfind = .true.                    #indicate equipment found
+    }
+ 
+ return
+ end
+
+ 
+ Subroutine JAMEQ(JAM$POINTER)          #check JAM EQuipment
+                                        #jam characteristics pointer (input)
+ #######################################################
+ #$%
+ #$% Purpose:   JAMEQ generates a check of JAMMER
+ #$%            equipment.
+ #$%
+ #$% Called By: CHKDEQ
+ #$%
+ #$% Calls:     None
+ #$%
+ #$% Tables:    JAM
+ #$%
+ #$% Date:      AUGUST 1994
+ #$%
+ #$% Author:    John F. Richardson
+ #$%
+ #######################################################
+ 
+ BBcommon
+ OAcommon
+ literal CSTRIP8                        # MJC 6/21/2K (E2145 - Implicit None)
+ integer IORDER, litcmp,
+         IEQTYP,
+         IMODE,
+         NFOUND                         # MJC 6/21/2K (E2145 - Implicit None)
+ BBDeclare (JAM$Pointer,
+            UNT$Pointer)                # MJC 6/21/2K (E2145 - Implicit None)
+ 
+ senfnd = .true.                        #indicate desired sensor found
+ 
+ if (ALLFLG |                           #if no particular JAMMER specified
+     litcmp(XJAM$TYPE$C, IEQ) == 0)     #   or this particular one specified
+    {
+     OKFLAG = .true.                    #OK to switch on or off
+ 
+     eqfind = .true.                    #indicate equipment found
+    }
+ 
+ return
+ end
+
+ 
+ Subroutine IFFEQ(IFF$POINTER)          #check IFF EQuipment
+                                        #iff characteristics pointer (input)
+ 
+#######################################################
+ #$%
+ #$% Purpose:   IFFEQ generates a check of IFF
+ #$%            equipment.
+ #$%
+ #$% Called By: CHKDEQ
+ #$%
+ #$% Calls:     None
+ #$%
+ #$% Tables:    IFF
+ #$%
+ #$% Date:      March 91
+ #$%
+ #$% Author:    Cynthia Leaf
+ #$%
+ #######################################################
+ 
+ BBcommon
+ OAcommon
+ literal CSTRIP8                        # MJC 6/21/2K (E2145 - Implicit None)
+ BBDeclare (IFF$Pointer,
+            UNT$Pointer)                # MJC 6/21/2K (E2145 - Implicit None)
+ integer IORDER, litcmp,
+         IEQTYP,
+         IMODE,
+         NFOUND                         # MJC 6/21/2K (E2145 - Implicit None)
+ 
+ senfnd = .true.                        #indicate desired sensor found
+ 
+ if (ALLFLG |                           #if no particular iff specified
+     litcmp(xIFF$Name$C, IEQ) == 0)     #   or this particular one specified
+    {
+     OKFLAG = .true.                    #OK to switch on or off
+ 
+     eqfind = .true.                    #indicate equipment found
+    }
+ 
+ return
+ end
+ 
+
+ 
+ 
+ Subroutine ONOFF(ISWTCH, deq$pointer)  #switch equipment ON or OFF
+                                        #state of equipment (output)
+ 
+#######################################################
+ #$%
+ #$% Purpose:   ONOFF switches equipment on or off
+ #$%            depending on the specified mode.
+ #$%
+ #$% Called By: OACTIV
+ #$%
+ #$% Calls:     None
+ #$%
+ #$% Tables:    None
+ #$%
+ #$% Date:      APRIL 80
+ #$%
+ #$% Author:    Dana Wills
+ #$%
+ #######################################################
+ 
+ BBcommon
+ OAcommon
+ BBDeclare (UNT$Pointer, DEQ$Pointer)
+ integer IORDER,
+         ISWTCH,
+         IMODE,
+         IEQTYP,
+         ihswtch,
+         NFOUND
+ 
+ihswtch = iswtch
+ 
+ if (iorder == $lex$silence$)           #if order is to silence
+ 
+     iswtch = $off                      #turn switch to off
+ 
+ else if (imode == 0 |                  #if no mode specified
+          imode == $lex$dp$ |           #  or DP mode specified
+          imode == $lex$passive$ |      #  or all passives - cpa 9/92
+          imode == $lex$active$)        #  or all actives  - cpa 9/92
+ 
+     iswtch = $on                       #turn switch to on (same as DP)
+ 
+ else if (imode == $lex$bb$)            #if BB mode specified
+ 
+     iswtch = $on$bb                    #turn switch to BB
+ 
+ else if (imode == $lex$cz$)            #if CZ mode specified
+ 
+     iswtch = $on$cz                    #turn switch to CZ
+ 
+ nosuch = .false.                       #indicate applicable equipment found
+ 
+#if (ihswtch != iswtch) PUTDEQ$Modified$i($YES)   # on/off has changed
+ 
+ return
+ end
+ 
+
+ 
+ 
+ Subroutine ACTERR              # outputs error messages
+ 
+#######################################################
+ #$%
+ #$% Purpose:   ACTERR generates error messages for
+ #$%            active equipment.
+ #$%
+ #$% Called By: OACTIV
+ #$%
+ #$% Calls:     SEND
+ #$%
+ #$% Tables:    UNT
+ #$%
+ #$% Date:      APRIL 80
+ #$%
+ #$% Author:    Dana Wills
+ #$%
+ #######################################################
+ 
+ BBcommon
+ OAcommon
+ Character msg[ARB]
+ literal CSTRIP8                            # MJC 6/21/2K (E2145 - Implicit None)
+ integer ISTAT,
+         IS_TASK_ADDRESS,
+         IMODE,
+         NMODE,
+         KKLEN,
+         IEQTYP,
+         IORDER,
+         NFOUND                             # MJC 6/21/2K (E2145 - Implicit None)
+ BBDeclare (UNT$Pointer)                    # MJC 6/21/2K (E2145 - Implicit None)
+ 
+#String MSG1 'xxxxx does not have xxxxxyyyyyyyyyy'
+#String MSG2 'xxxxx :   xxxxx  invalid xxxx for xxxxx xxxxx'
+ 
+if (Is_Task_Address(istat) == YES) return       # no errors for task groups
+ 
+ #$% if active sonar mode indicated
+ if (imode != 0)
+    {
+     #$% if active sonar mode is DP, BB or CZ set nmode accordingly
+     if      (imode == $lex$dp$)  nmode = 'DP'
+     else if (imode == $lex$bb$)  nmode = 'BB'
+     else if (imode == $lex$cz$)  nmode = 'CZ'
+    }
+ 
+ if (eqfind & !allflg)                  #if mode or type wrong & particular
+    {                                   #         equipment asked for
+     kklen = 0
+     #$% move unit name into msg format for display
+     Call SMOVHN(xunt$name$c,$$MaxLit,msg,kklen)
+     Call SMOVV(" :  ",msg,kklen)
+ 
+     #$% if equipment is sonar
+     if (ieqtyp == $lex$sonar$)
+        {
+         #$% move sonar mode into msg2 format for display
+         Call SMOVH(nmode,4,msg,kklen)
+         Call SMOVV(" invalid mode for sonar",msg,kklen)
+        }
+     else
+        {
+         #$% if equipment type is air
+         if (ieqtyp == $lex$air$)
+            {
+             Call SMOVV("  Air",msg,kklen)
+            }
+         else
+            {
+             Call SMOVV(" Surf",msg,kklen)
+            }
+         #$% move 'type of radar' into msg format for display
+         Call SMOVV(" type for radar ",msg,kklen)
+        }
+ 
+     #$% move equipment into msg format for display
+     Call SMOVHN(ieq,$$MaxLit,msg,kklen)
+     #$% call send_ for display of msg
+     call send_(xunt$view$i,0,kklen,msg) # msg2
+    }
+ 
+ else
+    {
+     kklen = 0
+     #$% move unit name into msg format for display
+     Call SMOVHN(xunt$name$c,$$MaxLit,msg,kklen)
+     Call SMOVV(" does not have ",msg,kklen)
+ 
+     #$% if sensor not found
+     if (!senfnd)
+          #$% move 'any' into msg format for display
+          Call SMOVV(" any ",msg,kklen)
+     #$% else if air
+     else if ((ieqtyp == $lex$air$) & allflg)
+          #$% move 'air' into msg format for display
+          Call SMOVV(" air ",msg,kklen)
+     #$% else if surface
+     else if ((ieqtyp == $lex$surface$) & allflg)
+          #$% move 'surf' into msg format for display
+          Call SMOVV(" surf" ,msg,kklen)
+     #$% else if mode specified
+     else if ((imode != 0) & allflg)
+          #$% move mode into msg format for display
+          Call SMOVH(nmode,4,msg,kklen)
+ 
+     else
+         #$% move equipment into msg format for display
+          Call SMOVHN(ieq,$$MaxLit,msg,kklen)
+ 
+     #$% if sonar
+     if (ieqtyp == $lex$sonar$)
+        {
+         #$% move 'sonar' into msg format for display
+         Call SMOVV(" sonar.   ",msg,kklen)
+        }
+     #$% else if esm
+     else if (ieqtyp == $lex$esm$)
+        {
+         #$% move 'ESM' into msg format for display
+         Call SMOVV(" ESM.     ",msg,kklen)
+        }
+     #$% if eoir
+     else if (ieqtyp == $lex$eoir$)
+        {
+         #$% move 'EOIR' into msg format for display
+         Call SMOVV(" EOIR.    ",msg,kklen)
+        }
+     #$% if iff                         # clk 8/4/93 - bug fix
+     else if (ieqtyp == $lex$iff$)      # "does not have any IFF."
+        {
+         #$% move 'IFF' into msg format for display
+         Call SMOVV(" IFF.    ",msg,kklen)
+        }
+     #$% if ASMD
+     else if (ieqtyp == $lex$asmd$)
+        {
+         #$% move 'ASMD' into msg format for display
+         Call SMOVV(" ASMD.    ",msg,kklen)
+        }
+     else if (ieqtyp == $lex$jammer$)         # - jecewsi (JFR 11/18/94)
+        {
+         #$% move 'JAMMER' into msg format for display
+         Call SMOVV(" Jammer.    ",msg,kklen)
+        }
+     else
+        {
+         #$% move 'radar' into msg format for display
+         Call SMOVV(" radar.   ",msg,kklen)
+        }
+     #$% call send for display of msg
+     call send_(xunt$view$i,0,kklen,msg) # msg1
+    }           # End of ELSE...  OTHER errors
+ 
+ return
+ end
+ 
+
+ 
+ 
+ Subroutine silerr(nomen)
+ 
+#######################################################
+ #$%
+ #$% Purpose:   SILERR generates an error message
+ #$%            if emitter name is not found.
+ #$%
+ #$% Called By: OACTIV
+ #$%
+ #$% Calls:     SEND
+ #$%
+ #$% Tables:    UNT
+ #$%
+ #$% Date:      APRIL 80
+ #$%
+ #$% Author:    Dana Wills
+ #$%
+ #######################################################
+ 
+ BBcommon
+ OAcommon
+ Character msg[ARB]
+ literal CSTRIP8, nomen                         # MJC 6/21/2K (E2145 - Implicit None)
+ integer ISTAT,
+         IS_TASK_ADDRESS,
+         KKLEN,
+         IORDER,
+         IEQTYP,
+         IMODE,
+         NFOUND                                 # MJC 6/21/2K (E2145 - Implicit None)
+ BBDeclare (UNT$Pointer)                        # MJC 6/21/2K (E2145 - Implicit None)
+ 
+#String MSG3 'xxxxx does not have an emitter named    xxxxx'
+ 
+ if (Is_Task_Address(istat) == YES) return      # no errors for task groups
+ 
+ kklen = 0
+ #$% move unit name into msg format for display
+ Call SMOVHN(xunt$name$c,$$MaxLit,msg,kklen)
+ Call SMOVV(" does not have an emitter named ",msg,kklen)
+ 
+ #$% move emitter name into msg format for display
+ Call SMOVHN(nomen,$$MaxLit,msg,kklen)
+ #$% call send for display of msg
+ call send_ ( xunt$view$i, 0, kklen, msg )
+ 
+ return
+ end
+ 
+ 
+
+ 
+ 
+ Subroutine UPDBOY(unt$POINTER,      #UPDate BuOY table for VDS or towed array
+ 
+                   SON$POINTER,      #unt$POINTER = platform unt pntr (in)
+                   iorder,           #SON$POINTER = sonar char pntr (in)
+                   ICODE)            #iorder = activate or silence code (in)
+                                     #ICODE = which type code (in)
+ 
+#######################################################
+ #$%
+ #$% Purpose:   UPDBOY updates the buoy table by
+ #$%            creating or deleting table entries.
+ #$%
+ #$% Called By: OACTIV
+ #$%
+ #$% Calls:     SEND
+ #$%
+ #$% Tables:    BOY        UNT        SON
+ #$%
+ #$% Date:      APRIL 80
+ #$%
+ #$% Author:    Dana Wills
+ #$%
+ #######################################################
+ 
+ BBcommon
+ literal CSTRIP8                            # MJC 6/21/2K (E2145 - Implicit None)
+ BBDeclare (BOY$Pointer,
+            BOY$Ownerindx$I,
+            BOY$Eqpntr$I,
+            BOY$Type$I,
+            BOY$Truedepth$I,
+            BOY$Cablelength$F,
+            BOY$Truelatitude$F,
+            BOY$Truelongitude$F,
+            BOY$Costruelat$F,
+            BOY$Assumedlatitude$F,
+            BOY$Assumedlongitude$F,
+            BOY$Trueheading$F,
+            BOY$Headingerror$F,
+            BOY$Assumedheading$F,
+            UNT$Pointer,
+            SON$Pointer)                    # MJC 6/21/2K (E2145 - Implicit None)
+ integer KKLEN,
+         IORDER,
+         ICODE                              # MJC 6/21/2K (E2145 - Implicit None)
+ 
+ logical ALREDY
+ Character msg[ARB]
+ 
+#String MSG4 'Buoy table full --- xxxxx cannot deploy xxxxxxxxxxxxxxxxxxxx'
+ 
+ kklen = 0
+ Call SMOVV("Buoy table full --- ",msg,kklen)
+ 
+ if (IORDER == $LEX$SILENCE$)                   #if order to silence
+    {
+     for (BOY$POINTER$FIRST;BOY$POINTER$OK;     #for each BOY table entry
+          BOY$POINTER$NEXT)
+        {
+         if (XBOY$OWNERINDX$I == UNT$POINTER$INDEX & # if entry for the
+             XBOY$EQPNTR$I == SON$POINTER)      #particular equip in question
+            {
+             PUTboy$KillTime$f (1.0)              #               5/5/86
+             break
+            }
+        }
+    }
+ 
+ else                                           #if order to activate
+    {
+     ALREDY = .false.                           #initialize flag
+ 
+     for (BOY$POINTER$FIRST;BOY$POINTER$OK;     #for each BOY table entry
+          BOY$POINTER$NEXT)
+        {
+         if ((XBOY$OWNERINDX$I == UNT$POINTER$INDEX) &  #if this platform
+             (XBOY$TYPE$I == $TOWEDARRAY$CODE |   # already has a towed array
+              XBOY$TYPE$I == $VDS$CODE))          #  or VDS deployed
+            {
+             ALREDY = .true.                      #set flag
+ 
+             break                                #leave pointer set to spot
+            }
+ 
+        }                                       #end for each BOY entry
+ 
+     if (!ALREDY)                               #if no such equip deployed
+        {
+         for (BOY$POINTER$FIRST;BOY$POINTER$VALID;     #find
+              BOY$POINTER$NEXT)
+            {
+             if (XBOY$TYPE$I == $NULL$CODE)             #  an empty slot
+ 
+                 break
+            }
+        }
+ 
+     if (!BOY$POINTER$VALID)                    #if no empty slot
+        {
+         Call SMOVHN(xunt$name$c,$$MaxLit,msg,kklen)
+         Call SMOVV(" cannot deploy ",msg,kklen)
+ 
+         if (icode == $vds$code)
+            {
+             Call SMOVV(" VDS ",msg,kklen)
+             Call SMOVHN(xson$type$c,$$MaxLit,msg,kklen)
+            }
+         else
+            {
+             Call SMOVV("  towed array  ",msg,kklen)
+             Call SMOVHN(xson$type$c,$$MaxLit,msg,kklen)
+            }
+ 
+         call send_(XUNT$VIEW$I,                 #give player the bad news
+                   0,
+                   kklen,
+                   MSG) # msg4
+        }
+ 
+     else                                       #otherwise
+        {
+         BOY$OWNERINDX$I = UNT$POINTER$INDEX    #store owner pointer
+         PUTBOY$OWNERINDX$I
+ 
+         BOY$EQPNTR$I = SON$POINTER             #store eq char pointer
+         PUTBOY$EQPNTR$I
+ 
+         BOY$TYPE$I = ICODE                     #store type
+         PUTBOY$TYPE$I
+ 
+         PUTboy$KillTime$f(999999999.0)         # Never kill activated sonars
+ 
+         call assign_unique_boy_name (boy$pointer) # Needs owner and type set
+ 
+         if (ICODE == $VDS$CODE)                #if VDS
+            {
+             BOY$TRUEDEPTH$I = XSON$TOWDEPTH$I  #get and store depth
+             PUTBOY$TRUEDEPTH$I
+            }
+         else                                   #if towed array
+            {
+             BOY$CABLELENGTH$F =                #convert cable length
+                FLOAT(XSON$CABLELENGTH$I) *
+                ($PI/(180.*60.*2000.))          #    to radians
+             PUTBOY$CABLELENGTH$F               #        and store
+ 
+             PUTboy$TrueDepth$i (XUNT$Truealtdepth$i +300) # 0  1/19/84
+ 
+             BOY$TRUELATITUDE$F =               #start array at ship
+                     XUNT$TRUELATITUDE$F
+             PUTBOY$TRUELATITUDE$F              #store latitude
+ 
+             BOY$TRUELONGITUDE$F =              #start array at ship
+                     XUNT$TRUELONGITUDE$F
+             PUTBOY$TRUELONGITUDE$F             #store longitude
+ 
+             BOY$COSTRUELAT$F =
+                     XUNT$COSTRUELAT$F
+             PUTBOY$COSTRUELAT$F
+ 
+             BOY$ASSUMEDLATITUDE$F =
+                     XUNT$ASSUMEDLATITUDE$F
+             PUTBOY$ASSUMEDLATITUDE$F
+ 
+             BOY$ASSUMEDLONGITUDE$F =
+                     XUNT$ASSUMEDLONGITUDE$F
+             PUTBOY$ASSUMEDLONGITUDE$F
+ 
+             BOY$TRUEHEADING$F =                #point array in same
+                     XUNT$TRUECOURSE$F          #   direction as ship
+             PUTBOY$TRUEHEADING$F               #store heading
+ 
+             BOY$HEADINGERROR$F =               #(for now) give array same
+                     XUNT$HEADINGERROR$F        #   heading error as ship
+             PUTBOY$HEADINGERROR$F              #store heading error
+ 
+             BOY$ASSUMEDHEADING$F =                      #compute assumed
+                BOY$TRUEHEADING$F + XBOY$HEADINGERROR$F  #   heading of array
+             PUTBOY$ASSUMEDHEADING$F
+            }                                   #end else towed array
+ 
+         if (!BOY$POINTER$OK)                   #if added to table beyond
+                                                #     last non-zero entry
+            {
+             BOY$POINTER$NEXT                   #increase pointer to
+ 
+             BOY$LAST$TO BOY$POINTER - 1        #   end of non-zero entries
+            }
+ 
+        }                                       #end else table not full
+ 
+    }                                           #end else activate order
+ 
+ return
+ end
+ 
+ 
+
+ Subroutine OSELCT(NORD,      #NORD = id number of order (input)
+                   IPNTR,     #IPNTR = unit pointer for addressee (input)
+                   NWRDS,     #NWRDS = number of words being passed (input)
+                   ILEX)      #ILEX = order content (input)
+ 
+ 
+#######################################################
+#$%
+#$% Purpose:   OSELCT processes SELECT
+#$%            commands to select a channel number for
+#$%            electro-magnetically eminating types of equipment.
+#$%
+#$% Called By: EXEORD
+#$%
+#$% Calls:
+#$%
+#$%
+#$% Tables:    UNT        DEQ
+#$%
+#$%
+#$% Date:      APRIL 89
+#$%
+#$% Author:    Bob Hundt
+#$%
+#######################################################
+ 
+BBcommon
+literal CSTRIP8                         # MJC 6/21/2K (E2145 - Implicit None)
+integer NWRDS, litcmp,
+        IPNTR,
+        IORDER,
+        ICHAN,
+        IDENT,
+        NORD                            # MJC 6/21/2K (E2145 - Implicit None)
+BBDeclare (UNT$Pointer,
+           DEQ$Pointer,
+           DEQ$EM$Index)                # MJC 6/21/2K (E2145 - Implicit None)
+ 
+literal ILEX[NWRDS]
+literal dev_name
+ 
+UNT$POINTER = IPNTR                    #set unit pointer
+ 
+IORDER   = ILEX[1]                       #activate or silence code
+ichan    = ILEX[2]
+dev_name = ILEX[3]
+ 
+# if ( EMI$Analysis == $no ) return
+ 
+# if invalid channel number
+IF (ichan < 1 | ichan > 10) return
+ 
+FOR_DEQ_CHAIN
+    {
+    ident = XDEQ$IDENT$I
+ 
+    if (litcmp(xdeq$type$c, dev_name) == 0 &
+        (ident == $radar$code | ident == $commsuite$code ) )
+        {
+        PUTDEQ$AllBands$i ( $OFF )      # clear all channels
+ 
+        DEQ$EM$Index = ichan            # set the channel index
+        PUTDEQ$EM$Band$i ( $ON )        # set the selected channel
+        break                           # Assuming one device per unit
+        }
+    } # end, walk the DEQ chain
+ 
+return
+end
+ 
+ 
+
+subroutine oactrot (ipntr,nord,nwrds,ilex)
+ 
+ #######################################################
+ #$%
+ #$% Purpose:   OACTROT processes ACTIVATE and SILENCE
+ #$%            commands to activate or silence ROTHR
+ #$%            equipment.
+ #$%
+ #$% Called By: OACTIV
+ #$%
+ #$% Calls:     DIRSLEFT
+ #$%
+ #$% Tables:    UNT    RTH
+ #$%
+ #$% Date:      JUNE 1987
+ #$%
+ #$% Author:    Richard Schauer
+ #$%
+ #######################################################
+ 
+ BBcommon
+ OAcommon
+ literal CSTRIP8                                    # MJC 6/21/2K (E2145 - Implicit None)
+ integer NWRDS,
+         IFOUND, litcmp,
+         IPNTR,
+         KK,
+         IROTINDX,
+         IROTAS,
+         IDIR,
+         IROTDN,
+         ILEFT,
+         INUM,
+         IORDER,
+         IEQTYP,
+         IMODE,
+         NFOUND,
+         NORD                                       # MJC 6/21/2K (E2145 - Implicit None)
+ BBDeclare (UNT$Pointer,
+            UNT$Name$C,
+            RTH$Pointer,
+            RTH$PCA$Index)                          # MJC 6/21/2K (E2145 - Implicit None)
+ real BASELAT,
+      BASELON,
+      POSLAT,
+      DMS2RAD,
+      POSLON,
+      RANGE,
+      COS_BASELAT,              # jb E2145  9/27/00
+      COS_POSLAT,               # jb E2145  9/27/00
+      BRG                                           # MJC 6/21/2K (E2145 - Implicit None)
+ 
+ integer dir_find
+ 
+ literal ilex[nwrds]
+ Character msg[ARB]
+ 
+# string  msg1 "Base xxxxxxxx has no rothr attached to it!"
+# string  msg2 "Base xxxxxxxx has damaged ROTHR"  # 31 long
+# string  mag3 "No such DIR number"
+ 
+ ifound = $NO
+ UNT$Pointer = ipntr
+ UNT$Name$c = Xunt$Name$c
+ for (RTH$Pointer$First; RTH$Pointer$OK; RTH$Pointer$Next)
+   if (litcmp(XRTH$BaseName$c, UNT$Name$c) == 0)
+     {
+      ifound = $YES
+      BREAK
+     }
+ if (ifound == $NO)
+   {
+    kk = 0
+    Call SMOVV("Base ",msg,kk)
+    call smovhn(unt$name$c,$$MaxLit,msg,kk)
+    Call SMOVV(" has no rothr attached to it!",msg,kk)
+    call send_(Xunt$view$i,0,kk,msg) # msg1
+    RETURN
+   }
+ 
+ if (ilex[2] == $lex$DIR$)
+   {
+    irotindx = RTH$Pointer$Index
+    if (ilex[3] == $lex$POSITION$)              # position was entered,
+      {                                         # find which DIR it is in
+       baselat = Xunt$TrueLatitude$f
+       baselon = Xunt$TrueLongitude$f
+       cos_baselat = cos(baselat)
+       poslat = dms2rad(ilex[4])
+       poslon = dms2rad(ilex[5])
+       cos_poslat = cos(poslat)
+       call rll2rb(baselat,baselon,cos_baselat,poslat,poslon,cos_poslat,
+                   range,brg)
+       if (ilex[6] == $lex$AIR$)
+         {
+          irotas = air$pca
+          idir = dir_find(irotindx,irotas,range,brg)
+          RTH$PCA$Index = idir + air$pca$base
+         }
+       else
+         {
+          irotas = surf$pca
+          idir = dir_find(irotindx,irotas,range,brg)
+          RTH$PCA$Index = idir + surf$pca$base
+         }
+       if (ilex[7] == $lex$DAY$)
+         irotdn = day$rth
+       else
+         irotdn = night$rth
+      }
+    else                                            # DIR number was entered
+      {
+       if (ilex[5] == $lex$AIR$)
+         {
+          if ( (ilex[4] > 48) | (ilex[4] < 1 ) )
+            {
+             call echov ("No such DIR number")
+             RETURN
+            }
+          RTH$PCA$Index = air$pca$base + ilex[4]
+          irotas = air$pca
+         }
+       else
+         {
+          if ( (ilex[4] > 96) | (ilex[4] < 1) )
+            {
+             call echov ("No such DIR number")
+             RETURN
+            }
+          RTH$PCA$Index = surf$pca$base + ilex[4]
+          irotas = surf$pca
+         }
+       if (ilex[6] == $lex$DAY$)
+         irotdn = day$rth
+       else
+         irotdn = night$rth
+      }
+   }
+ 
+ if (ilex[1] == $lex$SILENCE$)
+   {
+    if (ilex[2] == $Lex$DIR$)
+      {
+       if (irotdn == day$rth)
+         {
+          call dirsleft(irotindx,irotas,day$rth,ileft,inum)
+          if ((Xrth$PCA$DayOn$I == $NO) | (inum == 0))
+            RETURN
+          PUTrth$PCA$DayOn$I ($NO)
+          if (irotas == surf$pca)
+            PUTrth$SurfDirDay$I (inum - 1)
+          else
+            PUTrth$AirDirDay$I (inum - 1)
+         }
+       else
+         {
+          call dirsleft(irotindx,irotas,night$rth,ileft,inum)
+          if ((Xrth$PCA$NiteOn$I == $NO) | (inum == 0))
+            RETURN
+          PUTrth$PCA$NiteOn$I ($NO)
+          if (irotas == surf$pca)
+            PUTrth$SurfDirNight$I (inum - 1)
+          else
+            PUTrth$AirDirNight$I (inum - 1)
+         }
+      }
+    else            # ilex[2] equals $lex$ROTHR$
+      PUTRTH$Active$I ($NO)
+    PUTRTH$Modified$I ($YES)
+   }
+ else if (ilex[1] == $lex$ACTIVATE$)
+   {
+    if (ilex[2] == $lex$DIR$)
+      {
+       if (irotdn == day$rth)
+         {
+          call dirsleft(irotindx,irotas,day$rth,ileft,inum)
+          if ((Xrth$PCA$DayOn$I == $YES) | (ileft == 0))
+            RETURN
+          PUTrth$PCA$DayOn$I ($YES)
+          if (irotas == surf$pca)
+            PUTrth$SurfDirDay$I (inum + 1)
+          else
+            PUTrth$AirDirDay$I (inum + 1)
+         }
+       else
+         {
+          call dirsleft(irotindx,irotas,night$rth,ileft,inum)
+          if ((Xrth$PCA$NiteOn$I == $YES) | (ileft == 0))
+            RETURN
+          PUTrth$PCA$NiteOn$I ($YES)
+          if (irotas == surf$pca)
+            PUTrth$SurfDirNight$I (inum + 1)
+          else
+            PUTrth$AirDirNight$I (inum + 1)
+         }
+      }
+    else
+      {
+       if (Xrth$Damaged$I == $YES)
+         {
+          kk = 0
+          Call SMOVV("Base ",msg,kk)
+          call smovhn(unt$name$c,$$MaxLit,msg,kk)
+          Call SMOVV(" has damaged ROTHR",msg,kk)
+          call send_(Xunt$view$i,0,kk,msg) # msg2
+          RETURN
+         }
+       PUTRTH$Active$I ($YES)
+      }
+    PUTRTH$Modified$I ($YES)
+   }
+ 
+ return
+ end
+
+ 
+ Subroutine FALSEslot(indxUNT,  # jb            1/29/91
+                      indxSON ) # jb Indices vice Pointers
+ 
+#######################################################
+ #$%
+ #$% Purpose: On activation of a hullmounted active sonar,
+ #$%          this subroutine determines whether/when//for
+ #$%          how long  a false target is to be provided.
+ #$%          IF SO, and if a FLS table slot is free, four
+ #$%          fields in the slot are set (for future action).
+ #$%
+ #$% Called By: OACTIV
+ #$%
+ #$% Calls:     GTUNT
+ #$%
+ #$% Tables:    UNT        SON
+ #$%
+ #$% Date:      December 1990
+ #$%
+ #$% Author:    Joe Bryant
+ #$%
+ #######################################################
+ 
+BBcommon
+BBDeclare (SON$Pointer,
+           SON$Falserate$I,
+           FLS$Pointer,
+           FLS$Shipindx$I,
+           FLS$Starttime$F,
+           FLS$Killtime$F)                          # MJC 6/21/2K (E2145 - Implicit None)
+real PERHOUR,
+     PFC,
+     RANDOM, x                                         # MJC 6/21/2K (E2145 - Implicit None)
+ 
+integer iptrFLS, indxUNT, indxSON    # jb E2145 (X) 9/27/00
+data x/0.0/		# Get next random number in sequence
+ 
+if(Level$ActiveSonar == 0) return
+ 
+SON$Pointer$TO (indxSON)             #                2/7/91
+son$FalseRate$i = Xson$FalseRate$i
+perHour = son$FalseRate$i / 24.0    # False Targets per HOUR
+Pfc     = 0.0 - LOG(1.0 - perHour)  # Prob of a False Contact
+if ( RANDOM(X) >= Pfc ) RETURN   # jb Avoided False Contact 12/26/90
+ 
+iptrFLS = $NO    # Initialize saved FLS Pointer to NO   1/28/91
+for(FLS$Pointer$First; FLS$Pointer$Valid; FLS$Pointer$Next)
+   {
+    FLS$SHIPindx$i = xFLS$SHIPindx$i            #     1/28/91
+    if(FLS$SHIPindx$i ==indxUNT & xFLS$SONindx$i ==indxSON)
+            RETURN    # DON'T set up a 2nd False Target 1/28/91
+                      #  for SAME SHIP AND SONAR...
+    if (iptrFLS == $NO & FLS$ShipIndx$I == 0) # Available slot
+        iptrFLS = FLS$Pointer          # Save FLS Pointer 1/28/91
+   }
+ 
+if( iptrFLS == $NO )        # FLS slot not available      1/28/91
+   {
+    RETURN                  # Forget it...
+   }
+ 
+FLS$POINTER = iptrFLS       # FLS slot IS available..    1/28/91
+ 
+putFLS$SHIPindx$i (indxUNT) #                            1/28/91
+putFLS$SONindx$i  (indxSON) #                            1/28/91
+ 
+FLS$StartTime$f =     game$time + (0.6 + RANDOM(X)*30.)
+putFLS$StartTime$f
+FLS$KillTime$f = fls$StartTime$f +(0.6 + RANDOM(X)*20.)
+putFLS$KillTime$f
+ 
+RETURN
+end
+
+SUBROUTINE set_jecewsi_jammer_bands ( UNT$Pointer,
+                                      rad_frequency,
+                                      new_on_off_setting,
+                                      frequency_found,
+                                      DEQ$POINTER )
+ 
+BBcommon
+ 
+INTEGER*4    DEQ$EM$Index
+INTEGER*4    UNT$Pointer            # 4/89 reh
+INTEGER*4    DEQ$Pointer            # 4/89 reh
+REAL*4       rad_frequency          # 3/91 reh, was integer
+LOGICAL*1    frequency_found
+Real*4       High_Freq
+Real*4       Low_Freq
+INTEGER*4    JAM$Pointer
+INTEGER*4    JAM$FQ$Index
+INTEGER*4    JAM$FQ$CenterFreq$I
+INTEGER*4    JAM$FQ$BandWidth$I
+INTEGER*4    new_on_off_setting
+ 
+frequency_found = .FALSE.
+IF ( xDEQ$Ident$I == $jammer$code |       # JFR 8/8/94 (jecewsi)
+     xDEQ$Ident$I == $RadComjammer$code | # JFR 8/8/94 (jecewsi)
+     xDEQ$Ident$I == $Radarjammer$code )  # JFR 8/8/94 (jecewsi)
+    {
+     JAM$Pointer = xDEQ$Pntr$I
+     FOR ( JAM$FQ$Index = 1;
+           JAM$FQ$Index <= JAM$FQ$Slots;
+           JAM$FQ$Index = JAM$FQ$Index + 1 )
+         {
+          #$% allow for frequency separation between - JFR 8/8/94 (jecewsi)
+          #$% jammer and radar (is radar inside jammer bandwidth)
+          JAM$FQ$CenterFreq$I = xJAM$FQ$CenterFreq$I  # JFR 8/8/94 (jecewsi)
+          JAM$FQ$BandWidth$I = xJAM$FQ$BandWidth$I    # JFR 8/8/94 (jecewsi)
+ 
+          High_Freq = JAM$FQ$CenterFreq$I + JAM$FQ$BandWidth$I # JFR 8/8/94 for jecewsi
+          Low_Freq  = JAM$FQ$CenterFreq$I - JAM$FQ$BandWidth$I # JFR 8/8/94 for jecewsi
+ 
+          #$% if radar freq within jammer freq +- a percentage
+          #$% jam using 2nd harmonic of jammer, added 8/91.reh
+          IF ( (rad_frequency <= High_Freq &      # JFR 8/8/94 (jecewsi)
+                rad_frequency >= Low_Freq) |      # JFR 8/8/94 (jecewsi)
+               (rad_frequency <= High_Freq*2 &    # JFR 8/8/94 (jecewsi)
+                rad_frequency >= Low_Freq*2) )    # JFR 8/8/94 (jecewsi)
+             {
+              frequency_found = .TRUE.                 # JFR 8/8/94 (jecewsi)
+              DEQ$EM$Index = JAM$FQ$Index              # JFR 8/8/94 (jecewsi)
+              putDEQ$EM$Band$I ( new_on_off_setting )  # JFR 8/8/94 (jecewsi)
+             }
+         }
+ 
+     putDEQ$On$I ( $ON )
+     IF ( xDEQ$AllBands$I == 0 )
+        {
+         putDEQ$On$I ( $OFF )
+        }
+ 
+    }
+END
+ 

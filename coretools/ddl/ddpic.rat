@@ -1,0 +1,1865 @@
+define  MAXWords        256
+define  MaxField        512
+define  MaxLevel        8
+
+define ($CharHgt,0.112)
+define ($NoteHgt,0.09)
+define ($lmargin,0.2)
+define ($BMargin,(8.0-$table))
+define ($title,  0.5)
+define ($table,  0.6)
+define ($BitWidth,0.2)
+define ($ShadeWidth,0.04)
+define ($wordHgt, 0.6)
+define ($NbrBits,  32)
+define ($labelWid,1.0)
+
+define ($CSI,155)
+define ($LN03$offset, 0.3)
+define ($PS$offset, 0.6)
+
+define ($$MOVE,+3)
+define ($$DRAW,+2)
+define ($$SETORG,-3)
+
+include 'ddmain.inc'
+
+
+define (pic_common,
+    logical     ln03_mode               # Generate LN03+ Graphics
+    logical     pScript_mode            # Generate Postscript Graphics
+    logical     plxy_mode               # Generate PLXY Graphics
+    logical     Highlight               # True if to Highlight text
+    integer     pwords,                 # Number of different words in tbl
+                pcurwd,                 # index to current word
+                pnotes,                 # Number of Footnotes
+                pfields,                # Number of Fields
+                psize[MaxWords],        # the numer of overlays in each word 
+                pnote[MaxField]         # pointer to field to be footnoted
+
+    integer*2   pimage[$NbrBits, MaxLevel, MaxWords] # workspace for complete
+                                                     # image of the table
+                #
+                # 1st dimension:        bit position
+                # 2nd    "     :        overlay position
+                # 3rd    "     :        Word position
+                #
+
+    character   pwname1[20,MaxWords],   # Name 1 of the word
+                pwname2[20,MaxWords],   # Name 2 of the word
+                pfname[40,MaxField]     # Name of Field Number n
+    logical     pfhigh[MaxField]        # Highlight flag
+
+    integer*4   fid3,                   # File Id for LN03/pScript output
+                lfont                   # Current LN03/pScript Font Family Id
+
+    common      /ddlpic_common/ pwords, pcurwd, pnotes, pfields, 
+                                psize, pnote, pimage,
+                                pwname1, pwname2, pfname, 
+                                ln03_mode, fid3, Lfont,
+                                highlight, pfhigh, pScript_Mode, PLXY_mode
+    )
+
+
+
+subroutine ddl_pic (in,name,out) # gen picture of tbl entry (use plxy or LN03)
+d_common
+pic_common
+
+integer         in,
+                out
+character       name[ARB],
+                tblname[20],
+                tbldesc[100],
+                sysname[20],
+                sysdesc[100],
+                sysdate[100]
+
+fid3         = out 
+
+ln03_mode    = opt_ln3              # these three modes are mutually exclusive
+pScript_Mode = opt_ps
+plxy_mode    = opt_pic
+
+if (sys$id    != 0) call scopy (ddl_text[sys$id],   1, sysname,1)
+else                sysname[1] = EOS
+
+if (sys$title != 0) call scopy (ddl_text[sys$title],1, sysdesc,1)
+else                sysdesc[1] = EOS
+
+if (sys$date  != 0) call scopy (ddl_text[sys$date], 1, sysdate,1)
+else                sysdate[1] = EOS
+
+if (plxy_mode)
+    {
+    call upper(sysname)
+    call upper(sysdesc)
+    call upper(sysdate)
+    }
+
+for (itbl = 1; itbl <= sys$tbl_count; itbl = itbl+1)
+    {
+    tbl$pointer$to itbl
+
+    call clear_pcom
+
+    call build_pcom (tbl$pointer)
+
+    call scopy (ddl_text[tbl$id],   1, tblname,1)
+    call scopy (ddl_text[tbl$title],1, tbldesc,1)
+
+    if (plxy_mode)
+        {
+        call upper (tblname)
+        call upper (tbldesc)
+        }
+
+    call dd_tblpage (name, tbl$pointer, 
+                     sysname, sysdesc, sysdate, 
+                     tblname,tbldesc)
+    }
+
+
+return
+end
+
+
+subroutine clear_pcom 
+pic_common
+
+pwords  = 0
+pnotes  = 0
+pfields = 0
+
+for (i=1; i <= MAXWords; i=i+1) 
+    {
+    psize[i] = 1
+
+    pwname1[1,i] = EOS
+    pwname2[1,i] = EOS
+    
+    for (k=1; k<=MaxLevel; k=k+1)
+        {
+        for (j=0; j<=31; j=j+1)
+            {
+            pimage[j,k,i] = 0
+            }
+        }
+    }
+
+return
+end
+
+
+subroutine build_pcom (tbl$pointer)
+d_common
+pic_common
+
+integer         equal, ctoi
+character       w1[50], w2[50], w3[50], w4[50]
+
+for (tbl$fld$index = 1; tbl$fld$index <= tbl$fld_count; 
+     tbl$fld$index=tbl$fld$index+1)
+    {
+    pfields = pfields + 1
+
+    j = 1
+    call stcopy (ddl_text[tbl$fld$name],1, w1,j)
+
+    if (tbl$fld$SubTbl != 0)            # if field in subtbl, can shorten name
+#    if (tbl$fld$WrdSub != 0 |           # if field in subtbl, can shorten name
+#        tbl$fld$PosSub != 0)            
+        {                               # (for picture use only)
+        if (tbl$fld$WrdSub != 0 ) M1 = tbl$fld$WrdSub
+        else                      M1 = tbl$fld$PosSub
+
+        call scopy (ddl_text[tbl$fld$name],  1, w2,1)
+        call scopy (ddl_text[M1],1, w3,1)
+
+        kk = length(w3)
+
+        if (w2[kk+1] == DoLLAR)
+            {
+            w2[kk+1] = EOS
+
+            call upper(w2)      # make sure subtbl name is same as 
+            call upper(w3)      # field name prefix
+
+            if (equal(w2,w3) == YES) 
+                call scopy (ddl_text[tbl$fld$name+kk+1],1, w1,1)
+            }
+        }
+
+    j = 1
+    call stcopy (w1,1, pfname[1,pfields],j)
+
+    if (ddl_text[tbl$fld$type] != BIGI)
+        {
+        pfname[j,pfields] = DOLLAR
+        j = j + 1
+
+        pfname[j,pfields] = ddl_text[tbl$fld$type] 
+        j = j + 1
+
+        pfname[j,pfields] = EOS
+        }
+
+    if (plxy_mode)
+        {
+        call upper (pfname[1,pfields])
+        }
+
+    pfhigh[pfields] = (ddl_text[tbl$fld$title] == PLUS)
+
+    call make_pname (tbl$pointer,tbl$fld$index,w1,w2,0)
+
+    call fnd_pword (w1,w2,pcurwd)
+
+    #  ?? what next
+
+    if (ddl_text[tbl$fld$Pos] >  DIG9 | 
+        tbl$fld$PosSub        != 0     )
+        {
+        call proc_sub_field (tbl$pointer,tbl$fld$index)
+
+        # This is in a sub-table (within a word).
+        # Not sure what to do with it yet,  so...
+
+        next
+        }
+
+    if (ddl_text[tbl$fld$Type] == BIGC | ddl_text[tbl$fld$Type] == BIGV)
+        {
+        j = 1; isize =  ctoi(ddl_text[tbl$fld$Size],j) * 8
+        j = 1; ipos  = (ctoi(ddl_text[tbl$fld$Pos], j) - 1) * 8
+
+        inc = 0
+        repeat 
+            {
+            call ins_pfield (pcurwd,pfields,ipos,isize)
+
+            isize = isize - 32 + ipos
+
+            if (isize <= 0) break
+
+            ipos = 0
+            inc = inc + 1
+
+            call make_pname (tbl$pointer,tbl$fld$index,w3,w4,inc)
+            call fnd_pword (w3,w4,pcurwd)
+            }
+        }
+    else if (ddl_text[tbl$fld$Size] == BIGW |
+             ddl_text[tbl$fld$Size] == LETW  )
+        {
+        isize = 32
+        ipos =  0
+
+        call ins_pfield (pcurwd,pfields,ipos,isize)
+        }
+    else if (ddl_text[tbl$fld$Size] == BIGH |
+             ddl_text[tbl$fld$Size] == LETH  )
+        {
+        isize = 16
+        j = 1; ipos  = (ctoi(ddl_text[tbl$fld$Pos], j) - 1) * 16
+
+        call ins_pfield (pcurwd,pfields,ipos,isize)
+        }
+    else if (ddl_text[tbl$fld$Size] == BIGB |
+             ddl_text[tbl$fld$Size] == LETB  )
+        {
+        isize = 8
+        j = 1; ipos  = (ctoi(ddl_text[tbl$fld$Pos], j) - 1) * 8
+
+        call ins_pfield (pcurwd,pfields,ipos,isize)
+        }
+    else             # 
+        {
+        j = 1; isize = ctoi (ddl_text[tbl$fld$size],j)
+        j = 1; ipos  = ctoi (ddl_text[tbl$fld$Pos], j)
+
+#       call ins_pfield (pcurwd,pfields,ipos,isize)
+
+        inc = 0
+        if (ipos > 31)
+            {
+            inc  = ipos/32
+            ipos = ipos - inc*32
+
+            call make_pname (tbl$pointer,tbl$fld$index,w3,w4,inc)
+            call fnd_pword (w3,w4,pcurwd)
+            }
+
+        repeat 
+            {
+            call ins_pfield (pcurwd,pfields,ipos,isize)
+
+            isize = isize - 32 + ipos
+
+            if (isize <= 0) break
+
+            ipos = 0
+            inc = inc + 1
+
+            call make_pname (tbl$pointer,tbl$fld$index,w3,w4,inc)
+            call fnd_pword (w3,w4,pcurwd)
+            }
+        }
+    }
+
+return
+end
+
+
+subroutine proc_Sub_field (tbl$pointer,tbl$fld$index)
+d_common
+pic_common
+integer         ctoi, woffset
+logical         contained
+character       w3[50], w4[50]
+
+########################################
+# statement functions:
+
+#ifig_add(ndx) = (ndx - 1 + (woffset/isize)) / (32/isize)
+ifig_add(ndx) = (ndx - 1 + ((woffset-iwaste)/isize)) / ((32-iwaste)/isize)
+ifig_pos(ndx) = mod( ndx*isize + woffset - isize, ibitsused)
+
+########################################
+
+call fnd_subtbl (tbl$pointer,tbl$sub$index,tbl$fld$PosSub)
+
+if (tbl$sub$index == 0) return          # could not find it, GET OUT
+
+if (tbl$sub$EntSize != 0)               # get Size of the entry (words/bits)
+    { 
+    i = tbl$sub$EntSize
+
+    isize = ctoi (ddl_text,i)
+    }
+else
+    isize = 0
+
+if (isize <= 0) return                  # check if entered,  GET OUT
+
+if (tbl$sub$WrdOff != 0)                # get the Word offset (n bits)
+    { 
+    i = tbl$sub$WrdOff
+
+    WOffSet = ctoi (ddl_text,i)
+    }
+else
+    WOffSet = 0
+
+if (tbl$sub$Slots != 0)                 # get number of entries
+    { 
+    i = tbl$sub$Slots
+
+    islots = ctoi (ddl_text,i)
+    }
+else
+    islots = 0
+
+contained = ((islots * isize + WOffset) <= 32)  # all within one word ?
+
+iwaste    = mod(Woffset, isize)  # number of un-usable bits preceeding
+                                 # entries in each word
+ival      = (32-iwaste) / isize
+iBitsUsed = ival * isize
+
+inc = 0
+
+j = 1; iwidth = ctoi (ddl_text[tbl$fld$size],j)
+
+for (ient = 1; ient <= islots; ient=ient+1)
+    {
+    ipos = ifig_pos(ient)
+
+    if (tbl$fld$pos != 0)
+        {
+        jj = 1; ipos = ipos + ctoi (ddl_text[tbl$fld$pos], jj)
+        }
+
+    inc =  ifig_add(ient)    
+
+#   if (inc > 1) break
+
+    call make_pname (tbl$pointer,tbl$fld$index,w3,w4,inc)
+    call fnd_pword (w3,w4,pcurwd)
+
+    if (mod(ient,2) == 0) ifld = pfields
+    else                  ifld = pfields * -1
+
+    call ins_pfield (pcurwd,ifld,ipos,iwidth)
+    }
+
+return
+end
+
+
+subroutine ins_pfield (iword,ifield,ipos,isize)
+d_common
+pic_common
+integer         iword, ifield,
+                ipos, isize, 
+                jpos, jsize,
+                chk_pbits
+
+
+jpos = ipos + 1
+
+for (ilevel = 1; ilevel <= MaxLevel; ilevel = ilevel + 1)
+    {
+    if (chk_pbits(iword,ilevel,jpos,isize) != YES) next
+    
+    call set_pbits (iword,ilevel,jpos,isize,ifield)
+
+    if (ilevel > psize[iword]) psize[iword] = ilevel
+
+    break
+    }
+
+return
+end
+
+
+integer function chk_pbits (iword,ilevel,jpos,isize)
+d_common
+pic_common
+
+for (k=0; k < isize & (k+jpos) <= 32 ; k=k+1)
+    {
+    if (pimage[jpos+k,ilevel,iword] != NO) return (NO)
+    }
+
+return (YES)
+end
+
+
+subroutine set_pbits (iword,ilevel,jpos,isize,ifld)
+d_common
+pic_common
+
+for (k=0; k < isize & (k+jpos) <= 32 ; k=k+1)
+    {
+    pimage[jpos+k,ilevel,iword] = ifld
+    }
+
+return 
+end
+
+
+subroutine make_pname (tbl$pointer,tbl$fld$index,n1,n2,inc)
+d_common
+pic_common
+integer         equal, ctoi
+character       n1[ARB], n2[ARB],
+                w1[50],  w2[50],  subtbl[30], 
+                work[60], cupper
+
+
+j = 1
+if (tbl$fld$Word != 0) ivword = inc + ctoi(ddl_text[tbl$fld$Word],j)
+else                   ivword = inc + 0
+
+w1[1] = EOS
+w2[1] = EOS
+
+if (tbl$fld$WrdSub != 0) 
+    {
+    call scopy (ddl_text[tbl$fld$WrdSub],1, subtbl,1)
+    }
+#else if (tbl$fld$PosSub != 0) 
+#    {
+#    call scopy (ddl_text[tbl$fld$PosSub],1, subtbl,1)
+#    }
+
+else if (tbl$fld$Indir != 0) 
+    {
+    call scopy (ddl_text[tbl$fld$Indir],1, work,1)
+
+    call upper (work)                   # put in uppercase
+
+    k = length(work)
+    if (k > 4 & work[k-1] == DOLLAR & work[k] == BiGI) work[k-1] = EOS
+
+    subtbl[1] = LPAREN     
+    k = 2
+
+    if (work[1] == cupper(ddl_text[tbl$id+0]) &    
+        work[2] == cupper(ddl_text[tbl$id+1]) &    
+        work[3] == cupper(ddl_text[tbl$id+2])  )
+        {
+        call stcopy (work,5, subtbl,k)
+        }
+    else
+        {
+        call stcopy (work,1, subtbl,k)
+        }
+
+    call stcopy (')',1, subtbl,k)
+    }
+
+j = 1
+call stcopy (subtbl,1, w1,j)
+
+if (ivword == 0)
+    {
+    continue
+    }
+else if (j == 1) 
+    {
+    klen = itoc (ivword,w1,10)
+    }
+else              
+    {
+    w2[1] = PLUS
+    klen = itoc (ivword,w2[2],10)
+    }
+
+i1 = length(w1)
+i2 = length(w2)
+
+if ((i1 + i2) <= 7)
+    {
+    call scopy (w2, 1, w1, i1+1)
+
+    w2[1] = EOS
+    }
+
+call scopy (w1,1, n1,1)
+call scopy (w2,1, n2,1)
+
+if (i1 > 7)                             # name too long, so break it up
+    {                                   # i.e.  given: Xxx$Yyy$Zz+1
+    call scopy (w2, 1, w1, i1+1)        # generate: n1 = Xxx$Yyy
+                                        # and       n2 = $Zz+1
+    n1[1] = EOS
+    n2[1] = EOS
+
+    iflg = 0
+    k = 0
+
+    for (i=1; w1[i] != EOS; i=i+1)
+        {
+        if (iflg == 0 & k > 6 & (w1[i] == DOLLAR | w1[i] == PLUS))
+            {           
+            n1[k+1] = EOS
+
+            iflg = 1
+            k = 0
+            }
+
+        k = k + 1
+
+        if (iflg == 0) n1[k] = w1[i]
+        else           n2[k] = w1[i]
+        }
+
+    n2[k+1] = EOS
+    }
+
+call upper (n1)
+call upper (n2)
+
+return
+end
+
+
+subroutine fnd_pword (w1,w2,ipnt)
+d_common
+pic_common
+
+integer         equal
+character       w1[ARB], w2[ARB]
+
+for (ipnt = 1; ipnt <= pwords; ipnt = ipnt + 1)
+    {
+    if (equal(w1,pwname1[1,ipnt]) == YES & 
+        equal(w2,pwname2[1,ipnt]) == YES  ) return
+    }
+
+pwords = pwords + 1
+
+call scopy (w1,1, pwname1[1,pwords], 1)
+call scopy (w2,1, pwname2[1,pwords], 1)
+
+ipnt = pwords
+
+return
+end
+
+
+subroutine fill_pword (iword,aline,wordhgt)
+d_common
+pic_common
+character       work[100]
+real            aline, wordhgt, markit[MaxLevel]
+
+nlevels = psize[iword]
+
+step = (wordhgt - .07) / nlevels
+
+acol1 = $lmargin + $LabelWid
+acol2 = $lmargin + $LabelWid + $NbrBits * $BitWidth
+
+for (i = 1; i < nlevels; i=i+1)                 # divide word by overlays
+    {
+    markit[i] = aline + i * step
+
+    call xplot (markit[i], acol1, 
+                markit[i], acol2)
+    }
+
+markit[nlevels] = aline + wordhgt 
+
+aline2 = aline
+
+for (iovr = 1; iovr <= nlevels; iovr = iovr + 1)
+    {
+    aline1 = aline2             # top of overlay
+    aline2 = markit[iovr]       # bottom of overlay
+
+    aline3 = aline1 + (step + $CharHgt) / 2.0   # text line (center in space)
+    ibit1 = 1
+
+    for (ibit = 2; ibit <= 33; ibit = ibit + 1)
+        {
+        if (ibit < 33 & 
+            pimage[ibit,iovr,iword] == pimage[ibit1,iovr,iword]) next
+
+        nbits = ibit - ibit1            
+        acol3 = acol2 - (ibit-1) * $BitWidth
+
+        call xplot (aline1, acol3, 
+                    aline2, acol3)
+
+        ifld = abs(pimage[ibit1,iovr,iword])
+        
+        ibit1 = ibit    # set up for next field
+
+        if (ifld == 0) next
+
+        highlight = pfhigh[ifld]
+        if (Highlight) 
+            {
+            call shade_field (aline1, aline2, acol3, nbits)
+            }
+
+        ilen = length(pfname[1,ifld])
+
+        if      (plxy_mode)  mlen = nbits * 8.0  / 5.0 
+        else if (ln03_mode)  mlen = nbits * 16.0 / 7.0 
+        else                 mlen = nbits * 16.0 / 7.0
+
+        if (ilen > mlen)                # must use footnote
+            {
+            pnotes = pnotes + 1
+            pnote[pnotes] = ifld
+
+            anum = pnotes
+            call xnumber (aline3, acol3+0.035, $Notehgt, anum, 90.0, -1)
+            }
+        else                            # put the name in
+            {
+            jj = 0
+            while (ilen < mlen)         # center it in the space available
+                {
+                call smov (BLANK,work,jj)
+                ilen = ilen + 2
+                }
+
+            call smovh (pfname[1,ifld],ARB,work,jj]
+            call smov (EOS,work,jj]
+            ilen = length(work)
+
+            call xsymbol (aline3, acol3+0.05, $CharHgt, work, 90.0, ilen)
+            }
+
+        }
+
+    }
+
+return
+end
+
+
+subroutine dd_tblpage (name, tbl$pointer,
+                       sysname, sysdesc, sysdate, 
+                       tbl,desc)
+d_common
+pic_common
+character       name[ARB]
+
+if (ln03_mode)                                # Initialize LN03
+    {
+    call putch ($CSI,fid3)
+    call putlin_v ("11h",fid3)                  # Select Spacing Unit (pixel)
+    call putch (NEWLINE,fid3)
+    call putch ($CSI,fid3)
+    call putlin_v ("7 I",fid3)                  # Select Size Unit (Pixel)
+    call putch (NEWLINE,fid3)
+    call putch ($CSI,fid3)
+    call putlin_v ("0;14;0m",fid3)              # Select Elite 10pt, 12cpi, normal
+    call putch (NEWLINE,fid3)
+    Lfont = 14
+    }
+else if (pScript_mode)                        # Initialize postscript printer
+    {
+    call putlin_v ("%%Creator: RESA - Data Definition Language (DDL) Processor",fid3)
+    call putch (NEWLINE,fid3)
+    call putlin_v ("%%Title: "//char(0),fid3)
+    call putlin (sysname,fid3)
+    call putch  (BLANK,fid3)
+    call putlin (sysdesc,fid3)
+    call putch (NEWLINE,fid3)
+
+    call putlin_v ("%%       "//char(0),fid3)
+    call putlin (tbl,fid3)
+    call putch  (BLANK,fid3)
+    call putlin (desc,fid3)
+    call putch (NEWLINE,fid3)
+
+    call putlin_v ("%%CreationDate: "//char(0),fid3)
+    call putlin (sysdate,fid3)
+    call putch (NEWLINE,fid3)
+
+    call putlin_v ("%%EndProlog "//char(0),fid3)
+    call putch (NEWLINE,fid3)
+
+    call putlin_v ("0.24 0.24 scale % Select Size Unit (300 pixels/inch)",fid3) 
+    call putch (NEWLINE,fid3)
+
+    #   The following is used as:      100 fn1
+    call putlin_v ("/fn1 { /Courier findfont exch scalefont setfont } def "//char(0),fid3)
+    call putlin_v ("% macro to set Standard font",fid3) 
+    call putch (NEWLINE,fid3)
+
+    call putlin_v ("/fn2 { /Courier-Bold findfont exch scalefont setfont } def "//char(0),fid3)
+    call putlin_v ("% macro to set Bold font",fid3) 
+    call putch (NEWLINE,fid3)
+
+    call putlin_v ("/do1tic { dup 0 exch rlineto neg 0 exch rmoveto } def ",fid3)
+    call putlin_v ("% hgt do1tic == draw 1 line of hgt",fid3)
+    call putch (NEWLINE,fid3)
+
+    call putlin_v ("/doticmov { do1tic 0 rmoveto } def "//char(0),fid3)
+    call putlin_v ("% wid hgt doticmov == % draw 1 line, move over wid",fid3)
+    call putch (NEWLINE,fid3)
+
+    call putlin_v ("/ticsave { /h exch def /w exch def } def "//char(0),fid3)
+    call putlin_v ("% wid hgt ticsave == save the given hgt & wid",fid3)
+    call putch (NEWLINE,fid3)
+
+    call putlin_v ("/dotics { ticsave { w h doticmov } repeat } def "//char(0),fid3)
+    call putlin_v ("% n wid hgt dotics == draw n lines of hgt, wid apart",fid3)
+    call putch (NEWLINE,fid3)
+
+    Lfont = 14
+    }
+else                                          # Initialize PLXY 
+    {
+    k = length(name)
+
+    call newdev (3,name,k)
+
+    call plotst (,"IN",0)
+    }
+
+nwords = pwords
+ipage = 0
+
+aline = 0.0
+wordhgt = $WordHgt
+
+for (i=1; i <= nwords | i == 1; i=i+1)
+    {
+    k = (psize[i]+1) / 2
+    wordhgt = $WordHgt * k
+
+    call genblank (ipage, sysname, sysdesc, sysdate, 
+                   tbl,desc,aline,wordhgt,pwname1[1,i],pwname2[1,i])
+
+    aline1 = aline - wordhgt
+
+    if (i <= pwords) call fill_pword (i,aline1,wordhgt)
+    }
+
+call genpage (tbl$pointer,aline)
+
+if (plxy_mode)
+    {
+    call plotnd
+    }
+else if (pscript_mode)
+    {
+    call putlin_v ("stroke showpage",fid3)   
+    call putch (NEWLINE,fid3)
+    call putlin_v ("%%Trailer",fid3)   
+    call putch (NEWLINE,fid3)
+    }
+
+return
+end
+
+
+subroutine genblank (ipage,sysname, sysdesc, sysdate, 
+                     tbl,desc,aline,wordhgt,name1,name2)
+character       name1[ARB], name2[ARB], 
+                sysname[ARB], sysdesc[ARB], sysdate[ARB],
+                tbl[ARB], desc[ARB],
+                pagen[20], work[51]
+integer*4       npage
+
+# check for top-of-page
+
+bline = mod(aline,11.0)
+if (bline+wordhgt >= $BMargin | aline == 0.0)
+    {
+    # check for bot-of-page
+    if (bline != 0.0) call gen_bottom (aline)
+
+    ipage = ipage + 1 
+    if (aline != 0.0) 
+        {
+        aline = aline + 11.0 - mod(aline, 11.0)
+
+        call top_page
+        }
+
+    # put title
+    tline = aline + $title
+    tline2 = aline + $title - $CharHgt * 1.2
+    tcol  = $Lmargin
+
+    jj = 0 
+    call smovhn (sysname,3, work, jj)
+    call smov   (BLANK,     work, jj)
+    call smovhn (tbl,    4, work, jj)
+
+    call xsymbol (tline     ,tcol     ,3*$CharHgt,work, 90.0, jj)
+    call xsymbol (tline+0.01,tcol+0.01,3*$CharHgt,work, 90.0, jj)
+    call xsymbol (tline+0.02,tcol+0.02,3*$CharHgt,work, 90.0, jj)
+
+    tcol  = $Lmargin + 2.5
+    jj = 0
+    call smovh (desc,32,work,jj)
+
+    call xsymbol (tline     ,tcol     ,$CharHgt,work, 90.0, jj)
+
+    jj = length(sysdesc)
+    call xsymbol (tline2    ,tcol     ,$CharHgt,sysdesc, 90.0, jj)
+
+    tcol  = $Lmargin + 6.35
+    npage = ipage
+    jj = 0
+    call smovv ("PAGE ",pagen,jj)
+    call smovi (npage    ,pagen,jj)
+
+    call xsymbol (tline     ,tcol     ,$CharHgt,pagen, 90.0, jj)
+
+    jj = length(sysdate)
+    if (jj != 0) call xsymbol (tline2, tcol, $CharHgt,sysdate, 90.0, jj)
+    aline = aline + $table
+
+    call bitlab (aline)
+
+    call xplot (aline-$wordHgt, $Lmargin            , 
+                aline         , $Lmargin + $LabelWid)
+
+    call xsymbol (aline-.10          ,$Lmargin+.08,$CharHgt,"WORD", 90.0, 4)
+    call xsymbol (aline-$wordhgt+.15 ,$Lmargin+$LabelWid-.40,
+                                                  $CharHgt,"BIT" , 90.0, 3)
+    }
+
+call genword  (aline,wordhgt,name1,name2)
+
+return
+end
+
+subroutine xsymbol (aline,acol,hgt,text, angle, len)
+pic_common
+
+real        aline,
+            acol,
+            hgt,
+            angle
+integer*4   len
+character   text[ARB]
+logical     blank_only
+
+if (ln03_mode)
+    {
+    call ln03_symbol (aline,acol,hgt,text, angle, len)
+    }
+else if (pscript_mode)
+    {
+    call ps_symbol (aline,acol,hgt,text, angle, len)
+    }
+else
+    {
+#   call upper (text)
+    call symbol (aline,acol,hgt,text, angle, len)
+    }
+
+return
+end
+
+subroutine ln03_symbol (aline,acol,hgt,text, angle, len)
+pic_common
+
+real        aline,
+            acol,
+            hgt,
+            angle
+integer*4   len
+character   text[ARB]
+logical     blank_only
+
+string BQUOTE "`"
+
+    iline = mod(aline ,11.0) * 300
+    icol  = (acol+$LN03$Offset)  * 300
+
+    ahgt = hgt
+
+    if (angle .gt. 91.0) 
+        {
+        ahgt = $noteHgt
+        icol = icol - (hgt * 300)
+        iline = iline - ($BitWidth * 300)
+        }
+
+    call set_ln03_font (ahgt)
+
+    call putch  ($CSI,fid3)
+    call putint (icol,1,fid3)
+    call putch  (BQUOTE,fid3)
+    call putch  ($CSI,fid3)
+    call putint (iline,1,fid3)
+    call putch  (LETD,fid3)
+
+    blank_only = highlight
+    for (i=1; i<=len; i=i+1)
+        {
+        if (blank_only & text[i] != BLANK)
+            {
+            call set_ln03_bold (highlight)
+            blank_only = .false.
+            }
+
+        call putch (text[i],fid3)
+        }
+
+    if (highlight) 
+        {
+        highlight = .false.
+        call set_ln03_bold (highlight)
+        }
+
+    call putch  (NEWLINE,fid3)
+
+return
+end
+
+subroutine ps_symbol (aline,acol,hgt,text, angle, len)
+pic_common
+
+real        aline,
+            acol,
+            hgt,
+            angle
+integer*4   len
+character   text[ARB]
+logical     blank_only
+
+    iline = (11 - mod(aline ,11.0) ) * 300
+    icol  = (acol+$PS$Offset)  * 300
+
+    ahgt = hgt
+
+    if (angle .gt. 91.0) 
+        {
+        ahgt = $noteHgt
+        icol = icol - (hgt * 300)
+        iline = iline - ($BitWidth * 300)
+        }
+
+    call set_ps_font (ahgt)
+    if (highlight) 
+        {
+        call set_ps_bold (highlight)
+        }
+
+    call putint (icol,1,fid3)
+    call putch  (BLANK,fid3)
+    call putint (iline,1,fid3)
+    call putlin_v (" moveto (",fid3)
+
+    for (i=1; i<=len; i=i+1)
+        {
+        if ( text[i] == LPAREN | 
+             text[i] == RPAREN  ) call putch (BACKSLASH,fid3)
+
+        call putch (text[i],fid3)
+        }
+
+    call putlin_v (") show "//char(0),fid3)
+    call putch  (NEWLINE,fid3)
+
+    if (highlight) 
+        {
+        highlight = .false.
+        call set_ps_bold (highlight)
+        }
+
+return
+end
+
+subroutine set_ln03_Bold (OnOff)
+pic_common
+logical OnOff
+
+if (OnOff) 
+    {
+    call putch  ($CSI,fid3)
+    call putlin_v ("1m",fid3)
+    }
+else
+    {
+    call putch  ($CSI,fid3)
+    call putlin_v ("22m",fid3)
+    }
+
+return
+end
+
+subroutine set_ln03_font (hgt)
+pic_common
+
+real        hgt
+
+ifont = lfont
+if      (hgt .eq. $notehgt) ifont = 15
+else if (hgt .eq. $charhgt) ifont = 14
+else if (hgt .gt. $charhgt) ifont = 19
+
+if (ifont .ne. Lfont)
+    {
+    Lfont = ifont
+
+    call putch  ($CSI,fid3)
+    call putint (Lfont,1,fid3)
+    call putlin_v ("m",fid3)
+    call putch (NEWLINE,fid3)
+    }
+
+return
+end
+
+
+subroutine set_ps_font (hgt)
+pic_common
+
+real        hgt
+
+ifont = hgt * 300
+if (hgt == $charHgt) ifont = (hgt * 1.2) * 300      # adjust font larger
+
+if (ifont .ne. Lfont)
+    {
+    Lfont = ifont
+
+    call putch (BLANK,fid3)
+    call putint (Lfont,1,fid3)
+    call putlin_v (" fn1 "//char(0),fid3)
+    }
+
+return
+end
+
+subroutine set_ps_Bold (OnOff)
+pic_common
+logical OnOff
+
+if (OnOff) 
+    {
+    call putch (BLANK,fid3)
+    call putint (Lfont,1,fid3)
+    call putlin_v (" fn2 "//char(0),fid3)
+    }
+else
+    {
+    call putch (BLANK,fid3)
+    call putint (Lfont,1,fid3)
+    call putlin_v (" fn1 "//char(0),fid3)
+    }
+
+return
+end
+
+
+subroutine top_page                         # Generate TOP-OF-FORM on LN03/PS
+pic_common
+
+if (ln03_mode)
+    {
+    call putch (12,fid3)                    # formfeed
+    call putch (NEWLINE,fid3)
+    }
+else if ( pScript_mode )
+    {
+    call putlin_v ("stroke gsave showpage grestore  % End-Of-Page "//char(0),fid3)
+    call putch (12,fid3)                        # formfeed
+    call putch (NEWLINE,fid3)
+    }
+
+return
+end
+
+
+subroutine xnumber (aline, acol, hgt, anum, angle, len)
+pic_common
+
+real        aline,
+            acol,
+            hgt,
+            anum,
+            angle
+integer*4   len
+
+if (ln03_mode)
+    {
+    call ln03_number (aline, acol, hgt, anum, angle, len)
+    }
+else if (pscript_mode)
+    {
+    call ps_number (aline, acol, hgt, anum, angle, len)
+    }
+else
+    {
+    call number (aline, acol, hgt, anum, angle, len)
+    }
+
+return
+end
+
+subroutine ln03_number (aline, acol, hgt, anum, angle, len)
+pic_common
+
+real        aline,
+            acol,
+            hgt,
+            anum,
+            angle
+integer*4   len
+
+string BQUOTE "`"
+
+    iline = mod(aline ,11.0) * 300
+    icol  = (acol+$LN03$Offset)  * 300
+
+    ahgt = hgt
+
+    if (angle .gt. 91.0) 
+        {
+        ahgt = $noteHgt
+        icol = icol - (hgt * 300)
+        iline = iline - ($BitWidth * 300)
+        }
+
+    call set_ln03_font (ahgt)
+
+    inum  = anum
+
+    call putch  ($CSI,fid3)
+    call putint (icol,1,fid3)
+    call putch  (BQUOTE,fid3)
+    call putch  ($CSI,fid3)
+    call putint (iline,1,fid3)
+    call putch  (LETD,fid3)
+
+    if (highlight) 
+        {
+        call set_ln03_bold (highlight)
+        }
+
+    call putint (inum,1,fid3)
+
+    if (highlight) 
+        {
+        highlight = .false.
+        call set_ln03_bold (highlight)
+        }
+
+    call putch  (NEWLINE,fid3)
+
+return
+end
+
+subroutine ps_number (aline, acol, hgt, anum, angle, len)
+pic_common
+
+real        aline,
+            acol,
+            hgt,
+            anum,
+            angle
+integer*4   len
+
+    iline = ( 11 - mod(aline ,11.0) ) * 300
+    icol  = (acol+$PS$Offset)  * 300
+
+    ahgt = hgt
+
+    if (angle .gt. 91.0) 
+        {
+        ahgt = $noteHgt
+        icol = icol - (hgt * 300)
+        iline = iline - ($BitWidth * 300)
+        }
+
+    call set_ps_font (ahgt)
+    if (highlight) 
+        {
+        call set_ps_bold (highlight)
+        }
+
+    inum  = anum
+
+    call putint (icol,1,fid3)
+    call putch  (BLANK,fid3)
+    call putint (iline,1,fid3)
+    call putlin_v (" moveto (",fid3)
+
+    call putint (inum,1,fid3)
+
+    call putlin_v (") show ",fid3)
+    call putch  (NEWLINE,fid3)
+
+    if (highlight) 
+        {
+        highlight = .false.
+        call set_ps_bold (highlight)
+        }
+
+return
+end
+
+subroutine shade_field (aline, aline2, acol, nbits)
+pic_common
+
+real        aline,
+            aline2,
+            acol
+integer     nbits
+
+if (pscript_mode)
+    {
+    call putlin_v (" stroke 0.85 setgray "//char(0),fid3)
+
+    iline1 = (11 - mod(aline +0.01,11.0 ) ) * 300
+    iline2 = (11 - mod(aline2-0.07,11.0 ) ) * 300
+    icol1  = (acol  + $PS$Offset + 0.01) * 300     
+    icol2  = icol1 + (nbits * $BitWidth - 0.02) * 300
+
+    call putint (icol1 ,1,fid3); call putch  (BLANK,fid3)
+    call putint (iline1,1,fid3); call putlin_v (" moveto ",fid3)
+
+    call putint (icol2 ,1,fid3); call putch  (BLANK,fid3)
+    call putint (iline1,1,fid3); call putlin_v (" lineto ",fid3)
+
+    call putint (icol2 ,1,fid3); call putch  (BLANK,fid3)
+    call putint (iline2,1,fid3); call putlin_v (" lineto ",fid3)
+
+    call putint (icol1 ,1,fid3); call putch  (BLANK,fid3)
+    call putint (iline2,1,fid3); call putlin_v (" lineto ",fid3)
+
+    call putlin_v (" closepath fill 0 setgray "//char(0),fid3)
+    call putch  (NEWLINE,fid3)
+    }
+else if (ln03_mode)
+    {
+    iline1 = mod(aline ,11.0) * 300
+    iline2 = mod(aline2,11.0) * 300
+    icol1  = (acol  + $LN03$Offset) * 300
+    icol2  = icol1 + (nbits * $BitWidth) * 300
+    
+    ispace = $ShadeWidth * 300
+
+    for (iline=iline1; iline <= iline2; iline=iline + ispace) # Horizontal line
+        {
+        call putch  ($CSI,fid3)
+        call putlin_v ("0;",fid3)
+        call putint (icol1,1,fid3)
+        call putch  (SEMICOL,fid3)
+        call putint (iline,1,fid3)
+        call putch  (SEMICOL,fid3)
+        call putint (iabs(icol1-icol2),1,fid3)
+        call putlin_v (";1!|",fid3)
+        call putch  (NEWLINE,fid3)
+        }
+    }
+
+return
+end
+
+subroutine xplot (aline, acol, aline2, acol2)
+pic_common
+
+real        aline,
+            acol,
+            aline2,
+            acol2
+
+if (ln03_mode)
+    {
+    call ln03_plot (aline, acol, aline2, acol2)
+    }
+else if (pscript_mode)
+    {
+    call ps_plot (aline, acol, aline2, acol2)
+    }
+else 
+    {
+    call plot (aline,  acol,  $$Move)
+    call plot (aline2, acol2, $$Draw)
+    }
+
+return
+end
+
+subroutine ln03_plot (aline, acol, aline2, acol2)
+pic_common
+
+real        aline,
+            acol,
+            aline2,
+            acol2
+
+    iline1 = mod(aline ,11.0) * 300
+    iline2 = mod(aline2,11.0) * 300
+    icol1  = (acol  + $LN03$Offset) * 300
+    icol2  = (acol2 + $LN03$Offset) * 300
+
+    if (iline1 .eq. iline2)            # Horizontal line
+        {
+        call putch  ($CSI,fid3)
+        call putlin_v ("0;",fid3)
+        call putint (icol1,1,fid3)
+        call putch  (SEMICOL,fid3)
+        call putint (iline1,1,fid3)
+        call putch  (SEMICOL,fid3)
+        call putint (iabs(icol1-icol2),1,fid3)
+        call putlin_v (";2!|",fid3)
+        call putch  (NEWLINE,fid3)
+        }
+    else if (icol1 .eq. icol2)         # Vertical line
+        {
+        call putch  ($CSI,fid3)
+        call putlin_v ("1;",fid3)
+        call putint (icol1,1,fid3)
+        call putch  (SEMICOL,fid3)
+        call putint (iline1,1,fid3)
+        call putch  (SEMICOL,fid3)
+        call putint (iabs(iline1-iline2),1,fid3)
+        call putlin_v (";2!|",fid3)
+        call putch  (NEWLINE,fid3)
+        }
+
+return
+end
+
+subroutine ps_plot (aline, acol, aline2, acol2)
+pic_common
+
+real        aline,
+            acol,
+            aline2,
+            acol2
+
+    iline1 = (11 - mod(aline ,11.0)) * 300
+    iline2 = (11 - mod(aline2,11.0)) * 300
+    icol1  = (acol  + $PS$Offset) * 300
+    icol2  = (acol2 + $PS$Offset) * 300
+
+    call putint (icol1,1,fid3)
+    call putch  (BLANK,fid3)
+    call putint (iline1,1,fid3)
+    call putlin_v (" moveto "//char(0),fid3)
+
+    call putint (icol2,1,fid3)
+    call putch  (BLANK,fid3)
+    call putint (iline2,1,fid3)
+    call putlin_v (" lineto "//char(0),fid3)
+    call putch  (NEWLINE,fid3)
+
+return
+end
+
+
+subroutine bitlab (aline)
+pic_common
+
+aline1 = aline
+aline2 = aline + $WordHgt
+aline3 = aline + $WordHgt/2 + 0.1             
+if (pscript_mode)               # modified for PScript
+    aline3 = aline + $WordHgt/2 - 0.1             
+
+acol   = $Lmargin 
+acol1  = $Lmargin + $LabelWid
+acol2  = $Lmargin + $LabelWid + $NbrBits * $BitWidth
+acol3  = $Lmargin + $LabelWid - 0.05
+
+
+# top line
+call xplot (aline1, acol,  
+            aline1, acol2)
+
+# bottom line
+call xplot (aline2, acol,  
+            aline2, acol2)
+
+# Vertical lines
+
+call xplot (aline1, acol, 
+            aline2, acol)
+
+if (pscript_mode)
+    {
+    iline2 = (11 - mod(aline2,11.0)) * 300
+    icol1  = (acol1 + $PS$Offset) * 300
+
+    call putint (icol1,1,fid3)
+    call putch  (BLANK,fid3)
+    call putint (iline2,1,fid3)
+    call putlin_v (" moveto "//char(0),fid3)
+
+    #   n wid hgt dotics == draw n lines of hgt, wid apart
+
+    call putint ($NbrBits+1,1,fid3)
+    call putch  (BLANK,fid3)
+    call putint (int(300 * $BitWidth),1,fid3)
+    call putch  (BLANK,fid3)
+    call putint (int(300 * $WordHgt) ,1,fid3)
+    call putlin_v (" dotics "//char(0),fid3)
+
+    call putch (NEWLINE,fid3)
+    }
+else
+    {
+    for (ibit = 0; ibit <= $NbrBits; ibit = ibit + 1)
+        {
+        call xplot (aline1, acol1 + ibit * $BitWidth, 
+                    aline2, acol1 + ibit * $BitWidth)
+        }
+    }
+
+# label bits 
+
+for (ibit = 1; ibit <= $NbrBits; ibit = ibit + 1)
+    {
+    bit = $NbrBits - ibit
+
+    call xnumber (aline3, acol3 + ibit * $BitWidth, $CharHgt, bit, 180.0, -1)
+    }
+
+# incriment line position
+
+aline = aline + $WordHgt
+
+return
+end
+
+
+subroutine genword (aline,wordhgt,name1,name2)
+pic_common
+character name1[ARB], name2[ARB]
+
+ilen1 = length (name1)
+ilen2 = length (name2)
+
+aline1 = aline
+aline2 = aline + WordHgt
+aline3 = aline + WordHgt/2 
+aline4 = aline + WordHgt/2 + 0.15
+
+acol   = $Lmargin 
+acol1  = $Lmargin + $LabelWid
+acol2  = $Lmargin + $LabelWid + $NbrBits * $BitWidth
+
+acol3  = acol + 0.03 + max(0.0, $LabelWid/2 - (ilen1 * 0.5 * $CharHgt))
+acol4  = acol + 0.03 + max(0.0, $LabelWid/2 - (ilen2 * 0.5 * $CharHgt))
+
+
+# top line
+call xplot (aline1, acol,  
+            aline1, acol2)
+
+# bottom line
+call xplot (aline2, acol,
+            aline2, acol2)
+
+# bottom line (BOLD)
+call xplot (aline2-.013, acol,  
+            aline2-.013, acol2)
+
+# Vertical lines
+
+call xplot (aline1, acol, 
+            aline2, acol)
+
+call xplot (aline1, acol1, 
+            aline2, acol1)
+
+call xplot (aline1, acol2, 
+            aline2, acol2)
+
+# tic marks
+
+if (pscript_mode)
+    {
+    iline2 = (11 - mod(aline2,11.0)) * 300
+    icol1  = (acol1 + $PS$Offset) * 300
+
+    call putint (icol1,1,fid3)
+    call putch  (BLANK,fid3)
+    call putint (iline2,1,fid3)
+    call putlin_v (" moveto "//char(0),fid3)
+
+    #   n wid hgt dotics == draw n lines of hgt, wid apart
+
+    call putint ($NbrBits,1,fid3)
+    call putch  (BLANK,fid3)
+    call putint (int(300 * $BitWidth),1,fid3)
+    call putch  (BLANK,fid3)
+    call putint (int(300 * 0.07),1,fid3)
+    call putlin_v (" dotics "//char(0),fid3)
+
+    call putch (NEWLINE,fid3)
+    }
+else
+    {
+    for (ibit = 0; ibit <= $NbrBits; ibit = ibit + 1)
+        {
+        call xplot (aline2-0.07, acol1 + ibit * $BitWidth, 
+                    aline2     , acol1 + ibit * $BitWidth)
+        }
+    }
+
+# label word
+
+if (ilen1 > 0) call xsymbol (aline3, acol3, $CharHgt, name1, 90.0, ilen1)
+if (ilen2 > 0) call xsymbol (aline4, acol4, $CharHgt, name2, 90.0, ilen2)
+
+# incriment line position
+
+aline = aline + WordHgt
+
+return
+end
+
+
+subroutine genpage (tbl$pointer,aline) # wordhgt,name1,name2)
+d_common
+pic_common
+string name1[10] ""
+string name2[10] ""
+
+if (aline == 0.0) return
+
+wordhgt = $wordhgt
+
+ifudge = (tbl$sub_count * wordhgt) + ((pnotes/3) * 0.2)
+
+while (mod(aline,11.0)+wordhgt+ifudge < $BMargin)
+    {
+    call genword  (aline,wordhgt,name1,name2)
+    }
+
+call gen_bottom (aline)
+
+call gen_sub_notes (tbl$pointer,aline)
+
+return
+end
+
+
+subroutine gen_sub_1note (tbl$pointer,tbl$sub$index,line)
+d_common
+pic_common
+character       line[ARB], name[30]
+integer         ctoi, woffset, toffset, lastword
+logical         contained, bitentry
+
+string          sub_heading "SUB-TABLE NOTES:"
+
+
+########################################
+# statement functions:
+
+#ifig_add(ndx) = (ndx - 1 + (woffset/isize)) / (32/isize)
+ifig_add(ndx) = (ndx - 1 + ((woffset-iwaste)/isize)) / ((32-iwaste)/isize)
+ifig_pos(ndx) = mod( ndx*isize + woffset - isize, ibitsused)
+
+########################################
+
+
+call ddl_sub_findout (tbl$pointer, tbl$sub$index,
+                      islots, woffset, toffset, isize, 
+                      bitentry, contained, lastword)
+
+if (tbl$sub$SubTbl != 0)        # get the Table name if this is sub-sub-tbl
+    { 
+    call scopy (ddl_text[tbl$sub$subtbl],1,name,1)
+    }
+else
+    name[1] = EOS
+
+
+# got everything about this sub-table.... format something
+
+
+ilen = 1
+
+if (tbl$sub$id != 0)
+    {
+    call stcopy (ddl_text[tbl$sub$id],1, line, ilen)
+    call stcopy_vh (" - ",1, line, ilen)
+    }
+    
+if (tbl$sub$title != 0)
+    {
+    call stcopy (ddl_text[tbl$sub$title],1, line ,ilen)
+    call stcopy_vh (".  ",1, line, ilen)
+    }
+
+call stcopy_vh ("Consists of ",1, line, ilen)
+        
+call stcopy (ddl_text[tbl$sub$slots],1, line ,ilen)
+
+call stcopy_vh (" entries",1, line, ilen)
+
+if (isize == 0) 
+    {
+    call stcopy_vh (".",1, line, ilen)
+    return 
+    }
+    
+iwaste    = mod(Woffset, isize)  # number of un-usable bits preceeding
+                                 # entries in each word
+ival      = (32-iwaste) / isize
+iBitsUsed = ival * isize
+        
+call stcopy_vh (" contained in ",1, line, ilen)
+
+if (islots == 0)
+    {
+    call stcopy (ddl_text[tbl$sub$slots],1, line ,ilen)
+    call stcopy_vh (" * ",1, line, ilen)
+    call stcopy (ddl_text[tbl$sub$EntSize],1, line ,ilen)
+    call stcopy_vh (" words.  ",1, line, ilen)
+    }
+else if (contained)
+    {
+    call stcopy_vh (" 1 word.  ",1, line, ilen)
+    }
+else
+    {
+    if (! bitentry) nwrds = isize * islots
+    else            nwrds = ifig_add(islots) + 1
+
+    klen = itoc(nwrds,line[ilen],9)
+    ilen = ilen + klen
+
+    if (nwrds == 1) call stcopy_vh (" word.  ",1, line, ilen)
+    else            call stcopy_vh (" words.  ",1, line, ilen)
+    }
+
+call stcopy_vh ("Entry ",1, line, ilen)
+
+inc = 0
+
+if (islots == 0) islots = 10
+
+for (ient = 1; ient <= islots; ient=ient+1)
+    {
+    if (ient != 1) call stcopy_vh (", ",1, line, ilen)
+    if (ient == islots) call stcopy ("... with Entry ",1, line, ilen)
+
+    call stcopy_vh ("#",1, line, ilen)
+    klen = itoc(ient,line[ilen],9)
+    ilen = ilen + klen
+
+    if (ient <= 2) call stcopy_vh (" is at ",1, line, ilen)
+    else           call stcopy_vh (" @ ",1, line, ilen)
+
+    if (ient == 1) call stcopy_vh ("Word ",1, line, ilen)
+
+    #  Figure actual word position
+
+    if (Bitentry)
+        {
+        iadd =  ifig_add(ient) 
+        kadd = iadd + toffset
+        }
+    else
+        {    
+        iadd = 0
+        kadd = (ient-1) * isize + toffset
+        }
+
+    call stcopy (name,1, line, ilen)
+
+    if (kadd != 0)
+        {
+        if (name[1] != EOS) call stcopy_vh ("+",1, line, ilen)
+
+        klen = itoc(kadd,line[ilen],9)
+        ilen = ilen + klen
+        }
+
+    if (bitentry)
+        {
+        call stcopy_vh ("/",1, line, ilen)
+
+        if (ient == 1) call stcopy_vh ("Bit ",1, line, ilen)
+
+        ipos = ifig_pos(ient)
+
+        klen = itoc(ipos,line[ilen],9)
+        ilen = ilen + klen
+        }
+
+    if (ient < islots)
+        {
+        if      (contained  & ient >= 3) ient = islots - 1
+        else if (  bitentry & iadd != 0) ient = islots - 1
+        else if (! bitentry & ient >= 3) ient = islots - 1
+        }
+    }
+
+call stcopy_vh (".",1, line, ilen)
+
+return
+end
+
+
+subroutine gen_sub_notes (tbl$pointer,aline)
+d_common
+pic_common
+character       line[600], name[30]
+
+string          sub_heading "SUB-TABLE NOTES:"
+
+
+if (tbl$sub_count == 0) return
+
+aline = aline + $CharHgt*2
+acol1 = $lmargin 
+acol2 = $lmargin + $labelWid - 5 * $CharHgt
+acol3 = $lmargin + $labelWid 
+
+call gen_text (aline,acol1,Sub_Heading,$CharHgt/2.0)
+
+for (tbl$sub$index = 1; tbl$sub$index <= tbl$sub_count; 
+     tbl$sub$index=tbl$sub$index+1)
+    {
+    call gen_sub_1note (tbl$pointer,tbl$sub$index,line)
+
+    acolx = acol2
+    mlen = 62
+    ipos = 1
+
+    if (plxy_mode)
+        {
+        call upper (line)
+        }
+
+    repeat
+        {
+        while (line[ipos] == BLANK) ipos = ipos + 1
+
+        ilen = length(line[ipos])    
+
+        if (ilen <= mlen) break
+
+        for (k=mlen-1; k >= 30; k=k-1)
+            {
+            if (line[ipos+k] != BLANK) next
+
+            line[ipos+k] = EOS
+
+            call gen_text (aline,acolx,line[ipos],0.0)
+
+            acolx = acol3
+            ipos = ipos + k + 1
+            mlen = 57
+            break
+            }
+        }
+
+    call gen_text (aline,acolx,line[ipos],$CharHgt/1.0)
+    }
+
+return
+end
+
+
+subroutine gen_text (aline,acol,str,val)
+character       str[ARB]
+
+k = length(str)
+
+if (k > 0) call xsymbol (aline, acol, $CharHgt, str, 90.0, k)
+
+aline = aline + $CharHgt + .03 + val
+
+return
+end
+
+
+subroutine gen_bottom (aline)
+pic_common
+character       nbr[20]
+real            offset[0:2] / -0.3, 2.4, 5.1 /
+
+call bitlab (aline)
+
+aline = aline + $CharHgt
+acol1 = $lmargin + $labelWid - 5 * $CharHgt
+acol2 = $lmargin + $labelWid 
+
+if (pnotes <= 5) irows = pnotes
+else             irows = (pnotes +2) / 3
+
+for (i = 1; i <= irows; i=i+1)
+    {
+    aline = aline + $CharHgt + .02
+    
+    for (k=0; k<=2; k=k+1)
+        {
+        n = i + irows * k
+        if (n > pnotes) break
+
+        ifld = pnote[n]
+        highlight = pfhigh[ifld]
+
+        jj = 0 
+        call smovib (n,2,nbr,jj)    
+        call smovh  (" - ",3,nbr,jj)
+
+        call xsymbol (aline, acol1+offset[k], $CharHgt, nbr, 90.0, jj)
+
+        highlight = pfhigh[ifld]
+        ilen1 = length (pfname[1,ifld])
+        call xsymbol (aline, acol2+offset[k], $CharHgt, pfname[1,ifld], 
+                                                            90.0, ilen1)
+        }
+    }
+
+pnotes = 0
+
+return
+end

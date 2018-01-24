@@ -1,0 +1,420 @@
+##### FILE: STAMH.RAT  (Aircraft Mission History - E1726)
+ 
+include "bbcode.inc"             # RESA code definitions
+include "bbctl.inc"              # BBCommon definition, etc.
+ 
+include "bbacc.inc"              # Aircraft Characteristics Table Definition
+include "bbamh.inc"              # Aircraft Mission History Table Definition
+include "bbnam.inc"              # Name Table Definition
+include "bbunt.inc"              # Active Unit Table Definition
+ 
+include "ascii.inc"
+include "stmain.inc"
+ 
+define (BBimplicit, IMPLICIT NONE)  # jb E2145  4/10/00
+ 
+subroutine Air_Mission_History_Astab
+#################################################################
+#$%
+#$% Purpose:   Air_Mission_History_Astab controls the displaying
+#$%            of data from the AMH (Air Mission History) table.
+#$%
+#$% Called By: STDISP
+#$%
+#$% Calls:     Next_AMH
+#$%            AMH_Entry
+#$%            No_AMH_Entries
+#$%
+#$% Tables:    AMH
+#$%
+#$% Date:      December 1996
+#$%
+#$% Author:    Carol Kropp
+#$%
+#$% Modified:  James O. Allen 11/02 (E2313)
+#$%            Changed first column in header to CALLSIGN & Side#
+#################################################################
+BBcommon
+STATUScommon
+ 
+#                        1         2         3         4         5         6         7         8
+#              012345678901234567890123456789012345678901234567890123456789012345678901234567890
+string   MSG1 "MISSION#  TYPE &   LAUNCH  RECVRD    NUMBER OF AC    NUMBER LOST   1ST  "
+string   MSG2 "& SIDE#  MISSION  TIM/BASE  TIME   TSK/LCH/SPL/LND   DOG/AAE/SAE   TOT  "
+string   MSG3 "-------- -------- -------- ------  ---------------   -----------  ------"
+ 
+integer  msg_len
+integer  ifound
+integer  AMH$Pointer
+integer  Game_DTGs
+ 
+  $prepare$next$line
+  $column  1
+  $outv  ("View: ")
+  $outh  (nmvue, 5)
+  $column 20
+  $outv  ("  AIRCRAFT MISSION HISTORY [")
+  $outi  (iboard)
+  $outV  ("] - Page ")
+  $outib (kpage,2)
+  $column 61 ; $outV("Game Time: ") ; $outIZ(Game_DTGs(igmin),8)
+ 
+  msg_len = 0
+  call smovh (msg1, arb, ipage[1,2], msg_len)
+  linlen[2] = msg_len
+  msg_len = 0
+  call smovh (msg2, arb, ipage[1,3], msg_len)
+  linlen[3] = msg_len
+  msg_len = 0
+  call smovh (msg3, arb, ipage[1,4], msg_len)
+  linlen[4] = msg_len
+  lincnt = 4
+ 
+  $exit$on$overflow
+  ifound = $no
+ 
+  repeat
+    {
+     call Next_AMH (AMH$Pointer)
+ 
+     if (AMH$Pointer$Valid)
+       {
+        ifound = $yes
+        call AMH_Entry (AMH$Pointer)
+ 
+        $exit$on$overflow
+       }  # end of if the AMH is good
+     else
+        break
+    }   # end of repeat loop
+ 
+  if (ifound == $no)
+    call No_AMH_Entries
+ 
+return
+end   # end of Air_Mission_History_Astab
+
+ 
+subroutine Next_AMH (next_amh_pointer)
+#################################################################
+#$%
+#$% Purpose:   Next_AMH locates the next aircraft mission
+#$%            history entry for display on the astab.  The
+#$%            entries are displayed in descending recovered time
+#$%            order, so that the most current missions are
+#$%            displayed on the astab first.  When multiple
+#$%            missions recover at the same time display those
+#$%            in alphabetical order.
+#$%
+#$% Called By: Air_Mission_History_Astab
+#$%
+#$% Calls:     compar    <asformat.rat>
+#$%
+#$% Tables:    AMH
+#$%
+#$% Date:      December 1996
+#$%
+#$% Author:    Carol Kropp
+#$%
+#################################################################
+BBcommon
+StatusCommon
+ 
+Literal  CSTRIP8            # jb E2145  4/10/00
+integer  next_amh_pointer
+ 
+integer  AMH$Pointer
+real     AMH$TimeLanded$F
+integer  compare_result
+ 
+literal  recover_key
+literal  name_key[1], callsign[1]
+ 
+real     newest_recover_time
+literal  lowest_name[1]
+ 
+integer  update_key_data
+ 
+  newest_recover_time = 0.0     # no low constant for floating point BB variables
+  lowest_name[1] = $Highest$Ascii
+ 
+  if (ikey == 1)
+    {
+     recover_key = 999999.0                 # recover_key is the landing time to beat
+     name_key[1] = $Lowest$Ascii            # last reported name
+    }
+  else
+    {
+     recover_key = ikey
+     name_key[1] = ikey2
+    }
+ 
+  next_amh_pointer = $null
+  for (AMH$Pointer$First; AMH$Pointer$Valid; AMH$Pointer$Next)
+    {
+     if (xAMH$InUse$I != $no & xAMH$ReadyToReport$I == $yes)
+       {
+        if (xAMH$View$I == iview)           # is this entry for the current view
+          {
+           AMH$TimeLanded$F = xAMH$TimeLanded$F
+           callsign[1] = xAMH$CallSign$C
+ 
+           # sort order:
+           # primary sorting is by descending recovery times
+           # when times are equal, entries are sorted alphabetically by callsign
+           # (callsign values should be unique for a single launch/land pair)
+           if (AMH$TimeLanded$F <= recover_key)
+             {
+              update_key_data = $no
+              if (AMH$TimeLanded$F > newest_recover_time)    # if the newest located so far
+                {
+                 if (AMH$TimeLanded$F == recover_key)
+                   {
+                    call compar (1, callsign, name_key, compare_result)
+                    if (compare_result > 0)     # if the callsign is lexically after the key
+                      {                         # then this one has not been reported before
+                       update_key_data = $yes
+                      }   # if the callsign is after the name key, it was previously reported
+                   }   # end of if the recovery time matches the key
+                 else
+                   {
+                    update_key_data = $yes
+                   }   # end of if recovery time was before the key
+                }   # end of if newest recovery time so far
+              else if (AMH$TimeLanded$F == newest_recover_time)
+                {
+                 call compar (1, callsign, name_key, compare_result)
+                 if (compare_result > 0)    # if the callsign is lexically after the key
+                   {
+                    call compar (1, callsign, lowest_name, compare_result)
+                    if (compare_result < 0)     # if alphabetically before
+                       update_key_data = $yes   # the best located prviously
+                    }   # if alphabetically after the key
+                }   # end of if names must be checked
+ 
+              if (update_key_data == $yes)
+                {
+                 newest_recover_time = AMH$TimeLanded$F
+                 lowest_name[1] = callsign[1]
+                 next_amh_pointer = AMH$Pointer
+                }   # end of if the best located so far
+             }   # end of if within the legal recovery window
+          }   # end of if in the correct view
+       }   # end of if the entry is in use
+    }   # end of loop through the AMH table
+ 
+  ikey  = newest_recover_time
+  ikey2 = lowest_name[1]
+ 
+return
+end   # end of Next_AMH
+ 
+
+ 
+ 
+subroutine AMH_Entry (AMH$Pointer)
+#################################################################
+#$%
+#$% Purpose:   AMH_Entry formats the Air Mission History table
+#$%            data for display on the astab.
+#$%
+#$% Called By: Air_Mission_History_Astab
+#$%
+#$% Calls:     smov..         <lbsmov.rat>
+#$%            Astab_Mission  <lbcommn.rat>
+#$%
+#$% Tables:    AMH     NAM
+#$%
+#$% Date:      December 1996
+#$%
+#$% Author:    Carol Kropp
+#$%
+#$% Modified:  Susan Miller 11/98 (E2036)
+#$%            Replaced Game_Time with Game_DTG to display the
+#$%            day in the time.
+#################################################################
+BBcommon
+STATUScommon
+ 
+Literal  CSTRIP8                    # jb E2145  4/10/00
+integer  AMH$Pointer, AMH$EXP$Index # jb E2145  4/10/00
+ 
+literal  Astab_Mission
+ 
+integer  ACC$Pointer
+literal  mission
+real     AMH$TimeLanded$F
+real     AMH$TimeAt1stTarget$F
+integer  AMH$NbrLanded$I,AMH$NbrLostOnGround$I  # jb E2145 4/27/00
+integer  AMH$NbrExpEntries$I,AMH$NbrSplitOff$I  # jb E2145 4/27/00
+Integer AMH$NbrRequested$I,AMH$NbrLaunched$I    # jb E2145 4/27/00
+Integer AMH$NbrLostAAE$I,AMH$NbrLostSAM$I       # jb E2145 4/27/00
+Integer AMH$EXP$NbrExpended$I                   # jbjb 10/25/00
+integer  Game_DTG       # SMM 11/98 (E2036)
+ 
+  $test$next$line
+  $exit$on$overflow
+  $save$line$count
+  $save$keys
+ 
+  $prepare$next$line
+ 
+## jb E2141:   Reorganized because of 8-character names.  Defer
+##   CALLSIGN, MISSION, & BASE; enter them on next line under
+##    EVENT,    TYPE    & LAUNCH TIME, respectively     4/10/00
+ 
+  $column 1             # jb E2141 ($$MAXname vs 6)     4/10/00
+  call smovhn (xAMH$CallSign$C, $$MAXname, ipage[1,lincnt], ibyte)
+  $column 10
+  ACC$Pointer = xAMH$ACCPntr$I  # \/ jb E2141 ($$MAXname vs 5) 4/10/00
+  call smovhn (xACC$Type$C, $$MAXname, ipage[1,lincnt], ibyte)
+  $column 20
+  call smoviz (Game_DTG (xAMH$TimeLaunched$F), 6, ipage[1,lincnt], ibyte)
+  $column 28
+  AMH$NbrLanded$I = xAMH$NbrLanded$I
+  if (AMH$NbrLanded$I > 0)
+    {
+     AMH$TimeLanded$F = xAMH$TimeLanded$F
+     if (AMH$TimeLanded$F > 0.0)
+       call smoviz (Game_DTG (AMH$TimeLanded$F), 6, ipage[1,lincnt], ibyte)
+    }   # end of if any aircraft landed
+ 
+ 
+  AMH$NbrRequested$I=xAMH$NbrRequested$I # jb E2141 (user request) 4/27/00
+  AMH$NbrLaunched$I = xAMH$NbrLaunched$I # jb E2141 (user request) 4/27/00
+  AMH$NbrSplitOff$I = xAMH$NbrSplitOff$I # jb E2141 (user request) 4/27/00
+ 
+  $column 36    # jb E2141 (36 vs 46)   4/10/00
+  if (AMH$NbrRequested$I > 0)       # jb E2141 (user request)   4/27/00
+      call smoviz (AMH$NbrRequested$I, 3, ipage[1,lincnt], ibyte)
+  $column 39; call smovv  ("/", ipage[1,lincnt], ibyte)
+  if (AMH$NbrLaunched$I > 0)       # jb E2141 (user request)   4/27/00
+    call smoviz (AMH$NbrLaunched$I, 3, ipage[1,lincnt], ibyte)
+  $column 43; call smovv  ("/", ipage[1,lincnt], ibyte)
+  if (AMH$NbrSplitOff$I > 0)       # jb E2141 (user request)   4/27/00
+    call smoviz (AMH$NbrSplitOff$I, 3, ipage[1,lincnt], ibyte)
+  $column 47; call smovv  ("/", ipage[1,lincnt], ibyte)
+  if (AMH$NbrLanded$I > 0)       # jb E2141 (user request)   4/27/00
+  call smoviz (AMH$NbrLanded$I, 3, ipage[1,lincnt], ibyte)
+ 
+  AMH$NbrLostOnGround$I = xAMH$NbrLostOnGround$I # E2141 (user request) /27/00
+  AMH$NbrLostAAE$I = xAMH$NbrLostAAE$I # E2141 (user request) /27/00
+  AMH$NbrLostSAM$I = xAMH$NbrLostSAM$I # E2141 (user request) /27/00
+ 
+  $column 54    # jb E2141 (54 vs 62)   4/10/00
+  if (AMH$NbrLostOnGround$I > 0) # jb E2141 (user request)   4/27/00
+    call smoviz (AMH$NbrLostOnGround$I, 3, ipage[1,lincnt], ibyte)
+  $column 57; call smovv  ("/", ipage[1,lincnt], ibyte)
+  if (AMH$NbrLostAAE$I > 0) # jb E2141 (user request)   4/27/00
+    call smoviz (AMH$NbrLostAAE$I, 3, ipage[1,lincnt], ibyte)
+  $column 61; call smovv  ("/", ipage[1,lincnt], ibyte)
+  if (AMH$NbrLostSAM$I > 0) # jb E2141 (user request)   4/27/00
+    call smoviz (AMH$NbrLostSAM$I, 3, ipage[1,lincnt], ibyte)
+ 
+  $column 67    # jb E2141 (67 vs 74)   4/10/00
+  AMH$TimeAt1stTarget$F = xAMH$TimeAt1stTarget$F
+  if (AMH$TimeAt1stTarget$F > 0)
+    call smoviz (Game_DTG (AMH$TimeAt1stTarget$F), 6, ipage[1,lincnt], ibyte)
+ 
+  linlen[lincnt] = ibyte
+ 
+ 
+  $test$next$line     # jb E2141  These 3 lines moved up from IF, to
+  $exit$on$overflow   #   enter CALLSIGN, MIS-
+  $prepare$next$line  #    SION and BASE, preceding expendables
+ 
+ 
+  $column 1 # jb E2141: CALLSIGN  under EVENT; 8 vice 5 char's 4/10/00
+  call smovhn (xAMH$EventName$C, $$MAXname, ipage[1,lincnt], ibyte) # jb E2141
+ 
+ 
+  $column 10     # jb E2141:  MISSION under TYPE    4/10/00
+  mission = Astab_Mission (xAMH$Mission$I)
+  call smovh (mission, $$MAXname, ipage[1,lincnt], ibyte)
+ 
+  $column 19     # jb E2141: BASE (8 vs 5 char's) under LAUNCH TIME 4/10/00
+  call smovhn (xAMH$LaunchPlatform$C, $$MAXname, ipage[1,lincnt], ibyte)
+ 
+  linlen[lincnt] = ibyte    # jb E2141 (length to be printed) 4/27/00
+ 
+ 
+#$% If applicable, Prepare to list weapons used, on new line   4/27/00
+ 
+  AMH$NbrExpEntries$I = xAMH$NbrExpEntries$I
+  if (AMH$NbrExpEntries$I > 0)
+    {
+     # Display the expended weapon information.
+     # The column spacing is the same as in FXPEXP <asformat.rat>,
+     # which lists expendables from the inventory table for a number
+     # of the astabs.
+ 
+     $test$next$line     # jb E2141  These 3 lines replaced in IF, to
+     $exit$on$overflow   #   start entry of expendables on new line,
+     $prepare$next$line  #    as requested     4/25/00
+ 
+ 
+     $column 5   # jb 2141 Indent to 'separate' frm preceding line..
+     call smovv  ("Ordnance dlv'd: ", ipage[1,lincnt], ibyte)
+     $column 22       # jb E2141  4/25/00 (per request)
+ 
+     for (AMH$EXP$Index = 1;
+          AMH$EXP$Index <= MIN(AMH$EXP$SLOTS,AMH$NbrExpEntries$I +1); #+1jbjb
+          AMH$EXP$Index = AMH$EXP$Index + 1)
+       {
+        if ($beyond$column 68)
+          {
+           linlen[lincnt] = ibyte
+ 
+           $test$next$line
+           $exit$on$overflow
+           $prepare$next$line
+ 
+           $column 16  # jb E2141: (Unchanged (16))  4/10/00
+          }   # end of if the current line is full
+        AMH$EXP$NbrExpended$I = xAMH$EXP$NbrExpended$I  # jbjb  10/25/00
+        if( AMH$EXP$NbrExpended$I > 0 )                 # jbjb  10/25/00
+          {                                             # jbjb  10/25/00
+        call smovib  (AMH$EXP$NbrExpended$I, 4, ipage[1,lincnt], ibyte)
+        call smovv   (" ", ipage[1,lincnt], ibyte)
+        call smovh   (xAMH$EXP$Type$C, $$MAXname, ipage[1,lincnt], ibyte)
+        call smovv   ("  ", ipage[1,lincnt], ibyte)
+          }                                             # jbjb  10/25/00
+       }   # end of loop through the expended weapons
+     linlen[lincnt] = ibyte
+    }   # end of if the aircraft expended weapons
+ 
+return
+end   # end of AMH_Entry
+
+ 
+subroutine No_AMH_Entries
+#################################################################
+#$%
+#$% Purpose:   No_AMH_Entries displays a message if there are
+#$%            no aircraft mission histories for the view.
+#$%
+#$% Called By: Air_Mission_History_Astab
+#$%
+#$% Calls:     smov..      <lbsmov.rat>
+#$%
+#$% Tables:    None
+#$%
+#$% Date:      December 1996
+#$%
+#$% Author:    Carol Kropp
+#$%
+#################################################################
+BBcommon
+STATUScommon
+ 
+  $test$next$line
+  $exit$on$overflow
+  $prepare$next$line
+ 
+  $column 1
+  call smovv ("No Aircraft Mission History Records for this view",
+                                           ipage[1,lincnt], ibyte)
+  linlen[lincnt] = ibyte
+ 
+return
+end   # end of No_AMH_Entries

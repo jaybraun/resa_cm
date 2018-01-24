@@ -1,0 +1,316 @@
+include 'ddmain.inc'
+
+define ($Max_Sub_Test,75)
+
+#------------------------------
+subroutine ddl_BBTest (in,int)          # output list of field names for BBTEST
+d_common
+character       line[MAXLINE]
+integer         mark[2], getlin, tty, islots, isize, woffset, toffset, ctoi
+logical         bitentry, contained
+
+data            mark/0,0/
+
+########################################
+# statement functions:
+
+ifig_add(ndx) = (ndx - 1 + ((woffset-iwaste)/isize)) / ((32-iwaste)/isize)
+ifig_pos(ndx) = mod( ndx*isize + woffset - isize, ibitsused)
+
+########################################
+
+for (itbl = 1; itbl <= sys$tbl_count; itbl = itbl+1)
+    {
+    tbl$pointer$to itbl
+
+    call putlin (ddl_text[tbl$Id],int)
+    call putch (NEWLINE,int)
+
+    #--------------------------------------------------
+    # loop through all fields, and output fields not in any subtable
+
+    for (tbl$fld$index = 1; tbl$fld$index <= tbl$fld_count; 
+        tbl$fld$index=tbl$fld$index+1)
+        {
+        if (tbl$fld$Indir != NO) next       # skip indirect fields
+
+        if (tbl$fld$WrdSub != 0) next       # WORD via sub table
+        if (tbl$fld$PosSub != 0) next       # POSITION via Sub table
+
+        call ddl_bbfld (int,tbl$pointer,tbl$fld$index,0,0,0,0,0)
+        }
+
+    #--------------------------------------------------
+    # loop through all sub tables, single depth only (not sub-sub-tables)
+
+    for (tbl$sub$index = 1; tbl$sub$index <= tbl$sub_count; 
+        tbl$sub$index=tbl$sub$index+1)
+        {
+        if (tbl$sub$subtbl != 0) next           # skip sub-sub-tables
+
+        call ddl_sub_findout (tbl$pointer, tbl$sub$index,
+                              islots, woffset, toffset, isize, 
+                              bitentry, contained, lastword)
+
+        if (isize == 0) next                    # skip if no size specified (?)
+
+        iwaste    = mod(Woffset, isize)  # number of un-usable bits preceeding
+                                         # entries in each word
+        ival      = (32-iwaste) / isize
+        iBitsUsed = ival * isize
+
+        #--------------------------------------------------
+        # loop for each possible slot in the sub table....
+
+        for (ix=1; ix <= islots & ix <= $Max_Sub_Test; ix = ix+1)
+            {
+            #--------------------------------------------------
+            # now look for fields in this sub table
+
+            for (tbl$fld$index = 1; tbl$fld$index <= tbl$fld_count; 
+                 tbl$fld$index=tbl$fld$index+1)
+                {
+                if (tbl$fld$Indir != NO) next
+
+                inc = 0             # this is used later
+                if (tbl$fld$subtbl != 0)                    # in some sub-table
+                    {
+                    call fnd_subtbl (tbl$pointer,indx_sub,tbl$fld$subtbl)
+
+                    if (indx_sub != tbl$sub$index) next     # wrong sub-table
+
+                    if (tbl$fld$word != 0)                  
+                        {
+                        i = tbl$fld$Word
+                        inc = ctoi (ddl_text,i)         # save this for later
+                        }
+                    }
+                else if (tbl$fld$PosSub != 0)
+                    {
+                    call fnd_subtbl (tbl$pointer,indx_sub,tbl$fld$PosSub)
+
+                    if (indx_sub != tbl$sub$index) next     # wrong sub-table
+                    }
+                else next                                   # not in subtable
+
+                if (Bitentry)
+                    {
+                    iadd =  ifig_add(ix) 
+
+                    if (tbl$fld$subtbl == 0) iword = 0
+                    else                     iword = iadd + toffset + inc
+
+                    jj = 1; ibits = ctoi (ddl_text[tbl$fld$Size],jj) 
+                    ipos = ifig_pos(ix)
+
+                    if (tbl$fld$pos != 0)
+                        {
+                        jj = 1; ipos = ipos + ctoi (ddl_text[tbl$fld$pos], jj)
+                        }
+                    }
+                else
+                    {    
+                    iadd = 0
+                    iword = (ix-1) * isize + toffset + inc
+                    jj = 1; ibits = ctoi (ddl_text[tbl$fld$Size],jj) 
+                    jj = 1; ipos  = ctoi (ddl_text[tbl$fld$pos], jj)
+                    }
+
+                call ddl_bbfld (int,tbl$pointer,tbl$fld$index,
+                                ix,0,iword,ibits,ipos)
+                } # end of fld loop
+
+            #--------------------------------------------------
+            # now look for subtables in this sub table
+            
+            if (Bitentry)  ipos = ifig_pos(ix) 
+            else           ipos = 0
+
+            if (contained) iword = ifig_add(ix) 
+            else           iword = (ix-1) * isize + toffset 
+
+            call ddl_sub_sub_tables (int, itbl,tbl$sub$index,
+                                     ix,iword,ipos)
+
+            } # end of ix loop
+
+        } # end of subtbl loop
+
+    } # end of tbl loop
+
+return
+end
+
+
+subroutine ddl_sub_sub_tables (int, itbl,
+                               index_parent_sub,
+                               ix_parent,
+                               iword_parent,
+                               ipos_parent)
+d_common
+
+integer         islots, isize, woffset, toffset, ctoi
+logical         bitentry, contained
+
+
+########################################
+# statement functions:
+
+ifig_add(ndx) = (ndx - 1 + ((woffset-iwaste)/isize)) / ((32-iwaste)/isize)
+ifig_pos(ndx) = mod( ndx*isize + woffset - isize, ibitsused)
+
+########################################
+
+
+tbl$pointer$to itbl
+
+#--------------------------------------------------
+# loop through all sub tables, single depth only (not sub-sub-tables)
+
+for (tbl$sub$index = 1; tbl$sub$index <= tbl$sub_count; 
+     tbl$sub$index=tbl$sub$index+1)
+    {
+%C  inside sub table loop
+    if (tbl$sub$subtbl == 0) next           # skip non sub-sub-tables
+
+    call fnd_subtbl (tbl$pointer,indx_sub,tbl$sub$SubTbl)
+
+    if (indx_sub != index_parent_sub) next  # wrong parent sub-table
+
+    call ddl_sub_findout (tbl$pointer, tbl$sub$index,
+                          islots, woffset, toffset, isize, 
+                          bitentry, contained, lastword)
+
+    if (isize == 0) next                    # skip if no size specified (?)
+
+    iwaste    = mod(Woffset, isize)  # number of un-usable bits preceeding
+                                     # entries in each word
+    ival      = (32-iwaste) / isize
+    iBitsUsed = ival * isize
+
+    #--------------------------------------------------
+    # loop for each possible slot in the sub table....
+
+    for (ix=1; ix <= islots & ix <= $Max_Sub_Test; ix = ix+1)
+        {
+        #--------------------------------------------------
+        # now look for fields in this sub table
+
+        for (tbl$fld$index = 1; tbl$fld$index <= tbl$fld_count; 
+             tbl$fld$index=tbl$fld$index+1)
+            {
+            if (tbl$fld$Indir != NO) next
+
+            inc = 0             # this is used later
+            if (tbl$fld$subtbl != 0)                    # in some sub-table
+                {
+                call fnd_subtbl (tbl$pointer,indx_sub,tbl$fld$subtbl)
+
+                if (indx_sub != tbl$sub$index) next     # wrong sub-table
+
+                if (tbl$fld$word != 0)                  
+                    {
+                    i = tbl$fld$Word
+                    inc = ctoi (ddl_text,i)         # save this for later
+                    }
+                }
+            else if (tbl$fld$PosSub != 0)
+                {
+                call fnd_subtbl (tbl$pointer,indx_sub,tbl$fld$PosSub)
+
+                if (indx_sub != tbl$sub$index) next     # wrong sub-table
+                }
+            else next                                   # not in subtable
+
+            if (Bitentry)
+                {
+                iadd =  ifig_add(ix) 
+
+                if (tbl$fld$subtbl == 0) iword = 0
+                else                     iword = iadd + toffset + inc
+
+                iword = iword + iword_parent
+
+                jj = 1; ibits = ctoi (ddl_text[tbl$fld$Size],jj) 
+                ipos = ifig_pos(ix) + ipos_parent
+
+                if (tbl$fld$pos != 0)
+                    {
+                    jj = 1; ipos = ipos + ctoi (ddl_text[tbl$fld$pos], jj)
+                    }
+                }
+            else
+                {    
+                iadd = 0
+                iword = (ix-1) * isize + toffset + inc + iword_parent
+                jj = 1; ibits = ctoi (ddl_text[tbl$fld$Size],jj) 
+                jj = 1; ipos  = ctoi (ddl_text[tbl$fld$pos], jj)
+                }
+
+            call ddl_bbfld (int,tbl$pointer,tbl$fld$index,
+                            ix_parent,ix,iword,ibits,ipos)
+            } # end of fld loop
+
+        } # end of ix loop
+
+    } # end of subtbl loop
+
+return
+end
+
+
+subroutine ddl_bbfld (int,tbl$pointer,tbl$fld$index,indx,indx2,iword,isize,ipos)
+d_common
+
+call putlin_v ("def ,",int)
+
+if (iword == 0) call putlin (ddl_text[tbl$fld$Word],int)
+else            call putint (iword,1,int)
+
+call putch (BLANK,int)
+call putlin (ddl_text[tbl$Id],int)
+call putch (DOLLAR,int)
+call putlin (ddl_text[tbl$fld$Name],int)
+call putch (DOLLAR,int)
+call putch (ddl_text[tbl$fld$Type],int)
+
+if (indx != 0)
+    {
+    call putch (LBRACK,int)
+    call putint (indx,1,int)
+    call putch (RBRACK,int)
+    }
+if (indx2 != 0)
+    {
+    call putch (LBRACK,int)
+    call putint (indx2,1,int)
+    call putch (RBRACK,int)
+    }
+
+call putch (BLANK,int)
+
+if (ddl_text[tbl$fld$type] == BIGC)              # Character field
+    {
+    call putlin_v ("64 0",int)
+    }
+else if (ddl_text[tbl$fld$Size] > DIG9)          # Full word field
+    {
+    call putlin_v ("32 0",int)
+    }
+else if ( isize != 0 | ipos != 0)               # Subtable field 
+    {
+    call putint (isize,1,int)
+    call putch (BLANK,int)
+    call putint (ipos,1,int)
+    }
+else                                            # Bit field
+    {
+    call putlin (ddl_text[tbl$fld$Size],int)
+    call putch (BLANK,int)
+    call putlin (ddl_text[tbl$fld$pos],int)
+    }
+
+call putch (NEWLINE,int)
+
+return
+end

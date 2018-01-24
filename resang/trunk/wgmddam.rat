@@ -1,0 +1,2594 @@
+ 
+#####                        File  WGMDDAM.rat
+#####   version 3.1  dated-  7apr81
+ 
+ 
+###
+### mod to version 3.0          dated 23-feb-1981
+###
+### smn prog    module  comments
+### === ====    ======  =================================================
+### 009 dew     damlac  Fixed bug
+###
+ 
+ 
+###
+### mod to version 3.0          dated 13-jan-1981
+###
+### smn prog    module  comments
+### === ====    ======  =================================================
+### 002 rjw     damshr  Chg- Modified for reporting policy
+###             damshp  Chg- Modified for reporting policy
+###             damrep  Chg- Modified for reporting policy
+###
+ 
+#####   version 3.0  dated- 22dec80
+ 
+ 
+# 
+ 
+ 
+#$%     MODULE                         UTILITY                    DATA
+#$%   SUBROUTINES                    SUBROUTINES                 TABLES
+#$%   ===========                    ===========                 ======
+#$%     DAMAGE                         SMOVI                       UNT
+#$%     DAMDIR                         SMOVH                       DEQ
+#$%     DAMIND                         SMOVHN                      AML
+#$%     DAMSUB                         SEND                        SHC
+#$%     DAMCRM                                                     DAM
+#$%     DAMLAC
+#$%     DAMAIR
+#$%     MOVEXP
+#$%     DAMSHR
+#$%     DAMSHP
+#$%     DAMACI
+#$%     DAMREP
+#$%     DAMFLM
+#$%
+#$%
+#$%   NOTES
+#$%   =====
+#$%
+#$%   1.  <FILENAME> INDICATES FILE WHERE SUBROUTINE IS LOCATED.
+#$%
+#$%   2.  UTILITY SUBROUTINES ARE NOT SHOWN ON FLOWCHART.
+#$%
+#$%   3.  * INDICATES NO OTHER SUBROUTINES CALLED.
+#$%
+#$%
+#$%   FLOWCHART FOR DAMAGE
+#$%   ====================
+#$%
+#$%   DAMAGE - DAMDIR - DAMSUB*
+#$%                   - DAMCRM*
+#$%                   - DAMAIR - MOVEXP*
+#$%                   - DAMSHR - DAMACI*
+#$%                   - DAMSHP - DAMREP*
+#$%          - DAMIND - DAMLAC - MOVEXP*
+#$%                   - DAMAIR - MOVEXP*
+#$%                   - DAMFLM*
+ 
+
+ 
+ 
+#define ($DEBUG, $$Debug$Control)
+ 
+ include "bbctl.inc"
+ include "bbcode.inc"
+ include "bbunt.inc"
+ include "bbdeq.inc"
+ include "bbdam.inc"                                     ### smn002
+ include "bbacc.inc"
+ include "bbshc.inc"
+ include "bbaml.inc"
+ include "bbbml.inc"                     # jb - for SmallBoats  5/3/89
+ include "bbnam.inc"
+ include "bbrth.inc"                     # cml - for ROTHR 4/24/90
+ include "ascii.inc"
+ include "macros.inc"
+ 
+ 
+define(LOSTcommon,
+    LitCharEquiv(Cgonwep,64)         # jb -for types of weapons lost 5/11/87
+ 
+    common  /LLost/ Cgonwep
+    )
+ 
+define (DMcommon,
+        Integer*4 nhits[unt$slots],namcom[50],namsen[50],maxspd
+        common / scratch$pad / nhits,namcom,namsen,maxspd)
+ 
+define(trace$damage$EXE,istrip(trace$damage,0,M1bits)) # jb 5/11/87
+define(trace$damage$WEP,istrip(trace$damage,1,M1bits)) # jb 5/11/87
+ 
+#$% "Implicit None" was added since there were a few implicit declaractions
+#$% causing float/integer miscalculations.  The appropriate variable
+#$% declaractions were added to various subroutines.    SMM 3/98 (E1937)
+define (BBImplicit, Implicit None)
+
+Subroutine DAMAGE                               # Damage assessment
+ 
+ 
+########################################################
+#$%
+#$% Purpose:   DAMAGE uses input data in order
+#$%            to assess damage due to weapons
+#$%            effects for the processed game.
+#$%            The data is channeled to the
+#$%            appropriate subroutine for pro-
+#$%            cessing.
+#$%
+#$% Called By: WARCYC
+#$%
+#$% Calls:     DAMDIR     DAMIND
+#$%
+#$% Tables:    None
+#$%
+#$% Date:      FEB 81
+#$%
+#$% Author:    Dana Wills
+#$%
+########################################################
+ 
+ 
+#$% process direct damage
+call DAMDIR
+#$% process indirect damage
+call DAMIND
+ 
+return
+end
+ 
+
+Subroutine DAMDIR                               # Direct damage assessment
+ 
+########################################################
+#$%
+#$% Purpose:   DAMDIR assesses direct damage
+#$%            due to weapons effects during
+#$%            game being processed.
+#$%
+#$% Called By: DAMAGE
+#$%
+#$% Calls:     DAMSUB     DAMAIR     DAMSHP
+#$%            DAMCRM     DAMSHR
+#$%
+#$% Tables:    UNT
+#$%
+#$% Date:      FEB 81
+#$%
+#$% Author:    Dana Wills
+#$%
+#$% Modified:  Susan Miller - 3/98 (E1937)
+#$%            Added variable definitions.
+#$%
+########################################################
+ 
+BBcommon
+DMcommon
+ 
+integer*4 UNT$Pointer, UNT$Status$I, UNT$Type$I
+integer*4 i, nleft, nlost
+ 
+#$% for each unit entry
+for (UNT$POINTER$FIRST;still_ok(UNT);UNT$POINTER$NEXT) # 9/26/88
+   {
+    #$% if slot not in use, get next
+    if (xunt$InUse$i == $no |
+        xUNT$GhostedUnit$I == $YES) #
+            NEXT
+ 
+    #$% get unit status
+    unt$status$i = xunt$status$i
+ 
+    #$% if status is being deleted, get next
+    if (unt$status$i == $beingdeleted$code) next
+ 
+    #$% if status is "sinking"
+    if (unt$status$i == $sinking$code)
+       {
+        #$% if minute is beyond time sunk
+        if (game$time >= xunt$TimeSunk$f)
+           {
+            #$% display message that unit is "sunk", get next
+            call damsub(UNT$POINTER)
+            next
+           }
+       }
+ 
+    #$% set unit pointer
+    i = unt$pointer$index
+ 
+    #$% get number of hits
+    nhits[i] = xunt$hits$i
+ 
+    #$% if there are hits
+    if (nhits[i] > 0)
+       {
+        #$% get unit type
+        UNT$TYPE$I = XUNT$TYPE$I
+ 
+        #$% find unit type and call appropriate damage subroutine
+        if      (UNT$TYPE$I == $Sub$code          ) call damsub (unt$pointer)
+        else if (UNT$TYPE$I == $CruiseMissile$code) call damcrm (unt$pointer)
+        else if (UNT$TYPE$I == $AIR$code          ) call damair (unt$pointer,nleft,nlost)
+        else if (unt$type$i == $ShoreBase$code    ) call damshr (UNT$POINTER)
+#       else if (unt$type$i == $SurfaceWithAc$code) call damshp (UNT$POINTER)
+        else if (unt$type$i == $Surface$code      ) call damshp (UNT$POINTER)
+ 
+        PUTunt$hits$i (0)                       # clear unit hits
+ 
+        PUTunt$TorpHits$i (0)
+        PUTunt$BombHits$i (0)
+        PUTunt$MissHits$i (0)
+        PUTunt$GunHits$i  (0)
+        PUTunt$ARMhits$i  (0)           # Task 4.1 b: ARM msl:  3/5/85
+ 
+       }
+   }
+return
+end
+ 
+
+ 
+ 
+Subroutine DAMIND                               # Indirect damage assessment
+                                                #  (for a/c awaiting launch
+########################################################
+#$%
+#$% Purpose:   DAMIND assesses indirect damage to a/c on deck
+#$%            when platform is damaged; & to a/c in launch
+#$%            phase when platform is sinking..
+#$%
+#$% Called By: DAMAGE
+#$%
+#$% Calls:     DAMLAC     DAMAIR     DAMFLM
+#$%
+#$% Tables:    UNT        DEQ
+#$%
+#$% Date:      FEB 81
+#$%
+#$% Author:    Dana Wills
+#$%
+#$% Modified:  Susan Miller - 3/98 (E1937)
+#$%            Added variable definitions.
+#$%
+########################################################
+ 
+BBcommon                                        #   or launching)
+DMcommon
+ 
+integer*4 UNT$Pointer, UNT2$Pointer, UNT2$Status$I
+integer*4 launch, nleft, nlost
+ 
+#$% for each unit entry
+for (UNT$POINTER$FIRST;still_ok(UNT);UNT$POINTER$NEXT) # 9/26/88
+   {
+    #$% if slot not in use, get next
+    if (xunt$InUse$i == $no)  next
+ 
+    #$% if ghosted unit, skip it SMM 5/18/92
+    if (xUNT$GhostedUnit$I == $YES) next
+ 
+    #$% if unit type is not air, get next
+    if (xunt$type$i != $air$code)  next
+ 
+    #$% if status is not aircraft awaiting launch and Marshall Status
+    #$% is not launching, get next
+    if (xunt$status$i != $AcAwaitingLaunch$code &
+        xunt$MarshallStatus$i != $Launching$code)  next
+ 
+    #$% get launch index
+    launch = xunt$LaunchIndx$i
+ 
+    #$% set unit table to launch aircraft
+    unt2$pointer$to launch
+ 
+    #$% get unit status
+    unt2$status$i = xunt2$status$i
+ 
+    #$% if launching platform is being deleted or is sinking
+    if (unt2$status$i == $BeingDeleted$code |
+        unt2$status$i == $Sinking$code)
+        #$% call for damage data on launching aircraft
+        call DAMLAC(unt$pointer,nleft,nlost)
+ 
+    #$% else if launch platform damaged
+    else if (nhits[launch] > 0)
+        #$% call for damage data for aircraft on deck
+        call DAMAIR(unt$pointer,nleft,nlost)
+ 
+    #$% else get next unit
+    else next
+ 
+    #$% if any aircraft lost
+    if (nlost > 0)
+        #$% call for data on damaged aircraft flights
+        call DAMFLM(unt$pointer,launch,nleft,nlost)
+   }
+ 
+return
+end
+ 
+
+ 
+ 
+Subroutine DAMSUB(unt$pointer)                  # Damaged sub or sunk ship
+ 
+########################################################
+#$%
+#$% Purpose:   DAMSUB outputs a message to the
+#$%            damaged sub or ship that it has
+#$%            been "sunk". The unit is also
+#$%            deleted from the game being pro-
+#$%            cessed.
+#$%
+#$% Called By: DAMDIR
+#$%
+#$% Calls:     None
+#$%
+#$% Tables:    UNT
+#$%
+#$% Date:      FEB 81
+#$%
+#$% Author:    Dana Wills
+#$%
+#$% Modified:  Susan Miller - 3/98 (E1937)
+#$%            Added variable definitions.
+#$%
+########################################################
+ 
+BBcommon
+LOSTcommon                              # jb - for weapons LOST 5/11/87
+    data    CgonwepC[ $cruisemissile$code] /" CRSm "/
+    data    CgonwepC[           $aam$code] /" AAM  "/
+    data    CgonwepC[           $asm$code] /" ASM  "/
+    data    CgonwepC[           $sam$code] /" SAM  "/
+    data    CgonwepC[      $sonobuoy$code] /" SBUO "/
+    data    CgonwepC[          $mine$code] /" MINE "/
+    data    CgonwepC[          $bomb$code] /" BOMB "/
+    data    CgonwepC[       $torpedo$code] /" TORP "/
+    data    CgonwepC[          $ciws$code] /" CIWS "/
+    data    CgonwepC[           $gun$code] /" GUN  "/
+    data    CgonwepC[      $Aircraft$code] /" acft "/
+    data    CgonwepC[  $SmartTorpedo$Code] /" SmTrp"/
+    data    CgonwepC[          $RBOC$Code] /" RBOC "/
+    data    CgonwepC[           $GND$Code] /" Grnd "/
+    data    CgonwepC[$Countermeasure$Code] /" CtrMe"/
+    data    CgonwepC[   $AdvancedSAM$Code] /" ADSAM"/
+ 
+ 
+integer*4 UNT$Pointer
+ 
+integer   Game_DTG    # integer function
+literal   UNT$Name$C, cstrip8, DEQ$Type$C, cname
+integer*4 UNT$SuperType$I, UNT$BMLIndx$I, BML$Pointer
+integer*4 UNT$TorpHits$I, UNT$BombHits$I, UNT$MissHits$I
+integer*4 UNT$GunHits$I, UNT$ARMHits$I, UNT$Status$I
+integer*4 DEQ$Pointer, DEQ$Ident$I, AML$Pointer
+integer*4 AML$Status$I
+integer*4 jj, ihaveair, ilost, iowner, icnt, iecho4
+integer*4 klen
+Character msg[ARB]
+ 
+##        0         1         2
+##        012345678901234567890
+##          0         1         2         3         4\/
+##           123456789012345678901234567890123456789012345678
+#String msg4 "#       These aircraft lost in sinking of   "
+String msg5 "#                                                                           "
+ 
+unt$name$c = Xunt$name$c                # jb            5/12/87
+UNT$SuperType$I = xUNT$SuperType$I
+ 
+#   begin 2/11/91 trs
+#   modified to generate a 'sinking' message in the engagement log
+    if (UNT$SuperType$i  == $Submarine$SuperCode)
+        {
+        if (log$engage != $no)                  # if engagement log desired
+            {
+            call Generate_eng_rec ("SINKING ","DAMAGE  ",Unt$Name$c)
+            }
+        }
+    else if (UNT$SuperType$I == $SmallBoat$SuperCode)  # clk 4/9/94 (E1099) -
+        {                                              # make sure the BML entry
+         UNT$BMLIndx$I = xUNT$BMLIndx$I                # is flagged as destroyed
+         BML$Pointer$To  (UNT$BMLIndx$I)
+         putBML$Status$I ($Destroyed$Code)
+         putBML$UNTIndx$I (0)
+        }
+jj = 0
+ 
+#$% move "sunk" message into array for display
+call smovhn(unt$name$c,$$MaxLit,msg,jj)
+Call SMOVV(" sunk !!!!",msg,jj)
+#call send (xunt$view$i,0,jj,msg)                        #smn002
+ 
+#$% if trace of damage requested by user (usually for debug)
+if (trace$damage$EXE != $no)
+   {
+    #$% display "sunk" trace message
+    call echor
+    call echov  ('@ ')
+    call echoh (msg,jj)
+ 
+    unt$TorpHits$i = xunt$TorpHits$i
+    unt$BombHits$i = xunt$BombHits$i
+    unt$MissHits$i = xunt$MissHits$i
+    unt$GunHits$i  = xunt$GunHits$i
+    unt$ARMHits$i  = xunt$ARMHits$i
+ 
+    if (unt$TorpHits$i != 0)
+        {
+        call echov(" Torp=")
+        call echoi(unt$TorpHits$i)
+        }
+ 
+    if (unt$MissHits$i != 0)
+        {
+        call echov(" Miss=")
+        call echoi(unt$MissHits$i)
+        }
+ 
+    if (unt$BombHits$i != 0)
+        {
+        call echov(" Bomb=")
+        call echoi(unt$BombHits$i)
+        }
+ 
+    if (unt$GunHits$i != 0)
+        {
+        call echov(" Gun=")
+        call echoi(unt$GunHits$i)
+        }
+ 
+#    if (unt$ARMHits$i != 0)
+#       {
+#        call echov(" ARM=")
+#        call echoi(unt$ARMHits$i)
+#       }
+   }
+ 
+#$% set unit status to "being deleted"
+unt$status$i = $beingdeleted$code
+#$% save unit status
+putunt$status$i
+ 
+if (trace$damage$WEP != $NO )           # jb            5/11/87
+ {
+  iHaveAIR = $NO                # Initlz. trigger for AML search
+   FOR_DEQ_CHAIN
+    {
+    #$% get equipment ID
+    DEQ$IDENT$I = XDEQ$IDENT$I
+ 
+    iLOST = Xdeq$remaining$i    # Is there anything to lose?
+    #$%   if this is an ordnance item & there will be any losses..
+    if(iLOST > 0        &       # jb    5/12/87
+       (DEQ$IDENT$I == $CRUISEMISSILE$CODE |
+        DEQ$IDENT$I == $AAM$CODE  |
+        DEQ$IDENT$I == $ASM$CODE  |
+        DEQ$IDENT$I == $SAM$CODE  |
+        DEQ$IDENT$I == $MINE$CODE |
+        DEQ$IDENT$I == $BOMB$CODE |
+        DEQ$IDENT$I == $TORPEDO$CODE |
+        DEQ$IDENT$I == $SMARTTORPEDO$CODE |      # 1/29/91  hdf
+        DEQ$IDENT$I == $GUN$CODE  |
+        DEQ$IDENT$I == $Aircraft$CODE |
+        DEQ$IDENT$I == $Sonobuoy$Code|  # jb            7/8/87
+        DEQ$IDENT$I == $CIWS$CODE    ))
+      {
+        if( DEQ$IDENT$I == $Aircraft$CODE )
+         {
+          iHaveAIR = $YES
+         }
+        else    # This equipment is ordnance, but NOT a/c
+         {
+          call echor
+          call echov ('#')
+#         call echov   ('# ')
+          call echoiZ (Game_DTG(game$time),6)
+          call echov   (' ')
+          call echoi  (iLOST)
+          call echoh  (Cgonwep[DEQ$ident$i],8)
+          call echov  (" lost in sinking of ")
+          call echohn (UNT$Name$C,$$MaxLit)            # jb    5/11/87
+          DEQ$Type$c = XDEQ$Type$c              # jb    5/13/87
+          call echov   (' / ')
+          call echohn  (DEQ$TYPE$C,$$MaxLit)            # jb    5/13/87
+         }
+      }         # End if (..this is a weapon..)
+   }            # End FOR_DEQ_CHAIN
+ 
+  if( iHaveAIR != $NO )         # jb this IF added:     5/15/87
+   {
+    iOWNER = unt$pointer$index
+    icnt = 1            # initlz. counter for each line of side-numbers
+    iecho4 = $YES       # initlz. trigger for MSG4
+ 
+    for(aml$pointer$first; still_valid(aml); aml$pointer$next) # 9/26/88
+     {
+      aml$Status$i = Xaml$Status$i
+      if( (aml$status$i !=$OnDeck$code & aml$status$i !=$Assigned$code) |
+         iOWNER != Xaml$ownerindx$i)    NEXT
+ 
+      if(iecho4 == $YES)                        # jb            5/15/87
+       {
+        call echor; klen =0; iecho4 = $NO       # jb =1         5/21/87
+        Call smovv("#",msg,klen)
+        call smoviZ(Game_DTG(game$time),6,msg,klen) # jb IZ  5/21/87
+        Call smovv(" These aircraft lost in sinking of ",msg,klen)
+        call smovHn(Unt$Name$c,$$MaxLit,msg,klen)
+                  Call SMOVV(" : ",msg,klen)
+        call echoh(msg,klen +1)        # +1            5/19/87
+        klen = 0        # jb avoid unwanted msg5 @ if(klen >0) 5/19/87
+       }
+ 
+      if ( icnt == 1 )
+       {
+        call echor; klen =1     # initlz. ptr for MSG5.. =1     5/21/87
+        }
+      Cname = Xaml$SideNumber$c
+      call smovHN(Cname,$$MaxLit,msg5,klen)
+      call smovv(" ",msg5,klen)
+ 
+      if ( icnt > 11 )
+       {
+        call echoh(msg5,klen)
+        icnt = 0; klen = 0                      #       5/19/87
+       }
+      icnt = icnt +1
+     }  # End of loop thru AML table
+ 
+    if(klen > 0 ) call echoh (msg5,klen)
+   }  # End if ship had any a/c on board..
+ }      # End if trace$damage$WEP != $NO
+ 
+return
+end
+ 
+
+ 
+ 
+Subroutine DAMCRM(unt$pointer)                  # Damaged cruise missile
+ 
+########################################################
+#$%
+#$% Purpose:   DAMCRM deletes the damaged cruise
+#$%            missile from game being processed.
+#$%
+#$% Called By: DAMDIR
+#$%
+#$% Calls:     None
+#$%
+#$% Tables:    UNT
+#$%
+#$% Date:      FEB 81
+#$%
+#$% Author:    Dana Wills
+#$%
+#$% Modified:  Susan Miller - 3/98 (E1937)
+#$%            Added variable definitions.
+#$%
+########################################################
+ 
+BBcommon
+ 
+integer*4 UNT$Pointer, UNT$Status$I
+ 
+#$% set unit status to "being deleted"
+UNT$STATUS$I = $BEINGDELETED$CODE
+#$% save unit status
+PUTUNT$STATUS$I
+ 
+return
+end
+ 
+
+ 
+ 
+Subroutine DAMLAC(unt$pointer,                  # Damage to launching aircraft
+                  Nleft,
+                  Nlost)
+ 
+########################################################
+#$%
+#$% Purpose:   DAMLAC assesses damage done to
+#$%            launching aircraft during game
+#$%            being processed.
+#$%
+#$% Called By: DAMIND
+#$%
+#$% Calls:     MOVEXP
+#$%
+#$% Tables:    UNT        AML
+#$%
+#$% Date:      FEB 81
+#$%
+#$% Author:    Dana Wills
+#$%
+#$% Modified:  Susan Miller - 3/98 (E1937)
+#$%            Added variable definitions.
+#$%
+########################################################
+ 
+BBcommon
+ 
+integer*4 UNT$Pointer, nleft, nlost , dummy    #jhm CT02
+ 
+integer*4 ntot, icnt, nextix
+integer*4 UNT$Status$I, UNT$NbrAcTot$I, AML$NextIndx$I
+integer*4 AML$Pointer, AML$Status$I, AML$OwnerIndx$I
+integer*4 UNT2$Pointer
+literal   cstrip8, UNT2$Name$C, AML$SideNumber$C, idummy
+integer   Game_DTG    # integer function
+real*4    pcent
+ 
+dummy = 1  # JHM CT02 (E2257) 1/02  dummy is for unknown attacker, checked in engdata
+ 
+#$% set number of aircraft left
+Nleft = XUNT$NbrAc$i
+ 
+#$% set aircraft total
+Ntot = xUNT$NbrAcTot$i
+ 
+#$% compute number lost
+Nlost = NTot - Nleft
+ 
+#$% if no launching aircraft left
+if (Nleft == 0)
+   {
+    #$% set unit status to "being deleted" and store it
+    unt$status$i = $BeingDeleted$code
+    putunt$status$i
+   }
+#$% else if some aircraft left
+else
+   {
+    #$% set total to number left and store it
+    UNT$NbrAcTot$i = Nleft
+    putUNT$NbrAcTot$i
+ 
+    #$% set next AML index
+    aml$NextIndx$i = Xunt$AmlIndx$i                                   #smn009
+ 
+    #$% for each aircraft left up to number remaining
+    for (icnt = 1 ; icnt <= Nleft ; icnt = icnt + 1)
+       {
+        #$% set AML pointer and get next index
+        aml$pointer$to aml$NextIndx$i
+        aml$NextIndx$i = Xaml$NextIndx$i
+       }
+ 
+    #$% save index
+    NextIx = aml$NextIndx$i                     #save index to next
+ 
+    aml$NextIndx$i = 0                          #break chain at last a/c
+    putaml$NextIndx$i
+ 
+    #$% for each aircraft destroyed
+    for (icnt = Nleft + 1 ; icnt <= Ntot ; icnt = icnt + 1)
+       {
+        #$% set AML pointer to next index and save
+        aml$pointer$to NextIx
+        NextIx = Xaml$NextIndx$i
+ 
+        #$% Enter data into the DAC table.       clk 3/92
+        idummy = 0
+        call Update_Destroyed_Aircraft (0, 0, $DestroyedOnGround$Code,
+                                        idummy, AML$Pointer, 0)
+ 
+        if (log$engage != $no)              # if engagement log desired
+            {
+            if (xAML$status$i != $destroyed$code )
+               {
+                call Engdata(dummy, UNT$Pointer)   # JHM CT02 1/02 (E2257)
+                call Generate_eng_rec ("ONDECK  ","DAMAGE  ",xaml$SideNumber$c)
+               }
+            }
+ 
+        #$% set aml status to destroyed and store it
+        aml$status$i = $destroyed$code
+        putaml$status$i
+ 
+        if (trace$damage$WEP != $NO     )       # jb            5/11/87
+         {
+          aml$OwnerIndx$i = Xaml$OwnerIndx$i
+          UNT2$Pointer$TO (aml$OwnerIndx$i)
+          UNT2$Name$C = xUNT2$Name$C
+          aml$SideNumber$c = Xaml$SideNumber$c
+          call echor
+          call echov ('#')
+#         call echov   ('# ')
+          call echoiZ (Game_DTG(game$time),6)
+          call echov   (' ')
+          call echohn (aml$SideNumber$c,5)
+          call echov  (" lost as damage to launch platform ")
+          call echohn (UNT2$Name$C,$$MaxLit)
+         }
+ 
+        if (trace$damage$EXE != $no)    # jb  $exe      5/11/87
+           {
+            #$% display damage message
+            call echor
+            call echov   ('@ ')
+            call echoh(xaml$SideNumber$c,5)
+            call echov(" destroyed")
+           }
+ 
+       }   # End of loop thru each a/c destroyed
+ 
+    #$% compute percent of equipment remaining
+    pcent = float(Nleft) / float(Ntot)
+ 
+    #$% set pointer to flight losing equipment
+    call MOVEXP(UNT$pointer,        ##XXX
+                -1,
+                pcent)
+   }
+ 
+return
+end
+ 
+
+ 
+ 
+Subroutine DAMAIR(unt$pointer,                  # Damaged aircraft
+                  Nleft,
+                  Nlost)
+ 
+########################################################
+#$%
+#$% Purpose:   DAMAIR assesses damage done to
+#$%            select aircraft due to weapons
+#$%            effects during game being pro-
+#$%            cessed.
+#$%
+#$% Called By: DAMDIR     DAMIND
+#$%
+#$% Calls:     MOVEXP
+#$%
+#$% Tables:    UNT        AML
+#$%
+#$% Date:      FEB 81
+#$%
+#$% Author:    Dana Wills
+#$%
+#$% Modified:  Susan Miller - 3/98 (E1937)
+#$%            Added variable definitions.
+#$%
+########################################################
+ 
+BBcommon
+ 
+integer*4 UNT$Pointer, nleft, nlost
+ 
+integer*4 UNT$NbrAc$I, UNT$NbrAcTot$I, UNT$AMLIndx$I
+integer*4 AML2$NextIndx$I, UNT$Status$I
+integer*4 AML$Pointer, AML2$Pointer, AML$NextIndx$I
+integer*4 ngone, icnt
+literal   cstrip8, UNT$Name$C
+real*4    pcent
+ 
+#$% get number of aircraft
+unt$NbrAc$i = Xunt$NbrAc$i
+unt$NbrAcTot$i = Xunt$NbrAcTot$i
+ 
+#$% initialize flags
+aml$pointer = 0                                 #initialize
+aml2$pointer = 0
+NLost = 0                                       #nmbr destroyed on deck
+Ngone = 0                                       #nmbr destroyed overall
+aml$NextIndx$i = xunt$AmlIndx$i
+ 
+#$% zero counter
+icnt = 0
+#$% loop through aml table until no numbers left
+while (aml$NextIndx$i != 0)
+   {
+    #$% save last AML pointer
+    aml2$pointer = aml$pointer
+ 
+    #$% set next index
+    aml$pointer$to aml$NextIndx$i
+    aml$NextIndx$i = Xaml$NextIndx$i
+ 
+    #$% increment counter
+    icnt = icnt + 1
+ 
+    #$% if aircraft not destroyed, get next entry
+    if (xaml$status$i != $destroyed$code)  next
+ 
+    #$% if trace of damage requested by user (usually for debug)
+    if (trace$damage$EXE != $no)
+       {
+        #$% display damage message
+        call echor
+        call echov  ('@ ')
+        call echoh(xaml$SideNumber$c,5)
+        call echov(" destroyed")
+       }
+ 
+    #$% increment counter
+    Ngone = Ngone + 1
+ 
+    if (icnt > unt$NbrAc$i)  Nlost = Nlost + 1  #number lost from deck
+ 
+    if (aml2$pointer == 0)                      #if flight leader gone
+       {
+        if (aml$NextIndx$i != 0)                #if not last flight
+           {
+            unt$AmlIndx$i = aml$NextIndx$i      #reset aml ptr
+            PUTunt$AmlIndx$i
+           }
+ 
+        aml$pointer = 0
+       }
+    else                                        #if not flight leader
+       {
+        aml2$NextIndx$i = aml$NextIndx$i        #reconnect links
+        PUTaml2$nextindx$i
+ 
+        aml$pointer = aml2$pointer              #save pntr to last good plane
+       }
+   }
+ 
+unt$NbrAcTot$i = icnt
+NLeft = unt$NbrAcTot$i - Ngone
+ 
+if (Nleft <= 0)                                 #if none left
+   {
+    unt$Status$i = $BeingDeleted$code           #delete unit
+    PUTunt$Status$i
+   }
+else
+   {
+    aml$pointer$to Xunt$AmlIndx$i
+ 
+    unt$Name$c = Xaml$SideNumber$c              #rename flight
+    PUTunt$Name$c
+ 
+    pcent = float(Nleft) / float(unt$NbrAcTot$i) #proportion of equipment
+                                                 #               remaining
+    unt$NbrAc$i = unt$NbrAc$i - Ngone + Nlost
+    PUTunt$NbrAc$i
+ 
+    unt$NbrAcTot$i = Nleft
+    PUTunt$NbrAcTot$i
+ 
+    #$% set pointer to aircraft losing equipment
+    call MOVEXP(unt$pointer,-1,pcent)    ##xxx
+   }
+ 
+return
+end
+ 
+
+Subroutine AIREXP(UNT$pointer,          # pointer to a/c losing equip
+                  UNT2$pointer,         # pointer to a/c taking it (or -1)
+                  pcent)                # percent of expends remaining
+ 
+integer     UNT$pointer, UNT2$Pointer
+real        pcent
+ 
+call MOVEXP (UNT$pointer,          # pointer to UNT losing equip
+             UNT2$pointer,         # pointer to UNT taking it (or -1)
+             pcent)                # percent of expends remaining
+ 
+return
+end
+ 
+#----------------------------------------------------------------------
+ 
+Subroutine BOATEXP(UNT$pointer,          # pointer to a/c losing equip
+                   UNT2$pointer,         # pointer to a/c taking it (or -1)
+                   pcent)                # percent of expends remaining
+ 
+integer     UNT$pointer, UNT2$Pointer
+real        pcent
+ 
+call MOVEXP (UNT$pointer,          # pointer to UNT losing equip
+             UNT2$pointer,         # pointer to UNT taking it (or -1)
+             pcent)                # percent of expends remaining
+ 
+return
+end
+ 
+ 
+
+Subroutine MOVEXP(UNT$pointer,          # pointer to UNT losing equip
+                  UNT2$pointer,         # pointer to UNT taking it (or -1)
+                  pcent)                # percent of expends remaining
+ 
+########################################################
+#$%
+#$% Purpose:   MOVEXP moves equipment from one UNT to another, or
+#$%            off to never-never-land (if -1).  The quantity moved is
+#$%            determined by the PCENT to remain on the original UNT.
+#$%            This is also called with a UNT2 value of -2 for purposes
+#$%            of generating trace messages.....
+#$%
+#$% Called By: DAMLAC   DAMAIR  FLHOME
+#$%            CLONAC   FLTREC  XLOAD
+#$% Calls:     None
+#$%
+#$% Tables:    UNT    DEQ
+#$%
+#$% Date:      APRIL 81
+#$%
+#$% Author:    Dana Wills
+#$%
+#$% Warning:   Do not change UNT2$Pointer - it may be a CONSTANT
+#$%
+#$% Modified:  Added an entry point for calling from OSPLIT
+#$%            to handle case where moving equipment from a
+#$%            collective flight to two flight leaders
+#$%            SMM and CLK 4/10/1992
+#$%
+#$%            Susan Miller - 3/98 (E1937)
+#$%            Added variable definitions.
+#$%
+########################################################
+BBcommon
+LOSTcommon                      # jb - for weapons LOST         5/11/87
+ 
+integer*4 UNT$Pointer, UNT2$Pointer
+real*4    pcent
+ 
+integer   Game_DTG    # integer function
+ 
+integer     ifound
+integer     entry_point_called  # flag for if MOVEXP_SPLIT was called
+integer     iadd, isexp, ilost
+integer*4   UNT$Type$I, UNT2$Type$I, DEQ$Pointer, DEQ$Ident$I
+integer*4   norig, DEQ$Remaining$I, UNT$RecoverIndx$I, UNT3$Pointer
+literal     UNT3$Name$C, cstrip8, DEQ$Type$C
+integer*4   DEQ$Pntr$I, DEQ2$Pointer, DEQ2$Pntr$I, DEQ2$Remaining$I
+integer*4   DEQ2$Logistical$I, DEQ2$Ident$I
+ 
+entry_point_called = $no
+ 
+goto 6001                                       # E2143 dew 10/99
+    {
+     entry MOVEXP_SPLIT(UNT$Pointer,UNT2$Pointer,pcent)
+     entry_point_called = $yes
+    }
+6001                                            # E2143 dew 10/99
+ 
+UNT$type$i  = xUNT$type$i
+ 
+if (UNT2$pointer < 0)
+    {
+    iadd = $no                                  # 5/12/87
+    }
+else
+    {
+    unt2$type$i = xunt2$type$i
+    if (unt$type$i   != unt2$type$i)   iadd = $yes
+    else                               iadd = $no
+    }
+ 
+#$% for each equipment entry
+FOR_DEQ_CHAIN
+    {
+    deq$ident$i = Xdeq$ident$i
+ 
+    # Special bomb does not exist on any base, only aircraft noting bad load
+    if (deq$ident$i == $Bomb$code)
+    {
+        if (Xdeq$type$c == 'NOWEAP') next
+    }
+ 
+    call EXPTST ( deq$ident$i , isexp )
+ 
+    #$% if equipment is of an expendable type
+    if (isexp == $YES & Xdeq$Logistical$i == $YES)
+        {
+        #$% get initial number of equipment listed as remaining
+        norig = Xdeq$remaining$i
+ 
+        #$% compute current equipment remaining by multiplying initial
+        #$% number by % expended, rounded to the next whole number
+        deq$remaining$i = norig * Pcent + .5
+        deq$remaining$i = max(0,deq$remaining$i)        # jb    5/11/87
+ 
+ 
+        ###-- For lost-weapons trace (flagged by DYN2$pointer set -2 or -1) ---
+        iLOST = norig - deq$remaining$i         #       5/12/87
+        if(iLOST > 0    &                               # jb    5/12/87
+           trace$damage$WEP != $NO & unt2$pointer < 0 & # jb    5/12/87
+           deq$ident$i != $GND$code                   & # jb   12/11/89
+           deq$ident$i != $CommBuoy$code )      #               5/11/87
+            {
+            unt$RecoverIndx$i = Xunt$RecoverIndx$i
+            unt3$Pointer$TO (unt$RecoverIndx$i)
+            unt3$Name$C = Xunt3$Name$C
+            call echor
+            call echov ('#')
+            call echoiZ (Game_DTG(game$time),6)
+            call echov   (' ')
+            call echoi  (iLOST)
+            call echoh  (Cgonwep[deq$ident$i],6)
+            call echov  ("lost from flight based at ")
+            call echohn (UNT3$Name$C,$$MaxLit)
+            deq$Type$c = Xdeq$Type$c            # jb    5/13/87
+            call echov   (' / ')               # jb    5/13/87
+            call echohn  (deq$TYPE$C,$$MaxLit)          # jb    5/13/87
+            }
+ 
+        if(unt2$pointer < -1) NEXT # jb [called ONLY for trace] 5/12/87
+        ####-------- End of 5/12/87 addition for lost-weapons trace ---
+ 
+        PUTdeq$remaining$i
+ 
+        if (unt2$pointer <= 0)  next    # rest is used when transferring equip
+ 
+        deq$pntr$i = xdeq$pntr$i  # get equipment pointer
+ 
+        ifound = $no
+ 
+        #$% for each transfer equipment entry
+        FOR_DEQ2_CHAIN
+            {
+            #$% if slot not used, get next entry
+            deq2$ident$i = xdeq2$ident$i
+            if (deq2$ident$i == $null$code) next
+ 
+            #$% if transfer equipment is not equipment, get next entry
+ 
+            deq2$pntr$i = xdeq2$pntr$i
+            if (deq2$pntr$i == deq$pntr$i)
+                {
+                if (iadd == $yes) deq2$remaining$i = Xdeq2$remaining$i
+                else              deq2$remaining$i = 0
+ 
+                deq2$remaining$i=deq2$remaining$i+(norig-deq$remaining$i)
+                PUTdeq2$remaining$i
+ 
+                ifound = $YES
+                break
+                } # end if matching pntr's
+            } # end FOR DEQ2 chain
+ 
+        if (ifound == $no)              # Need to add a DEQ entry to the chain ?
+            {
+            call get_DEQ_entry ( UNT2$Pointer, DEQ2$Pointer)
+ 
+            if (DEQ2$pointer != 0)
+                {
+                deq2$ident$i        = Xdeq$ident$i
+                deq2$pntr$i         = Xdeq$pntr$i
+                if (entry_point_called == $no)    # clk 1/94 - was previously setting
+                    deq2$remaining$i = ilost      # to Xdeq$remaining$I - causing excessive amounts
+                else    # OSPLIT call
+                    deq2$remaining$I = norig - deq$remaining$i
+                deq2$Logistical$I   = Xdeq$Logistical$I
+ 
+                PUTdeq2$ident$i
+                PUTdeq2$pntr$i
+                PUTdeq2$remaining$i
+                PUTdeq2$Logistical$I
+                } # end valid DEQ2 pointer
+            } # End adding entry to DEQ2 chain
+        } # end IF EXPENDABLE
+    } # end FOR DEQ chain
+ 
+return
+end
+ 
+
+ 
+ 
+Subroutine DAMSHR(unt$pointer)                  #Damaged shorebase routine
+ 
+########################################################
+#$%
+#$% Purpose:   DAMSHR assesses damage done to
+#$%            the select shorebase unit and
+#$%            the on-base equipment due to
+#$%            weapons effect during the game
+#$%            being processed.
+#$%
+#$% Called By: DAMDIR
+#$%
+#$% Calls:     DAMACI     DAMREP
+#$%
+#$% Tables:    DEQ        SHC        UNT
+#$%
+#$% Date:      FEB 81
+#$%
+#$% Author:    Dana Wills
+#$%
+#$% Modified:  James Allen - 2/96 (E1467)
+#$%            Replaced general fuel damage (rmfuel)
+#$%            with dual air/ship fuel tank damage.
+#$%
+#$%            James Allen - 3/96 (E1467)
+#$%            Moved trace statements below computation
+#$%            of fuel store damage and extract the
+#$%            tank capacity of the ship fuel before
+#$%            calculations.
+#$%
+#$%            Susan Miller - 5/96 (E1582)
+#$%            Ensure that the percent of fuel lost does
+#$%            not exceed 100%.
+#$%
+#$%            Susan Miller 3/98 (E1937)
+#$%            Added variable definitions.  Created variable,
+#$%            real_hits, to hold the float product of hits
+#$%            divided by 100 so it wouldn't be rounded to the
+#$%            integer value, which was what was causing the
+#$%            lack of damage to sensors, comms, etc.
+#$%
+########################################################
+ 
+BBcommon
+DMcommon
+LOSTcommon                      # jb - for weapons LOST         5/11/87
+ 
+integer*4 UNT$Pointer
+ 
+integer*4 ndairc
+integer*4 SHC$Pointer, DEQ$Pointer, SHC$TNK$Index
+integer*4 UNT$Hits$I, UNT$TorpHits$I, UNT$BombHits$I
+integer*4 UNT$MissHits$I, UNT$GunHits$I, UNT$TNK$Index
+literal   UNT$Name$C, cstrip8, DEQ$Type$C
+real*4    rmsams, rmstor, amt_lost
+real*4    SHC$TNK$Capacity$F, pct_ship_fuel_loss
+real*4    pct_aviation_fuel_loss
+real*4    pdsens, pdairc, pdcomm, pdfuel
+real*4    random_number, x, random
+real*4    real_hits
+integer*4 idsfuel, idafuel, idhull, idsams, idstor
+integer*4 ndcomm, ndsens, ndboats, nstore, nlimit
+integer*4 i_pcent_weap, i_pcent_fuel, ilost, isexp
+real*4    UNT$StoreDamage$F, UNT$SAMDamage$F
+real*4    UNT$AviationFuelDamage$F, UNT$ShipFuelDamage$F
+integer   Game_DTG    # integer function
+integer*4 DEQ$Remaining$I, DEQ$Limit$I, DEQ$Ident$I
+data x/0.0/		# Get next random number in sequence
+ 
+#$% set shorebase characteristics pointer
+shc$pointer = xunt$shcpntr$i
+ 
+#$% get number of hits
+unt$Hits$i = xunt$Hits$i
+real_hits = float(UNT$Hits$I)/100.0  # SMM 3/98 (E1937)
+ 
+unt$Name$c = Xunt$Name$c        # jb                    5/11/87
+if (trace$damage$EXE != $no)
+   {
+    call echor
+    call echov  ('@ ')
+    call echohn(unt$Name$c,$$MaxLit)   # jb  - no 'X' -        5/11/87
+    call echov(" damage: ")
+    call echoi(unt$hits$i/100)
+    call echov(" EPU's")
+ 
+    unt$TorpHits$i = xunt$TorpHits$i    # Moved 6/24/85
+    unt$BombHits$i = xunt$BombHits$i    #   here from
+    unt$MissHits$i = xunt$MissHits$i    #   just above the
+    unt$GunHits$i  = xunt$GunHits$i     # preceding IF (trace..
+ 
+    if (unt$TorpHits$i != 0)
+        {
+        call echov(" Torp=")
+        call echoi(unt$TorpHits$i)
+        }
+ 
+    if (unt$MissHits$i != 0)
+        {
+        call echov(" Miss=")
+        call echoi(unt$MissHits$i)
+        }
+ 
+    if (unt$BombHits$i != 0)
+        {
+        call echov(" Bomb=")
+        call echoi(unt$BombHits$i)
+        }
+ 
+    if (unt$GunHits$i != 0)
+        {
+        call echov(" Gun=")
+        call echoi(unt$GunHits$i)
+        }
+   }
+ 
+#$% compute remaining SAMS and stores based on hits and lethal
+#$% effects ratios
+# rmfuel is replaced by pct_ship_fuel_loss and pct_aviation_fuel_loss - joa 2/96 (E1467)
+rmsams = exp(-real_hits * xSHC$LethalAreaSAMSiteS$F)
+rmstor = exp(-real_hits * xSHC$LethalAreaStores$F)
+ 
+#$% compute partially damaged air, comm, and sensor units based on
+#$% number of hits and lethal effects ratios
+pdairc = 1.0 - exp(-real_hits * xSHC$LethalAreaAC$F)
+pdcomm = 1.0 - exp(-real_hits * xSHC$LethalAreaComm$F)
+pdsens = 1.0 - exp(-real_hits * xSHC$LethalAreaSensor$F)
+ 
+#$% initialize flags
+idsfuel = $no                                   #init ship fuel-damaged flag       # joa 2/96 (E1467)
+idafuel = $no                                   #init aviation fuel-damaged flag   # joa 2/96 (E1467)
+idhull  = $no                                   #init hull-damaged flag            # joa 2/96 (E1467)
+idsams = $no                                    #init SAM-site-damaged flag
+idstor = $no                                    #init stores-damaged flag
+ 
+ndcomm = 0                                      #init damaged comm counter
+ndsens = 0                                      #init damaged sensor counter
+ 
+# Determine Ship fuel tank damage    # joa 2/96 (E1467)
+shc$TNK$Index = ShipFuelTank$Index
+pdfuel = 1.0 - exp(-unt$hits$i * XShc$TNK$LETHALAREA$F/100.)
+random_number = random(x)
+if (random_number <= pdfuel)
+{
+    unt$TNK$Index = ShipFuelTank$Index
+    amt_lost = Xunt$TNK$FuelRemaining$f * 0.5 * random_number * pdfuel
+    shc$TNK$Capacity$f = Xshc$TNK$Capacity$f
+    if (shc$TNK$Capacity$f > 0)
+       {
+        pct_ship_fuel_loss = amt_lost / shc$TNK$Capacity$f
+        if (pct_ship_fuel_loss > 1.0)   # ensure that percent lost is
+          pct_ship_fuel_loss = 1.0      # not more than 100% - smm 5/96 (E1582)
+       }
+    else
+        pct_ship_fuel_loss = 0
+ 
+ 
+    #$% if current fuel remaining is less than initial fuel remaining
+    if (amt_lost > 0.0)
+    {
+ 
+    call TNK_adjust_fuel_remaining(unt$pointer,
+                                  ShipFuelTank$Index,
+                                  amt_lost * (-1.0) )
+    #$% set fuel flag to YES
+    idsfuel = $yes
+   }
+}
+ 
+# Determine Aviation fuel tank damage    # joa 2/96 (E1467)
+shc$TNK$Index = AviationFuelTank$Index
+pdfuel = 1.0 - exp(-unt$hits$i * XShc$TNK$LETHALAREA$F/100.)
+random_number = random(x)
+if (random_number <= pdfuel)
+{
+    unt$TNK$Index = AviationFuelTank$Index
+    amt_lost = Xunt$TNK$FuelRemaining$f * 0.5 * random_number * pdfuel
+    shc$TNK$Capacity$f = Xshc$TNK$Capacity$f
+    if (shc$TNK$Capacity$f > 0)
+       {
+        pct_aviation_fuel_loss = amt_lost / shc$TNK$Capacity$f
+        if (pct_aviation_fuel_loss > 1.0)   # ensure that percent lost is
+          pct_aviation_fuel_loss = 1.0      # not more than 100% - smm 5/96 (E1582)
+       }
+    else
+        pct_aviation_fuel_loss = 0
+ 
+    #$% if current fuel remaining is less than initial fuel remaining
+    if (amt_lost > 0.0)
+    {
+ 
+    call TNK_adjust_fuel_remaining(unt$pointer,
+                                  AviationFuelTank$Index,
+                                  amt_lost * (-1.0) )
+    #$% set fuel flag to YES
+    idafuel = $yes
+   }
+}
+ 
+#$% if trace of damage requested by user (usually for debug)
+if (trace$damage$EXE != $no)
+   {
+    #$% display damage message
+    call echor
+    call echov  ('@ ')
+    call echov("% remaining:  ")
+    call echoi(int(100*(1.0 - pct_ship_fuel_loss)))
+    call echov(" Ship Fuel")
+    call echoi(int(100*(1.0 - pct_aviation_fuel_loss)))
+    call echov(" Aviation Fuel")
+    call echoi(int(100*rmsams))
+    call echov(" SAMS")
+    call echoi(int(100*rmstor))
+    call echov(" eq ")
+    call echov("...")
+    call echov("  PD a/c ")
+    call echoi(int(100*pdairc))
+    call echov("  PD comm ")
+    call echoi(int(100*pdcomm))
+    call echov("  PD sens ")
+    call echoi(int(100*pdsens))
+   }
+ 
+#$% for each equipment entry
+FOR_DEQ_CHAIN
+   {
+    #$% get equipment identity
+    deq$ident$i = xdeq$ident$i
+    call EXPTST ( deq$ident$i , isexp )
+ 
+    #$% if equipment identity is SAM
+    if (DEQ$IDENT$I == $SAM$CODE)       # <<<>>>???
+       {
+        #$% get equipment limit
+        DEQ$LIMIT$I = XDEQ$LIMIT$I
+ 
+        #$% update limit for damage
+        nlimit = deq$limit$i * rmsams
+ 
+        #$% if updated limit is less than initial limit
+        if (nlimit < deq$limit$i)
+           {
+            #$% update initial limit and store
+            deq$limit$i = nlimit
+            putdeq$limit$i
+ 
+            #$% set SAM flag to YES
+            idsams = $yes
+           }
+ 
+        #$% get initial number of equipment/stores remaining
+        DEQ$REMAINING$I = XDEQ$REMAINING$I
+ 
+        #$% updates stores for damage incurred
+        nstore = deq$remaining$i * rmstor
+ 
+        #$% if updated stores is less than initial stores
+        if (nstore < deq$remaining$i)
+           {
+            #$% update initial remaining stores and store
+            deq$remaining$i = nstore
+            putdeq$remaining$i
+ 
+            #$% set stores flag to YES
+            idstor = $yes
+           }
+       }        # End if SAM...<<<>>>
+ 
+    #$% else if equipment ID is commsuite
+    else if (DEQ$IDENT$I == $COMMSUITE$CODE)
+       {
+        #$% if a random number is less than or equal to comm partial damage
+        if (random(x) <= pdcomm)
+           {
+            #$% set equipment ID to null (totally destroyed) and save it
+            PUTdeq$TimeWhenUse$f ($Hi_deq$TimeWhenUse$f)
+            # DEQ$IDENT$I = $NULL$CODE
+            # PUTDEQ$IDENT$I
+ 
+            #$% increment comm damage counter
+            ndcomm = ndcomm + 1
+            namcom[ndcomm] = XDEQ$pntr$i
+           }
+       }        # End if $COMMSUITE..
+ 
+    #$% else if equipment ID is radar or ESM
+    else if (deq$ident$i == $radar$code |
+             deq$ident$i == $esm$code   |
+             deq$ident$i == $iff$code)
+       {
+        #$% if a random number is less than or equal to sensor partial damage
+        if (random(x) <= pdsens)
+           {
+            #$% set equipment ID to null (totally destroyed) and save it
+            PUTdeq$TimeWhenUse$f ($Hi_deq$TimeWhenUse$f)
+            # DEQ$IDENT$I = $NULL$CODE
+            # PUTDEQ$IDENT$I
+ 
+            #$% increment sensor damage counter
+            ndsens = ndsens + 1
+           #namsen[ndsens] = XDEQ$TYPE$C             ### smn002
+            namsen[ndsens] = XDEQ$pntr$i             ### smn002
+           }
+       }        # End if ESM or RADAR
+ 
+    #$% else if equipment ID is one of the following
+    else if (isexp == $YES)
+#             deq$ident$i == $CruiseMissile$code |
+#            deq$ident$i == $AAM$code           |
+#            deq$ident$i == $ASM$code           |
+#            deq$ident$i == $SAM$code           |       # jb    5/11/87
+#            deq$ident$i == $Bomb$code          |
+#            deq$ident$i == $Mine$code          |
+#            deq$ident$i == $Torpedo$code       |
+#            deq$ident$i == $CommBuoy$code      |
+#            deq$ident$i == $SonoBuoy$code      |
+#            deq$ident$i == $GND$code            )    # jb -noted- 12/11/89
+        {
+        #$% get number of initial equipment remaining
+        DEQ$REMAINING$I = XDEQ$REMAINING$I
+ 
+        #$% update initial stores by damage incurred
+        nstore = deq$remaining$i * rmstor
+ 
+        #$% if updated stores are less than initial number
+        if (nstore < deq$remaining$i)
+            {
+            if (trace$damage$WEP != $NO &               # jb    5/11/87
+            deq$ident$i != $CommBuoy$code )     # If this is so-5/11/87
+#           deq$ident$i != $SonoBuoy$code  ) # nobuoy or ordn.7/8/87
+                {
+                iLOST = deq$remaining$i - nstore
+                call echor
+                call echov ('#')
+                call echoiZ (Game_DTG(game$time),6)
+                call echov   (' ')
+                call echoi  (iLOST)
+                call echoh  (Cgonwep[deq$ident$i],6)
+                call echov  ("lost as damage to ")
+                call echohn (UNT$Name$C,$$MaxLit)                      # jb    5/11/87
+                DEQ$Type$c = XDEQ$Type$c                # jb    5/13/87
+                call echov   (' / ')
+                call echohn  (deq$TYPE$C,$$MaxLit)              # jb    5/13/87
+                }
+ 
+            #$% updates stores remaining and store
+            deq$remaining$i = nstore
+            putdeq$remaining$i
+ 
+            #$% set stores damage flag to YES
+            idstor = $yes
+            }   # End if (nstore < deq$remaining$i)
+        }     # End if this is an ordnance item
+    }   # End for EQ
+ 
+#$% call damage ROTHR
+call DAMROT(unt$pointer,pdsens)                 #damage ROTHR 4/24/90
+ 
+#$% call damage aircraft inventory
+call DAMACI(unt$pointer,pdairc,ndairc)          #damage aircraft inventory
+ 
+#--------------------------------------- Boat Inventory Damage 5/1/89
+#$% call damage boat inventory
+if ( pdairc > 0.0 & ndairc < 1 ) # jb (Not done if a/c damaged) 5/2/89
+    call DamBOATinv(unt$pointer,pdairc,ndboats)      # jb       5/2/89
+else ndboats = 0
+#----------------------------------    End Boat Inventory Damage 5/1/89
+ 
+#$% compute ship fuel damage and store it        # joa 2/96 (E1467)
+unt$Shipfueldamage$f = Xunt$Shipfueldamage$f + pct_ship_fuel_loss
+putunt$Shipfueldamage$f
+ 
+#$% compute aviation fuel damage and store it    # joa 2/96 (E1467)
+unt$Aviationfueldamage$f = Xunt$Aviationfueldamage$f + pct_aviation_fuel_loss
+putunt$Aviationfueldamage$f
+ 
+#$% compute SAM damage and store it
+unt$samdamage$f = 1.0 - rmsams * (1.0 - xunt$samdamage$f)
+putunt$samdamage$f
+ 
+#$% compute stores damage and store it
+unt$storedamage$f = 1.0 - rmstor * (1.0 - xunt$storedamage$f)
+putunt$storedamage$f
+ 
+#$% call to set up damage report
+#$% added expanded fuel damage arguments to call      # joa 2/96 (E1467)
+call DAMREP(unt$pointer,$shorebase$code,$no,          #compose damage report
+            idsfuel,idafuel,idhull,idstor,idsams,ndairc,ndsens,ndcomm,ndBOATS)
+ 
+#$% clk 2/95 - Update the C2 engagement record (for air/ground reports)
+#$% clk 3/96 (E1467) - replaced rmfuel reference (meant to indicate a/c fuel losses)
+i_pcent_fuel = INT(((1.0-pct_aviation_fuel_loss) * 100) + 0.5)
+i_pcent_weap = INT(((1.0-rmstor) * 100) + 0.5)
+ 
+return
+end
+ 
+
+ 
+ 
+Subroutine DAMSHP(unt$pointer)                  #Damaged ship routine
+ 
+########################################################
+#$%
+#$% Purpose:   DAMSHP assesses damage done to the
+#$%            select ship and to the on-board
+#$%            equipment due to weapons effects
+#$%            during the game being processed.
+#$%
+#$% Called By: DAMDIR
+#$%
+#$% Calls:     DAMREP     DAMACI
+#$%
+#$% Tables:    DEQ        SHC        UNT
+#$%
+#$% Date:      FEB 81
+#$%
+#$% Author:    Dana Wills
+#$%
+#$% Modified:  James Allen - 2/96 (E1467)
+#$%            Added dual air/ship fuel tank damage.
+#$%
+#$%            Susan Miller - 10/96 (E1696)
+#$%            Changed ihullepu (an integer) to
+#$%            hullepu (a real) so that more accurate
+#$%            damage can be computed/simulated.
+#$%
+#$%            Susan Miller 3/98 (E1937)
+#$%            Added variable definitions.
+#$%            Changed variables iachits,icommhits,isenhits,
+#$%            iwephits, and ispdepu from integers to
+#$%            reals and removed leading i in name. Done
+#$%            so that decimal damage would not get lost
+#$%            to integer rounding.
+#$%
+########################################################
+ 
+BBcommon
+DMcommon
+LOSTcommon                      # jb - for weapons LOST         5/11/87
+ 
+integer*4  UNT$Pointer
+ 
+integer*2  iweapon[3]   # jb  Flags for: ASM/CrsMsl; BOMB; TORPEDO
+integer Game_DTG
+real time, when, minclosed
+real hullepu # SMM 10/3/96 (E1696)
+real*4    achits, commhits, senhits, wephits, spdepu # SMM 3/12/98 (E1937)
+real*4    amt_lost, random, x, random_number
+real*4    UNT$HullDamage$F, UNT$TNK$Index, SHC$TNK$Index
+real*4    rmhull, pdhull, rmmspd, pdweap, pdsens
+real*4    pdcomm, pdairc, pdfuel, pctrem
+integer*4 BML$Pointer, UNT$ARMHits$I, UNT$GunHits$I, UNT$MissHits$I
+integer*4 UNT$BombHits$I, UNT$TorpHits$I, UNT$Hits$I, SHC$Pointer
+integer*4 SHC$CrossSect$I, UNT$Type$I, DEQ$Remaining$I, DEQ$Ident$I
+integer*4 DEQ$Pointer, UNT$Speed$I
+integer*4 idhull, ntop, ndsens, ndcomm, idweap, ndtop
+integer*4 ndboats, ndairc
+integer*4 idafuel, idsfuel, idmspd
+integer*4 krs, i, isink, ilost, isexp
+real*4    dcbls
+real*4    UNT$TimeSunk$F, UNT$TopSideDamage$F, UNT$OrderedSpeed$F
+literal   cstrip8, UNT$Name$C, DEQ$Type$C
+data x/0.0/		# Get next random number in sequence
+ 
+SHC$POINTER = Xunt$SHCPNTR$I
+ 
+unt$hits$i = xunt$hits$i                # get number of hits
+ 
+unt$TorpHits$i = xunt$TorpHits$i
+unt$BombHits$i = xunt$BombHits$i
+unt$MissHits$i = xunt$MissHits$i
+unt$GunHits$i  = xunt$GunHits$i
+UNT$ARMhits$I  = xUNT$ARMhits$I         # Task 4.1 b: ARM msl:  3/5/85
+ 
+#if (Xunt$SmallBoat$i != $NO)             ## jb                 6/29/89
+if (Xunt$SubType$i == $SmallBoat$SubCode )              # DEW 5/1/90
+ {
+  If(unt$TorpHits$i >0 | unt$BombHits$i >0 | unt$MissHits$i >unt$armhits$i)
+    {        # Small Boat sinks upon hit, except guns/ARMs
+     for (i=1; i<=3; i = i+1)
+       {
+        iweapon[i] = $NO    # jb  Clear-out old information     5/1/89
+       }                    # -- then, conditionally insert new info:
+     if(unt$MissHits$i >unt$ARMHITS$i)    iweapon[1] = $ASM$Code
+     if(unt$BombHits$i >0)                iweapon[2] = $BOMB$Code
+     if(unt$TorpHits$i >0)                iweapon[3] = $TORPEDO$Code
+     if(Xunt$NeverSink$i == NO)call SmBsunk(UNT$Pointer,iweapon)     #JHM 8/05 UFL-
+    }                                                                #-nosink now works for boats
+  Else if (UNT$ARMhits$I > 0 | unt$GunHits$i > 0)
+    {
+     BML$Pointer$TO  (xUNT$BMLindx$i)  # jb                    7/7/89
+     putBML$DamageMultiplier$i (3)     # jb                    7/7/89
+     UNT$ARMhits$i = 0 # jb for SmBoats, ARMs damage spd,hull 6/29/89
+    }
+ } # End if SmallBoat..
+ 
+unt$Name$c = xunt$Name$c                        #       jb      5/11/87
+ 
+#$% if trace of damage requested by user (usually for debug)
+if (trace$damage$EXE != $no)
+   {
+    #$% display damage message
+    call echor
+    call echov  ('@ ')
+    call echohn(unt$Name$c,$$MaxLit)                   # jb -no 'X'    5/11/87
+    call echov(" damage: ")
+    call echoi(unt$hits$i/100)
+    call echov(" EPU's")
+ 
+    if (unt$TorpHits$i != 0)
+        {
+        call echov(" Torp=")
+        call echoi(unt$TorpHits$i)
+        }
+ 
+    if (unt$MissHits$i != 0)
+        {
+        call echov(" Miss=")
+        call echoi(unt$MissHits$i)
+        }
+ 
+    if (unt$BombHits$i != 0)
+        {
+        call echov(" Bomb=")
+        call echoi(unt$BombHits$i)
+        }
+ 
+    if (unt$GunHits$i != 0)
+        {
+        call echov(" Gun=")
+        call echoi(unt$GunHits$i)
+        }
+   }
+ 
+# Determine Ship fuel tank damage    # joa 2/96 (E1467)
+idsfuel = $NO
+idafuel = $NO
+ 
+if (Xunt$SubType$i != $SmallBoat$SubCode )        # joa 2/96 (E1467)
+{                                                 # only surface ships
+    shc$TNK$Index = ShipFuelTank$Index
+    pdfuel = 1.0 - exp(-unt$hits$i * XShc$TNK$LETHALAREA$F/100.)
+    random_number = random(x)
+    if (random_number <= pdfuel)
+    {
+        unt$TNK$Index = ShipFuelTank$Index
+        amt_lost = Xunt$TNK$FuelRemaining$f * 0.5 * random_number * pdfuel
+        #$% if current fuel remaining is less than initial fuel remaining
+        if (amt_lost > 0.0)
+        {
+            call TNK_adjust_fuel_remaining(unt$pointer,
+                                      ShipFuelTank$Index,
+                                      amt_lost * (-1.0) )
+            #$% set fuel flag to YES
+            idsfuel = $yes
+       }
+    }
+ 
+    # Determine Aviation fuel tank damage
+ 
+    shc$TNK$Index = AviationFuelTank$Index
+    pdfuel = 1.0 - exp(-unt$hits$i * XShc$TNK$LETHALAREA$F/100.)
+    random_number = random(x)
+    if (random_number <= pdfuel)
+    {
+        unt$TNK$Index = AviationFuelTank$Index
+        amt_lost = Xunt$TNK$FuelRemaining$f * 0.5 * random_number * pdfuel
+        #$% if current fuel remaining is less than initial fuel remaining
+        if (amt_lost > 0.0)
+        {
+ 
+            call TNK_adjust_fuel_remaining(unt$pointer,
+                                      AviationFuelTank$Index,
+                                      amt_lost * (-1.0) )
+            #$% set fuel flag to YES
+            idafuel = $yes
+       }
+    }
+}
+ 
+unt$HullDamage$f = xunt$HullDamage$f  #$% get initial hull damage
+rmhull = 1.0 - unt$HullDamage$f  #$% amount of hull OK before hits
+ 
+    #$% compute amount of hull OK after hits:
+# SMM 10/3/96 (E1696) - Changed equation to handle real numbers
+# rather than integers (values were being truncated to 0).
+HULLepu = (unt$hits$i - UNT$ARMhits$I)/100.  # Task 4.1b: ARM tpside     3/5/85
+if (HULLepu > 0.0)                           #Task 4.1 b: ARM tpside 3/5/85
+  rmhull = rmhull *  exp(-HULLepu * xshc$ProbSink$f) #Task 4.1b: 3/5/85
+ 
+pdhull = 1.0 - rmhull  #$% update amount of hull damaged
+ 
+#$% if trace of damage requested by user (usually for debug)
+if (trace$damage$EXE != $no)
+   {
+    #$% display damage message
+    call echor
+    call echov  ('@ ')
+    call echoi(int(100*pdhull))
+    call echov("% hull damaged  ")
+   }
+ 
+if (pdhull > unt$HullDamage$f)  #$% if additional hull damage
+   {
+    unt$HullDamage$f = pdhull   #$% set to latest hull damage
+    putunt$HullDamage$f         #$% save hull damage
+    idhull = $yes    #$% set hull damage flag to YES
+   }
+else        #$% else set hull damage flag to NO
+    idhull = $no
+ 
+# if a random number is less than or equal to ship Prob-damage to Hull
+if (random(x) < pdhull & Xunt$NeverSink$i == NO)  #E2360 JOA UFL03, per_never
+ {
+  if (Xunt$SubType$i != $SmallBoat$SubCode )                    # DEW 5/1/90
+   {
+    #$%  compute sink time
+    SHC$CROSSSECT$I = XSHC$CROSSSECT$I                          #       2/11/85
+    krs = max(22,SHC$CROSSSECT$I)                               #       2/11/85
+    DCBLS = FLOAT(krs) - 21.                                    # jb    8/22/88
+    time =krs/3 + 4.* rmhull *(10**(DCBLS/10)) # jb; Replace QKPOWR    8/22/88
+    time = min(time,90.)                                       #       2/21/85
+    time = max(time,2.)             # At least 2 minutes to sink
+   }
+  else        # This is a Small Boat..                          # jb    4/27/89
+   {
+    time = 2 + 10 * random(x) # jb  SmallBoat sinks in 2 to 10 minutes 8/8/08
+   }
+ 
+  when = game$time + time
+  unt$TimeSunk$f = Xunt$TimeSunk$f              # set game time ship will sink
+ 
+  if (unt$TimeSunk$f == 0  |
+      unt$TimeSunk$f > when) PUTunt$TimeSunk$f (when)
+ 
+  # joa 2/96 (E1467) - added in dummy arguments for fuel tank damage
+  #call DAMREP(unt$pointer,0,$yes,0,0,0,0,0,0,0,0,0)    # jb    5/3/89
+ 
+  if (trace$damage$EXE != $no)
+       {
+        call echov ("...sinking...gone at ")
+        call echoiz(Game_DTG(Xunt$TimeSunk$f),6)
+        call echov ("  ")
+       }
+ 
+  if (log$engage != $no)              # if engagement log desired
+    {
+    if (Xunt$Status$I != $Sinking$Code)
+        call Generate_eng_rec ("SINKING ","DAMAGE  ",xUnt$Name$c)
+    }
+ 
+  PUTunt$Status$I ($Sinking$Code)               # set unit status to sinking
+ 
+  PUTunt$truespeed$f (0.0)                      # stop dead in the water
+  putUNT$AssumedSpeed$F (0.0)   # clk 4/95 (E1366)
+  PUTunt$speed$i      (0)       # jb set maximum speed to zero    4/26/89
+ }
+ 
+############################################################################
+###### Reinsert when automatic deck closure after damage is desired jb  11/3/86
+## NOTE: 2 other lines involved, at top of this subroutine and of the module:
+#literal        args[20]        # jb -for possible deck closure 11/3/86
+# include "orders.inc" # jb     <<<>>>  possible OCLOSE call    11/3/86
+#
+#if (unt$hits$i > 3 & Xunt$AirCapable$i == $Yes)        # jb  <<<>>>  11/3/86
+# {
+#  minclosed = Xunt$FltsOkTime$f - GAME$Time              # jb            11/3/86
+#  if (minclosed < 0 ) minclosed = 0                    # jb            11/3/86
+#  args[2] = unt$hits$i + minclosed                     # jb            11/3/86
+#  if (args[2] +GAME$Time >3000) args[2] = 3000 -GAME$Time # jb     11/3/86
+#  args[1] = $lex$CLOSE$                                # jb            11/3/86
+#  nord = $YES                  # dummy; not used in OCLOSE.    # jb    11/3/86
+#  nargs = 2                    # dummy; not used in OCLOSE.    # jb    11/3/86
+#  call oclose (nord,unt$pointer,nargs,args)    # jb    <<<>>>          11/3/86
+# } # NOTE:
+##### End of insertion for automatic deck closure after damage ######## 11/3/86
+ 
+idmspd = $no                                    #init max-speed-damage flag
+idweap = $no                                    #init weapon-damage flag
+ 
+ndcomm = 0                                      #init damaged comm counter
+ndsens = 0                                      #init damaged sensor counter
+ 
+ntop = 0                                        #init comm/sensor counter
+ 
+#$% compute comm, sens, weap, aircraft partial damage ratios
+ 
+AChits = float(UNT$Hits$I - UNT$TorpHits$I) #No a/c damage fm TORP jb 7/10/87
+pdairc = 1.0 - exp(-(AChits/100.0) * xSHC$LethalAreaAC$F)  # jb    7 /10/87
+ 
+if (RANDOM(x) <=0.5) COMMhits = AChits                # jb    7 /10/87
+else                 COMMhits = float(UNT$Hits$I)     # jb    7 /10/87
+pdcomm = 1.0 - exp(-(COMMhits/100.0) * xSHC$LethalAreaComm$F)      # jb    7 /10/87
+ 
+if (RANDOM(x) <=0.5) SENhits = AChits                 # jb    7 /10/87
+else                 SENhits = float(UNT$Hits$I)              # jb    7 /10/87
+pdsens = 1.0 - exp(-(SENhits/100.0) * xSHC$LethalAreaSensor$F) # jb        7 /10/87
+ 
+if (RANDOM(x) <=0.8) WEPhits = AChits                 # jb    7 /10/87
+else                 WEPhits = float(UNT$Hits$I)              # jb    7 /10/87
+pdweap = 1.0 - exp(-(WEPhits/100.0) * xSHC$LethalAreaWeapons$F)# jb        7 /10/87
+ 
+#$% compute damaged ship speed
+SPDepu = float(UNT$Hits$I - UNT$ARMHits$I) /100.0     # Task 4.1b: ARM tpside 3/6/85
+rmmspd = exp(-SPDepu * xSHC$LethalAreaMaxSpeed$F)       #       5/9/90
+ 
+#$% if trace of damage requested by user (usually for debug)
+if (trace$damage$EXE != $no)
+   {
+    #$% display ship damage message
+    call echoi(int(100*rmmspd))
+    call echov("% speed left ")
+    call echov("  PD a/c ")
+    call echoi(int(100*pdairc))
+    call echov("  PD comm ")
+    call echoi(int(100*pdcomm))
+    call echov("  PD sens ")
+    call echoi(int(100*pdsens))
+    call echov("  PD weap ")
+    call echoi(int(100*pdweap))
+   }
+ 
+unt$speed$i = xunt$speed$i
+maxspd = unt$speed$i * rmmspd   #$% maximum ship speed available
+ 
+#$% if maximum speed reduced from initial max speed capability
+if (maxspd < unt$speed$i)
+   {
+    unt$speed$i = maxspd    #$% update max speed and store
+    putunt$speed$i
+    idmspd = $yes    #$% set maximum speed flag to YES
+ 
+    unt$orderedspeed$f = Xunt$orderedspeed$f            #       4/19/85
+ 
+    #$% if ordered speed is greater than maximum speed
+    if (unt$orderedspeed$f > float(unt$speed$i) )       #       3/18/86
+       {
+        #$% limit speeds to max capable speed and store
+        unt$orderedspeed$f = float(unt$speed$i)         #       3/18/86
+        putunt$orderedspeed$f
+        putunt$assumedSpeed$f   (unt$orderedspeed$f)    #       12/18/85
+        putunt$TrueSpeed$f(unt$orderedspeed$f +Xunt$SpeedError$f) #12/18/85
+       }
+   }
+ 
+#$% for each equipment entry
+FOR_DEQ_CHAIN
+    {
+    DEQ$IDENT$I = XDEQ$IDENT$I    #$% get equipment ID
+    call EXPTST ( deq$ident$i , isexp )
+ 
+    #$% if equipment ID is commsuite or acoustic communication
+    if (DEQ$IDENT$I == $COMMSUITE$CODE |
+        DEQ$IDENT$I == $acousticCOMM$CODE)
+       {
+        ntop = ntop + 1 #$% increment comm/sensor counter
+ 
+        #$% if a random number is less than or equal to comm partial damage
+        if (random(x) <= pdcomm)
+           {
+            #$% set equipment ID to null (totally destroyed) and save it
+            PUTdeq$TimeWhenUse$f ($Hi_deq$TimeWhenUse$f)
+            # DEQ$IDENT$I = $NULL$CODE
+            # PUTDEQ$IDENT$I
+ 
+            ndcomm = ndcomm + 1     #$% increment comm damage counter
+            namcom[ndcomm] = XDEQ$pntr$i
+           }
+       }
+    #$% else if equipment ID is...
+    else if (DEQ$IDENT$I == $RADAR$CODE |
+             DEQ$IDENT$I == $SONAR$CODE |
+             DEQ$IDENT$I == $PASSONAR$CODE |
+             DEQ$IDENT$I == $ESM$CODE)
+       {
+        #$% increment comm/sensor counter
+        ntop = ntop + 1
+ 
+        #$% if a random number is less than or equal to sens partial damage
+        if (random(x) <= pdsens)
+           {
+            #$% set equipment ID to null (totally destroyed) and save it
+            PUTdeq$TimeWhenUse$f ($Hi_deq$TimeWhenUse$f)
+            # DEQ$IDENT$I = $NULL$CODE
+            # PUTDEQ$IDENT$I
+ 
+            ndsens = ndsens + 1 #$% increment sensor partial damage counter
+           #namsen[ndsens] = XDEQ$TYPE$C             ### smn002
+            namsen[ndsens] = XDEQ$pntr$i             ### smn002
+           }
+       }
+    #$% else if equipment ID is...
+    else if (isexp == $YES )
+#             DEQ$IDENT$I == $CRUISEMISSILE$CODE |
+#            DEQ$IDENT$I == $SAM$CODE |
+#            DEQ$IDENT$I == $TORPEDO$CODE |
+#            DEQ$IDENT$I == $gun$CODE |         # jb added  5/11/87
+#            DEQ$ident$i == $SonoBuoy$code |    # jb added   7/8/87
+#            DEQ$IDENT$I == $CIWS$CODE     |
+#            DEQ$IDENT$I == $GND$CODE       )  # jb noted 12/11/89
+       {
+        #$% if a random number is less than or equal to weapon partial damage
+        if (random(x) <= pdweap)
+           {
+            iLOST = XDEQ$remaining$i
+            if (trace$damage$WEP != $NO  & iLOST > 0)   # jb    5/12/87
+             {
+              call echor
+              call echov ('#')
+              call echoiZ (Game_DTG(game$time),6)
+              call echov   (' ')
+              call echoi  (iLOST)
+              call echoh  (Cgonwep[DEQ$ident$i],6)
+              call echov  (" lost as damage to ")
+              call echohn (UNT$Name$C,$$MaxLit)                # jb    5/11/87
+              DEQ$Type$c = XDEQ$Type$c          # jb    5/13/87
+              call echov   (' / ')
+              call echohn  (DEQ$TYPE$C,$$MaxLit)                # jb    5/13/87
+             }
+ 
+            #$% set equipment remaining (totally destroyed) to zero
+            DEQ$remaining$i = 0
+            putDEQ$remaining$i
+ 
+            idweap = $yes           #$% initialize weapon damage flag to yes
+           }
+       }
+   }
+ 
+unt$type$i  = Xunt$type$i                    # jb               5/2/89
+#$% call damage aircraft inventory
+if(Xunt$AirCapable$i == $Yes & pdairc > 0.0 ) # jb     7/9/87
+    call DAMACI(unt$pointer,pdairc,ndairc)
+else ndairc = 0                         # clf 8/21/87
+ 
+#--------------------------------------- Boat Inventory Damage 5/1/89
+#$% call damage boat inventory
+ 
+if(unt$type$i != $Sub$Code & pdairc > 0.0  &
+   Xunt$SuperType$i != $SmallBoat$SuperCode)               # jb       5/2/89
+    call DamBOATinv(unt$pointer,pdairc,ndboats)      # jb       5/2/89
+else ndboats = 0
+#----------------------------------    End Boat Inventory Damage 5/1/89
+ 
+#$% set topside damage as sum of comm and sensor damage counters
+ndtop = ndcomm + ndsens
+ 
+if (ndtop > 0)  #$% if there is topside damage
+   {
+    pctrem = 1.0 - float(ndtop)/float(ntop)    #$% percent topside damage
+ 
+    #$% compute topside damage and store it
+    unt$topsidedamage$f = 1.0 - pctrem * (1.0 - xunt$topsidedamage$f)
+    putunt$topsidedamage$f
+   }
+ 
+if(xunt$status$i == $sinking$code) isink = $YES         #       4/10/84
+else                               isink = $NO          #       4/10/84
+call DAMREP(unt$pointer,$surface$code,isink,    #compose damREP 4/10/84
+            idsfuel,idafuel,idhull,idmspd,idweap,ndairc,ndsens,ndcomm,ndBOATS)
+ 
+return
+end
+ 
+ 
+
+ 
+Subroutine DAMACI(unt$pointer,pdairc,ndairc)   #damage aircraft inventory
+ 
+########################################################
+#$%
+#$% Purpose:   DAMACI assesses damage done to
+#$%            the aircraft inventory due to
+#$%            weapons effects during the game
+#$%            being processed.
+#$%
+#$% Called By: DAMSHR     DAMSHP
+#$%
+#$% Calls:     None
+#$%
+#$% Tables:    UNT        AML
+#$%
+#$% Date:      APRIL 81
+#$%
+#$% Author:    Dana Wills
+#$%
+#$% Modified:  Susan Miller - 3/98 (E1937)
+#$%            Added variable definitions.
+#$%
+########################################################
+ 
+BBcommon
+ 
+integer*4 UNT$Pointer, ndairc
+real*4    pdairc
+ 
+integer   Game_DTG    # integer function
+literal   cstrip8, idummy
+ 
+integer*4 iecho4, iowner
+integer*4 AML$Pointer, AML$Status$I
+real*4    random, x
+integer*4 icnt, klen
+literal   AML$SideNumber$C, UNT$Name$C
+Character msg[ARB]
+ 
+#            12345678901234567890123456789012345678901
+#String msg4 "#       Aircraft lost as damage to                  "
+data x/0.0/		# Get next random number in sequence
+ 
+#$% initialize air damage counter
+ndairc = 0
+ 
+#$% set unit pointer
+iOWNER = unt$pointer$index
+iecho4 = $YES   # initlz. trigger for MSG4      # jb    5/21/87
+ 
+#$% for each pointer entry
+for(aml$pointer$first; still_valid(aml); aml$pointer$next) # 9/26/88
+   {
+    aml$Status$i = Xaml$Status$i
+    if( (aml$status$i !=$OnDeck$code & aml$status$i !=$Assigned$code) |
+         iOWNER != Xaml$ownerindx$i)    NEXT
+ 
+    #$% if a random number is less than or equal to air partial damage,
+    if (random(x) > pdairc) NEXT        # .. a/c is NOT lost
+ 
+    #$% increment air damage counter
+    ndairc = ndairc + 1
+ 
+    #$% Enter data into the DAC table.       clk 3/92
+    idummy = 0
+    call Update_Destroyed_Aircraft (0, 0, $DestroyedOnGround$Code,
+                                    idummy, AML$Pointer, 0)
+ 
+    if (log$engage != $no)              # if engagement log desired
+        {
+        if (xAML$status$i != $destroyed$code )
+            call Generate_eng_rec ("ONDECK  ","DAMAGE  ",xaml$SideNumber$c)
+        }
+ 
+    #$% set status of entry to destroyed and store it in the AML table
+    aml$status$i = $destroyed$code
+    PUTaml$status$i
+ 
+    if (trace$damage$WEP != $NO )               # jb            5/11/87
+     {
+      if(iecho4 == $YES)                        # jb            5/15/87
+       {
+        Unt$Name$c = XUnt$Name$c                # jb            5/21/87
+        call echor; klen = 0; iecho4 = $NO      # jb =1         5/21/87
+        call smovv("#",msg,klen)
+        call smoviZ(Game_DTG(game$time),6,msg,klen) # jb IZ  5/21/87
+        call smovv(" Aircraft lost as damage to ",msg,klen)
+        call smovHn(Unt$Name$c,$$MaxLit,msg,klen)   #        5/21/87
+        call smovv(" : ",msg,klen)
+        call echoh(msg,klen +1)
+        icnt = 0        # initlz. counter for each line of side-numbers
+       }
+ 
+ 
+      if (icnt > 11 | icnt < 1 )                # jb            5/15/87
+        {
+         call echor
+         call echov ('#')
+         if ( icnt > 11 )  icnt = 0
+        }
+ 
+      aml$SideNumber$c = Xaml$SideNumber$c
+      call echohn (aml$SideNumber$c,5)
+      call echov   (' ')
+      icnt = icnt +1
+     }          # End of if (trace$damage$WEP != $NO)
+   }    # End of search thru AML table
+ 
+return
+end
+ 
+
+ 
+ 
+Subroutine DAMREP(unt$pointer,
+                  unt$type$i,
+                  isink,                #sinking flag
+                  idsfuel,              #ship fuel damage flag
+                  idafuel,              #aviation fuel damage flag
+                  idhull,               #hull damage flag
+                  idspst,               #speed or store damage flag
+                  idweap,               #weapon or SAM damage flag
+                  ndairc,               #number of damaged aircraft
+                  ndsens,               #number of damaged sensors
+                  ndcomm,               #number of damaged comms
+                  ndBOATS)  #number of damaged SmallBoats jb    5/2/89
+ 
+########################################################
+#$%
+#$% Purpose:   DAMREP outputs damage reports
+#$%            for ships, shorebases, and
+#$%            related equipments.  The re-
+#$%            port is formatted  during the
+#$%            game being processed.
+#$%
+#$% Called By: DAMSHR     DAMSHP
+#$%
+#$% Calls:     None
+#$%
+#$% Tables:    UNT        DAM
+#$%
+#$% Date:      FEB 81
+#$%
+#$% Author:    Ron Williams
+#$%
+#$% Modified:  7/89 - D. Wills      Allowed re-use of DAM entries
+#$%
+#$%            Carol Kropp - 4/95 (E1365)
+#$%            Send a message to control when there are
+#$%            no free DAM slots and one will be reused.
+#$%
+#$%            James Allen 2/96 (E1467)
+#$%            Removed paramater idhufu and added idsfuel,
+#$%            idafuel and idhull for fuel tank and hull damage.
+#$%
+#$%            Susan Miller - 3/98 (E1937)
+#$%            Added variable definitions.
+#$%
+#$%            James Allen 8/04 UFL04
+#$%            Damage table automatically archived when full.
+#$%            Oldest entry is overwritten instead of clearing DAM table
+#$%
+########################################################
+BBcommon
+DMcommon
+ 
+integer*4 UNT$Pointer, UNT$Type$I
+integer*4 isink, idsfuel, idafuel, idhull, idspst
+integer*4 idweap, ndairc, ndsens, ndcomm, ndBOATS
+ 
+integer*4 UNT$ReportDamage$I
+integer*4 DAM$Pointer, DAM$View$I
+integer*4 DAM$DEV$Pntr$I, DAM$DEV$Index, DAM$NbrDevices$I
+integer*4 DAM$SMBoats$I, DAM$Aircraft$I, DAM$AviationFuel$I
+integer*4 DAM$ShipFuel$I, DAM$WeaponSystems$I, DAM$Speed$I
+integer*4 DAM$Sinking$I, DAM$SamSites$I, DAM$Stores$I
+integer*4 DAM$Hull$I, DAM$Base$I, DAM$ReportStatus$I
+integer*4 NAM$Pointer
+real      DAM$Time$F, dam$sinklatitude$f, dam$sinklongitude$f   #$%  Smp E1671   4/98
+ 
+integer     oldest_DAM
+real        oldest_time
+integer     oldest_Archived_DAM
+real        oldest_Archived_time
+character   msg[ARB]
+integer     msg_len
+ 
+#$% set unit report damage flag to YES and store
+unt$ReportDamage$i = $yes
+PUTunt$ReportDamage$i
+ 
+oldest_DAM  = 0                         # allow re-use of DAM slot entries
+oldest_TIME = game$time + 1.0           # by finding the oldest (earliest)
+ 
+oldest_Archived_DAM  = 0
+oldest_Archived_TIME = game$time  + 1.0 # Beyond latest time
+ 
+#$% for each damage entry
+for (dam$pointer$first;still_valid(dam);dam$pointer$next) # 9/26/88
+   {
+    #$% if DAM Slot not used, break loop
+    if (xdam$NameIndx$i == 0)  break
+ 
+    dam$Time$f = Xdam$Time$f
+    if (dam$Time$f < oldest_Time)   # Is this one older?
+    {
+        oldest_DAM  = dam$pointer   # yes it is...
+        oldest_TIME = dam$Time$f    # save age
+    }
+    if (dam$Time$f < oldest_Archived_Time & Xdam$Archived$i == $YES)   # Is this one older?
+    {
+        oldest_Archived_DAM  = dam$pointer   # yes it is...
+        oldest_Archived_TIME = dam$Time$f    # save age
+    }
+   }
+ 
+# Overwrite oldest archived slot
+if (oldest_Archived_DAM != 0) dam$pointer = oldest_Archived_DAM
+ 
+if (!dam$pointer$valid)                 # was there a new DAM slot available?
+    {
+    call archive_dam_table
+    dam$pointer = oldest_DAM            # OK, use it
+    }
+ 
+if (dam$pointer$valid)
+    {
+    dam$zero                            # empty the old one out
+    }
+ 
+ 
+call addnam_unit (unt$pointer,nam$pointer)      # add entry to NAM Table
+ 
+if (nam$pointer == 0) return                    # no slots avail in NAM
+ 
+#$% if pointer out of range, reset table limits
+if (!dam$pointer$ok)  dam$last$to dam$pointer + dam$entry - 1
+ 
+#$% set damage unit index to unit to be reported on and store it
+PUTdam$NameIndx$i (nam$pointer$index)
+ 
+#$% set damage unit index to unit to be reported on and store it
+PUTdam$UnitIndx$i (unt$pointer$index)
+ 
+#$% set view in which damage is to be displayed and store it
+dam$View$i = Xunt$View$i
+PUTdam$View$i
+ 
+#$% set report status and store it
+dam$ReportStatus$i = $NeedsReport$code
+PUTdam$ReportStatus$i
+ 
+#$% set damage time to game time and store it
+dam$Time$f = game$time
+PUTdam$Time$f
+ 
+#$% if shorebase
+if (unt$type$i == $shorebase$code)
+   {
+    #$% set damage shore base to YES and store it
+    dam$Base$i = $yes
+    PUTdam$Base$i
+ 
+    #$% set hull damage flag and store it    # joa 2/96 (E1467)
+    dam$Hull$i = idhull
+    PUTdam$Hull$i
+ 
+    #$% set stores damage flag and store it
+    dam$Stores$i = idspst
+    PUTdam$Stores$i
+ 
+    #$% set weapons damage flag and store it
+    dam$SamSites$i = idweap
+    PUTdam$SamSites$i
+   }
+else
+   {
+    #$% set sinking damage flag and store it
+    dam$Sinking$i = isink
+    PUTdam$Sinking$i
+ 
+    #$% if unit sinking, return
+    if (isink == $yes) return
+ 
+    #$% set maximum speed capability and store it
+    dam$Speed$i = maxspd
+    PUTdam$Speed$i
+ 
+    #$% set weapon damage flag and store it
+    dam$WeaponSystems$i =idweap
+    PUTdam$WeaponSystems$i
+   }
+ 
+#$% set ship fuel damage flag and store it    # joa 2/96 (E1467)
+dam$ShipFuel$i = idsfuel
+PUTdam$ShipFuel$i
+ 
+#$% set aviation fuel damage flag and store it    # joa 2/96 (E1467)
+dam$AviationFuel$i = idafuel
+PUTdam$AviationFuel$i
+ 
+#$% set aircraft damage flag and store it
+dam$Aircraft$i = ndairc
+PUTdam$Aircraft$i
+ 
+#$% set and store Small-Boats damaged
+dam$SmBOATS$i = ndBOATS                               # jb        5/2/89
+PUTdam$SmBOATS$i                                      # jb        5/2/89
+ 
+#$% set topside damage flag and store it
+dam$NbrDevices$i = ndsens + ndcomm
+PUTdam$NbrDevices$i
+ 
+#$% for each sensor entry
+for (dam$dev$index=1;dam$dev$index<=ndsens;dam$dev$index=dam$dev$index+1)
+   {
+    #$% set pointer to sensor name and store it
+    dam$dev$Pntr$i = namsen[dam$dev$index]
+    PUTdam$dev$Pntr$i
+   }
+ 
+#$% for each comm entry
+for (dam$dev$index=ndsens+1;dam$dev$index<=dam$nbrdevices$i;dam$dev$index=dam$dev$index+1)
+   {
+    #$% set device pointer to com device name and store it
+    dam$dev$Pntr$i = namcom[dam$dev$index-ndsens]
+    PUTdam$dev$Pntr$i
+   }
+ 
+return
+end
+ 
+
+ 
+ 
+Subroutine DAMFLM(unt$pointer,          # Damaged flight message
+                  launch,
+                  nleft,
+                  nlost)
+ 
+########################################################
+#$%
+#$% Purpose:   DAMFLM outputs a flight message
+#$%            because of damage done to ship,
+#$%            shorebase, and related equipments
+#$%            due to weapons effects during
+#$%            game being processed.
+#$%
+#$% Called By: DAMIND
+#$%
+#$% Calls:     SMOVI      SMOVH      SMOVHN
+#$%            SEND
+#$%
+#$% Tables:    DEQ        UNT
+#$%
+#$% Date:      FEB 81
+#$%
+#$% Author:    Dana Wills
+#$%
+#$% Modified:  Susan Miller - 3/98 (E1937)
+#$%            Added variable definitions.
+#$%
+########################################################
+BBcommon
+ 
+integer*4 UNT$Pointer, launch, nleft, nlost
+ 
+integer*4 ilen
+literal   cstrip, cstrip8
+integer*4 UNT2$Pointer
+integer msg[ARB]
+ 
+# Output is formatted as in the following examples:
+#
+# 5 aircraft in Flight ALPHA unable to launch from CONNY.
+#
+# Flight ALPHA unable to launch from CONNY.
+ 
+ 
+#$% zero line length
+ilen = 0
+ 
+#$% if any aircraft left
+if (nleft > 0)
+   {
+    #$% move number lost to array for display
+    call smovi(nlost,msg,ilen)
+    call smovv(" aircraft in ",msg,ilen)
+   }
+ 
+#$% move data to array for display
+call smovv("Flight ",msg,ilen)
+ 
+#$% move data to array for display
+call smovhn(xunt$event$c,$$MaxName,msg,ilen) # SMM 10/99 E2141
+ 
+#$% move message to array for display
+call smovv(" unable to launch from ",msg,ilen)
+ 
+#$% set pointer to launch
+unt2$pointer$to launch
+ 
+#$% move data to array for display
+call smovhn(xunt2$name$c,$$MaxLit,msg,ilen)
+ 
+#$% send message to appropriate view
+call send(xunt$view$i,0,ilen,msg)
+ 
+return
+end
+ 
+
+subroutine SMBsunk(unt2$pointer, #rec'v  Small Boat unit pointer
+                   iweapon ) # rec'v 3 flags @ $NO or DEQ$Ident$I codes:
+# 5=CrsMsl NOT KNOWN in DAMSHP) SO: 7=MISS (ASM or CrsMsl) ;12=BOMB; 13=TORP
+########################################################
+#$%
+#$% Purpose:   SMBsunk 'sinks' the SmallBoat unit,
+#$%     specifying unt2$TimeSunk$f as Game$Time +2; and tells
+#$%     Player WHERE sunk plus by MISSILE/ BOMB and/or TORPEDO.
+#$%     (Does NOT divulge whether MISSILE is ASM or CRUISE...)
+#$%
+#$% Called By: DAMSHP
+#$%
+#$% Calls:    SEND    ECHO..    SMOV..
+#$%
+#$% Tables:    UNT2 (the target--the UNT from DAMSHP..)
+#$%            BML  (when BUILD/FORCE/INIT set it up..)
+#$%
+#$% Date:      MayDay, 1989
+#$%
+#$% Author:    Joe Bryant
+#$%
+#$% Modified:  Susan Miller - 3/98 (E1937)
+#$%            Added variable definitions.
+#$%
+########################################################
+BBCommon
+ 
+integer*4 UNT2$Pointer
+                      # Missile 7; Mine 11; Bomb 12; Torpedo 13
+INTEGER*2 iweapon [4] # DEQ$IDENT$i, except $ASM$code includes CrsMsl 7/6/89
+ 
+literal   cstrip8
+ 
+Character sbsunk[ARB]
+integer*4 BML$Pointer
+literal   UNT2$Name$C
+integer*4 jj
+ 
+BML$Pointer$TO  (xUNT2$BMLindx$i)    # jb ACTIVATED 5/16/89
+putBML$status$i ($destroyed$code)    # jb ACTIVATED 5/16/89
+putbml$TimeLaunch$f (0)              # jb           5/16/89
+ 
+if (log$engage != $no)               # if engagement log desired
+    {
+    if (Xunt2$Status$I != $Sinking$Code)
+        call Generate_eng_rec ("SINKING ","DAMAGE  ",xUnt2$Name$c)
+    }
+ 
+PUTunt2$status$i  ($SINKING$code)
+PUTunt2$TimeSunk$f (Game$Time + 2.)
+ 
+unt2$name$c = xunt2$name$c
+jj = 0
+call smovhn (unt2$name$c,$$MaxLit, sbsunk, jj)
+Call SMOVV(" SUNK by ",sbsunk,jj)
+ 
+if (iweapon[1] == $ASM$code    ) call smovv (" Missile hit,",       sbsunk, jj)
+if (iweapon[2] == $BOMB$code   ) call smovv (" Bomb hit,",          sbsunk, jj)
+if (iweapon[3] == $TORPEDO$code) call smovv (" Mine\Torpedo",  sbsunk, jj)
+ 
+call smovv(" at ",sbsunk,jj)
+call smovll(xUNT2$assumedLATITUDE$f,"NS",sbsunk,jj)
+call smovv(" ",sbsunk,jj)
+call smovll(xUNT2$assumedLONGITUDE$f,"EW",sbsunk,jj)
+ 
+call send  (xunt2$view$i, 0, jj, sbsunk)
+return
+end    # End  Subroutine SmBsunk
+ 
+
+ 
+Subroutine damBOATinv(unt$pointer,pdairc,ndBOATs) #damage SMboat inventory
+ 
+########################################################
+#$%
+#$% Purpose:   damBOATinv assesses damage done to
+#$%            the BOAT inventory due to
+#$%            weapons effects during the game
+#$%            being processed.
+#$%
+#$% Called By: DAMSHR     DAMSHP
+#$%
+#$% Calls:     None
+#$%
+#$% Tables:    UNT        BML
+#$%
+#$% Date:      2 May 1989
+#$%
+#$% Author:    Modified from Dane Wills' DAMACI by Joe B.
+#$%
+#$% Modified:  Susan Miller - 3/98 (E1937)
+#$%            Added variable definitions.
+#$%
+########################################################
+ 
+BBcommon
+Character msg[ARB]
+ 
+integer*4 UNT$Pointer, ndboats
+real*4    pdairc
+ 
+integer   Game_DTG    # integer function
+literal   cstrip8
+real*4    random
+ 
+integer*4 iowner, iecho4
+integer*4 BML$Pointer, BML$Status$I
+real*4    x
+literal   UNT$Name$C, BML$Name$C
+integer*4 klen, icnt
+ 
+#            12345678901234567890123456789012345678901
+#String msg4 "#       SmlBoats lost as damage to    "
+data x/0.0/		# Get next random number in sequence
+ 
+#$% initialize air damage counter
+ndBOATS = 0
+ 
+#$% set unit pointer
+iOWNER = unt$pointer$index
+iecho4 = $YES   # initlz. trigger for MSG4      # jb    5/21/87
+ 
+#$% for each pointer entry
+for(bml$pointer$first; still_valid(bml); bml$pointer$next) # 9/26/88
+   {
+    bml$Status$i = Xbml$Status$i
+    if( bml$status$i !=$OnDeck$code | iOWNER != Xbml$ownerindx$i)
+            NEXT
+ 
+    #$% if a random number is less than or equal to air partial damage,
+    if (random(x) > pdairc) NEXT        # .. Boat is NOT lost
+ 
+    #$% increment air damage counter
+    ndBOATS = ndBOATS + 1
+ 
+    if (log$engage != $no)              # if engagement log desired
+        {
+        if (xBML$status$i != $destroyed$code )
+            call Generate_eng_rec ("INPORT  ","DAMAGE  ",xBML$Name$c)
+        }
+ 
+    #$% set status of entry to destroyed and store it in the bml table
+    bml$status$i = $destroyed$code
+    PUTbml$status$i
+ 
+    if (trace$damage$WEP != $NO )               # jb            5/11/87
+     {
+      if(iecho4 == $YES)                        # jb            5/15/87
+       {
+        Unt$Name$c = XUnt$Name$c                # jb            5/21/87
+        call echor; klen = 0; iecho4 = $NO      # jb =1         5/21/87
+        call smovv("#",msg,klen)
+        call smoviZ(Game_DTG(game$time),6,msg,klen) # jb IZ  5/21/87
+        call smovHn(Unt$Name$c,$$MaxLit,msg,klen)   #        5/21/87
+        call smovv(" : ",msg,klen)
+        call echoh(msg,klen +1)
+        icnt = 0        # initlz. counter for each line of side-numbers
+       }
+ 
+      if (icnt > 11 | icnt < 1 )                # jb            5/15/87
+        {
+         call echor
+         call echov ('#')
+         if ( icnt > 11 )  icnt = 0
+        }
+ 
+      bml$Name$c = Xbml$Name$c                    # jb          5/2/88
+      call echohn (bml$Name$c,5)                  # jb          5/2/88
+      call echov   (' ')
+      icnt = icnt +1
+     }          # End of if (trace$damage$WEP != $NO)
+   }    # End of search thru bml table
+ 
+return
+end
+ 
+
+ 
+subroutine DAMROT(unt$pointer,pdsens)
+ 
+#####################################################################
+#$%
+#$% Purpose:   DAMROT determines which ROTHR sites have been
+#$%            damaged.
+#$%
+#$% Called By: DAMSHR
+#$%
+#$% Calls:     None
+#$%
+#$% Tables:    RTH
+#$%
+#$% Date:      AUG 87
+#$%
+#$% Author:    Richard Schauer
+#$%
+#$% Modified:  Susan Miller - 3/98 (E1937)
+#$%            Added variable definitions.
+#$%
+#####################################################################
+BBcommon
+ 
+integer*4 UNT$Pointer
+real*4    pdsens
+ 
+integer*4 RTH$Pointer, RTH$Damaged$I
+integer*4 indx, ifound
+real*4    random, x
+data x/0.0/		# Get next random number in sequence
+ 
+  indx = UNT$Pointer$Index
+  ifound = $NO
+  for (RTH$Pointer$First; RTH$Pointer$OK; RTH$Pointer$Next)
+    {
+     if (Xrth$InUse$i == $NO) NEXT
+     if (Xrth$UnitIndx$i == indx)
+       {
+        ifound = $YES
+        BREAK
+       }
+    }
+  if (ifound == $YES)
+    {
+     RTH$Damaged$i = Xrth$Damaged$i
+     if (RTH$Damaged$i == $YES) RETURN
+     if (random(x) <= pdsens)
+       {
+        PUTrth$Damaged$i ($YES)
+        PUTrth$Active$i ($NO)
+        PUTrth$Modified$i (1)
+       }
+    }
+  return
+  end

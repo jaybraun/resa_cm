@@ -1,0 +1,1546 @@
+define ($PlotInput$Loop,20)     # Number of loops for GEO_Input 
+define ($PlotInput$Delay,1000)  # TTYDLY time for each iteration
+
+define ($$Pause$for$Votrax, call delay (1100 + 200 * @1))
+
+
+
+###             VAX Conversion - starting Feb. '82
+##  2/2/82:
+#       -Substituted PLPLAY.inc   vice  ORDDEF.inc
+#       -Removed references to ORDcommon
+#       -In subroutine RNAME, designated 2 former integers to be LITERALs
+#          (i1 and i2).  BUT these are arguments for calling IPBYTE, so
+#          IPBYTE should be checked for compatibility.
+#       -echoP("XTEE")  vice  echo("XTEE")  - two times
+#       -"char" designated as CHARACTER for calls to get_ch (3 or 4 times)
+#       -In subroutine CHKFLT, designated "itype" and "mname" as LITERAL.
+#       -In subroutine DISP_MSG, the extraction of STA$msg$EXT$i is deleted be-
+#        cause (1) there is no further reference to it in this file; and
+#        (2) it is now completely omitted from BBVUE.def, so that SNDMSG
+#        can no longer PUT it into the table to be extracted    if (Args[ipnt][1:1] == "B" | Args[ipnt][1:1] == "O") here.
+#       -In PLAYER, change "ordset" assignment to parse$set$group($grp$------)
+#        macro; where the dashes are replaced by "PLAYER" or by "CONTROL".
+#       -In PLAYER, call to ORDINT is removed.
+## ----------------------------------------------------------------------------
+#####   version 3.1  dated-  7apr81  
+
+
+#####   version 3.0  dated- 22dec80
+
+
+# 
+
+define ($DEBUG,# $$Debug$Control)
+define (HIFR,REFUEL)            # Helicopter In-Flight Refuel   5/28/86
+#include "iodef.inc"         
+
+include "wsmain.inc"         
+include "bbctl.inc"         
+include "bbcode.inc"         
+include "bbacc.inc"  
+include "bbsbi.inc"                
+include "bbsta.inc"         
+include "bbrvu.inc"                                             #       6/22/83
+include "plplay.inc"                                            #       2/2/82
+include "csf.inc"         
+include "ascii.inc"         
+include "elevation.inc "         # joa 2/98 (E1864) - Terrain for Improved CM Model
+
+define (BBimplicit,IMPLICIT None)       # MJC 4/24/2000
+
+#define ($$AuxBBPages,120)
+define ($PAUSE,3)
+
+# Define voice out Common Area
+
+define (VOICEcommon,
+    logical      voiceon
+    integer      voiceint 
+    integer*4    old_char[2]
+    integer*2    voicechan
+    character    voicename[ARB]
+    Common /voicecom/ voiceon, voiceint, old_char, voicechan, voicename       
+    )
+
+define (TAGcommon,
+    integer     time_of_time_tag
+    logical     time_tag_last, time_tag
+    common /tt_comm/ time_of_time_tag, time_tag_last, time_tag
+    )
+
+define (TPAcommon,
+    integer     iREM_View, iREM_Station
+    common /TA_comm/ iREM_View, iREM_Station
+    )
+
+
+
+Program WORK_STATION
+
+#$%  Modified:    Alex Vagus - 10/96 (E1722)
+#$%               Added the mapping of the RESA to real name translation
+#$%               database - for automated SITREP generation.
+#$%
+#$%               Dew - 11/2000 Removed Sitrep Global section
+#$%
+#$% Modified:     Jim Allen - 12/97 (E1825)
+#$%               Tech control level station created with own order group.
+#$%               Multiple tech control stations allowed but all control
+#$%               stations informed.
+#$%
+#$% Modified:     Jim Allen - 2/98 (E1884)
+#$%               Added mapping of the DTED data for Improved Cruise
+#$%               Missile Model planning/firing.
+
+use ifport
+BBcommon
+PLAYcommon
+VOICEcommon
+IOcommon
+TPAcommon
+
+BBDeclare  (STA$Pointer,
+	    STA$IOPid$i,
+            STA$Voiceouttype$I,
+            STA$Plotprtint$I,
+            STA$Plotprtlasttime$F)          # MJC 4/24/2000
+integer     ISTA, IVIEW, KK, K2, iside,
+            ILEN, I, IHANDLE,
+            ICHAN_IN, ICHAN_OUT, LENGTH, rc, c_munmap 
+literal     CSTRIP8                         # MJC 4/24/2000
+character   PROMPT                          # MJC 5/3/2000
+character   echocontrol[10], votraxcontrol[6]
+character   vmsg[ARB]
+integer     ierr, write_okay, ok_to_write
+integer     readonly
+external   pl_shutdown 
+data       echocontrol  /$CNTLE,$DIG3,$DIG0,$LITP,$RETURN,0,0,0,0,0/
+data       votraxcontrol/$ESC,20,$RETURN,0,0,0/
+character  ready[80]
+vaxcharacter*80 readyV
+equivalence (ready, readyV)
+
+data ok_to_write/0/
+
+####### begin logic     ######
+
+call initR4                     #                                       2/11/82
+
+BBmap
+
+DTED_map        # joa 2/98 (E1864)
+
+write_okay = 0
+
+call check_version (ierr,vmsg)          # Correct Database Version?
+
+if (vmsg[1] != EOS)
+    {
+    call remark (vmsg)
+    }
+
+if (ierr == YES) call exit
+
+curfor = $NULL                         # initialize FOR <addressee> process
+
+call STATNUM (ista,iside,iview,readonly)      # determine Station number
+IO_ReadOnly = readonly                  # save this for GETCH/etc  DEW 11/19/91
+
+sta$pointer$to ista
+
+putSTA$PlotWakeup$i ($NO)
+putSTA$AstabWakeup$i ($NO)
+
+iREM_Station = ista                     ## tpa 6/12/85
+iREM_View    = iview                    ## tpa 6/12/85
+
+call pl_setup (STA$pointer)             # setup everything... Config, Plot, 
+                                        #                     Status, SBI, etc.
+sta$IOPid$i = getpid()			# Save IO pic in BB
+PUTsta$IOPid$i
+
+call echor
+
+#call set_exit_handler (pl_shutdown) # jb E2149 (s_e_h vice userex) 1/11/00
+call c_signal_sigtstp(pl_shutdown)
+
+kk = 0
+call smov ($bell,ready,kk)
+call smovv ("Station ",ready,kk)
+call smovi (ista,ready,kk); k2 = kk+2
+call smovv (" is ready",ready,kk)
+if (readonly == YES) call smovv (" (ReadOnly)",ready,kk)
+call smov  ($bell,ready,kk)
+call smov  (EOS,ready,kk)
+
+call inform_control (ista,readyv[k2:kk],0)
+
+#______________________________________________________________________
+## ***** enter here voice out code *****
+## open output tty line for voice output
+##
+
+STA$voiceOutType$i = xSTA$voiceOutType$i
+
+voiceon = $no
+
+
+#______________________________________________________________________
+
+if      (iside == $Neutral$Code |
+         iside == $Blue$code |
+         iside == $Orange$Code)           parse$set$group($grp$player)  #set PLAYER
+else if (Xsta$TechControlFlag$i == $yes)  parse$set$group($grp$TechControl)
+else                                      parse$set$group($grp$control) #else, CONTROL 
+
+call echo  ($formfeed)
+
+#______________________________________________________________________
+# turn WRAPAROUND ON (assuming I/O is to a VT100)
+
+call echo ($ESC)
+call echov ("[?7h")
+
+## turn OFF Slooooow Scroll (assuming I/O is to a VT100)
+#call echo ($ESC)                                         # DEW 8/17/88
+#call echov ("[?4l")
+
+#______________________________________________________________________
+
+call echor
+for (i=1; i<=7; i=i+1) call echo ($LineFeed)
+
+ihandle = 0
+
+CALL Recall_Init (iHandle, ichan_in, 36, 260)   # save 36 lines of 260 char 
+
+PARSE$SET$RECALL(ihandle)
+
+
+call echo  ($bell)
+call echoh (ready,ARB)
+call echor
+call echor
+
+repeat                                 # loop for input
+   {
+    call DISP_MSG (ista)               # display incoming messages
+
+	if      (iside == $Neutral$Code |
+         	 iside == $Blue$code |
+        	 iside == $Orange$Code)           parse$set$group($grp$player)  #set PLAYER
+	else if (Xsta$TechControlFlag$i == $YES)  parse$set$group($grp$TechControl)
+	else                                      parse$set$group($grp$control) #else, CONTROL 
+
+
+    mid_command = .false.
+
+                                        # Check to see if it is time for a
+                                        # periodic print of the geo display
+    STA$PlotPrtInt$I = xSTA$PlotPrtInt$I        # CLF 2/20/87
+    if ((STA$PlotPrtInt$I != 0) &
+        (Game$time - Xsta$PlotPrtLastTime$f) >=STA$PlotPrtInt$I)
+    {        
+        putSTA$PlotPrint$I (YES)
+        # Update last print time to nearest interval boundary
+        STA$PlotPrtLastTime$f = XSTA$PlotPrtLastTime$f
+        STA$PlotPrtLastTime$f = STA$PlotPrtLastTime$f + 
+           int((game$time - STA$PlotPrtLastTime$f) / STA$PlotPrtInt$I) *
+           STA$PlotPrtInt$I
+
+        putSTA$PlotPrtLastTime$f
+    }
+
+    call ORDPRC (ista,$PAUSE,prompt)   # input and validate orders
+                                       #   return if no entry within
+                                       #   n seconds.
+
+    mid_command = .false.
+
+    if (halt$request == $true)          # Check for Halt
+       {
+        # call delay (2000)             # Pause, 2 seconds
+
+        call DISP_MSG (ista)            # Display incoming messages
+
+        call echor
+        call echov (" Wargame Exercise Halted.")
+        call echor
+        call echor
+
+        call echop ("XTEE")             # Close typescript file  [echoP 2/2/82
+
+        call pl_shutdown               # shutdown Plot, etc.
+
+        if (auto$logout == $yes) call logout
+
+        BBunmap
+
+        call hltslf                     # Allow continue
+       }
+
+   }
+
+end
+
+
+
+
+Subroutine GET_CH (char,itime)   # get_ch gets input from ttydly        2/2/82
+BBcommon
+IOcommon
+TAGcommon
+TPAcommon
+
+BBDeclare  (STA$Plotinputrequest$I, STA$PlotInput$v)
+integer         KTIME, JTIME                            # MJC 4/24/2000
+CHARACTER       char                    # VAX conversion                2/2/82
+real			mygt
+integer         itime,
+                STA$pointer,
+                k
+data            STA$pointer / 0 /
+logical         First_Time / .true. /
+integer         geo_repeat / 0 /
+integer         geo_pos  / 0 /
+integer         geo_len  / 0 /
+vaxcharacter    geo_work * $Size_STA$PlotInput$V
+vaxcharacter    geo_line * arith($Size_STA$PlotInput$V,+,10)
+vaxcharacter    vstrip   * $Size_STA$PlotInput$V
+external        vstrip
+
+if (first_time)
+    {
+    if (iREM_Station > 0)               # is this needed ?
+        first_time = .false.
+	mygt = 0.0	
+    STA$Pointer$To iREM_Station
+    }
+
+
+if (Geo_Len > Geo_Pos)            # is there anything in the GEO buffer
+    {
+    GEO_Pos = GEO_Pos + 1
+    char = ichar(GEO_Line[GEO_Pos:GEO_Pos])
+    }
+else                          # NO.... read a char from TTY/Disk file
+    {
+    
+    char = 0
+    ktime = itime
+    jtime = 3000
+    jtime = 50
+
+    repeat
+    {
+
+       	 if (mygt != Game$Time)
+            {
+	     	putSTA$PlotWakeup$i ($YES)				# Cycle plot
+	    	putSTA$AstabWakeup$i ($YES)				# Cycle ASTAB
+			mygt = game$time
+            }
+
+
+        if (geo_repeat > 0)
+            {
+            geo_repeat = geo_repeat - 1
+            char = $CntlP
+            }
+        else
+            {
+            if (! Mid_command)
+                {
+                call check_play_mbx (char,0)
+    
+                if (char == $EXCLAIM)                   # allow comments from MMI
+                    {
+                    while (char != $linefeed & char != $return) # terminate yet ?
+                        {
+                        call echo (char)
+
+                        call check_play_mbx (char,0)
+                        }           
+                            
+                    call echor                          # terminate the line
+                    next                                # Check for more in mbx
+                    }
+
+                if (char != 0) break
+                } # end IF not Mid-Command
+
+            if (jtime > ktime) jtime = ktime
+
+            call getfch (char,$no,jtime) # command file in (using ttydly) 
+            if (! mid_command & IO_Readonly == YES &  
+                  (char == $ASTER | char == $GREAT | char == $LESS ) )
+                {
+                call echov ('!')
+                while (char != $linefeed & char != $return) # terminate yet ?
+                    {
+                    call echo (char)
+                    call getfch (char,$no,jtime) # command file in (using ttydly) 
+                    }           
+                call echor                          # terminate the line
+                } 
+            ktime = ktime - jtime
+            }
+
+        if (char == $CNTLP)                     # user wants input from Mouse
+            {
+            call echov ("^P")
+            if ( xSTA$PlotInputCapable$I == $No)        # is a GEO input Ok?
+                {
+                call echov ("[GEO input not available] ")
+                char = $CNTLR
+                }
+            else
+                {
+                call echov ("[Pos input] ")
+
+                putSTA$PlotInputReady$i ($No)       # Flag Input Request
+				STA$PlotInput$v = " "
+                putSTA$PlotInput$V 
+                putSTA$PlotInputRequest$i ($PIR$Position)
+
+                # loop $PlotInput$Loop times for input 
+                for (k = 1; k <= $PlotInput$Loop ; k=k+1)
+                    {
+                    if (xSTA$PlotInputReady$i == $YES)  break
+                
+                    call ttydly (char,$PlotInput$Delay ) # delay in milliseconds
+
+                    if (xSTA$PlotInputReady$i == $YES)  break
+
+                    if (char == 0 ) next
+
+                    else if (char == '?'  )  
+                        {
+						call echov ("? (help)")
+						call echor
+						call echov ("You are enabled for input from the Geo-Display.")
+						call echov ("  Types of input are:")
+						call echor
+						call echov ("    Position (lat & long, DEFAULT),        [press P]")
+						call echor
+						call echov ("        <position repetition"//"count>        [press 1/2/3/4/5/6/7/8]")
+						call echor
+						call echov ("    Force Name, or                         [press F]")
+						call echor
+						call echov ("    Ground unit, or                        [press G]")
+						call echor
+						call echov ("    Track Number, or                       [press T]")
+						call echor
+						call echov ("    Unit (any Force or Track)              [press U]")
+						call echor
+						call echov ("Cancel by pressing a period (.)")
+						call echor
+						call echov ("This mode will time-out after 20 seconds of inactivity.")
+						call echor
+						call echov ("Now go hook a Position/Force/Track....")
+						call echor
+                        }                    
+                    #   if user enters dot (.) cancel
+                    else if (char == '.'  )  
+                        {
+                        geo_repeat = 0
+                        break
+                        }                    
+                    #   if user enters a 1..7 set-up for repeat 
+                    else if (char >= $DIG1 & char <= $DIG8 &
+                             XSTA$PlotInputRequest$i == $PIR$Position)
+                        {
+                        call echov ("[pos*")
+                        call echo (char)
+                        call echov ("] ")
+                        geo_repeat = char - $dig1
+                        }                    
+                    #   if user enters P, F, T, or U change request
+                    else if (char == $LETP | char == $LITP  ) 
+                        {
+                        putSTA$PlotInputRequest$i ($PIR$Position)
+                        call echov ("[pos] ")
+                        }                    
+                    else if (char == $LETF | char ==  $LITF ) 
+                        {
+                        putSTA$PlotInputRequest$i ($PIR$Force)
+                        call echov ("[force] ")
+                        geo_repeat = 0
+                        }                    
+                    else if (char == $LETT | char == $LITT  ) 
+                        {
+                        putSTA$PlotInputRequest$i ($PIR$Track)
+                        call echov ("[track] ")
+                        geo_repeat = 0
+                        }                    
+                    else if (char == $LETU | char == $LITu  ) 
+                        {
+                        putSTA$PlotInputRequest$i ($PIR$Unit)
+                        call echov ("[unit] ")
+                        geo_repeat = 0
+                        }                    
+                    else if (char == $LETG | char == $LITg  ) 
+                        {
+                        putSTA$PlotInputRequest$i ($PIR$Ground)
+                        call echov ("[ground] ")
+                        geo_repeat = 0
+                        }                    
+                    }
+    
+                # if input never ready, cancel
+
+                if (xSTA$PlotInputReady$i == $No)  
+                    {   
+                    if (char == '.') call echov ('[Canceled] ')
+                    else             call echov ("[Time-Out] ")
+                    geo_repeat = 0
+                    char = $CNTLR
+                    }
+                else # request ready, make buffer, get first char
+                    {
+                    STA$PlotInputRequest$i = xSTA$PlotInputRequest$i 
+                    geo_work = xSTA$PlotInput$V
+                    k = 0
+
+                    if (STA$PlotInputRequest$i == $PIR$Position)
+                        call vmovv ("P ", geo_line, k)
+
+                    call vmovVT (geo_work, geo_line, k)
+                    geo_len = k
+                    geo_pos = 0
+                    char = $CNTLR
+                    }
+                }    
+            }
+
+        if (char != 0) 
+            {
+            mid_command = .true.
+            break
+            }
+
+        } until (ktime <= 0)
+    } # end if reading from TTY or File....
+
+if (char == $CNTLZ) 
+   {
+    call echor
+    call echor
+    call echov ("^Z")
+    call echor
+    call echor
+
+    call echov ("STATION Shutdown")
+    call echor
+
+    call echop ("XTEE")    # close typescript file (if it exists) [echop 2/2/82
+
+    call ttyout_flush       # just to be sure.....          DEW 2/22/200
+    
+    call pl_shutdown
+
+    call exit
+   }
+else if (char != EOS)
+    {
+    time_tag_last  = .false.
+    }
+
+return
+end
+
+
+
+Subroutine CHECK_PLAY_MBX (ichar,arg)   # check mailbox for player
+BBcommon
+integer Xstat,Xjfn
+common /Cgetch/ Xjfn,Xstat
+SetupCommon
+
+character       ichar, arg[ARB], buffer[MBX$MsgSize], buffer_tmp[MBX$MsgSize]
+integer         ichan,
+                first_time,
+                mbx_input,
+                buflen,
+                bufpos,
+                rc,
+		mbx_id,
+                kk
+data            first_time  / YES /
+data            mbx_input  / NO /
+BBDeclare       (sta$pointer, sta$PRE$index)
+SAVE bufpos, buflen, ichan  # jb  For portability  1/11/00
+
+if (first_time == YES)
+    {
+#    if (arg[1] == 0) 
+#        {
+#        ichar = 0
+#        return
+#        }
+
+    buflen = 0
+    bufpos = 1
+    first_time = NO
+    return
+    }
+
+# read one char from mailbox
+
+if (bufpos >= buflen)
+{
+    Sta$pointer$to stationindx
+    buflen = Xsta$PreLen$i
+    if (buflen > 0)
+    {	    
+        for (kk = 1; kk <= buflen; kk = kk + 1)
+	{
+	    sta$PRE$index = kk
+	    buffer[kk] = Xsta$PRE$Char$i
+	}
+	PUTsta$PreLen$i(0)			# Allow prescript to fill buffer
+    }
+
+
+    bufpos = 0
+
+    if (buflen > 0)
+	{
+		if (buffer[buflen] != $return  & buffer[buflen] != $linefeed) 
+    	{
+        	buflen = buflen + 1
+        	buffer[buflen] = $return
+    	}
+	}
+}
+
+if (bufpos >= buflen)
+{
+    ichar = 0
+    if (mbx_input == YES)
+    {
+        Xstat = 'TTY'
+        mbx_input = NO
+    }
+}
+else
+{
+    bufpos = bufpos + 1
+    ichar = buffer[bufpos]
+    Xstat = 'DSK'
+    mbx_input = YES
+}
+
+return
+end
+
+
+
+Subroutine DISP_MSG (ista)          # display pending messages
+
+ BBcommon                            # MESSAGE FORMAT: (see SEND.RAT)
+ VOICEcommon
+ TAGcommon
+
+ BBDeclare  (STA$Pointer,
+             STA$Msgread$I,
+             STA$Msgwrite$I,
+             STA$MSG$Index,
+             STA$MSG$len$I,
+             STA$MSG$for$I,
+             STA$MSG$gm$I,
+             STA$MSG$type$I,
+             STA$Voiceouttype$I)        # MJC 4/24/2000
+ integer ISTA,I,ILEN,IHEAD,JJ,
+         JCHAR,JJLEN,INT,ISNUMBER,
+         INUM,IND,NARGS                 # MJC 4/24/2000
+ character VOTRAXCONTROL                # MJC 5/12/2000
+ literal itaskn
+ literal lmsg[100]
+ integer msg0,imsg[200] # jb E2145 (msg0 to push imsg[2} to quad boundary 7/00
+ equivalence (imsg[2],lmsg)
+ Common /lmsg_disp/ msg0,imsg   # jb E2145 (Put imsg in common for EQUIV) 7/00
+ integer dest[arith($max$args,*,8)],voicedest[arith($max$args,*,8)]
+ integer Game_DTG
+ integer Game_DTGs
+ data    time_tag_last /.false./
+
+ STA$pointer$to ista
+
+
+ call tty_set_echo (NO)                 # reset for re-attached cases
+
+ repeat
+   {
+    STA$msgread$i = xSTA$msgread$i
+    STA$msgwrite$i = xSTA$msgwrite$i
+
+    if (STA$msgread$i == STA$msgwrite$i) break
+
+    STA$msg$index = STA$msgread$i
+
+    STA$msg$Len$i  = XSTA$msg$Len$i     # get length
+
+    STA$msg$For$i  = XSTA$msg$For$i     # get addressee
+
+    STA$msg$GM$i   = XSTA$msg$GM$i      # get game minute sent
+
+    STA$msg$Type$i = XSTA$msg$Type$i    # get type code (0=text,1=LEX)
+
+    # STA$msg$Ext$i  = XSTA$msg$Ext$i   # get EXTra... (unused as yet)  2/2/82
+
+    time_tag = .false.
+
+    if (STA$msg$Len$i <= 1 | STA$msg$Len$i >= 99) # invalid info in queue?
+       {
+        call echov ("ERROR-- Message Length Invalid (")
+        call echoi (STA$msg$Len$i)
+        call echov (" @ ")
+        call echoi (STA$msg$Address)
+        call echov (").  Clearing Queue!  Game minute= ")
+        call echoiz(Game_DTG(GAME$TIME), 6)
+        call echor
+        STA$msgread$i = STA$msgwrite$i  # set read index to write index
+        putSTA$msgread$i                # store it
+        call delay (3000)
+        next                            # loop again.... and exit
+       }
+
+    for(i=1; i<=STA$msg$Len$i; i=i+1)   # loop for the given length
+      {
+       imsg[i] = xSTA$msg$word$i        # get the text of the message
+
+       STA$msg$index = STA$msg$index + 1
+       if(STA$msg$index > STA$msg$slots) STA$msg$index = 1
+      }
+
+    # At this point, imsg[1] contains the encoded control fields of the 
+    # message.  Imsg[2]-imsg[n] contain the text/data of the message.
+
+    STA$msgread$i = STA$msg$index
+    putSTA$msgread$i
+
+    ilen = 0
+
+    call smov ($Lparen,dest,ilen)
+    $DEBUG    call smov ($LETG,dest,ilen)
+    $DEBUG    call smov ($LETM,dest,ilen)
+    $DEBUG    call smov ($EQUAL,dest,ilen)
+
+    call smoviz (Game_DTGs(GAME$TIME), 8,dest,ilen)
+
+    $DEBUG    call smov ($COMMA,dest,ilen)
+    $DEBUG    call smov ($LETL,dest,ilen)
+    $DEBUG    call smov ($EQUAL,dest,ilen)
+    $DEBUG    call smovi (STA$msg$Len$i,dest,ilen)# display length
+
+    if (xSTA$View$I != STA$msg$For$i)
+       {
+        call smovv (", Copy of ",dest,ilen)
+
+        if (STA$msg$For$i == $neutral$view) call smovv ("CONTROL",dest,ilen)
+
+        else if (STA$msg$For$i <= $lastblue$view)
+           {
+            call smovv ("BLUE",dest,ilen)
+            call smovi (STA$msg$For$i-$firstblue$view+1,dest,ilen)
+           }
+        else
+           {
+            call smovv ("ORANGE",dest,ilen)
+            call smovi (STA$msg$For$i-$firstorange$view+1,dest,ilen)
+           }
+       }
+    $DEBUG    call smov ($COMMA,dest,ilen)
+    $DEBUG    call smov ($LETV,dest,ilen)
+    $DEBUG    call smov ($EQUAL,dest,ilen)
+    $DEBUG    call smovi (STA$msg$For$i,dest,ilen)# display addressee
+    call smov ($Rparen,dest,ilen)
+    call smov ($SPACE,dest,ilen)
+
+    ihead = ilen
+
+    if (STA$msg$Type$i == 0)            # if text message....
+       {
+        call smovh (imsg[2],STA$msg$Len$i*4-4,dest,ilen)  # Put it
+    
+        ## ***** enter here voice output code *****
+        ## for dest starting at ihead to ilen
+        ## or imsg[2] for STA$msg$Len$i*4-4 characters
+        ## output carriage return at end of message to vocalize
+
+        if (imsg[2] == '----')
+            {
+            time_tag = .true.
+
+            if (time_tag_last) 
+                {
+                call move_up_1_line (sta$pointer)
+                ilen = ilen - 4
+                }
+            }
+       }
+    else                                # Lex message ....
+       {
+        # Lex messages are formatted such that imsg[2&3] are
+        # combined to lmsg[1], forming 'Addressee'.
+        #
+        # Imsg[4&5] are combined in lmsg[2], forming 'Start Time'.
+        # Imsg[6&7] are combined in lmsg[3], forming 'Order Nbr'.
+        #
+        # Lmsg[3]-->Lmsg[n] contain the LEX codes.
+
+        if (lmsg[1] != 0)                   # if an addressee
+           {
+            call smovv ("FOR ",dest,ilen)
+
+            if ($isnumeric(lmsg[1]))
+               {
+                call fgtask (int(lmsg[1]),itaskn)
+                call smovhn (itaskn,$$MaxLit,dest,ilen) # SMM 8/99 E2141
+               }
+            else
+               {
+                call smovhn (lmsg[1],$$MaxLit,dest,ilen) # SMM 8/99 E2141
+               }
+
+            call smov ($Space,dest,ilen)
+           }
+
+        if (lmsg[3] < 0)
+           {
+            inum = abs (lmsg[3])
+            ind = $yes
+           }
+        else
+           {
+            inum = lmsg[3]
+            ind = $no
+           }
+
+        nargs = (STA$msg$len$i-7)/2
+
+        call synbld (int(lmsg[2]),      # time of execution
+                     ind,               # search plan order
+                     inum,              # order number
+                     nargs,             # number of quad-words of lex data
+                     lmsg[4],           # lex array
+                     dest,              # output array
+                     ilen)              # returned length
+       }
+
+    call pline (dest,ilen,ihead)        # put the line out....
+
+    time_tag_last = time_tag
+
+    if (time_tag)                       # should wake up PLOT & ASTAB
+        {
+        if (time_of_time_tag != Game$minute)
+            {
+			putSTA$PlotWakeup$i ($YES)				# Cycle plot
+			putSTA$AstabWakeup$i ($YES)				# Cycle ASTAB
+            }
+
+        time_of_time_tag = Game$minute
+        }
+   }
+
+
+$DEBUG if (ihold != game$minute)
+$DEBUG   {call echor
+$DEBUG    call echov ("        Current Game Time is: ")
+$DEBUG    call echoiz(Game_DTG(GAME$TIME), 6)
+$DEBUG    call echor
+$DEBUG    ihold = game$minute
+$DEBUG   }
+
+ return
+ end
+
+
+
+Subroutine PLINE(dest,ilen,ihead)       # output message to player
+
+integer dest[120],ilen,ihead,itab,char,lchar,icol,head
+integer IPNT, IGBYTE                    # MJC 4/25/2000
+
+char = 1
+icol = 0
+itab = 0
+head = $no
+
+for (ipnt=1; ipnt <= ilen; ipnt = ipnt + 1)
+   {
+    lchar = char
+    char = igbyte (dest,ipnt)
+
+    if (char == $null) next
+
+    if (char == $tab)
+       {
+        ipnt = ipnt + 1
+        itab = igbyte (dest,ipnt)-1
+        char = $space
+        next
+       }
+    else if (char == $return)
+       {
+        call echor
+        icol = 0
+        next
+       }
+
+    if (icol >= ihead) head = $yes
+
+    if (icol >= 70 & lchar == $space)
+       {
+        call echor
+        icol = 0
+        head = $yes
+       }
+
+    while (head == $yes & icol < ihead+itab)
+       {
+        call echo ($space)
+        icol = icol + 1
+       }
+
+    call echo (char)
+    icol = icol + 1
+   }
+
+call echor
+
+return
+end
+
+
+
+subroutine move_up_1_line (sta$pointer) # re-write over the Last line
+BBcommon
+
+integer STA$Pointer
+
+call echo ($ESC)
+call echov("[A")
+
+return
+end
+
+
+ Subroutine CHKFLT (_                   # search for aircraft/display options
+                    itype,              #    aircraft type name
+                    istatus,            #    returned status $YES=ok(found it)
+                    icnt)               #    number of slots available
+ BBcommon
+
+ integer lstflt,eq[2,26]
+ integer ISTATUS, IPNT, ICNT, IEQCNT    # MJC 4/24/2000
+ integer M                              # MJC 4/24/2000
+ integer MQTY                           # MJC 4/28/2000
+ literal ITYPE, MNAME                   # MJC 5/11/2000
+ common /cckflt/ lstflt,eq
+
+ istatus = ! $yes
+ lstflt  = 0
+ ipnt    = 0
+#jhm 02/01 E2210  removed commented out literal compare plus associated lines
+
+ icnt    = 8
+ ieqcnt  = 0
+ m       = 0
+ istatus = $yes
+
+#for (acc$eq$index=1; acc$eq$index$ok; acc$eq$index = acc$eq$index + 1)
+#  {
+#   acc$eq$ident$i = xacc$eq$ident$i
+#
+#   if (acc$eq$ident$i != $navsensor$code) ieqcnt = ieqcnt + 1
+#
+#   if (acc$eq$ident$i != $cruisemissile$code &
+#       acc$eq$ident$i != $aam$code           &
+#       acc$eq$ident$i != $asm$code           &
+#       acc$eq$ident$i != $commbuoy$code      &
+#       acc$eq$ident$i != $sonobuoy$code      &
+#       acc$eq$ident$i != $mine$code          &
+#       acc$eq$ident$i != $bomb$code          &
+#       acc$eq$ident$i != $torpedo$code        ) next
+#
+#   tbl$pointer = xacc$eq$pntr$i
+#
+#   m = m + 1
+#
+#   eq[1,m] = ialfa(xacc$eq$epu$i+10000)
+#
+#   if      (acc$eq$ident$i == $bomb$code) call ipbyte (eq[1,m],1,$LETB)
+#   else if (acc$eq$ident$i == $mine$code) call ipbyte (eq[1,m],1,$LETM)
+#   else                                   eq[1,m] = ibb[tbl$pointer]
+#
+#   eq[2,m] = xacc$eq$maxitem$i
+#
+#   if (m==1)
+#      {
+#       call echov ("Possible Equipment Includes:")
+#      }
+#
+#   if (mod(m-1,4)==0) call echor
+#   else               call echov("    ")
+#
+#   hold[1] = ialfa (eq[1,m])
+#   call echoh (hold,5)
+#   call echo ($SPACE)
+#   call echoh (eq[2,m],5,hold)
+#  }
+#
+#call echor
+#
+#icnt = acd$eq$slots - (ieqcnt - m)   #include bbacd.inc removed also
+#eq[1,m+1] = 0
+
+ return
+
+ entry chkeq (itype,mqty,mname,istatus)
+
+ istatus = $yes
+
+#istatus = !$yes
+#
+#for (m=1; m<=16; m=m+1)
+#  {
+#   if (eq[1,m]==0) break
+#   if (eq[2,m] != mname) next
+#   if (eq[1,m] < mqty)
+#      {
+#       call echov ("You Cannot Exceed ")
+#       call echoi (eq[1,m])
+#       call echov (" of ")
+#       call echoh (mname,$$MaxLit)
+#       call echor
+#       return
+#      }
+#   istatus = $YES
+#   return
+#  }
+#
+#call echoh (mname,$$MaxLit)
+#call echov (" is not available.")
+#call echor
+
+ return
+ end
+
+
+
+ Subroutine SNDSTK (ista)
+
+ BBcommon
+ IOcommon
+ PLAYcommon
+ TAGcommon
+
+integer NORD, NARGS, ILEN, I, ISTA,
+        IAVAIL, K, KLEN, isRouteOrder, isSPAOrder
+BBDeclare  (STA$Pointer, STA$Inpread$I,
+            STA$Inpwrite$I, STA$INP$Index,
+            RVU$Pointer, RVU$Circuit$I)     # MJC 4/24/2000
+integer Game_DTG
+integer Game_DTGs
+integer lckt
+data    lckt/0/
+
+$DEBUG    call echov ("S-")
+$DEBUG    call echoi (stkpnt)
+$DEBUG    call echor
+
+ STA$pointer$to ista
+
+ if (stkpnt == $NULL)
+    {
+     if (execution$mode != review$mode) 
+        {
+         RVU$Pointer$to xSTA$View$i
+         RVU$Circuit$i = xRVU$Circuit$i
+
+         if (RVU$circuit$i != 0)
+           {
+            call echov ("Current circuit is #")
+            call echoi (RVU$circuit$i)
+            call echor
+           }
+
+         return
+        }
+
+
+     call echov ("**REVIEW Mode, ")
+     if (Review$Fast  >= Game$Minute) call echov ("Fast, ")
+     if (Game$Pause == $yes)        call echov ("Pause, ")
+     call echov ("Current Minute is ")
+     call echoiz(Game_DTG(Game$Time), 6)
+     call echor
+     return
+    }
+
+ nord = stack[$stk$nord,1]
+
+ # Allow route manage orders to be used while station is locked out per_lckrte 
+ if (nord == DefineROUTE$order | nord == ModifyROUTE$order)  isRouteOrder = $YES
+ else                                                        isRouteOrder = $NO
+
+ if (nord == DefineSPA$order | nord == DeleteSPA$order) isSPAOrder = $YES
+ else                                                   isSPAOrder = $NO
+
+ # Cruise Missile Fire and Planning commands are handled by the
+ # workstation eventhough they are an addressee order - joa 2/98 (E1864)
+ if ((nord >= local$order$lo & nord <= local$order$hi) |           # do LOCAL cmds
+     (nord == FIRECRUISE$order & (stack[$stk$args,1] == $lex$PLAN$ &
+                             stack[stack[$stk$length,1],1] != $lex$EXECUTE$)))
+    {
+    nargs = stack[$stk$length,1] - $stk$args + 1
+    call pl_exeord (STA$pointer,nord,nargs,stack[$stk$args,1])
+
+    return
+    }
+
+ if (halt$request == $yes)                                      # check HALT
+   {
+    call echov ("Sorry, but the exercise has halted.")
+    call echov ("  The last command is not accepted.")
+    call echor
+    return
+   }
+
+ if (lock$station == $YES & Xsta$view$i != $Neutral$View &  # JOA UFL02 8/02
+     game$pause == $YES)       # check PAUSE and LOCK
+   {
+    call echov ("Sorry, but the exercise has been temporarily paused ")
+    call echov ("with input restricted.")
+    call echor
+    call echov ("The last command is not accepted.")
+    call echor
+    return
+   }
+
+ if (lock$station == $YES & Xsta$view$i != $Neutral$View &
+     isRouteOrder == $NO & isSPAOrder == $NO)   
+   {
+    call echov ("Sorry, but stations are temporarily ")
+    call echov ("operating in read only mode.")
+    call echor
+    call echov ("The last command is not accepted.")
+    call echor
+    return
+   }
+
+ if (IO_ReadOnly == YES)
+    {
+    call echov ("Operating ReadOnly, command(s) not entered.")
+    call echor
+    return
+    }
+
+ call BBwtrq (ista)                    # request to write to BlackBoard
+
+ ilen = 0
+ for (i=1; i <= stkpnt; i=i+1)          # sum up the lengths of all orders
+   {                                    # in the stack
+    if (stack[$stk$nord,i] == ENTERORDERS$order) next
+
+    ilen = ilen + stack[$stk$length,i]
+$DEBUG    call echov ("# ")
+$DEBUG    call echoi (i)
+$DEBUG
+$DEBUG    call echov (": Length = ")
+$DEBUG    call echoi (int(stack[$stk$length,i]))
+$DEBUG
+$DEBUG    call echov (", Order # = ")
+$DEBUG    call echoi (int(stack[$stk$nord,i]))
+$DEBUG
+$DEBUG    call echov (", Start = ")
+$DEBUG    call echoi (int(stack[$stk$start,i]))
+$DEBUG
+$DEBUG    call echov (", Addressee = ")
+$DEBUG    call echoh (stack[$stk$addressee,i],$$MaxLit)
+$DEBUG
+$DEBUG    call echov (", ")
+$DEBUG    call echoi (int(stack[$stk$seq,i]))
+$DEBUG    call echov (" of ")
+$DEBUG    call echoi (int(stack[$stk$cnt,i]))
+$DEBUG    call echor
+   }
+
+ STA$inpread$i = xSTA$inpread$i
+ STA$inpwrite$i = xSTA$inpwrite$i
+
+ iavail = STA$inpread$i - STA$inpwrite$i
+
+ if(iavail <= 0)
+    iavail = STA$inp$slots + iavail
+
+ if(ilen >= iavail)
+   {
+    call echov ("Losing Order Stack. Queue Full!  ")
+    call echoi (ilen)
+    call echov (" Required, Available = ")
+    call echoi (iavail)
+    call echor
+
+    return
+   }
+
+ STA$inp$index = STA$inpwrite$i
+
+ for(k=1; k<=stkpnt; k=k+1)             # send the whole stack of orders
+   {                                    # at one shot......
+    if (stack[$stk$nord,k] == ENTERORDERS$order) next
+
+    if (stack[$stk$nord,k] == CIRCUIT$order) lckt = stack[8,k]
+
+    klen = stack[1,k] 
+
+    for(i=1; i<=klen; i=i+1)
+      {
+       putSTA$inp$word$C  (stack[i,k])
+
+       STA$inp$index = STA$inp$index + 1
+       if(STA$inp$index > STA$inp$slots) sta$inp$index = 1
+      }
+  }
+
+ STA$inpwrite$i = STA$inp$index
+ putSTA$inpwrite$i
+
+ call BBwtX (ista)                     # unlock BlackBoard
+
+ call echo ($LPAREN)
+ call echoiz(Game_DTGs(GAME$TIME), 8)
+ call echov (") Order Entered.")
+
+ time_tag_last  = .false.
+
+# if (xSTA$circuit$i != 0)
+#   {
+#    call echov ("  Current circuit is #")
+#    call echoi (xSTA$circuit$i)
+#   }
+
+ if (execution$mode == review$mode) call echov ("  (REVIEW Mode)")
+
+ call echor
+
+ return
+ end
+
+
+
+Subroutine ORDPRC(ista,itime,prompt)   # input and process orders
+                                       # return if nothing input within
+                                       # ITIME minutes.
+
+ BBcommon
+ ##ORDcommon                                                    #       2/2/82
+ PLAYcommon
+
+ character  PROMPT                              # MJC 2/4/2000
+ integer    ITIME, NORD, NARGS, ISTATUS, ISTA   # MJC 2/4/2000
+
+stkpnt = 0
+
+ call ordpar (itime,prompt,nord,nargs)  # call orders parser
+
+ if (nord == -1) return                 # test for CANCEL COMMAND
+
+ if (nord == $null) return
+
+ repeat
+   {
+    call ordchk (nord,nargs,istatus,ista) # verify order & bld order stack
+
+    if (nord == -1) return              # test for CANCEL COMMAND
+
+    if (istatus == $YES)
+       {
+        call sndstk (ista)             # send the order to WARGAM
+        break
+       }
+    else
+       {
+        break                           # 28july80 don't hold up tty
+
+        #call echov ("Retype the command, or enter a blank line.")
+        #call echor
+       }
+
+    repeat
+       {
+        stkpnt = 0
+        call ordpar (itime,prompt,nord,nargs)
+       } until ( nord != $NULL)
+
+    if (nord == -1) return              # test for CANCEL COMMAND
+
+   } until (nord == blank$order)
+
+ return
+ end
+
+
+
+
+Subroutine STATNUM (ista,iside,iview,readonly)
+#
+#       ISTA is returned as an index to the STA table
+#
+#$% Modified:  James Allen - 12/97 (E1852)
+#$%            Added processing of the new tech control level station.
+
+ BBcommon
+ PLAYcommon
+ Qual$Common
+
+ BBDeclare  (STA$Pointer, STA$Configid$C, STA$NbrAstabs$i, STA$SBIIndex$i)
+ BBDeclare  (STA$GEOAddr$i, STA$IOAddr$i)
+ BBDeclare  (SBI$Pointer, SBI$AstabAddr$i)
+ integer IPNT, IPOS, IVIEW, KK, iside
+ integer        ctoi, k, i, ista, nsbi
+ Integer*4           Arg_Lens[10], readonly, n, length_trimmed
+ VaxCharacter*80     Args[10], Param, Script, Params, kw, kwuc, value
+ integer		IPAddr, IPRng
+ character		IPsect[4]
+ equivalence	(IPAddr, IPsect)
+
+call help_pgm(2,
+              "vsta: Virtual workstation",
+              "vsta Tags: Workstation",
+              "Usage: vsta [|-r] <station no.> <side> [|<view>]",
+              "-r read only station",
+              "<station no.> station number(1-64)",
+              "<side> - [ b | o | c | n |t]",
+              "<view> - view 1-9",
+              "Example: vsta 21 b 4")
+
+call Read_Arguments ( 10,                  # (in) Number of args to read
+                      Args,               # (out) Array of arguments 
+                      Arg_Lens,           # (out) Length of each
+                      Params)             # (out) Misc Qualifiers
+
+#--------------------------------------------------
+
+readonly = NO
+script   = ""
+for (n = 1; n <= 20; n=n+1)
+    {
+    call Get_Qualifier ( Params,      # (in) string returned by READ_ARGUMENT
+                         N,           # (in) Which Param to return
+                         Param)       # (out) The specified Qualifiers
+
+    if (Param == "") break
+
+    if      (param[1:1] == "R" | param[1:1] == "r")  readonly = YES 
+    else if (param[1:1] == "S" | param[1:1] == "s")  script   = param  
+    }
+
+Qual_ReadOnly = ReadOnly
+Qual_Script   = ""
+call str_element (Qual_Script, 1 , "=", Script)
+
+#--------------------------------------------------
+
+ista = 0                                                        # check stand-
+
+k=1
+ista = ctoi (%%ref(args[1]),k)
+
+if (ista > 0)
+{
+    STA$Pointer$To ista
+
+    if (! STA$Pointer$Valid )                   # OK ?
+    {
+        print *, "Invalid Station Number."
+        call exit                               # .........Abort
+    }
+
+    #____________________________________________________________________
+    # Stand-alone start-up
+    #____________________________________________________________________
+    # STATION <station-indx> CONTROL       <config-file-name>
+    #                        TECHCONTROL   <config-file-name>
+    #                        BLUE <view>   <config-file-name>
+    #                        ORANGE <view> <config-file-name>
+
+    ipnt = 2
+
+    # process side [C/N/B/O]
+
+    putSTA$TechControlFlag$I ($no)      # joa 12/97 (E1825)
+    if (Args[ipnt][1:1] == "B" | Args[ipnt][1:1] == "b" |
+        Args[ipnt][1:1] == "O" | Args[ipnt][1:1] == "o")
+    {
+        ipnt = ipnt + 1    
+
+        ipos = 1
+        k = ctoi (%%ref(Args[ipnt]),ipos)
+
+        if (Args[2][1:1] == "B" | Args[2][1:1] == "b")
+        {
+			iside = $Blue$Code
+            iview = $FirstBlue$View - 1 + k
+
+            if      (iview > $LastBlue$View  ) iview = 0
+            else if (iview < $FirstBlue$View ) iview = 0
+        }
+        else 
+        {
+			iside = $Orange$Code
+            iview = $FirstOrange$View - 1 + k
+
+            if      (iview > $LastOrange$view ) iview = 0
+            else if (iview < $FirstOrange$View) iview = 0
+        }
+    }
+    else if (Args[2][1:1] == "C" | Args[2][1:1] == "c")
+    {
+		iside = $Control$Code
+        iview = $first$view
+    }
+    else if (Args[2][1:1] == "N" | Args[2][1:1] == "n")
+    {
+		iside = $Neutral$Code
+        iview = $first$view
+    }
+    else if (Args[2][1:1] == "T" | Args[2][1:1] == "t")   # if tech control
+    {
+        iview = $first$view
+        putSTA$TechControlFlag$I  ($yes)
+		iside = $Control$Code
+    }
+    else 
+    {
+        iview = 0
+    }
+
+    call init_sta (sta$pointer,iview)           # init PLOT Center Point
+
+    PUTsta$Side$i(iside)
+    PUTsta$View$I (iview)                       # save view index
+	PUTSTA$NbrAstabs$i(4)
+	PUTSTA$GEOAddr$i(0)
+	PUTSTA$IOAddr$i(0)
+	sbi$AstabAddr$i = 0
+    for(ipnt = ipnt + 1; ipnt <= 10; ipnt = ipnt + 1)
+	{
+		if (length_trimmed(args[ipnt]) == 0) break
+		call str_element (kw, 0 , "=", args[ipnt])
+		call STR_upcase (kwuc, kw)
+		call str_element (value, 1 , "=", args[ipnt])
+
+		if      (kwuc == "AS")
+		{
+			k = 1
+			sta$NbrAstabs$i = ctoi(%%ref(value), k)
+			if (sta$NbrAstabs$i < 0 | sta$NbrAstabs$i > 6)
+				print *, "Number of Astabs out of range (1-6) ", sta$NbrAstabs$i
+			PUTsta$NbrAstabs$i
+		}
+		else if (kwuc == "X")
+		{
+			k = 1
+			for (i = 1; i <= 4; i = i + 1)
+			{
+				IPRng = ctoi(%%ref(value), k)
+				if (IPRng < 0 | IPRng > 255) print *, "IP value out of range ", iprng
+				IPsect[i] = IPRng
+				k = k + 1
+			}
+			PUTsbi$AstabAddr$i (IPAddr)			# IPAddr overlays 4 IPsect
+			PUTsta$IOAddr$i    (IPAddr)
+			PUTsta$GeoAddr$i   (IPAddr)
+		}
+		else if (kwuc == "AX")
+		{
+			k = 1
+			for (i = 1; i <= 4; i = i + 1)
+			{
+				IPRng = ctoi(%%ref(value), k)
+				if (IPRng < 0 | IPRng > 255) print *, "IP value out of range ", iprng
+				IPsect[i] = IPRng
+				k = k + 1
+			}
+			sbi$AstabAddr$i = IPAddr			# IPAddr overlays 4 IPsect
+		}
+		else if (kwuc == "GX")
+		{
+			k = 1
+			for (i = 1; i <= 4; i = i + 1)
+			{
+				IPRng = ctoi(%%ref(value), k)
+				if (IPRng < 0 | IPRng > 255) print *, "IP value out of range ", iprng
+				IPsect[i] = IPRng
+				k = k + 1
+			}
+			PUTsta$GeoAddr$i (IPAddr)			# IPAddr overlays 4 IPsect
+		}				  
+		else if (kwuc == "IX")
+		{
+			k = 1
+			for (i = 1; i <= 4; i = i + 1)
+			{
+				IPRng = ctoi(%%ref(value), k)
+				if (IPRng < 0 | IPRng > 255) print *, "IP value out of range ", iprng
+				IPsect[i] = IPRng
+				k = k + 1
+			}
+			PUTsta$IOAddr$i (IPAddr)			# IPAddr overlays 4 IPsect
+		}				  
+
+		else if (kwuc == "CONFIG")
+		{
+    		kk = 0
+    		call smovv ("        ", sta$ConfigId$c, kk)      # initialize to spaces
+   			kk = 0
+    		call smovvn (value,sta$ConfigId$c,kk)       # move in the specified name
+
+    		if (kk == 0) sta$ConfigId$c = '.NONE'       # initialize to NONE
+
+    		PUTsta$ConfigId$c                           # save it in the data base
+		}
+		else
+		{
+			print *, "Invalid station argument ", args[ipnt]
+		}			  				  				  
+    }
+
+	# Assign all astabs the same IP address
+	sta$NbrASTABS$i = Xsta$NbrASTABS$i      ## get number of ASTABs for view
+	sta$SBIIndex$i = Xsta$SBIIndex$i        ## set the index
+	for (nsbi = 1; nsbi <= sta$NbrASTABS$i; nsbi = nsbi + 1)
+	{
+	    #$% set status board information pointer    
+	    sbi$pointer$to (sta$SBIIndex$i + nsbi - 1)
+		PUTsbi$AstabAddr$i
+	}
+
+}  # end if ista is ok
+
+#________________________________________________________________________
+else                                            # Not stand-alone
+    {                                           
+    print *, "Invalid Station Number."
+    call exit                               # .........Abort
+    }
+
+iview = xSTA$View$I
+
+if (iview < $First$View | iview > $Last$View) 
+    {
+    print *, "Invalid View."
+    call exit
+    }
+
+PUTsta$PlayerOn$i (YES)                         # station On !!
+
+return
+end
+

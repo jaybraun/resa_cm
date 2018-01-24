@@ -1,0 +1,846 @@
+include "ascii.inc"
+include "atoid.inc"
+include "bbcode.inc"
+include "bbctl.inc"
+include "bbsta.inc"
+include "macros.inc"
+include "asctl.def"
+include "asshp.inc"
+ 
+undefine write   # use the standard fortran write statement
+undefine read
+ 
+
+Integer Function  getatowrd (ato_rcd, ipos, keyword)
+# Get next word from ATO line.  Continue if line not terminated.
+implicit none
+character ato_rcd[ARB]
+vmschar*400 a_line
+integer ipos, i, j, lenline
+character keyword[ARB]
+ 
+# ATO record terminated by //.  Optional fields are returned as null
+if (ipos > 0 & ato_rcd[ipos] == $SLASH & ato_rcd[ipos+1] == $SLASH)
+{
+    keyword[1] = EOS
+    return(0)
+}
+ 
+i = ipos + 1
+j = 0
+ 
+while (ato_rcd[i] != $SLASH)
+{
+	if (ato_rcd[i] == EOS)
+	{
+	    #$% get line of input from file with raw ato
+	    read (10,9001,END=8000) a_line
+	    lenline = len_trim(a_line)
+9001    format(a)
+		call fs2rs(a_line, ato_rcd)
+	    call upper (ato_rcd)
+	    i = 1
+		next
+	}
+ 
+    call smov(ato_rcd[i], keyword, j)
+    i = i + 1
+}
+ 
+ 
+#Trim trailing blanks
+while (keyword[j] == $SPACE & j > 0) j = j - 1
+ 
+keyword[j+1] = EOS
+ipos = i
+ 
+return(j)
+ 
+8000    close(10)
+        return(0)
+ 
+end
+
+ 
+Subroutine TimeShift(inTime, ts_days, ts_hours, ts_minutes, outTime)
+#Time shift DTG is USMTF ATO
+implicit none
+character inTime[ARB], outTime[ARB]
+integer ts_days, ts_hours, ts_minutes
+integer ctoi
+integer kk
+character cday[3]
+character chour[3]
+character cmin[3]
+integer iday, ihr, imin
+ 
+kk = 0
+call smovh (inTime, 2, cday, kk)
+call smov  (EOS, cday, kk)
+kk = 1
+iday = ctoi (cday, kk)
+ 
+kk = 0
+call smovh (inTime[3], 2, chour, kk)
+call smov  (EOS, chour, kk)
+kk = 1
+ihr = ctoi (chour, kk)
+ 
+kk = 0
+call smovh (inTime[5], 2, cmin, kk)
+call smov  (EOS, cmin, kk)
+kk = 1
+imin = ctoi (cmin, kk)
+ 
+ 
+imin = imin + ts_minutes
+while (imin < 0 | imin >= 60)
+{
+    if (imin < 0)
+    {
+        imin = imin + 60
+        ihr = ihr - 1
+        if (ihr < 0)
+        {
+            ihr = 23
+            iday = iday - 1
+            if (iday < 1) iday = 31
+        }
+    }
+    else
+    {
+        imin = imin - 60
+        ihr = ihr + 1
+        if (ihr >= 24)
+        {
+            ihr = 0
+            iday = iday + 1
+            if (iday > 31) iday = 1
+        }
+    }
+}
+ 
+ihr = ihr + ts_hours
+while (ihr < 0 | ihr >= 24)
+{
+    if (ihr < 0)
+    {
+        ihr = ihr + 24
+        iday = iday - 1
+        if (iday < 1) iday = 31
+    }
+    else
+    {
+        ihr = ihr - 24
+        iday = iday + 1
+        if (iday > 31) iday = 1
+    }
+}
+iday = iday + ts_days
+while (iday < 0 | iday > 31)
+{
+    if (iday < 0)
+    {
+        iday = iday + 31
+    }
+    else
+    {
+        iday = iday - 31
+    }
+}
+ 
+kk = 0
+call smoviz (iday, 2, outTime, kk)
+call smoviz (ihr, 2, outTime, kk)
+call smoviz (imin, 2, outTime, kk)
+call smov   (EOS, outTime, kk)
+ 
+return
+end
+
+Subroutine legit_name(aco_name, legal_name)
+# Remove special characters and truncate to form legal 24 char string
+implicit none
+character aco_name[ARB]
+vaxcharacter legal_name*24
+character chr
+integer jj, kk
+integer length
+ 
+kk = 0
+legal_name = " "
+ 
+# Eliminate -:,=,blank
+for (jj=1; jj <= length(aco_name); jj = jj + 1)
+{
+    chr = aco_name[jj]
+    if (chr == $MINUS | chr == $EQUAL | chr == $COLON | chr == $COMMA | chr == $SPACE) next
+    call vmov (chr, legal_name, kk)
+    if (kk > 24) break
+}
+#legal_name[kk+1] = EOS
+ 
+return
+end
+ 
+
+Subroutine shorten_name(aco_name1, mangle_name)
+# Shorten name to 8 characters by removing vowels, etc if necessary
+implicit none
+character aco_name[ARB]
+character aco_name1[ARB]
+character mangle_name[ARB]
+character chr
+character numstr[ARB]
+character numbers[11]
+ 
+integer i, j, jj, kk
+integer namelen
+integer index, length
+integer numstrlen
+ 
+data numbers/$DIG0,$DIG1,$DIG2,$DIG3,$DIG4,$DIG5,$DIG6,$DIG7,$DIG8,$DIG9,EOS/
+ 
+#
+# if >8 remove vowels, up to 4 of each
+# if >8 separate into alpha and numeric parts.
+#     combine alpha and numeric where 8-numeric chars = alpha chars
+ 
+
+namelen = length(aco_name1)
+kk = 0
+for (i=1; i<=namelen; i=i+1)
+{
+	if (aco_name1[i] == BLANK) break
+	if (aco_name1[i] == LPAREN | aco_name1[i] == RPAREN) next
+	kk = kk + 1
+	aco_name[kk] = aco_name1[i]
+}
+call smov (EOS, aco_name, kk)
+namelen = length(aco_name)
+ 
+if (namelen <= $$maxlit)
+{
+    kk = 0
+    call smovhn (aco_name, $$maxlit, mangle_name, kk)
+    call smov   (EOS, mangle_name, kk)
+    return
+}
+ 
+i = 1
+while ( i < namelen)
+{
+    chr = aco_name[i]
+    if (chr == $LETA | chr == $LETE | chr == $LETI | chr == $LETO | chr == $LETU)
+    {
+        for (j = i; j < namelen; j = j + 1)
+        {
+            aco_name[j] = aco_name[j+1]
+        }
+        namelen = namelen - 1
+    }
+    else
+    {
+        i = i + 1
+    }
+}
+call smov (EOS, aco_name, namelen)
+namelen = length(aco_name)
+ 
+if (namelen <= $$maxlit)
+{
+    kk = 0
+    call smovhn (aco_name, $$maxlit, mangle_name, kk)
+    call smov   (EOS, mangle_name, kk)
+    return
+}
+ 
+# Find trailing number
+kk = 0
+i = namelen
+while (i > 0)
+{
+    chr = aco_name[i]
+    if (index(numbers, chr) == 0) break
+    i = i - 1
+}
+numstrlen = namelen - i
+# Copy trailing number
+if (numstrlen > 0)
+{
+    kk = 0
+    call smovhn (aco_name[i+1],numstrlen, numstr, kk)
+    call smov (EOS, numstr, kk)
+}
+ 
+kk = 0
+call smovhn(aco_name, $$maxlit - numstrlen, mangle_name, kk)
+if (numstrlen > 0)
+    call smovhn(numstr, numstrlen, mangle_name, kk)
+call smov  (EOS, mangle_name, kk)
+ 
+return
+end
+
+
+Subroutine format_pos_lat (aco_pos, fmt_pos)
+# Format ACO latitude format into RESA latitude string format
+implicit none
+character aco_pos[ARB]
+character fmt_pos[ARB]
+integer kk
+integer index
+integer lon_pos, hemi_pos
+ 
+# Get postition of hemisphere char relative to start of lat
+hemi_pos = index(aco_pos[6], $LETN)
+if (hemi_pos == 0)
+    hemi_pos = index(aco_pos[6], $LETS)
+ 
+kk = 0
+ 
+if (hemi_pos == 5)
+{
+    call smovh (aco_pos[6], 2, fmt_pos, kk)  # lat deg
+    call smovv  ("-", fmt_pos, kk)
+    call smovh (aco_pos[8], 2, fmt_pos, kk)  # lat min
+    call smov  (aco_pos[10], fmt_pos, kk)     # lat hemi
+    call smov  (EOS, fmt_pos, kk)
+ 
+    lon_pos = 11
+}
+else
+{
+    call smovh (aco_pos[6], 2, fmt_pos, kk)  # lat deg
+    call smovv  ("-", fmt_pos, kk)
+    call smovh (aco_pos[8], 2, fmt_pos, kk)  # lat min
+    call smovv  ("-", fmt_pos, kk)
+    call smovh (aco_pos[10], 2, fmt_pos, kk)  # lat sec
+    call smov  (aco_pos[12], fmt_pos, kk)     # lat hemi
+    call smov  (EOS, fmt_pos, kk)
+ 
+}
+ 
+return
+end
+
+Subroutine format_pos_lon (aco_pos, fmt_pos)
+# Format ACO longitude format into RESA longitude string format
+implicit none
+character aco_pos[ARB]
+character fmt_pos[ARB]
+integer kk
+integer index
+integer lon_pos, hemi_pos
+ 
+# Get postition of hemisphere char relative to start of lat
+hemi_pos = index(aco_pos[6], $LETN)
+if (hemi_pos == 0)
+    hemi_pos = index(aco_pos[6], $LETS)
+ 
+kk = 0
+ 
+if (hemi_pos == 5) lon_pos = 11
+else               lon_pos = 13
+ 
+# Get postition of hemisphere char relative to start of lat
+hemi_pos = index(aco_pos[lon_pos], $LETE)
+if (hemi_pos == 0)
+    hemi_pos = index(aco_pos[lon_pos], $LETW)
+ 
+if (hemi_pos == 6)
+{
+    call smovh (aco_pos[lon_pos], 3, fmt_pos, kk)  # lon deg
+    call smovv  ("-", fmt_pos, kk)
+    call smovh (aco_pos[lon_pos+3], 2, fmt_pos, kk)  # lon min
+    call smov  (aco_pos[lon_pos+5], fmt_pos, kk)     # lon hemi
+    call smov  (EOS, fmt_pos, kk)
+}
+else
+{
+    call smovh (aco_pos[lon_pos], 3, fmt_pos, kk)  # lon deg
+    call smovv  ("-", fmt_pos, kk)
+    call smovh (aco_pos[lon_pos+3], 2, fmt_pos, kk)  # lon min
+    call smovv  ("-", fmt_pos, kk)
+    call smovh (aco_pos[lon_pos+5], 2, fmt_pos, kk)  # lon min
+    call smov  (aco_pos[lon_pos+7], fmt_pos, kk)     # lon hemi
+    call smov  (EOS, fmt_pos, kk)
+}
+return
+end
+
+Subroutine format_radius (aco_radius, fmt_radius)
+# Format and Convert radius to NM
+implicit none
+character aco_radius[ARB]
+character fmt_radius[ARB]
+ 
+integer kk
+integer ctof
+real radius
+integer iradius
+ 
+kk = 1
+ 
+radius = ctof(aco_radius, kk)               # stop at non-numeric
+ 
+# Covert to NM
+if (aco_radius[kk] == $LETM)
+{
+    radius = radius / $Meters$Per$Mile
+}
+ 
+iradius = radius + 0.5
+iradius = max(1, iradius)
+ 
+kk = 0
+call smovi (iradius, fmt_radius, kk)
+call smov  (EOS, fmt_radius, kk)
+ 
+return
+end
+
+Subroutine format_bearing (aco_bearing, fmt_bearing)
+# Format bearing within  0-360 degrees
+implicit none
+character aco_bearing[ARB]
+character fmt_bearing[ARB]
+ 
+integer kk
+integer ctoi
+integer ibrg
+ 
+kk = 1
+ 
+ibrg = ctoi(aco_bearing, kk)               # stop at non-numeric
+ 
+while (ibrg > 360) ibrg = ibrg - 360
+while (ibrg < 0)   ibrg = ibrg + 360
+ 
+kk = 0
+call smovi (ibrg, fmt_bearing, kk)
+call smov  (EOS, fmt_bearing, kk)
+ 
+return
+end
+
+ 
+Integer function ShapeText2Code (aco_shape)
+# Convert shape type to shape type code
+implicit none
+integer equal_hv
+integer shapecode
+character aco_shape[80]
+ 
+if      (equal_hv(aco_shape, "POINT") == YES)        shapecode = shape$point$code
+else if (equal_hv(aco_shape, "CIRCLE") == YES)       shapecode = shape$circle$code
+else if (equal_hv(aco_shape, "POLYARC") == YES)      shapecode = shape$polyarc$code
+else if (equal_hv(aco_shape, "POLYGON") == YES)      shapecode = shape$polygon$code
+else if (equal_hv(aco_shape, "RADARC") == YES)       shapecode = shape$radarc$code
+else if (equal_hv(aco_shape, "ORBIT") == YES)        shapecode = shape$orbit$code
+else if (equal_hv(aco_shape, "LINE") == YES)         shapecode = shape$line$code
+else if (equal_hv(aco_shape, "TRACK") == YES)        shapecode = shape$track$code
+else if (equal_hv(aco_shape, "CORRIDOR") == YES)     shapecode = shape$corridor$code
+else                                          shapecode = shape$unknown$code
+ 
+return (shapecode)
+end
+
+ 
+subroutine asaloc (tbl,jname,Nseg,islots,ientry)      # allocate $$tbl
+# Allocate table in memory
+implicit none
+AScommon
+integer tbl,Nseg,islots,ientry,iname
+VMSchar*(*) jname
+integer k, $$tbl, iflag
+ 
+#$% move table name (jname) into iname array
+k=0
+iname = $BLANKI4
+call smovvn (jname,iname,k)
+ 
+ 
+if (tbl < 1) return
+ 
+#$% get data for the table
+iasp[$$PTRBASE, tbl] = $$AS$BeginTables
+iasp[$$PTRSIZE, tbl] = islots * iabs(ientry)
+iasp[$$PTRUSED, tbl] = 0
+iasp[$$PTRNAME, tbl] = iname
+iasp[$$PTRLEN , tbl] = ientry
+iasp[$$PTRALOC, tbl] = 0
+ 
+return
+end
+
+Subroutine atoid_load
+# Load atoid and associated unique character
+implicit none
+ATOIDCommon
+ 
+integer name_len
+integer return_val
+integer k, kk
+integer lenline
+character file_name[50]
+vmschar*50 file_name_v
+equivalence(file_name, file_name_v)
+character a_line[400]
+ 
+character ai_rcd[400]
+vmschar*400 ai_rcd_v
+equivalence(ai_rcd, ai_rcd_v)
+ 
+integer ipos, isize
+integer getwrd, equal
+character keyword[80]
+integer ai$pointer
+integer i
+ 
+name_len = 0
+call smovv  ("atoid.dat", file_name, name_len)
+call smov   (EOS, file_name, name_len)
+open(unit    =   10,                            #open input file
+    file    =   file_name_v,
+    status  =  'unknown',
+    access  =  'sequential',
+    recl    =   120,
+    iostat  =   return_val)
+ 
+if (return_val != 0)
+{
+    print *, "unable to open atoid.dat"
+    return
+}
+ 
+ai$pointer = 0
+repeat
+{
+    #$% get line of input from resa formatted airspace definitions
+    read (10,9001,END=8000) ai_rcd_v
+    lenline = len_trim(ai_rcd_v)
+9001    format(a)
+    k = lenline
+    call smov (EOS, ai_rcd, k)
+    call upper (ai_rcd)
+ 
+    ipos = 1
+    call skipbl (ai_rcd, ipos)
+    if (ai_rcd[ipos] == $EXCLAIM | ai_rcd[ipos] == $POUND) next
+ 
+    isize = getwrd (ai_rcd, ipos, ai$Name$c)
+    isize = getwrd (ai_rcd, ipos, ai$UniqueChar$c)
+    ai$pointer$next
+    PUTai$Name$c
+    PUTai$UniqueChar$c
+}
+8000
+close(10)
+ 
+PUTai$used$i (ai$pointer)
+ 
+return
+end
+
+Subroutine atoid_add (atoidC)
+# Add new entry into atoid table
+implicit none
+ATOIDCommon
+ 
+character atoidC[8]
+character atoid_upperC[8]
+integer equal
+integer ai$pointer
+integer kk
+ 
+ai$pointer = Xai$Used$i
+ 
+Xai$Name$c
+ 
+kk = 0
+call smovhn(atoidC, ARB, atoid_upperC, kk)
+call smov(EOS, atoid_upperC, kk)
+call upper(atoid_upperC)
+ 
+if (equal(ai$Name$c, atoid_upperC) == NO)        # Add new ATOID and assign char
+{
+    ai$pointer$next
+    if (ai$pointer > ai$slots)
+    {
+        print *, "ATOID History table out of space. Clearing Table"
+        ai$pointer = 1
+    }
+    kk = 0
+    call smovh (atoid_upperC, 8, ai$Name$c, kk)
+    call smov (EOS, ai$Name$c, kk)
+    PUTai$Name$c
+ 
+    ai$UniqueChar$c[1] = $LETA - 1 + ai$pointer # Next unique char
+    ai$UniqueChar$c[2] = EOS
+    PUTai$UniqueChar$c
+    PUTai$used$i (ai$pointer)
+    call ATOID_store
+}
+ 
+PUTai$used$i (ai$pointer)
+ 
+ 
+return
+end
+
+Subroutine atoid_store
+# Write atoid to file
+implicit none
+ATOIDCommon
+ 
+integer name_len
+integer return_val
+integer k, kk
+integer lenline
+character file_name[50]
+vmschar*50 file_name_v
+equivalence(file_name, file_name_v)
+ 
+character ai_rcd[400]
+vmschar*400 ai_rcd_v
+equivalence (ai_rcd, ai_rcd_v)
+ 
+integer ipos, isize
+integer getwrd, equal
+character keyword[80]
+integer ai$pointer
+integer i
+ 
+name_len = 0
+call smovv  ("atoid.dat", file_name, name_len)
+call smov   (EOS, file_name, name_len)
+open(unit    =   10,                            #open input file
+    file    =   file_name_v,
+    status  =  'unknown',
+    access  =  'sequential',
+    recl    =   120,
+    iostat  =   return_val)
+ 
+if (return_val != 0)
+{
+    print *, "unable to write atoid.dat"
+    return
+}
+ 
+for (ai$pointer$first; ai$pointer$ok; ai$pointer$next)
+{
+    Xai$name$c
+    Xai$UniqueChar$c
+ 
+    kk = 0
+    call smovh (ai$name$c, ARB, ai_rcd, kk)
+    call smov  ($SPACE, ai_rcd, kk)
+    call smovh (ai$UniqueChar$c, ARB, ai_rcd, kk)
+    call smov  (EOS, ai_rcd, kk)
+ 
+    write (10,9001) (ai_rcd_v[1:kk-1])
+9001    format(a)
+}
+8000
+close(10)
+ 
+return
+end
+
+Subroutine atoid_find (atoid, atoid_suffix)
+# Find atoid by name.  Return unique mission suffix
+implicit none
+ATOIDCommon
+ 
+character atoid[8]
+character atoid_upper[8]
+character atoid_suffix[2]
+ 
+integer ai$pointer
+integer kk
+integer equal
+ 
+kk = 0
+call smovhn(atoid, ARB, atoid_upper, kk)
+call smov(EOS, atoid_upper, kk)
+call upper(atoid_upper)
+ 
+for (ai$pointer$first; ai$pointer$ok; ai$pointer$next)
+{
+    Xai$name$c
+    if (equal(ai$name$c,atoid_upper) == YES) break
+}
+ 
+if (ai$pointer$ok)
+    Xai$UniqueChar$c
+else
+{
+    kk = 0; call smov (EOS, ai$UniqueChar$c, kk)
+}
+ 
+kk = 0; call smovhn (ai$UniqueChar$c, ARB, atoid_suffix, kk)
+call smov (EOS, atoid_suffix, kk)
+ 
+return
+end
+
+ 
+ ## ctoim - convert string at in(i) to signed integer, increment i
+    integer function ctoim(in, i)
+    character in(ARB)
+    integer index
+    integer d, i, ism, ctoi
+ #   string digits "0123456789"
+    character digits(11)
+    data digits(1) /DIG0/
+    data digits(2) /DIG1/
+    data digits(3) /DIG2/
+    data digits(4) /DIG3/
+    data digits(5) /DIG4/
+    data digits(6) /DIG5/
+    data digits(7) /DIG6/
+    data digits(8) /DIG7/
+    data digits(9) /DIG8/
+    data digits(10) /DIG9/
+    data digits(11) /EOS/
+ 
+    while (in(i) == BLANK | in(i) == TAB)
+       i = i + 1
+    # Check for +-
+    ism = 1
+    if (in[i] == $MINUS)
+    {
+        ism = -1
+        i = i + 1
+    }
+    else if (in[i] == $PLUS)
+    {
+        ism = 1
+        i = i + 1
+    }
+ 
+    for (ctoi = 0; in(i) != EOS; i = i + 1) {
+       d = index(digits, in(i))
+       if (d == 0)      # non-digit
+          break
+       ctoi = 10 * ctoi + d - 1
+       }
+    ctoim = ctoi * ism
+    return
+    end
+
+# cvt_DMS_Rad           convert string Latitude/Longitude to radians
+Subroutine cvt_DMS_Rad ( Input, Radians, Error)
+ 
+Implicit None
+ 
+character           input[ARB]
+vmschar*ARB         input_v
+ 
+vmschar*4           deg_v
+vmschar*4           min_v
+vmschar*4           sec_v
+character           vhem
+integer*4           error, ideg, imin, isec, ihem, ideg_max, n
+real*4              radians
+integer             cupper, length, ctoi
+ 
+radians = 0.0       # set initial return values
+error   = 0
+ 
+# Check for validity
+call rs2fs(input, input_v)
+call str_element (deg_v, 0, "-", input_v)     # degrees
+call str_element (min_v, 1, "-", input_v)     # minutes
+call str_element (sec_v, 2, "-", input_v)     # seconds
+vhem = cupper(input[length(input)])                           # N/S or E/W
+ 
+n = 1; ideg = ctoi (%%ref(deg_v),n)
+n = 1; imin = ctoi (%%ref(min_v),n)
+n = 1; isec = ctoi (%%ref(sec_v),n)
+ 
+if      ( vhem == $LETN)   ihem = 1
+else if ( vhem == $LETS)   ihem = -1
+else if ( vhem == $LETE)   ihem = 1
+else if ( vhem == $LETW)   ihem = -1
+else                       ihem = 0
+ 
+if ( vhem == $LETN | vhem == LETS) ideg_max = 90
+else                               ideg_max = 180
+ 
+if ( ideg < 0       ) error = error + 1
+if ( ideg > ideg_max) error = error + 1
+if ( imin < 0       ) error = error + 1
+if ( imin > 59      ) error = error + 1
+if ( isec < 0       ) error = error + 1
+if ( isec > 59      ) error = error + 1
+if ( ihem == 0      ) error = error + 1
+ 
+if ( ideg == ideg_max & imin > 0) error = error + 1
+if ( ideg == ideg_max & isec > 0) error = error + 1
+ 
+if (error == 0)                         # Convert it to radians
+    {
+    radians = $pi/180.0 * ( ( ideg + imin/60.0 + isec/3600.0 ) * ihem)
+    }
+ 
+end
+ 
+subroutine copy_to_sta_prescript_buf (station_nbr, line2)
+BBcommon
+integer station_nbr
+character line2[800]
+BBDeclare (sta$pointer, sta$PRE$index, sta$PRE$char$i)
+integer kk, iavail
+ 
+sta$pointer$to station_nbr
+if (Xsta$PlayerOn$i == $NO)			# Don't sent orders to non-active station
+{
+    Print *, "Station ", station_nbr, " is not active.  Skipping order to station."
+}
+ 
+while (Xsta$PreLen$i > 0)		# Wait for workstation to process order
+{
+    call delay(30)
+}
+ 
+sta$pre$index = 0
+for (kk=1; kk <= STA$PRE$slots; kk = kk + 1)
+{
+    if (line2[kk] == EOS) break
+    sta$Pre$char$i = line2[kk]
+    sta$pre$index = sta$pre$index + 1
+    PUTsta$Pre$char$i
+}
+
+if (ALSP$Review == $NO)
+{
+	# Available characters in sta order input buffer
+	iavail = XSTA$inpread$i - XSTA$inpwrite$i
+	if(iavail <= 0)
+	   iavail = STA$inp$slots + iavail
+
+	# Wait for swar to clear station order input buffer
+	while(kk >= iavail)
+	{
+ 	   call delay(100)
+
+    	iavail = XSTA$inpread$i - XSTA$inpwrite$i
+    	if(iavail <= 0)
+    	   iavail = STA$inp$slots + iavail
+	}
+}
+
+ 
+if (kk > STA$PRE$slots)
+{
+    print *, "Input line exceeds max line length"
+}
+ 
+PUTsta$PreLen$i(kk-1)
+ 
+return
+end
+ 
+ 

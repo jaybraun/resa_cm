@@ -1,0 +1,746 @@
+#$%     MODULE                        UTILITY                   DATA
+#$%   SUBROUTINES                   SUBROUTINES                TABLES
+#$%   ===========                   ===========                ======
+#$%
+#$%     SWDMOD                         QTRIG                     UNT
+#$%     SWRDT1                         ANGPI                     SWB
+#$%     SWBSPD                         RANDOM                    SWD
+#$%     SWDNEW                         RANDN                     SHC
+#$%     SWDSET
+#$%     SWDDYN
+#$%     SWDELL
+#$%     ELLOFF  <WGMDSOS.RAT>
+#$%     INOUT
+#$%
+#$%   NOTES
+#$%   =====
+#$%
+#$%   1.  <FILENAME> INDICATES WHERE SUBROUTINE IS LOCATED.
+#$%
+#$%   2.  UTILITY SUBROUTINES NOT SHOWN ON FLOWCHART.
+#$%
+#$%   3.  * INDICATES NO OTHER SUBROUTINES CALLED.
+#$%
+#$%
+#$%
+#$%   FLOWCHART FOR FILE SWDMOD
+#$%   =========================
+#$%
+#$%   SWDMOD - SWDDT1 - SWRDT1 - INOUT
+#$%                   - SWBSPD
+#$%                   - ELLOFF
+#$%                   - SWDDYN
+#$%                   - SWDNEW
+#$%                   - SWDSET - SWDELL - ELLOFF
+#$%                            - SWDDYN
+#$%                   - Remove_old-tracks
+#$%
+
+ 
+define (BBImplicit,Implicit None)
+define ($debug,)
+ 
+include "bbctl.inc"
+include "bbcode.inc"
+include "bbunt.inc"
+include "bbswd.inc"
+include "bbswb.inc"
+include "bbshc.inc"
+include "macros.inc"
+define (BBImplicit,Implicit None)
+ 
+Subroutine SWDMOD
+#######################################################
+#$%
+#$% Purpose:   SWDMOD determines SWABS detections
+#$%            of submarines.
+#$%
+#$% Called By: WARCYC
+#$%
+#$% Calls:     SWDDT1     Remove_old_tracks
+#$%
+#$% Tables:    UNT
+#$%
+#$% Date:      MARCH 1991
+#$%
+#$% Author:    Susan Miller and Carol Kropp
+#$%
+#######################################################
+BBcommon
+BBDeclare  (UNT$Pointer,
+            UNT$Status$I)                           # MJC 7/19/2K (E2145)
+#$% for each entry search for subs
+for (UNT$pointer$first;UNT$pointer$ok;UNT$pointer$next)
+   {
+    #$% unit must be a submarine for SWABS detection
+    if (xUNT$type$i != $sub$code)
+      next
+ 
+    #$% get unit status
+    UNT$status$i = xUNT$status$i
+ 
+    #$% if being deleted or sinking, get next entry
+    if (UNT$status$i == $beingdeleted$code |   #skip if kaput
+        UNT$status$i == $sinking$code)  next   #skip if sinking
+ 
+    if (Xunt$NeverDetect$i == YES) next     # joa 3/05 per_never
+ 
+    #$% if it's a countermeasure or torpedo, skip it
+    if ((xUNT$SuperType$i == $CtrMeasure$SuperCode) |
+        (xUNT$SuperType$i == $Torpedo$SuperCode)) next
+ 
+    #$% see if the submarine is detected
+    call SWDDT1(UNT$pointer)
+   }
+ 
+call Remove_old_swabs_tracks
+ 
+ 
+return
+end
+
+ 
+ 
+subroutine SWDDT1(UNT$pointer)
+############################################################
+#$%
+#$% Purpose:   SWDDT1 determines whether SWABS has detected
+#$%            the submarine pointed to by the unit pointer.
+#$%
+#$% Called By: SWDMOD
+#$%
+#$% Calls:     SWRDT1     SWBSPD     ELLOFF
+#$%            SWDNEW     SWDSET     SWDDYN
+#$%
+#$% Tables:    UNT        SWB        SWD
+#$%
+#$% Date:      MARCH 1991
+#$%
+#$% Author:    Susan Miller and Carol Kropp
+#$%
+############################################################
+BBcommon
+BBDeclare  (UNT$Swbindx$I,
+            UNT$Pointer,
+            UNT$View$I,
+            UNT$Swdalertindx$I,
+            SWB$Pointer,
+            SWB$SUB$Index,
+            SWD$Pointer,
+            SWD$Offsetlat$F,
+            SWD$Offsetlon$F,
+            SHC$Type$C,
+            SHC$Pointer)                            # MJC 7/19/2K (E2145)
+real    RANDOM, x                                      # MJC 7/19/2K (E2145)
+data x/0.0/		# Get next random number in sequence
+ 
+literal CSTRIP8                                     # MJC 7/19/2K (E2145)
+real*4  sub_spd_prob, random_number
+integer inflag, IDtFlg, IndxS2, sub_found
+ 
+IDtFlg = $no           #initialize detection flag to no detection
+ 
+#determine region containing this sub
+inflag = $no
+UNT$SWBIndx$I = xUNT$SWBIndx$I   # first check the last known swabs region
+SWB$Pointer$To  (UNT$SWBIndx$I)  # clk 10/93 (hopefully will save time)
+if (SWB$Pointer$Ok)
+   call SWRDT1 (SWB$pointer, UNT$pointer, inflag)
+if (inflag != $yes)  # if no last known region or no longer in that region
+  {                  # check all the regions for the sub
+   for (SWB$pointer$first;SWB$pointer$ok;SWB$pointer$next)
+     {
+      call SWRDT1 (SWB$pointer, UNT$pointer, inflag)
+ 
+      if (inflag == $yes)        # get out if region located
+        {
+         putUNT$SWBIndx$I  (SWB$Pointer$Index)  # store the region
+         break
+        }
+     }
+  }
+ 
+if (inflag != $yes)        #if the region was not found return
+   return
+ 
+#$% get class and view of the submarine
+SHC$Pointer = xUNT$ShcPntr$I         # get pointer to sub characteristics
+SHC$Type$C = xSHC$Type$C
+UNT$view$i = xUNT$view$i
+ 
+sub_found = $no
+#$% check SWABS region data for class of submarine
+for (SWB$Sub$Index = 1;SWB$Sub$Index$OK;SWB$Sub$Index = SWB$Sub$Index + 1)
+    {
+     if (SHC$Type$C != xSWB$Sub$Class$C)
+       next
+     sub_found = $yes
+     break
+    }
+ 
+if (sub_found != $yes)    # if the sub was not classified for the region, return
+  return
+ 
+call SWBSPD(UNT$pointer,       #get probability for speed of sub
+            SWB$Pointer,
+            SWB$Sub$Index,
+            sub_spd_prob)      #return SWABS sub speed probability
+ 
+#$% get random number for detection check against sub_spd_prob
+random_number = RANDOM (x)
+if (sub_spd_prob < random_number)  # no detection occurs
+  return
+ 
+UNT$SWDAlertIndx$I = xUNT$SWDAlertIndx$I  # get index into detection table
+if (UNT$SWDAlertIndx$I != 0)    # if this sub has been found before update
+  {                             # information in the detection table
+   SWD$Pointer$to  UNT$SWDAlertIndx$i     # set pointer to track entry
+ 
+   call ELLOFF(float(xSWD$SemiMajorAxis$i),   # calculate ellipse center offset
+               float(xSWD$SemiMinorAxis$i),
+               xSWD$orientation$i * ($pi/180.0),
+               xUNT$truelatitude$f,
+               xUNT$truelongitude$f,
+               xUNT$costruelat$f,
+               SWD$offsetlat$f,         #return latitude of ellipse center
+               SWD$offsetlon$f)         #return longitude of ellipse center
+ 
+   putSWD$OffsetLat$F
+   putSWD$OffsetLon$F
+ 
+   #$% get course and speed of submarine
+   call SWDDYN(UNT$Pointer, SWD$Pointer)
+  }
+ 
+else         # SWABS alert is zero, sub is a new detection
+  {
+   call SWDNEW(UNT$SWDAlertIndx$I,   # get index to new track in
+               IndxS2)               # SWABS output table
+ 
+   if (UNT$SWDAlertIndx$I != 0)           # if table is not full
+       {
+        putUNT$SWDAlertIndx$I             # new SWD pointer to unit table
+ 
+        call SWDSET(UNT$Pointer,          # go setup this new track
+                    SWB$Pointer,          # SWABS region pointer
+                    UNT$SWDAlertIndx$I)
+       }
+ 
+  }   #end if sub is a new detection
+ 
+return
+end
+
+ 
+ 
+subroutine SWBSPD(UNT$pointer,
+                  SWB$Pointer,
+                  SWB$Sub$Index,
+                  sub_spd_prob)       #speed probability
+##############################################################
+#$%
+#$% Purpose:   SWBSPD gets probability of detection from
+#$%            SWB region table per speed of submarine.
+#$%
+#$% Called By: SWDDT1
+#$%
+#$% Calls:     None
+#$%
+#$% Tables:    UNT        SWB
+#$%
+#$% Date:      MARCH 1991
+#$%
+#$% Author:    Susan Miller and Carol Kropp
+#$%
+#$% Modified:  Carol Kropp - 10/93 (Variable Cycle Time)
+#$%            Adjusted the pd value to account for time
+#$%            spans other than one minute.
+#$%
+##############################################################
+BBcommon
+ 
+integer  UNT$pointer, SWB$Pointer, SWB$Sub$Index
+real*4   sub_spd_prob
+ 
+real*4  sub_true_speed
+ 
+#$% get true speed
+sub_true_speed = xUNT$TrueSpeed$F
+ 
+if      ((sub_true_speed >= 0) & (sub_true_speed <= 5))
+        sub_spd_prob = xSWB$Sub$ProbAt5$F
+else if ((sub_true_speed > 5) & (sub_true_speed <= 10))
+        sub_spd_prob = xSWB$Sub$ProbAt10$F
+else if ((sub_true_speed > 10) & (sub_true_speed <= 15))
+        sub_spd_prob = xSWB$Sub$ProbAt15$F
+else if ((sub_true_speed > 15) & (sub_true_speed <= 20))
+        sub_spd_prob = xSWB$Sub$ProbAt20$F
+else if ((sub_true_speed > 20) & (sub_true_speed <= 25))
+        sub_spd_prob = xSWB$Sub$ProbAt25$F
+else if (sub_true_speed > 25)
+        sub_spd_prob = xSWB$Sub$ProbAt30$F
+ 
+sub_spd_prob = 1.0 - (1.0 - sub_spd_prob) **
+               (Model$Interval)    # For VTS
+ 
+return
+end
+
+ 
+ 
+Subroutine SWDNEW(IndxS1,      #get and pass new track index
+                  IndxS2)
+#######################################################
+#$%
+#$% Purpose:   SWDNEW updates indices when getting
+#$%            index to a new slot.
+#$%
+#$% Called By: SWDDT1
+#$%
+#$% Calls:     None
+#$%
+#$% Tables:    SWD
+#$%
+#$% Date:      MARCH 1991
+#$%
+#$% Author:    Susan Miller and Carol Kropp
+#$%
+#######################################################
+BBcommon
+BBDeclare  (SWD$Pointer,
+            SWD$Nextindx$I)                         # MJC 7/19/2K (E2145)
+integer INDXS1,
+        INDXS2                                      # MJC 7/19/2K (E2145)
+#$% if table is full
+if (SWABS$First$Free == 0)
+    {
+     indxs1 = 0
+     return
+    }
+ 
+#$% save pointer index to first free slot
+indxs1 = SWABS$First$Free
+ 
+SWD$pointer$to indxs1       #point to this slot
+ 
+SWD$used = MAX(SWD$used, SWD$pointer$index * SWD$entry)
+ 
+#$% save pointer index to next free slot on chain
+indxs2 = xSWD$NextIndx$I
+ 
+#$% set the pointer index to the old first free slot and set to zero
+SWD$NextIndx$I = 0
+putSWD$NextIndx$I
+ 
+if (SWABS$Last$Track != 0)           # if this is not the first track,
+  {                                  # then point to old last
+   SWD$Pointer$to SWABS$Last$Track   # track and link old last track
+   SWD$NextIndx$I = indxs1           # to new last track.  this new
+   putSWD$NextIndx$I                 # last track was the first free
+  }
+else
+  {
+   SWABS$Last$Track = indxs1          # if this is the first track
+   SWABS$First$Track = indxs1         # indicies to the first slot
+  }
+ 
+SWABS$Last$Track = indxs1             #update last track
+SWABS$First$Free = indxs2             #update first free space
+ 
+if (indxs1  == SWABS$Last$Free)       #if the first and last free space
+  {
+   SWABs$Last$Free = indxs2           #pointer indicies are equal
+ 
+   if (indxs1 == SWABS$First$Track)   #if the first free space pointer
+     SWABS$First$Track = indxs2
+  }
+ 
+Return
+End
+
+ 
+ 
+subroutine SWDSET(UNT$pointer,         # pointer to sub UNT entry
+                  SWB$Pointer,         # SWABS region pointer
+                  index1)              # new index into SWD table
+#######################################################
+#$%
+#$% Purpose:   SWDSET initializes the new track.
+#$%
+#$% Called By: SWDDT1
+#$%
+#$% Calls:     SWDELL     SWDDYN
+#$%
+#$% Tables:    UNT        SWD        SWB
+#$%
+#$% Date:      MARCH 1991
+#$%
+#$% Author:    Susan Miller and Carol Kropp
+#$%
+#######################################################
+BBcommon
+BBDeclare  (SWD$Pointer,
+            SWD$Sequencenmbr$I,
+            SWD$Detectee$I,
+            SWD$Detectorside$I,
+            UNT$Pointer,
+            SWB$Pointer)                            # MJC 7/19/2K (E2145)
+integer index1, NmbrTr
+ 
+SWD$pointer$to index1
+NmbrTr = SWABS$TrackCntr               #get track number
+ 
+#$% if track number is less than minimum or greater than maximum
+If (NmbrTr < 1 | NmbrTr > 999)
+   NmbrTr = 1      # set track number to one
+ 
+SWD$SequenceNmbr$I = NmbrTr            #init track
+putSWD$SequenceNmbr$I                  #   number
+ 
+SWABS$TrackCntr = NmbrTr + 1
+ 
+SWD$Detectee$I = UNT$pointer$Index     #initialize index back to
+putSWD$Detectee$I                      #sub in unit table
+ 
+SWD$DetectorSide$I = xSWB$Side$I       #get which side, blue or orange
+putSWD$DetectorSide$I
+ 
+call SWDELL(UNT$pointer,               #generate SWABS ellipse
+            SWB$pointer,
+            SWD$pointer)
+ 
+#$% get course and speed of submarine
+call SWDDYN(UNT$Pointer,
+            SWD$Pointer)
+ 
+Return
+End
+
+ 
+ 
+ 
+Subroutine SWDDYN(UNT$Pointer,
+                  SWD$Pointer)
+##########################################################
+#$%
+#$% Purpose:   SWDDYN gets course and speed of submarine.
+#$%
+#$% Called By: SWDSET
+#$%
+#$% Calls:     None
+#$%
+#$% Tables:    UNT        SWD
+#$%            SHC
+#$%
+#$% Date:      MARCH 1991
+#$%
+#$% Author:    Susan Miller and Carol Kropp
+#$%
+#$% Modified:  Carol Kropp - 10/93 (Variable Cycle Time)
+#$%            swd$DetectionTime$f is now in game seconds.
+#$%
+###########################################################
+BBcommon
+BBDeclare  (SWD$Pointer,
+            SWD$Course$I,
+            SWD$Speed$I,
+            SWD$Class$C,
+            SWD$Detectiontime$F,
+            SHC$Pointer,
+            UNT$Pointer)                                # MJC 7/19/2K (E2145)
+literal CSTRIP8                                         # MJC 7/19/2K (E2145)
+#$% get SHC pointer
+SHC$Pointer = xUNT$SHCPntr$I
+ 
+SWD$Class$c = XSHC$Type$c
+PUTSWD$Class$c
+ 
+#$% set course to true course and store
+SWD$Course$I = xUNT$TrueCourse$F * (180.0/$PI)
+putSWD$Course$I
+ 
+#$% set speed to true speed and store
+SWD$Speed$I = INT(xUNT$TrueSpeed$F + .5)
+putSWD$Speed$I
+ 
+#$% get the game time and store
+swd$DetectionTime$f = Game$Time   # For VTS
+putswd$DetectionTime$f
+ 
+Return
+End
+
+ 
+ 
+Subroutine SWRDT1(SWB$pointer,
+                  UNT$pointer,
+                  inflag)       # $yes if in region, $no if not
+###########################################################
+#$%
+#$% Purpose:   SWRDT1 checks the SWB$pointer region for the
+#$%            specific submarine.
+#$%
+#$% Called By: SWBDT1
+#$%
+#$% Calls:     INOUT
+#$%
+#$% Tables:    SWB        UNT
+#$%
+#$% Date:      MARCH 1991
+#$%
+#$% Author:    Susan Miller and Carol Kropp
+#$%
+###########################################################
+BBcommon
+BBDeclare  (SWB$Pointer,
+            SWB$VER$Index,
+            SWB$Side$I,
+            UNT$Pointer,
+            UNT$View$I)
+real xp[6],yp[6]
+integer nvert, inflag, unitview
+ 
+#$% get number of vertices
+nvert = xSWB$NbrVertices$i
+ 
+#$% for each entry
+for (SWB$VER$index = 1; SWB$VER$index <= nvert;
+                               SWB$VER$index = SWB$VER$index + 1)
+  {
+   #$% get vertices longitude
+   xp[SWB$VER$index] = xSWB$VER$longitude$f
+   #$% get vertices latitude
+   yp[SWB$VER$index] = xSWB$VER$latitude$f
+  }
+ 
+call inout(xUNT$TrueLongitude$f, xUNT$TrueLatitude$f, nvert, xp, yp, inflag)
+ 
+if (inflag != $yes)
+  return
+ 
+#$% extract the views from the UNT and SWB table
+UNT$View$I = xUNT$View$I         # blue or orange view 1,2,3,etc.
+SWB$Side$I = xSWB$Side$I         # blue (1) or orange (2)
+ 
+if (SWB$Side$I == $Blue$Code)
+  {
+   if ((UNT$View$I >= $FirstBlue$View) & (UNT$View$I <= $LastBlue$View))
+     {
+      unitview = UNT$View$I - $FirstBlue$View + 1
+      if (SWABS$B_View == unitview)
+        inflag = $no
+      if (trace$SWABS != $No)
+         {
+          call echov (" INSIDE WGMDSWABS SUBROUTINE SWRDT1 ")
+          call echor
+          call echov ("SWABS$B_View=")
+          call echoi (SWABS$B_View)
+          call echov (",$FirstBlue$View=")
+          call echoi ($FirstBlue$View)
+          call echov (",$LastBlue$View=")
+          call echoi ($LastBlue$View)
+          call echov (",unitview=")
+          call echoi (unitview)
+          call echov (",UNT$View$I=")
+          call echoi (xUNT$View$I)
+          call echor
+          call echov ("The target is in region ")
+          call echoi (xSWB$RegionNumber$I)
+          call echor
+         }
+     }
+  }
+ 
+else     # the region is Orange
+  {
+   if ((UNT$View$I >= $FirstOrange$View) & (UNT$View$I <= $LastOrange$View))
+     {
+      unitview = UNT$View$I - $FirstOrange$View + 1
+      if (SWABS$O_View == unitview)
+        inflag = $no
+      if (trace$SWABS != $No)
+         {
+          call echov ("SWABS$O_View=")
+          call echoi (SWABS$O_View)
+          call echov (",$FirstOrange$View=")
+          call echoi ($FirstOrange$View)
+          call echov (",$LastOrange$View=")
+          call echoi ($LastOrange$View)
+          call echov (",unitview=")
+          call echoi (unitview)
+          call echov (",UNT$View$I=")
+          call echoi (xUNT$View$I)
+          call echor
+          call echov ("The target is in region ")
+          call echoi (xSWB$RegionNumber$I)
+          call echor
+         }
+     }
+  }
+ 
+return
+end
+
+ 
+ 
+Subroutine SWDELL(UNT$pointer,
+                  SWB$pointer,
+                  SWD$pointer)
+######################################################
+#$%
+#$% Purpose:   SWDELL generates SWABS ellipse.
+#$%
+#$% Called By: SWDDT1     SWDSET
+#$%
+#$% Calls:     ELLOFF
+#$%
+#$% Tables:    UNT        SWB        SWD
+#$%
+#$% Date:      MARCH 1991
+#$%
+#$% Author:    Susan Miller and Carol Kropp
+#$%
+#######################################################
+BBcommon
+BBDeclare  (SWD$Semimajoraxis$I,
+            SWD$Semiminoraxis$I,
+            SWD$Pointer,
+            SWD$Offsetlat$F,
+            SWD$Offsetlon$F,
+            SWD$Orientation$I,
+            SWB$Pointer,
+            UNT$Pointer)                            # MJC 7/19/2K (E2145)
+real   X,
+       RANDN,
+       RANDOM                                       # MJC 7/19/2K (E2145)
+data x/0.0/		# Get next random number in sequence
+ 
+real   LocError, StdDev
+real   rnone, rntwo
+ 
+LocError = xSWB$LocationError$I
+StdDev = xSWB$StdDevLength$I
+ 
+RNOne = abs(RANDN(LocError, StdDev))
+ 
+RNTwo = abs(RANDN(LocError, StdDev))
+ 
+RNone = RNone + 1.0
+RNtwo = RNtwo + 1.0
+ 
+if (RNOne >= RNTwo)
+   {
+   SWD$SemiMajorAxis$I = RNOne
+   SWD$SemiMinorAxis$I = RNTwo
+   }
+else
+   {
+   SWD$SemiMajorAxis$I = RNTwo
+   SWD$SemiMinorAxis$I = RNOne
+   }
+ 
+putSWD$SemiMajorAxis$I
+putSWD$SemiMinorAxis$I
+ 
+SWD$Orientation$I = 180*RANDOM(x)
+putSWD$Orientation$I
+ 
+call ELLOFF(float(SWD$SemiMajorAxis$i),     #call ellipse center offset routine
+            float(SWD$SemiMinorAxis$i),
+            ($pi/180.)*SWD$orientation$i,
+            xUNT$truelatitude$f,
+            xUNT$truelongitude$f,
+            xUNT$costruelat$f,
+            SWD$offsetlat$f,            #latitude of ellipse center
+            SWD$offsetlon$f)            #longitude of ellipse center
+ 
+putSWD$OffsetLat$F
+putSWD$OffsetLon$F
+ 
+return
+end
+
+ 
+subroutine Remove_old_swabs_tracks
+############################################################
+#$%
+#$% Purpose:   Remove_old_swabs_tracks loops through the SWD tables
+#$%            and removes any onld tracks from the detection
+#$%            list.
+#$%
+#$% Called By: SWDMOD
+#$%
+#$% Calls:
+#$%
+#$%
+#$% Tables:    UNT        SWD
+#$%
+#$% Date:      August 2005
+#$%
+#$% Author:    James O. Allen
+#$%
+############################################################
+BBcommon
+BBDeclare  (SWD$Pointer,
+            SWD$Detectiontime$F,
+            SWD$Detectee$I,
+            UNT$Pointer)                                # MJC 7/19/2K (E2145)
+integer*4  curr_track_index, curr_trk_nxt
+integer*4  prev_track_index
+ 
+if (SWABS$First$Track == 0)
+  return                       # no tracks to check
+ 
+prev_track_index = 0
+curr_track_index = SWABS$First$Track
+ 
+while (curr_track_index != 0)
+{
+    SWD$pointer$to curr_track_index
+    curr_trk_nxt = xSWD$NextIndx$I
+ 
+    #$% get the detection time and see if track is old
+    swd$DetectionTime$f = xswd$DetectionTime$f
+    if (game$minute - swd$DetectionTime$f >= minutes$to$old) # an old track
+    {
+        # Previous track points to next track of current track
+        if (prev_track_index == 0)
+            SWABS$First$Track = curr_trk_nxt
+        else
+        {
+            swd$pointer$to prev_track_index
+            PUTswd$NextIndx$i( curr_trk_nxt )
+        }
+ 
+        # Add current track to free list
+        swd$pointer$to curr_track_index
+        PUTswd$NextIndx$i( SWABS$First$Free )
+        SWABS$First$Free = curr_track_index
+ 
+        # Update last track
+        if (curr_track_index == SWABS$Last$Track)
+            SWABS$Last$Track = prev_track_index
+ 
+        #$% Update the UNT entry
+        SWD$Detectee$I = xSWD$Detectee$I
+        UNT$Pointer$To SWD$Detectee$I
+        putUNT$SWDAlertIndx$I (0)
+ 
+        #$% overwrite data in the old track entry
+        putSWD$SequenceNmbr$i (0)
+        putSWD$Detectee$i (0)
+        putSWD$DetectorSide$i (0)
+ 
+        # Since current track is being deleted, previous track becomes current
+        curr_track_index = prev_track_index
+    }
+ 
+    #$% update the previous track index
+    prev_track_index = curr_track_index
+ 
+    #$% update the SWD pointer
+    curr_track_index = curr_trk_nxt
+}
+ 
+return
+end

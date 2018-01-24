@@ -1,0 +1,3454 @@
+
+##############################################################################
+#                                                                            #
+#  File:     ALSP_RECEIVE_CREATE.RAT                                         #
+#                                                                            #
+#  Created:  April 30, 1992                                                  #
+#                                                                            #
+#  Author:   Carol L. Kropp                                                  #
+#            Modified Reused - Los Alamos National Labratory (AWSIMS)        #
+#                                                                            #
+#  Purpose:  A collection of routines used by RESA and the generic ALSP      #
+#            translator when joined to an ALSP conferation to process        #
+#            create messages.                                                #
+#                                                                            #
+#  Note:     For initial prototyping, only air units are being ghosted.      #
+#                                                                            #
+#  Modified: Carol Kropp - Sept. 1993                                        #
+#            Adding ghosting of boat, ship, and submarine units.             #
+#                                                                            #
+#            Susan Miller - 10/94                                            #
+#            Added new emitter characteristics as specified in JECEWSI ICD   #
+#                                                                            #
+#            Carol Kropp - 9/95 (E1456)                                      #
+#            Added display only ghosting of ALLRAD, HIMAD and RADAR units.   #
+#                                                                            #
+#            Jim Allen - Nov. 1995 (E1422)                                   #
+#            Added DTED terrain.                                             #
+#                                                                            #
+##############################################################################
+
+include "alsp.inc"         
+include "alsp_resa.inc"         
+include "plplay.inc"         
+include "bbbom.inc"         
+include "bbmfd.inc"         
+include "bbswp.inc"         
+define (BBImplicit, Implicit None) # SMM 3/00
+
+
+subroutine alsp_receive_create (_
+      n_args,         # maximum number of attributes
+      param_flag,     # array - indicates presence of attributes (0=No & 1=Yes)
+      int_params,     # array - contains integer values of integer attributes
+      f_params,       # array - contains real values of floating pt attributes
+      num_of_emitters,# int   - number of emitters contained in the message
+      emitcategory_list,# array - contains emitter category, JAMMER or RADAR
+      emittype_list,  # array - contains emitter enumeration number
+      emitstatus_list,# array - contains emitter status, ON or OFF 
+      emitindex_list, # array - contains emitter index
+      emitorient_list,# array - contains emitter orientation real number 
+      emitmode_list,  # array - contains emitter mode string
+      num_of_sonars,
+      sonartype_list,
+      sonarstatus_list,
+      sonarmode_list,
+      sonardepth_list,
+      num_of_positions,
+      positionlat_list,
+      positionlon_list,
+      unit_ew_acq,    # array - contains 8 sector acquisition pk factor float vals
+      unit_ew_launch, # array - contains 8 sector launch pk factor float vals
+      unit_ew_guide,  # array - contains 8 sector self guiding pk factor float vals
+      unit_ew_power,  # array - contains 8 sector jammer power float vals
+      unit_ew_surf,   # array - contains 8 sector surf jam power float vals
+      iffmode_params_list,  # array - contains IFF param data - smp 2/98 (E1907)
+      iffmode_status_list,  # array - contains IFF status data - smp 2/98 (E1907)
+      iffmode_value_list,   # array - contains IFF mode data - smp 2/98 (E1907)
+      strlens,        # array - contains lengths of string values passed in
+      string_params)  # array - contains the character strings of string attributes
+
+#$% Note:  The input arrays are index matched to the attributes'
+#$%        enumerated values specified in ALSP.INC.
+
+#########################################################################
+#$%
+#$% Purpose:   Processes the incoming ALSP create message.  Creates
+#$%            ghost units for RESA.
+#$%
+#$% Called By: HANDLE_AT_CREATE <at_mess_handler.c>
+#$%
+#$% Calls:     ALSP_CHECK_DUPLICATE_ID      ALSP_CROSS_REF
+#$%            ALSP_ERROR_ON_CREATE         ALSP_GET_UNT_SLOT
+#$%            ALSP_HANDLE_AIR_TYPE         ALSP_RECEIVE_DELETE
+#$%            ALSP_SET_UNT_SIDE            ALSP_SET_UNT_STUFF
+#$%            RadToDMS    <lbcommn.rat>    OORBIT   <wgoppim.rat>
+#$%            the_elevation    <lbelevation.rat>
+#$%            ALSP_Receive_Update_IFF   <alsp_receive_update.rat>
+#$%
+#$% Tables:    UNT          DEQ
+#$%
+#$% Date:      April 1992
+#$%
+#$% Author:    Carol L. Kropp
+#$%            Modified reused code from AWSIMS model translator.
+#$%            Added additional code for handling air units.
+#$%
+#$% Modified:  Carol L. Kropp - Sept. 1993
+#$%            Added alsp classes $sea_surface_boat, $sea_surface_ship
+#$%            and $sea_subsurface and added new attribute $depth.
+#$%
+#$%            Carol L. Kropp - Dec. 1993
+#$%            Added alsp classes $air_cruise_missile and
+#$%            $air_ballistic_missile.
+#$%
+#$%            Susan Miller - 10/94
+#$%            Added new emitter characteristics as specified in JECEWSI ICD
+#$%
+#$%            Carol Kropp - 8/95 (E1455)
+#$%            When a create message is received for a Base, need to
+#$%            check to see if the name matches a RESA "shared/not owned"
+#$%            base.  If there is a match, then assign the ALSP id to it.
+#$%            If the name matches, but the base is "owned", then reject
+#$%            the create message.
+#$%
+#$%            Carol Kropp - 9/95 (E1456)
+#$%            Added for display only ghosting of ground based air
+#$%            defense units (HIMAD, ALLRAD and RADAR).
+#$%
+#$%            Carol Kropp - 10/95 (E1482)
+#$%            Force an IFF transponder on all surface and subsurface units.
+#$%
+#$%            Carol Kropp - 10/95 (E1483)
+#$%            When a create is received for SEA.SURFACE.AAV or
+#$%            SEA.SURFACE.LANDING_CRAFT, change the class to
+#$%            SEA.SURFACE.BOAT and process normally.
+#$%
+#$%            Susan Miller - 10/95 (E1486)
+#$%            Added parameter unit_ew_surf for 1996 confederation.
+#$%
+#$%            Jim Allen - Nov. 1995 (E1422)
+#$%            Determine the elevation of bases, boats, ships and subs.
+#$%
+#$%            Jim Allen - 7/97
+#$%            Flip order of nilex and ilex arguments to oorbit
+#$%
+#$%            Stephanie Paden - 2/98 (E1907)
+#$%            Added IFF related arguments to process incoming IFF() data.
+#$%
+#########################################################################
+BBCommon
+include "alsp_io_rat.inc"         
+SensorCommon        # <alsp.inc>
+sonarcommon
+
+#$% Parameters
+real                      f_params [MAX_PARAM]
+integer                   n_args, param_flag [MAX_PARAM]
+integer                   int_params [MAX_PARAM], strlens[MAX_PARAM]
+integer  num_of_emitters, emitcategory_list[Max$Alsp$Emitters],
+         emittype_list[Max$Alsp$Emitters], emitstatus_list[Max$Alsp$Emitters],
+         emitindex_list[Max$Alsp$Emitters], emitmode_list[Max$Alsp$Emitters]
+integer  num_of_sonars,
+         sonartype_list[Max$Alsp$Sonars], sonarstatus_list[Max$Alsp$Sonars],
+         sonarmode_list[Max$Alsp$Sonars], sonardepth_list[Max$Alsp$Sonars]
+integer  num_of_positions
+real     positionlat_list[Max$Alsp$Positions],
+         positionlon_list[Max$Alsp$Positions]
+real     emitorient_list[Max$Alsp$Emitters]
+real     unit_ew_acq[Number$EW$Sectors]
+real     unit_ew_launch[Number$EW$Sectors]
+real     unit_ew_guide[Number$EW$Sectors]
+real     unit_ew_power[Number$EW$Sectors]
+real     unit_ew_surf[Number$EW$Sectors]
+integer  iffmode_status_list[Max$Alsp$Iffmodes]
+integer  iffmode_value_list[Max$Alsp$Iffmodes]
+integer  iffmode_params_list[Max$Alsp$Iffmodes]
+vaxcharacter*max_str_len  string_params[MAX_PARAM]
+vaxcharacter*max_str_len  remove_special_chars
+
+# Called functions
+integer  the_elevation        # integer function to obtain elevation
+
+#$% Local variables
+integer  attribute           # loop index for parameter arrays
+integer  duplicate_id        # boolean for duplicate id check
+integer  free_unt            # success flag in locating a free UNT slot
+integer  free_boy            # success flag in locating a free BOY slot
+integer  free_mfd            # success flag in locating a free MFD slot
+integer  free_swp            # success flag in locating a free SWP slot
+integer  unit_type_status    # success flag for finding proper unit class
+integer  alsp_class_type     # ALSP CLASS enumeration value
+integer  call_sign_processed_flag
+integer  process_base_flag   # flag to indicate if the create needs to be processed
+integer  ALSPPropulsion2localPropulsion
+literal  l_call_sign         # call sign in literal form
+character c_call_sign[8]     # SMM 12/7/94
+vaxcharacter*max_str_len  v_name
+character c_name[max_str_len]  # character format of name
+
+integer  number_of_orbit_positions
+real     orbit_lat1,         # latitude and
+         orbit_long1,        # logitude for
+         orbit_lat2,         # orbit point
+         orbit_long2         # attributes
+literal  ilex [$max$args]    # for processing orbit points
+integer  nilex               # number of arguments in ilex
+integer  c_index
+literal  cstrip8, UNT$Event$C, UNT$Name$C          # SMM 3/00
+integer  UNT$Pointer, UNT$Mission$I, UNT$Status$I  # SMM 3/00
+integer  UNT$Type$I, UNT$TrueAltDepth$I, UNT$Stratum$i
+integer  I_SWITCH_1, I, length                     # SMM 3/00
+integer  BOY$pointer
+integer  category
+real     UNT$Truelatitude$F, UNT$Costruelat$F, UNT$Truelongitude$F # SMM 3/00 
+real     UNT$Fltsoktime$F, UNT$Timebingo$F, UNT$Truecourse$F       # SMM 3/00
+real     UNT$Orderedlatitude$F, UNT$Orderedlongitude$F             # SMM 3/00
+real     speed, RADTODMS 					   # SMM 3/00
+BBDeclare (mfd$pointer, mfd$name$c, mfd$side$i, mfd$points$i, mfd$ver$index)
+BBDeclare (swp$pointer, swp$name$c, swp$side$i, swp$points$i, swp$ver$index)
+BBDeclare (bom$pointer)
+
+equivalence (v_name, c_name)
+equivalence (l_call_sign, c_call_sign)
+
+  # when a ghost unit has no emitters, the previous value of number of emitters
+  # is still set and so the ghost is created with that number of iffs, so 
+  # take this opportunity to reset the number.  SMM 11/17/94
+  number_of_emitters = 0  # <alsp.inc>
+  number_of_sonar_eq = 0
+
+  if (int_params [$class] == $alsp_class_sea_surface_aav |      # clk - 10/95 (E1483)
+      int_params [$class] == $alsp_class_sea_surface_landing_craft)
+    int_params [$class] = $sea_surface_boat
+
+  if (int_params [$class] == $shore_base)
+    {
+     call Determine_If_Shared_Base (int_params [$id], strlens[$name],
+                                    string_params[$name], process_base_flag)
+     if (process_base_flag == $no)
+       return
+     else      # the name didn't match, so create the unit
+       call alsp_get_unt_slot (UNT$Pointer, free_unt)
+    }
+  else if (int_params [$class] == $air_fixedwing         |  # At this time, only
+           int_params [$class] == $air_helicopter        |  # ghosting aircraft
+           int_params [$class] == $air_helicopter_airlift |
+           int_params [$class] == $air_cruise_missile    |  # cruise and
+           int_params [$class] == $air_ballistic_missile |  # ballistic missiles (12/93)
+           int_params [$class] == $sea_surface_boat      |  # added boats, ships,
+           int_params [$class] == $sea_surface_ship      |  # and subs  (9/93)
+           int_params [$class] == $sea_torpedo           |
+           int_params [$class] == $sea_countermeasure    |
+           int_params [$class] == $sea_subsurface  )
+    call alsp_get_unt_slot (UNT$Pointer, free_unt)
+  else if (int_params [$class] == $alsp_class_ground_maneuver_himad  |    # clk - 9/95 (E1456)
+           int_params [$class] == $alsp_class_ground_maneuver_allrad |
+           int_params [$class] == $alsp_class_ground_maneuver_radar  |
+           int_params [$class] == $alsp_class_ground_maneuver_combat |
+           int_params [$class] == $alsp_class_ground_maneuver_tel |
+           int_params [$class] == $alsp_class_ground_maneuver_support_convoy |
+           int_params [$class] == $alsp_class_ground_maneuver_support_unit |
+           int_params [$class] == $alsp_class_ground_maneuver_support_unit_tcu)
+    {
+     call Create_ALSP_Ground_Unit_Entry (int_params [$id], int_params [$class],
+                                         int_params [$unit_type], int_params [$side],
+                                         int_params[$size_attr], int_params [$speed],
+                                         int_params [$heading], f_params [$latitude],
+                                         f_params [$longitude], string_params[$name])
+     return                                         
+    }
+  else if (int_params [$class] == $sea_sonobuoy)
+    {
+    call alsp_check_duplicate_id (int_params [$id], duplicate_id)
+    if (duplicate_id == $yes) 
+        {
+        call alsp_error_on_create (int_params [$id], $dup_id, 0)
+        return
+        }
+     call alsp_get_boy_slot (BOY$Pointer, free_boy)
+
+     if (free_boy == $No)   # Check for existence of an empty slot
+     {                    # if this is true, then the boy table is full
+        call alsp_error_on_create (int_params [$id], $no_more_slots, 0)
+        return
+     }
+     PUTboy$ALSPID$i (int_params[$id])
+     PUTboy$GhostedUnit$i ($YES)
+     PUTboy$On$i ($YES)
+     PUTboy$BirthTime$f (game$time)
+
+     call Update_ALSP_Sonobuoy_Entry (_
+
+      n_args,         # maximum number of attributes
+      param_flag,     # array - indicates presence of attributes (0=No & 1=Yes)
+      int_params,     # array - contains integer values of integer attributes
+      f_params,       # array - contains real values of floating pt attributes
+      num_of_emitters,# int - number of emitters 
+      emitcategory_list,# array - contains emitter category, JAMMER or RADAR
+      emittype_list,  # array - contains emitter enumeration number
+      emitstatus_list,# array - contains emitter status, ON or OFF 
+      emitindex_list, # array - contains emitter index
+      emitorient_list,# array - contains emitter orientation real number 
+      emitmode_list,  # array - contains emitter mode string
+      num_of_sonars,
+      sonartype_list,
+      sonarstatus_list,
+      sonarmode_list,
+      sonardepth_list,
+      unit_ew_acq,    # array - contains 8 sector acquisition pk factor float vals
+      unit_ew_launch, # array - contains 8 sector launch pk factor float vals
+      unit_ew_guide,  # array - contains 8 sector self guiding pk factor float vals
+      unit_ew_power,  # array - contains 8 sector jammer power float vals
+      unit_ew_surf,   # array - contains 8 sector surf jam power float vals
+      iffmode_params_list,  # array - contains IFF param data - smp 2/98 (E1907)
+      iffmode_status_list,  # array - contains IFF status data - smp 2/98 (E1907)
+      iffmode_value_list,   # array - contains IFF mode data - smp 2/98 (E1907)
+      strlens,        # array - contains lengths of string values passed in
+      string_params)  # array - contains the character strings of string attributes
+
+     return                                         
+    }
+  else if (int_params [$class] == $sea_sweeparea)
+    {
+    call alsp_check_duplicate_id (int_params [$id], duplicate_id)
+    if (duplicate_id == $yes) 
+        {
+        call alsp_error_on_create (int_params [$id], $dup_id, 0)
+        return
+        }
+     call alsp_get_swp_slot (SWP$Pointer, free_swp)
+
+    if (free_swp == $No)   # Check for existence of an empty slot
+    {                    # if this is true, then the boy table is full
+        call alsp_error_on_create (int_params [$id], $no_more_slots, 0)
+        return
+    }
+    PUTswp$ALSPID$i (int_params[$id])
+    PUTswp$GhostedUnit$i ($YES)
+    PUTswp$TimeCreated$f (game$time)
+    call move_str_lit (_
+         remove_special_chars(string_params[$name]), SWP$Name$C)
+    putSWP$Name$C
+    switch (int_params[$side])
+    {
+        case $blue:      SWP$Side$I = $Blue$Code
+        case $red:       SWP$Side$I = $Orange$Code
+        case $neutral:   SWP$Side$I = $Neutral$Code
+    }
+    putSWP$Side$I
+
+    putSWP$Status$i (int_params[$sweeparea_status])
+    SWP$Points$i = min(mfd$ver$slots, num_of_positions)
+    putSWP$Points$i
+    for (swp$ver$index=1; swp$ver$index <= SWP$Points$i;
+         swp$ver$index = swp$ver$index + 1)
+    {
+        putSWP$Ver$Latitude$F (positionlat_list[swp$ver$index] * $deg2rad)
+        putSWP$Ver$Longitude$F (positionlon_list[swp$ver$index]* $deg2rad)
+    }        
+
+    # Increase number of slots used, if necessary
+    if (swp$last < swp$pointer)
+       {
+        swp$used = swp$pointer$index * swp$entry
+       }
+
+    call overlapping_minefields (swp$pointer, 0)
+
+    return                                         
+    }
+  else if (int_params [$class] == $sea_mine)
+    {
+    call alsp_check_duplicate_id (int_params [$id], duplicate_id)
+    if (duplicate_id == $yes) 
+        {
+        call alsp_error_on_create (int_params [$id], $dup_id, 0)
+        return
+        }
+     call alsp_get_mfd_slot (MFD$Pointer, free_mfd)
+
+    if (free_mfd == $No)   # Check for existence of an empty slot
+    {                    # if this is true, then the boy table is full
+        call alsp_error_on_create (int_params [$id], $no_more_slots, 0)
+        return
+    }
+    PUTmfd$ALSPID$i (int_params[$id])
+    PUTmfd$GhostedUnit$i ($YES)
+    PUTmfd$TimeCreated$f (game$time)
+    call move_str_lit (_
+        remove_special_chars(string_params[$name]), MFD$Name$C)
+    putMFD$Name$C
+    switch (int_params[$side])
+    {
+        case $blue:      MFD$Side$I = $Blue$Code
+        case $red:       MFD$Side$I = $Orange$Code
+        case $neutral:   MFD$Side$I = $Neutral$Code
+    }
+    putMFD$Side$I
+
+    putMFD$TargetType$i ($ShipAndSub$code)
+    putMFD$Status$i ($operational$code)        
+    MFD$Points$i = min(mfd$ver$slots, num_of_positions)
+    putMFD$Points$i
+    for (mfd$ver$index=1; mfd$ver$index <= MFD$Points$i;
+         mfd$ver$index = mfd$ver$index + 1)
+    {
+        putMFD$Ver$Latitude$F (positionlat_list[mfd$ver$index] * $deg2rad)
+        putMFD$Ver$Longitude$F (positionlon_list[mfd$ver$index]* $deg2rad)
+    }        
+
+    call ALSP_Map_Incoming_Mine_type (0,
+                                      int_params[$unit_type],
+                                      BOM$Pointer,
+                                      unit_type_status)
+    if (unit_type_status == $No) 
+    {
+        call alsp_error_on_create (xMFD$ALSPId$I, $no_class_type, 0)
+        call alsp_receive_delete (xMFD$ALSPId$I)
+        mfd$zero
+        return
+    }
+    putmfd$BOMIndx$i (bom$pointer$index)
+
+    # Increase number of slots used, if necessary
+    if (mfd$last < mfd$pointer)
+       {
+        mfd$used = mfd$pointer$index * mfd$entry
+       }
+
+    return                                         
+    }
+  else                # not of a type which is ghosted
+    {
+     call alsp_error_on_create (int_params [$id], $no_class_type, 0)
+     return
+    }
+
+  if (free_unt == $No)   # Check for existence of an empty slot
+    {                    # if this is true, then the unit table is full
+     call alsp_error_on_create (int_params [$id], $no_more_slots, 0)
+     return
+    }
+
+  putUNT$ALSPPosChgTime$F   (Game$Time)
+  putUNT$OrderedLatitude$F  ($Pi)      # indicates no ordered position
+
+  call_sign_processed_flag = $no    # for aircraft units
+
+  number_of_orbit_positions = 0     # reset the number of positions included in the message to zero
+
+  #$% Loop through the param_flag [n] array checking for existence of attributes
+  for (attribute = 1; attribute <= n_args; inc(attribute))
+    {
+     if (param_flag [attribute] == $no)
+       next
+     switch (attribute)
+       {
+        case $id:
+          {
+           call alsp_check_duplicate_id (int_params [attribute], duplicate_id)
+           if (duplicate_id == $yes) 
+             {
+              call alsp_error_on_create (int_params [attribute], $dup_id, 0)
+              return
+             }
+           else
+             call alsp_set_unt_stuff (UNT$Pointer, int_params [attribute])
+          }               # end of id case
+
+        case $call_sign:       # Convert the call sign characters to literal form
+          {
+           if (int_params [$class] == $air_fixedwing |      # call sign applies
+               int_params [$class] == $air_helicopter |      # to aircraft flights
+               int_params [$class] == $air_helicopter_airlift)
+             {
+              call move_str_lit (_
+                 remove_special_chars(string_params[$call_sign]), l_call_sign)
+
+              call AC_Duplicate_Name_Check (UNT$Pointer, l_call_sign, int_params [$size_attr])
+              putUNT$Name$C  (l_call_sign)
+              call_sign_processed_flag = $yes
+             }
+          }
+
+        case $class:
+          {
+           alsp_class_type = int_params[attribute]
+
+           if (alsp_class_type == $shore_base)
+             {
+              putUNT$Status$I  ($OnStation$Code)
+              putUNT$Type$I  ($Shorebase$Code)
+              putUNT$RulesOfEngage$I  ($IfAttacked$Code)
+             }
+          }
+
+        case $emitter: # $emitter, $radar, $jammer, $emitter_status, $emitter_type
+          {            # $emitter_index, $emitter_orient, $emitter_mode
+           #$% Sets up the sensor_list ( a common block )
+           call ALSP_Map_Incoming_Emitters (num_of_emitters, emitcategory_list,
+                                            emittype_list, emitstatus_list,
+                                            emitindex_list, emitorient_list,
+                                            emitmode_list)
+          }
+
+        case $sonar: # $sonar, $sonar_type, $sonar_status, $sonar_mode
+          {            # $sonar_depth
+           #$% Sets up the sonar_list ( a common block )
+           call ALSP_Map_Incoming_Sonars (num_of_sonars,
+                                          sonartype_list,
+                                          sonarstatus_list,
+                                          sonarmode_list,
+                                          sonardepth_list)
+          }
+
+        case $iff:   continue    # handled below after the emitters are processed
+
+        case $latitude:
+          {
+           UNT$TrueLatitude$F = (f_params [attribute] * $PI) / 180.0
+           putUNT$TrueLatitude$F
+           UNT$COSTrueLat$F = cos(UNT$TrueLatitude$F)
+           putUNT$COSTrueLat$F
+           putUNT$AssumedLatitude$F  (UNT$TrueLatitude$F)
+          }               # end of latitude case
+
+        case $longitude:
+          {
+           UNT$TrueLongitude$F = (f_params [attribute] * $PI) / 180.0
+           putUNT$TrueLongitude$F
+           putUNT$AssumedLongitude$F  (UNT$TrueLongitude$F)
+          }               # end of longitude case
+
+        case $altitude:        # air units
+          {
+           putUNT$TrueAltDepth$I     (int_params [attribute])
+           putUNT$OrderedAltDepth$I  (int_params [attribute])
+          }
+
+        case $depth:           # subsurface units
+          {
+           putUNT$TrueAltDepth$I     (int_params [attribute])
+           putUNT$OrderedAltDepth$I  (int_params [attribute])
+
+           if (alsp_class_type == $sea_torpedo)
+             {
+              if (Xunt$TrueAltDepth$i > Layer$Depth)
+                unt$Stratum$i = $Below$AcousticLayer
+              else
+                unt$Stratum$i = $Above$AcousticLayer
+              PUTunt$Stratum$i
+             }
+          }
+
+#        case $arty_supp     |               # Do nothing with these fields 
+#             $awsim_status  |               # at this time, as only        
+#             $cbs_status    |               # aircraft are being ghosted   
+#             $elect_deg     |               # and these do not apply.      
+#             $fire_cont     :     {}        
+
+        case $alsp_attr_flight_ops:
+          {
+           if (int_params [attribute] == $alsp_flight_ops_open)
+             {
+              UNT$FltsokTime$F = $Lo_UNT$FltsokTime$F
+              UNT$TimeBingo$F  = $Lo_UNT$TimeBingo$F
+             }
+           else  # int_params [attribute] == $alsp_flight_ops_closed
+             {
+              UNT$FltsokTime$F = $Hi_UNT$FltsokTime$F
+              UNT$TimeBingo$F  = $Hi_UNT$TimeBingo$F
+             }
+           putUNT$FltsokTime$F
+           putUNT$TimeBingo$F
+          }
+
+        case $heading:
+          {
+           UNT$TrueCourse$F = (int_params [attribute] * $PI) / 180.0
+           putUNT$TrueCourse$F
+           putUNT$OrderedCourse$F  (UNT$TrueCourse$F)
+           putUNT$AssumedCourse$F  (UNT$TrueCourse$F)
+          }                 # end case $heading
+
+        case $mission:
+          {
+           call alsp_translate_alsp_mission (int_params [attribute], UNT$Mission$I)
+           putUNT$Mission$I
+          }
+
+        case $name:              #$% Convert the first 8 characters to literal form
+          {
+           if (int_params [$class] == $air_fixedwing           |  # for aircraft the
+               int_params [$class] == $air_helicopter |  # name attribute is the
+               int_params [$class] == $air_helicopter_airlift)  # event name - and can be
+             {                                          # duplicated
+              if (call_sign_processed_flag == $no)
+                {
+                  call move_str_lit (_
+                    remove_special_chars(string_params[$name]), UNT$Event$C)
+                  putUNT$Event$C
+                }
+              else  # call_sign_processed_flag == $yes
+                {
+                 UNT$Event$C = xUNT$Event$C
+                 if (UNT$Event$C == '........' |
+                     UNT$Event$C == $BLANKLIT )
+                    {
+                      call move_str_lit (_
+                        remove_special_chars(string_params[$name]), UNT$Event$C)
+                      putUNT$Event$C
+                    }
+                }
+             }
+           else
+             {
+              call move_str_lit (_
+                 remove_special_chars(string_params[$name]), UNT$Name$C)
+              call Duplicate_Name_Check (UNT$Name$C)                # E2250
+              putUNT$Name$C
+             }
+          }
+
+#        case $old_id :       # Not quite sure how this applies 
+
+       case $orb_lat1:
+          {
+             orbit_lat1  = (f_params [attribute] * $PI) / 180.0
+             number_of_orbit_positions = number_of_orbit_positions + 1
+          }
+        case $orb_lon1:   orbit_long1 = (f_params [attribute] * $PI) / 180.0
+       case $orb_lat2:
+          {
+             orbit_lat2  = (f_params [attribute] * $PI) / 180.0
+             number_of_orbit_positions = number_of_orbit_positions + 1
+          }
+        case $orb_lon2:   orbit_long2 = (f_params [attribute] * $PI) / 180.0
+
+#        case $percent_attr:       # Not quite sure how this applies 
+
+        case $side:   call alsp_set_unt_side (UNT$Pointer,
+                                              int_params [attribute])
+
+        case $size_attr:
+          {
+           if (int_params [$class] == $air_fixedwing |       # for aircraft, size
+               int_params [$class] == $air_helicopter |       # indicates the number
+               int_params [$class] == $air_helicopter_airlift)       # of a/c in the flight.
+             {
+              putUNT$NbrAC$I     (int_params [attribute])
+              putUNT$NbrAcTot$I  (int_params [attribute])
+             }
+          }
+
+        case $speed:
+          {# speed is in km/hour, so convert to knots first
+           speed = int_params [attribute] / $knots_to_km
+           putUNT$TrueSpeed$F     (speed)
+           putUNT$AssumedSpeed$F  (speed)
+           putUNT$OrderedSpeed$F  (speed)
+          }                 # end case $speed
+
+        case $status:
+          {
+           call alsp_translate_alsp_status (int_params [attribute], UNT$Status$I)
+           putUNT$Status$I
+
+           if (UNT$Status$I == $ACAwaitingLaunch$Code)
+             putUNT$MarshallStatus$I  ($AwaitLaunch$Code)
+          }
+
+#        case $supply_launcher   |         # Do nothing with these
+#             $supply_missile    |           # at this time, as only        
+#             $supply_radar      :     {}      # aircraft are being ghosted.
+
+        case $target_lat:
+          {
+           UNT$OrderedLatitude$F = f_params [attribute] * ($PI / 180.0)
+           putUNT$OrderedLatitude$F
+          }
+        case $target_long:
+          {
+           UNT$OrderedLongitude$F = f_params [attribute] * ($PI / 180.0)
+           putUNT$OrderedLongitude$F
+          }
+
+        case $unit_type:
+          {
+           if (alsp_class_type == $air_fixedwing | 
+               alsp_class_type == $air_helicopter |
+               alsp_class_type == $air_helicopter_airlift)
+             {
+              call alsp_handle_air_type (UNT$Pointer,
+                                         alsp_class_type,
+                                         int_params [attribute],
+                                         unit_type_status)
+              if (unit_type_status == $yes) 
+                {
+                 putUNT$Type$I  ($Air$Code)
+                 putUNT$RulesOfEngage$I  ($IfAttacked$Code)
+                }
+             }
+           else if (alsp_class_type == $sea_surface_boat   |
+                    alsp_class_type == $sea_surface_ship   |
+                    alsp_class_type == $sea_subsurface     )
+             {
+              call alsp_handle_vessel_type (UNT$Pointer,
+                                            alsp_class_type,
+                                            int_params [attribute],
+                                            unit_type_status)
+             }
+           else if (alsp_class_type == $sea_torpedo)
+             {
+              call alsp_handle_torpedo_type (UNT$Pointer,
+                                            alsp_class_type,
+                                            int_params [attribute],
+                                            unit_type_status)
+             }
+           else if (alsp_class_type == $sea_countermeasure)
+             {
+              call alsp_handle_countermeasure_type (UNT$Pointer,
+                                                    alsp_class_type,
+                                                    int_params [attribute],
+                                                    unit_type_status)
+             }
+           else if (alsp_class_type == $air_cruise_missile   |
+                    alsp_class_type == $air_ballistic_missile)
+             {
+              call alsp_handle_Missile_type (UNT$Pointer,
+                                             alsp_class_type,
+                                             int_params [attribute],
+                                             unit_type_status)
+             }
+           else
+             call alsp_error_on_create (xUNT$ALSPId$I, $no_class_type, 0)
+
+           if (unit_type_status == $No) 
+             {
+              call alsp_receive_delete (xUNT$ALSPId$I)
+              return
+             }
+          }             #end of case $unit_type
+
+        case $propulsion_mode:
+          {
+           PUTunt$PropulsionMode$i(_
+                 ALSPPropulsion2localPropulsion(int_params[attribute]))
+          }
+#        case $posture     |             # Not quite sure how these 
+#             $orient      |             # fit into the picture yet.
+#             $time        :     {}
+
+       }   #$% end of switch statement
+    }           # end of loop through attributes
+
+   #$% Prepare to print unit name  JHM 12/02 THIS CODE generates a DUPLICATE NAME CHANGE error message with no dup name
+ #  if (unit_type_status == $yes & msg_log_open) 
+ #    {
+ #     if (xUNT$Type$I == $Air$Code)
+ #       call alsp_cross_ref (int_params [$id], xUNT$Name$C, string_params[$call_sign], strlens[$call_sign])
+ #    else    JHM 12/02 This is generating DUPLICATE NAME CHANGE error message with no dup name   
+ #       call alsp_cross_ref (int_params [$id], xUNT$Name$C, string_params[$name], strlens[$name])
+ #    }
+
+  # If orbit points were part of the message, process them
+  if (number_of_orbit_positions == 2)   # process orbit points
+    {
+     ilex [1] = $lex$Orbit$
+     ilex [2] = 0
+     ilex [3] = RadToDMS (orbit_lat1)
+     ilex [4] = RadToDMS (orbit_long1)
+     ilex [5] = RadToDMS (orbit_lat2)
+     ilex [6] = RadToDMS (orbit_long2)
+     nilex = 6
+     call oOrbit (Orbit$Order, UNT$Pointer, nilex, ilex)
+    }
+
+  UNT$Type$I = xUNT$Type$I
+  if (UNT$Type$I == $Air$Code     |  # An IFF will be forced
+      UNT$Type$I == $Surface$Code |  # on the unit, even if
+      UNT$Type$I == $Sub$Code     )  # it has no other emitters
+    {                              
+      call ALSP_Add_Emitter_Eq (UNT$Pointer)
+      call ALSP_Add_Sonar_Eq (UNT$Pointer)
+      call ALSP_Add_Passive_Eq (UNT$Pointer)
+    }
+  else if (num_of_emitters != 0)   # If emitters were part of the message,
+    {                              # add the equipment to the unit
+      if (int_params [$class] == $air_cruise_missile)
+        call ALSP_Handle_CM_Emitter (UNT$Pointer)
+      else
+        call ALSP_Add_Emitter_Eq (UNT$Pointer)
+    }
+
+    if (UNT$Type$I == $Surface$Code |      # Add OTG Info
+        UNT$Type$I == $Air$Code     | 
+        UNT$Type$I == $Sub$Code     ) 
+    {                              
+      call ALSP_Add_OTG_Info (UNT$Pointer)
+    }
+
+  if (param_flag [$iff] != $no)  # process IFF if in the message
+    {    
+     call ALSP_Receive_Update_IFF (UNT$Pointer,iffmode_params_list,
+                                   iffmode_status_list, iffmode_value_list)
+    }
+
+    if (alsp_class_type == $shore_base)
+      {
+       UNT$TrueAltDepth$I = the_elevation (xUNT$TrueLatitude$F*$rad2deg,
+                                           xUNT$TrueLongitude$F*$rad2deg)
+       putUNT$TrueAltDepth$I
+      }
+
+  if (UNT$Last < UNT$Pointer)    # update the Used index for the Unit Table
+    UNT$Used = UNT$Pointer$Index * UNT$Entry                 # if necessary
+
+return
+end             # end of alsp_receive_create
+
+
+Subroutine alsp_get_unt_slot (UNT$Pointer, istat)
+#########################################################################
+#$%
+#$% Purpose:  ALSP_get_unt_slot is used to get a slot in the UNT table,
+#$%           with an error message.
+#$%
+#$% Called By:  alsp_receive_create  
+#$%
+#$% Calls:   None
+#$%
+#$% Tables:  UNT
+#$%
+#$% Date:    April 1992
+#$%
+#$% Author:  Carol L. Kropp
+#$%
+#########################################################################
+BBCommon
+
+integer istat  
+integer UNT$Pointer  # SMM 3/00
+
+  istat = $no    # set status flag to NO for default
+
+  for (UNT$Pointer$First; UNT$Pointer$Valid; UNT$Pointer$Next)
+    {
+     if (xUNT$InUse$I == $no)     # if UNT slot not in use
+       {
+        istat = $yes              # Got an empty, don't look further
+        break
+       }
+    }
+
+return
+end
+
+
+Subroutine alsp_get_boy_slot (BOY$Pointer, istat)
+#########################################################################
+#$%
+#$% Purpose:  ALSP_get_boy_slot is used to get a slot in the BOY table,
+#$%           with an error message.
+#$%
+#$% Called By:  alsp_receive_create  
+#$%
+#$% Calls:   None
+#$%
+#$% Tables:  BOY
+#$%
+#$% Date:    July 24, 2006
+#$%
+#$% Author:  James O. Allen
+#$%
+#########################################################################
+BBCommon
+
+integer istat  
+integer BOY$Pointer
+
+istat = $no    # set status flag to NO for default
+
+for (BOY$Pointer$First; BOY$Pointer$Valid; BOY$Pointer$Next)
+{
+    if (xboy$type$i == $null$code)
+    {
+        istat = $YES
+        break
+    }
+}
+
+return
+end
+
+
+Subroutine alsp_get_mfd_slot (MFD$Pointer, istat)
+#########################################################################
+#$%
+#$% Purpose:  ALSP_get_mfd_slot is used to get a slot in the MFD table,
+#$%           with an error message.
+#$%
+#$% Called By:  alsp_receive_create  
+#$%
+#$% Calls:   None
+#$%
+#$% Tables:  MFD
+#$%
+#$% Date:    Oct. 26, 2006
+#$%
+#$% Author:  James O. Allen
+#$%
+#########################################################################
+BBCommon
+
+integer istat  
+integer MFD$Pointer
+
+istat = $no    # set status flag to NO for default
+
+for (MFD$Pointer$First; MFD$Pointer$Valid; MFD$Pointer$Next)
+{
+    if (xmfd$InUse$i == 0)
+    {
+        istat = $YES
+        break
+    }
+}
+
+return
+end
+
+
+Subroutine alsp_get_swp_slot (SWP$Pointer, istat)
+#########################################################################
+#$%
+#$% Purpose:  ALSP_get_swp_slot is used to get a slot in the SWP table,
+#$%           with an error message.
+#$%
+#$% Called By:  alsp_receive_create  
+#$%
+#$% Calls:   None
+#$%
+#$% Tables:  SWP
+#$%
+#$% Date:    March 29, 2007
+#$%
+#$% Author:  James O. Allen
+#$%
+#########################################################################
+BBCommon
+
+integer istat  
+integer SWP$Pointer
+
+istat = $no    # set status flag to NO for default
+
+for (SWP$Pointer$First; SWP$Pointer$Valid; SWP$Pointer$Next)
+{
+    if (xswp$InUse$i == 0)
+    {
+        istat = $YES
+        break
+    }
+}
+
+return
+end
+
+
+subroutine alsp_check_duplicate_id (alspid,         # in - alsp id number
+                                    duplicate_id)   # out - duplicate flag
+#########################################################################
+#$%
+#$% Purpose:   Checks to see if there is already an alspid in the game.
+#$%
+#$% Called by: alsp_receive_create 
+#$%
+#$% Tables:    UNT
+#$%
+#$% Date:      Jan 11,92
+#$%
+#$% Created by: tracy & perme
+#$%
+#########################################################################
+BBcommon
+
+integer  duplicate_id, alspid
+BBDeclare (UNT$Pointer, BOY$Pointer)
+
+  duplicate_id = $no
+  for (UNT$Pointer$First; UNT$Pointer$OK; UNT$Pointer$Next)
+    {
+     if (xUNT$ALSPid$I == alspid) 
+       {
+        if (xUNT$Status$I != $BeingDeleted$Code)  # if the unit
+          {                                       # is to be deleted
+           duplicate_id = $yes                    # then the id is dead.
+           break
+          }
+       }
+    }
+  if (duplicate_id == $no)          # Check for ids in boy table
+    {
+      for (BOY$Pointer$First; BOY$Pointer$OK; BOY$Pointer$Next)
+        {
+         if (xBOY$ALSPid$I == alspid) 
+           {
+            if (xBOY$KillTime$f <= game$time)         # if the boy
+              {                                       # is to be deleted
+               duplicate_id = $yes                    # then the id is dead.
+               break
+              }
+           }
+        }
+    }
+
+return
+end
+
+
+subroutine alsp_handle_air_type (_
+        UNT$Pointer,        # in - UNT slot pointer
+        alsp_class_enum,    # in - the enumeration of the ALSP class
+        unit_type_enum,     # in - the enumeration of the type being created
+        unit_type_status)
+#########################################################################
+#$%
+#$% Purpose:   Determines what type of aircraft unit is being created.
+#$%            then calls routines to map the enumeration (declared
+#$%            in wgalsp.inc) to the recognized name handles error
+#$%            conditions arising from no matches, populates 
+#$%
+#$% Called by: alsp_receive_create 
+#$%
+#$% Calls:     Map_Incoming_Aircraft_Type  <alsp_mapping.rat>
+#$%
+#$% Tables:    UNT      MC      SHC     RAD
+#$%
+#$% Date:      April 1992
+#$%
+#$% Author:    Carol L. Kropp
+#$%            Modified/reused:  alsp_handle_sam_type <wgalsp.rat>
+#$%
+#$% Modified:  Susan Miller - 9/95 (E1454)
+#$%            Added transfer of ACC$ALSPShared$I to UNT$ALSPShared$I.
+#$%
+#########################################################################
+BBCommon
+
+integer  alsp_class_enum, unit_type_enum, unit_type_status
+
+literal  literal_class_name, alsp_create_name, literal_first_letter
+literal  UNT$Name$C, CSTRIP8					    # SMM 3/00
+integer  ACC$Pointer, UNT$Pointer, UNT$ACCPntr$I, ACC$AlspShared$I  # SMM 3/00
+
+  unit_type_status = $Yes
+  literal_first_letter = $LETA
+
+  call Map_Incoming_Aircraft_Type (alsp_class_enum, unit_type_enum,
+                                   literal_class_name, ACC$Pointer, unit_type_status)
+
+  #$% If unit_type_status = $yes, then we have found a match in the 
+  #$% aircraft_unit_type array and it matches something in the database, so now set the pointers.
+  if (unit_type_status == $yes)
+    {
+     UNT$Name$C = xUNT$Name$C
+     if (UNT$Name$C == $BLANKLIT)     # if no name was provided
+       {
+        UNT$Name$C = alsp_create_name (literal_first_letter)
+        putUNT$Name$C
+       }
+
+     UNT$ACCpntr$I = ACC$Pointer
+     putUNT$ACCpntr$I
+
+     ACC$ALSPShared$I = xACC$ALSPShared$I   # SMM 9/95 (E1454)
+     if (ACC$ALSPShared$I == $yes)
+         putUNT$ALSPShared$I (ACC$ALSPShared$I)
+    }
+
+return
+end
+
+
+literal function alsp_create_name (literal_first_letter)
+#########################################################################
+#$%
+#$% Purpose:   Creates a unit_name.
+#$%               
+#$% Called by: alsp_handle_air_type
+#$%
+#$% Tables:    none
+#$%
+#$% Calls:     alsp_check_duplicate_name
+#$%            write
+#$%            read
+#$%
+#$% Date:      Jan 12, 92
+#$%
+#$% Created by: tracy & perme
+#$%
+#########################################################################
+BBcommon
+ALSP_FLAGS
+data name_search /$No/
+
+literal literal_first_letter
+
+vaxcharacter  c_first_letter*1, c_air_name*$$MaxName
+integer       i_air_name, duplicate_name
+literal       literal_unit_name
+
+  #$% increment the current value of ALSP$Air$Name in the blackboard
+  duplicate_name = $No
+  repeat
+    {
+     ALSP$Air$Name = ALSP$Air$Name + 1
+     if (ALSP$Air$Name > 9999) 
+       {
+        ALSP$Air$Name = 1
+        name_search = $yes
+       }
+
+     i_air_name = ALSP$Air$Name
+
+     #$% convert the literal (real*8) to a character
+     #$% datatype conversions using the intrinsic functions do not work here!
+     write (c_first_letter, '(a1)') literal_first_letter 
+
+     #$% convert the integer number to a character string.
+     write (c_air_name, '(i5.5)') i_air_name
+
+     #$% concatenate the name
+     c_air_name = c_first_letter//c_air_name[2:5]
+
+     #$% convert back to literal
+     call move_str_lit (c_air_name, literal_unit_name)
+
+     alsp_create_name = literal_unit_name
+
+     #$% check global name_search flag for $yes condition
+     if (name_search == $yes) 
+       call alsp_check_duplicate_name (literal_unit_name, duplicate_name)
+    } until (duplicate_name == $no)
+
+return
+end
+
+
+subroutine alsp_error_on_create (id,           # in - alsp id number
+                                 error_type,   # in - error condition
+                                 literal_type) # in - literal type name
+#########################################################################
+#$%
+#$% Purpose:  ALSP_Error_On_Create logs the error for the received
+#$%           CREATE message.  The error is written out to the ALSP log.
+#$%
+#$% Called by:  alsp_handle_air_type
+#$%             alsp_receive_create
+#$%
+#$% Calls:      Smov..
+#$%
+#$% Tables:     UNT
+#$%
+#$% Date:       Jan 11,92
+#$%
+#$% Created by:   Los Alamos National Labs (LANL), David F. Perme
+#$%               WPC, Rob Tracy
+#$%
+#$% Modified:     Carol L. Kropp - Sept. 1993
+#$%               Changed all echo.. calls to smov.. & write error to log.
+#$%
+#$%               Carol Kropp - 8/95 (E1455)
+#$%               Added error codes for "shared" bases and made all create
+#$%               error messages sent to the wargame terminal (as well as to
+#$%               the log file).
+#$%
+#$%               Carol Kropp - 8/95 (E1456)
+#$%               Added error handling for ground unit data.
+#$%
+#$%               Message length limited by length of string that
+#$%               echoh can hold - ARB.             10/19/95
+#$%
+#$%               Susan Miller - 9/96 (E1692)
+#$%               Send an error message back to the ACM regarding the error.
+#$%               Messages to the ACM are stored in acm_msg and then 
+#$%               alsp_send_error is called.
+#$%
+################################################################################
+BBcommon
+include "alsp_io_rat.inc"         
+
+integer  id, error_type
+literal  literal_type
+
+integer    msg_len, i, acm_msg_len
+character  message[100], acm_msg[100]
+vaxcharacter*100 v_message, vacm_msg
+
+integer I_SWITCH_1  # SMM 3/00
+
+Equivalence  (message, v_message)
+Equivalence  (acm_msg, vacm_msg)    # SMM 9/96 (E1692)
+
+  for (i = 1; i <= 100; i = i + 1)
+    {
+     message[i] = $SPACE
+     acm_msg[i] = $SPACE       # SMM 9/96 (E1692)
+    }
+
+  msg_len = 0
+  call smovv ("ALSP CREATE ERROR - Unit with ALSP ID:  ", message, msg_len)
+  call smovi (id, message, msg_len)
+
+  if (alsp$logging == $ON)
+  {
+      write (msg_log_unit, fmt=*)
+      write (msg_log_unit, fmt=*) v_message        # write the message to the log file
+      write (msg_log_unit, fmt=*)
+  }
+
+  call echor
+  call echoh  (message, msg_len)               # display message on the swar terminal
+  call echor                                   
+
+  # once the message is written, clear it out & start over SMM 9/96 (E1692)
+  for (i = 1; i <= 100; i = i + 1)
+     message[i] = $SPACE
+
+  acm_msg_len = 0           # SMM 9/96 (E1692)
+  call smovv ("ALSP ID:", acm_msg, acm_msg_len)
+  call smovi (id, acm_msg, acm_msg_len)     
+  call smovv (" not created - ", acm_msg, acm_msg_len)
+
+  msg_len = 0
+  switch (error_type)
+    {
+     case $dup_id:
+        {
+         call smovv (" is not going to be created", message, msg_len)
+         call smovv (" due to a duplicate id.", message, msg_len)
+
+         call smovv ("Duplicate id.", acm_msg, acm_msg_len)
+        }
+     case $no_class_match:
+        {
+         call smovv  (" - ", message, msg_len)
+         call smovhn (literal_type, $$MaxLit, message, msg_len)
+         call smovv  (" was not found in the game database.", message, msg_len)
+
+         call smovhn (literal_type, $$MaxLit, acm_msg, acm_msg_len)
+         call smovv (" not found in game database.", acm_msg, acm_msg_len)
+        }
+     case $no_missile_match:
+        {
+         call smovv (" is not going to be created", message, msg_len)
+         call smovv (" due to no missile match - ", message, msg_len)
+         call smovhn (literal_type, $$MaxLit, message, msg_len)
+
+         call smovv ("No missile match for type ", acm_msg, acm_msg_len)
+         call smovhn (literal_type, $$MaxLit, acm_msg, acm_msg_len)
+        }
+     case $no_radar_match:
+        {
+         call smovv (" is not going to be created", message, msg_len)
+         call smovv (" due to no radar match - ", message, msg_len)
+         call smovhn (literal_type, $$MaxLit, message, msg_len)
+
+         call smovv ("No radar match for type ", acm_msg, acm_msg_len)
+         call smovhn (literal_type, $$MaxLit, acm_msg, acm_msg_len)
+        }
+     case $no_class_type:
+        {
+         call smovv (" is not going to be created, unit class does", message, msg_len)
+         call smovv (" not match currently supported ghosting.", message, msg_len)
+
+         call smovv ("Class does not match supported ghosting.", acm_msg, acm_msg_len)
+        }
+     case $no_more_slots:
+        {
+         call smovv (" is not going to be created", message, msg_len)
+         call smovv (" due to no available slots.", message, msg_len)
+
+         call smovv ("No available unit slots.", acm_msg, acm_msg_len)
+        }                                                  
+     case $no_unit_type_map:
+        {
+         call smovv (" - UNIT_TYPE in message did not", message, msg_len)
+         call smovv (" map to a RESA recognizable name.", message, msg_len)
+
+         call smovhn (literal_type, $$MaxLit, acm_msg, acm_msg_len)
+         call smovv (" doesn't map to a RESA recognizable name.", acm_msg, acm_msg_len)
+        }
+     case $shared_base_registered:
+        {
+         call smovv (" - The base is identified to be shared", message, msg_len)
+         call smovv (", but is already assigned an ALSP ID.", message, msg_len)
+
+         call smovv ("Base is shared, but already has an ALSP ID.", acm_msg, acm_msg_len)
+        }
+     case $shared_base_is_owned:
+        {
+         call smovv (" - The base is identified to be RESA OWNED.", message, msg_len)
+
+         call smovv ("Base identified to be RESA OWNED.", acm_msg, acm_msg_len)
+        }
+     case $base_not_shared:
+        {
+         call smovv (" - The base is not identified to be SHAREd.", message, msg_len)
+
+         call smovv ("Base not identified to be SHAREd.", acm_msg, acm_msg_len)
+        }
+     case $no_available_agd_slots:
+        {
+         call smovv (" - The AGD table is full.", message, msg_len)
+
+         call smovv ("The ALSP Ghost Ground Unit table is full.", acm_msg, acm_msg_len)
+        }
+    }
+
+  if (alsp$logging == $ON)
+  {
+      write (msg_log_unit, fmt=*)
+      write (msg_log_unit, fmt=*) v_message        # write the message to the log file
+      write (msg_log_unit, fmt=*)
+  }
+
+  call echor
+  call echoh  (message, msg_len)               # display message on the swar terminal
+  call echor                                   
+
+  # send error message to the ACM - SMM 9/96 (E1692)
+  if (acm_msg_len > 80)    # the ALSP message formating only handles
+     acm_msg_len = 80      # text strings up to 80 characters.
+  call alsp_send_error (acm_msg_len, %%REF(vacm_msg))  
+
+return
+end
+
+
+subroutine alsp_check_duplicate_name (literal_unit_name, duplicate_name)
+#########################################################################
+#$%
+#$% Purpose:  Called only after ALSP$Air$Name has been incremented > 9999.
+#$%           There is a possibility that a duplicate UNT$Name can be
+#$%           generated, so this routine accepts the generated
+#$%           literal_unit_name, indexes through the unit table searching
+#$%           for a duplicate name.  If none is found then the flag, 
+#$%           then duplicate_name = $no, otherwise a new name is
+#$%           generated and checked for a dup again.
+#$%
+#$% Called by:  alsp_create_name
+#$%
+#$% Calls:      None
+#$%
+#$% Tables:     UNT
+#$%
+#$% Date:       Jan 11,92
+#$%
+#$% created by:   Los Alamos National Labs (LANL), David F. Perme
+#$%
+################################################################################
+BBcommon
+
+integer  duplicate_name
+literal  literal_unit_name
+literal  CSTRIP8      # SMM 3/00
+integer  UNT$Pointer  # SMM 3/00
+integer  litcmp
+
+  duplicate_name = $no
+  for (UNT$Pointer$First; UNT$Pointer$Valid; UNT$Pointer$Next)
+    {
+     if (xUNT$InUse$I == $no)
+       next
+
+     if (litcmp(xUNT$Name$C, literal_unit_name) == 0)
+       {
+        duplicate_name = $yes
+        break
+       }
+    }
+
+return
+end
+
+
+subroutine alsp_receive_delete (id)     # in - ALSP id number
+#########################################################################
+#$%
+#$% Purpose:   Locates the specified ghost unit and sets the unit's
+#$%            status to $BeingDeleted$Code and clear the ALSP ID, so
+#$%            that it will not be considered by any of the models and
+#$%            will be removed at the end of the cycle.
+#$%
+#$% Called By: alsp_receive_create
+#$%            handle_at_delete     <at_mess_handler.c>
+#$%
+#$% Calls:     ALSP_Update_Base     <alsp_send_updates.rat>
+#$%
+#$% Tables:    UNT     SHC
+#$%
+#$% Date:      May 1992
+#$%
+#$% Author:    Carol L. Kropp
+#$%
+#$% Modified:  Carol Kropp - 8/95 (E1455)
+#$%            When a delete is received for a "shared" base, clear
+#$%            the ALSP id and then register the BASE (so RESA is now
+#$%            the owner).
+#$%
+#$%            Carol Kropp - 9/95 (E1456)
+#$%            If the ID was not located in the UNT table, try the AGD,
+#$%            since the information for GROUND.MANEUVER... units is there.
+#$%
+#########################################################################
+BBCommon
+
+include "alsp_io_rat.inc"               # mbx_io common block
+
+integer  id
+
+integer  UNT$Pointer, UNT$ALSPid$I
+integer  SHC$Pointer
+integer  unit_actor_number
+integer  AGD$Pointer, AGD$ALSPid$I
+integer  BOY$Pointer, BOY$ALSPid$I
+literal  CSTRIP8	# SMM 3/00
+integer  full_msg_flag #JHM 8/06
+integer  find_agd_slot, indx
+BBDeclare (mfd$pointer, mfd$ALSPId$i)
+BBDeclare (swp$pointer, swp$ALSPId$i)
+
+  if (id <= 0)      # if an invalid id
+    return
+
+boy$pointer = 0
+agd$pointer = 0
+mfd$pointer = 0
+swp$pointer = 0
+
+  for (UNT$Pointer$First; UNT$Pointer$OK; UNT$Pointer$Next)
+    {
+     UNT$ALSPid$I = xUNT$ALSPid$I
+     if (UNT$ALSPid$I == id)
+       {
+        if (xUNT$GhostedUnit$I == $yes)
+          {
+           putUNT$Status$I  ($BeingDeleted$Code)  # Set unit status for deletion
+           putUNT$ALSPid$I  (0)                   # and clear alsp id
+          }
+        else  # unit is not marked as a ghost
+          {
+           if (xUNT$Type$I == $ShoreBase$Code)    # shared bases will not be
+             {                                    # marked as a ghost
+              SHC$Pointer = xUNT$SHCPntr$I
+              if (xSHC$ALSPSharedBase$I == $yes)
+                {
+                 unit_actor_number = INT (UNT$ALSPid$I * 0.00001)  # see ALSP_Generate_ID <alsp_send_updates.rat>
+                 if (unit_actor_number == actor)     # Does RESA own it in the Confed
+                   {
+                    call echov  ("ALSP ERROR: Attempted")
+                    call echov  (" to delete shared base ")
+                    call echohn (xUNT$Name$C, $$MaxLit)
+                    call echov  (" with ALSP id = ")
+                    call echoi  (id)
+                    call echov  (" - RESA thinks it is the owner.")
+                    call echor
+                   }                 
+                 else
+                   {
+                    putUNT$ALSPid$I  (0)
+                    full_msg_flag = $no
+                    call ALSP_Update_Base (UNT$Pointer, $yes, full_msg_flag)
+                    break
+                   }   # end of else base is owned by another actor
+                }   # end of if the base is marked as "shared"
+             }   # end of if unit is a base
+
+           call echov  ("ALSP ERROR: Attempted to delete unit ")
+           call echohn (xUNT$Name$C, $$MaxLit)
+           call echov  (" with ALSP id = ")
+           call echoi  (id)
+           call echov  (" - Unit is not a ghost.")
+           call echor
+          }   # end of if/else unit is a ghost
+        break
+       }    # end of if ID matches
+    }   # end of loop through the UNT table
+
+if (!UNT$Pointer$OK)   # try the AGD Table
+{
+    indx = find_agd_slot(id,$NO)
+    agd$pointer$to indx
+    if (indx != 0)
+    {
+        if (Xagd$AlspId$i == 0)
+            agd$pointer = 0
+        else
+        {
+            AGD$Zero
+        }
+    }  
+}   # end of ID in the AGD table
+
+if (!UNT$Pointer$OK & !AGD$Pointer$Valid)   # try the BOY Table
+{
+    for (BOY$Pointer$First; BOY$Pointer$OK; BOY$Pointer$Next)
+    {
+        BOY$ALSPid$I = xBOY$ALSPid$I
+        if (BOY$ALSPid$I == id)
+        {
+            if (xBOY$GhostedUnit$I == $yes)
+            {
+                putBOY$KillTime$f  (1.0)  # Mark for deletion
+                putBOY$ALSPid$I  (0)      # and clear alsp id
+            }
+            else  # boy is not marked as a ghost
+            {
+                call echov  ("ALSP ERROR: Attempted to delete buoy ")
+                call echohn (xBOY$Name$C, $$MaxLit)
+                call echov  (" with ALSP id = ")
+                call echoi  (BOY$ALSPid$I)
+                call echov  (" - Buoy is not a ghost.")
+                call echor
+            }
+            break
+        }
+    }
+}
+if (!UNT$Pointer$OK & !AGD$Pointer$Valid & !BOY$Pointer$OK) 
+{
+    for (MFD$Pointer$First; MFD$Pointer$OK; MFD$Pointer$Next)
+    {
+        MFD$ALSPid$I = xMFD$ALSPid$I
+        if (MFD$ALSPid$I == id)
+        {
+            if (xMFD$GhostedUnit$I == $yes)
+            {
+                putMFD$Status$i  ($BeingDeleted$code)  # Mark for deletion
+                putMFD$ALSPid$I  (0)      # and clear alsp id
+            }
+            else  # mfd is not marked as a ghost
+            {
+                call echov  ("ALSP ERROR: Attempted to delete minefield")
+                call echoi (xMFD$Sequence$i)
+                call echov  (" with ALSP id = ")
+                call echoi  (MFD$ALSPid$I)
+                call echov  (" - Minefield is not a ghost.")
+                call echor
+            }
+            break
+        }
+    }
+}
+
+if (!UNT$Pointer$OK & !AGD$Pointer$Valid & !BOY$Pointer$OK &
+    !MFD$Pointer$OK)
+{
+    for (SWP$Pointer$First; SWP$Pointer$OK; SWP$Pointer$Next)
+    {
+        SWP$ALSPid$I = xSWP$ALSPid$I
+        if (SWP$ALSPid$I == id)
+        {
+            if (xSWP$GhostedUnit$I == $yes)
+            {
+                call delete_sweeparea (swp$pointer)
+            }
+            else  # sweep area is not marked as a ghost
+            {
+                call echov  ("ALSP ERROR: Attempted to delete sweeparea")
+                call echohn (xSWP$Name$c)
+                call echov  (" with ALSP id = ")
+                call echoi  (SWP$ALSPid$I)
+                call echov  (" - Sweeparea is not a ghost.")
+                call echor
+            }
+            break
+        }
+    }
+} 
+    
+if (!UNT$Pointer$OK & !AGD$Pointer$Valid & !BOY$Pointer$OK &
+    !MFD$Pointer$OK & !SWP$Pointer$OK)
+{
+    call echov  ("ALSP ERROR: Attempted to")
+    call echov  (" delete unit with ALSP id = ")
+    call echoi  (UNT$ALSPid$I)
+    call echov  (" - Unit not found.")
+    call echor
+} 
+    
+return
+end
+
+
+subroutine alsp_set_unt_side (unt$pointer, side)
+#########################################################################
+#$%
+#$% Purpose:    Maps the alsp side value to a RESA side value, and 
+#$%             set the units view.
+#$%
+#$% Called By:  alsp_receive_create
+#$%
+#$% Tables:     UNT         VUE
+#$%
+#$% Date:       May 1992
+#$%
+#$% Author:     Carol L. Kropp
+#$%
+#########################################################################
+BBCommon
+
+integer side
+integer I_SWITCH_1, UNT$View$I, UNT$Pointer, VUE$Pointer, UNT$HierarchyId$I  # SMM 3/00
+
+  switch (side)
+    {
+     case $blue:
+       UNT$View$I = ALSP$BlueGhost$View
+     case $red:
+       UNT$View$I = ALSP$OrangeGhost$View
+     case $neutral: 
+       UNT$View$I = $Neutral$View
+    }
+
+  putUNT$View$I
+
+  VUE$Pointer$To  UNT$View$I
+  UNT$HierarchyId$I = xVUE$ForceCode$I * 1000
+  putUNT$HierarchyId$I
+
+RETURN
+end
+
+
+
+subroutine alsp_set_unt_stuff (UNT$Pointer,     # in - UNT table slot pointer
+                               id)              # in - ALSP id number
+#########################################################################
+#$%
+#$% Purpose:    This routine initializes the UNT table with ALSP
+#$%             related information.
+#$%
+#$% Called By:  alsp_receive_create
+#$%
+#$% Tables:     UNT
+#$%
+#$% Date:       May 1992
+#$%
+#$% Author:     Carol L. Kropp
+#$%
+#########################################################################
+BBCommon
+
+integer id
+integer UNT$Pointer # SMM 3/00
+
+  putUNT$Status$I  ($Proceeding$Code)         # initialize these two field in
+  putUNT$MarshallStatus$I  ($InFlight$Code)   # case STATUS was an attribute
+                                              # contained in the message
+  #$% ALSP related items
+  putUNT$GhostedUnit$I    ($yes)
+  putUNT$ALSPid$I         (id)
+  putUNT$ALSPPosChgTime$F (Game$Time)
+
+return
+end
+
+
+subroutine alsp_cross_ref (alspid, literal_name, character_name, name_length)
+#########################################################################
+#$%
+#$% Purpose:   Prints out a cross reference to a message log file.
+#$%
+#$% Called By:  
+#$%
+#$% Calls:      write
+#$%
+#$% Tables:     None
+#$%
+#$% Date:       9-MAR-1992
+#$%
+#$% Created by:  Los Alamos National Labs (LANL), David F. Perme,
+#$%                                               Lynn Maas
+#$%
+#########################################################################
+BBcommon
+include "alsp_io_rat.inc"         
+
+integer                   alspid, name_length
+literal                   literal_name
+vaxcharacter*max_str_len  character_name
+
+vaxcharacter internal_name*8
+
+#$% print out ALSP ID, internal name, and received ACM message name
+write (internal_name, '(a8)') literal_name
+
+if (alsp$logging == $ON)
+{
+    write (msg_log_unit, fmt=*) '>>> DUPLICATE NAME CHANGE --  ID = ', alspid,
+                            '   CHANGED TO - ', internal_name,
+
+                            '   RECEIVED AS - ', character_name[1:name_length] 
+}
+
+return
+end
+
+
+subroutine alsp_translate_alsp_mission (_
+           alsp_mission,   # in - mission in alsp enumeration 
+           resa_mission)   # out - resa mission number
+#########################################################################
+#$%
+#$% Purpose:    ALSP_translate_alsp_mission maps the common alsp
+#$%             mission type to a resa mission.
+#$%
+#$% Called By:  alsp_receive_create
+#$%
+#$% Calls:      none
+#$%
+#$% Tables:     none
+#$%
+#$% Date:       May 8, 1992
+#$%
+#$% Author:     Carol L. Kropp
+#$%
+#$% Modified:   Carol Kropp - 1/97 (E1730)
+#$%             Added 1997 mission CSAR, FACA, and TRANSFER
+#$%
+################################################################################
+BBCommon
+
+integer  alsp_mission, resa_mission
+
+integer temp_mission
+integer I_SWITCH_1  # SMM 3/00
+
+  temp_mission = $NoneAssigned$Code      # initialize the mission
+  switch (alsp_mission)
+    {
+     case $mission_ad             : temp_mission = $AirDefense$Code
+     case $mission_aew            : temp_mission = $AEW$Code
+     case $mission_af_strike      : temp_mission = $Strike$Code
+     case $mission_ai             : temp_mission = $AirInteraction$Code
+     case $mission_airlift        : temp_mission = $AirLift$Code
+     case $mission_airtanker      : temp_mission = $AirTanker$Code
+     case $mission_amphib         : temp_mission = $Amphib$Code
+     case $mission_asw            : temp_mission = $AntiSub$Code
+     case $mission_bai            : temp_mission = $BattleFieldAirInteraction$Code
+     case $mission_cap            : temp_mission = $Cap$Code
+     case $mission_cargo          : temp_mission = $AirLift$Code
+     case $mission_cas            : temp_mission = $CloseAirSupport$Code
+     case $mission_commerce       : temp_mission = $Commerce$Code
+     case $mission_csar           : temp_mission = $Rescue$Code
+     case $mission_dca            : temp_mission = $Cap$Code
+     case $mission_escort         : temp_mission = $Escort$Code
+     case $mission_faca           : temp_mission = $SpecialMission$Code
+     case $mission_jammer         : temp_mission = $Jam$Code
+     case $mission_marops         : temp_mission = $MaritimePatrol$Code
+     case $mission_generic        : temp_mission = $NoneAssigned$Code
+     case $mission_navy_strike    : temp_mission = $Strike$Code
+     case $mission_none           : temp_mission = $NoneAssigned$Code
+     case $mission_oca            : temp_mission = $OffensiveCounterAir$Code
+     case $mission_reccon         : temp_mission = $Reconn$Code
+     case $mission_relay          : temp_mission = $CommRelay$Code
+     case $mission_sar            : temp_mission = $Rescue$Code
+     case $mission_sead           : temp_mission = $EW$Code
+     case $mission_sea_control    : temp_mission = $SeaControl$Code
+     case $mission_sealift        : temp_mission = $SeaLift$Code
+     case $mission_spec_miss      : temp_mission = $SpecialMission$Code
+     case $mission_strikecap      : temp_mission = $StrikeCap$Code
+     case $mission_sttanker       : temp_mission = $STTanker$Code
+     case $mission_surcap         : temp_mission = $SurveillanceCap$Code
+     case $mission_surveillance   : temp_mission = $Surv$Code
+     case $mission_transfer       : temp_mission = $Airlift$code
+    }       # end of switch
+
+  resa_mission = temp_mission
+
+return
+end
+
+
+subroutine alsp_translate_alsp_status (_
+           alsp_status,     # in- alsp status enumeration value
+           resa_status)     # out - resa status code
+#########################################################################
+#$%
+#$% Purpose:    ALSP_translate_alsp_status maps the common alsp
+#$%             status type to a resa status.
+#$%
+#$% Called By:  alsp_receive_create
+#$%
+#$% Calls:      none
+#$%
+#$% Tables:     none
+#$%
+#$% Date:       May 8, 1992
+#$%
+#$% Author:     Carol L. Kropp
+#$%
+#########################################################################
+BBcommon
+
+integer  alsp_status, resa_status
+
+integer  temp_status
+integer I_SWITCH_1  # SMM 3/00
+
+  temp_status = $Proceeding$Code
+  switch (alsp_status)
+    {
+     #$% status enumerations for air units:
+     case $drop           : temp_status = $Proceeding$Code
+     case $fly            : temp_status = $Proceeding$Code
+     case $lift           : temp_status = $Proceeding$Code
+     case $on_ground      : temp_status = $ACAwaitingLaunch$Code
+     case $orbit          : temp_status = $OnStation$Code
+     case $proceed        : temp_status = $Proceeding$Code
+     case $ready          : temp_status = $Proceeding$Code
+     case $delayed        : temp_status = $Proceeding$Code
+    }
+
+  resa_status = temp_status
+
+return
+end
+
+
+subroutine alsp_chk_adv (alsp_time_adv_status)  # advance granted flag
+#########################################################################
+#$%
+#$% Purpose:    Processes incoming ALSP messages.  Reads a pending
+#$%             ACM-to-actor message from the mailbox and then
+#$%             invokes the generic translator parser, which will
+#$%             call the appropriate routine to handle the message.
+#$%             Messages will continue to be read and processed until
+#$%             there are no pending messages or the time advance
+#$%             has been granted.
+#$%
+#$% Called By:  WARCYC  <wgmain.rat>
+#$%
+#$% Calls:      alsp_read_mbx
+#$%             alsp_invoke_parser
+#$%
+#$% Tables:     None
+#$%
+#$% Date:       May 6, 1992
+#$%
+#$% Author:     Carol L. Kropp
+#$%
+#$% Modified:  Carol Kropp - 12/96 (E1693)
+#$%            ALSP message size increased from 2700 to 20000.
+#$%
+#########################################################################
+
+implicit none
+integer  alsp_time_adv_status
+       VMSchar*20000  msg
+       integer        msg_len, err
+
+  alsp_time_adv_status = -1      # flag as no grant
+  msg = ""
+  repeat
+    {
+     msg_len = 0    # make sure that the length is initialized
+     #call alsp_read_mbx (msg, msg_len, .false., err)
+     call alsp_read_mbx (msg, msg_len, .true., err)
+
+     if (err != $no)
+       {
+        call echov ("WGALSP: Error trying to ")
+        call echov ("read mailbox in alsp_chk_adv")
+        call echor
+        call echov ("ERROR = ")
+        call echoi (err)
+        call echor
+       }
+     else if (msg_len > 0)
+       call alsp_invoke_parser (msg, msg_len)
+    }
+  until ((msg(1:9) == 'GRANT_ADV') | (msg_len <= 0))
+
+  if (msg(1:9) == 'GRANT_ADV')       # if the time advance has been granted
+    alsp_time_adv_status = 0
+
+return
+end
+
+
+subroutine AC_Duplicate_Name_Check (UNT$Pointer, call_sign, number_of_ac)  
+#########################################################################
+#$%
+#$% Purpose:   Determines if the call sign of the flight is a duplicate
+#$%            of a RESA aircraft flight or another ghosted flight.
+#$%            If the call sign is a duplicate, a "GH" call sign will
+#$%            be created and returned in call_sign and the original
+#$%            call sign will be stored in UNT$Event$C - and the NAME
+#$%            attribute (if included in the message) will be tossed.
+#$%
+#$% Called by: alsp_receive_create 
+#$%
+#$% Calls:     lcomp  <lbutil.rat>
+#$%
+#$% Tables:    UNT      AML
+#$%
+#$% Date:      July 1992
+#$%
+#$% Author:    Carol L. Kropp
+#$%
+#$% Modified:  April 26, 1993 - Carol Kropp
+#$%            Made the search through the AML table a binary search.
+#$%     
+#$%            Nov. 2002 - Jim Allen
+#$%            Sequential search through AML table because CREATE AIRCRAFT
+#$%            does not maintain alphabetical order
+#$%
+#########################################################################
+BBCommon
+
+integer   UNT$Pointer
+literal   call_sign
+integer   number_of_ac
+
+integer   duplicate_name  
+vaxcharacter  v_call_sign*$$MaxName,  v_flight_number*3
+character     c_flight_number[4]
+
+literal     AML$SideNumber$C, unt$ForceName$C
+
+literal  CSTRIP8, UNT$Event$C 			      # SMM 3/00
+integer  AML$Pointer, BML$Pointer, UNT2$Pointer, ilen, litcmp, itoc # SMM 3/00
+
+equivalence   (v_flight_number, c_flight_number)
+
+  duplicate_name = $no
+
+  #$% First check the AML table for a RESA a/c with same call sign
+
+  for (AML$Pointer$First; AML$Pointer$OK; AML$Pointer$Next)
+    {
+     if (litcmp(xAML$SideNumber$C, call_sign) == 0)
+       {
+        duplicate_name = $yes
+        break
+       }
+    }
+
+  if (duplicate_name == $no)   # if the name didn't dup an active
+    {                          # unit, check the moored boat names
+     for (BML$Pointer$First; BML$Pointer$OK; BML$Pointer$Next)
+       {
+        if (litcmp(xBML$Name$C, call_sign) == 0)
+          {
+           duplicate_name = $yes
+           break
+          }
+       }
+    }
+
+  #$% If no duplicate was found, check through the UNT
+  #$% table for a ghosted aircraft unit with same name
+  if (duplicate_name == $no)
+    {
+     for (UNT2$Pointer$First; UNT2$Pointer$OK; UNT2$Pointer$Next)
+       {
+        if (xUNT2$Type$I == $Air$Code & xUNT2$GhostedUnit$I == $yes)
+          {
+           if (litcmp(xUNT2$Name$C, call_sign) == 0)
+             {
+              duplicate_name = $yes
+              break
+             }
+          }
+       }
+    }
+
+UNT$ForceName$C = call_sign    # joa 11/02 (E2313) Allow for refuel by mission 
+putUNT$ForceName$C
+
+  if (duplicate_name == $yes)
+    {
+     UNT$Event$C = call_sign    # store the original call sign
+     putUNT$Event$C
+
+     if (ALSP$Air$Name + number_of_ac > 999)    # if the call number will cycle
+       ALSP$Air$Name = 0                        # during the flight - start back at 0
+
+     v_call_sign[1:2] = "GH"
+     ilen = itoc (ALSP$Air$Name, c_flight_number, 4)
+
+     #$% concatenate the name
+     if (ilen == 3)       # the flight number >= 100
+       v_call_sign = v_call_sign[1:2]//v_flight_number
+     else if (ilen == 2)  # the flight number >= 10, but < 100
+       v_call_sign = v_call_sign[1:2]//"0"//v_flight_number
+     else                 # the flight number >= 0 , but < 10
+       v_call_sign = v_call_sign[1:2]//"00"//v_flight_number
+ 
+     #$% convert back to literal
+     call move_str_lit (v_call_sign, call_sign)
+
+     ALSP$Air$Name = ALSP$Air$Name + number_of_ac
+    }
+  else
+    {
+    }
+
+return
+end
+
+
+subroutine ALSP_Map_Incoming_Emitters (_
+          num_emitters,    # int   - number of emitters contained in the message
+          emitter_category, # array - contains the radar/jammer/iff code for each emitter
+          emitter_type,  # array - contains the codes for the alsp emitter enumeration
+          emitter_status,   # array - contains the on/off codes for the emitters
+          emitter_index,    # array - contains index num of emitter for unit
+          emitter_orient,   # array - contains orientation of jammer emitters 
+          emitter_mode)     # array - contains comm jammer target comm net class
+#########################################################################
+#$%
+#$% Purpose:    ALSP_Map_Incoming_Emitter maps the alsp emitter type
+#$%             enumeration to a RESA recognized emitter name.  If the
+#$%             emitter is mapped, search the IFF, JAM, and RAD tables
+#$%             (based on the code) for the emitter.
+#$%
+#$% Called By:  ALSP_Receive_Create
+#$%
+#$% Calls:      None
+#$%
+#$% Tables:     IFF     JAM     RAD
+#$%
+#$% Date:       March 11, 1992
+#$%
+#$% Author:     Carol L. Kropp
+#$%
+#$% Modified:  Susan Miller - 10/94
+#$%            Added new emitter characteristics as specified in JECEWSI ICD
+#########################################################################
+BBCommon
+SensorCommon            # <alsp.inc>
+ALSP$Emitter_Common     # <alsp.inc>        # E2151 - DEW 9/99
+
+integer   num_emitters,  emitter_category[Max$Alsp$Emitters],
+          emitter_type[Max$Alsp$Emitters], emitter_status[Max$Alsp$Emitters],
+          emitter_index[Max$Alsp$Emitters], emitter_mode[Max$Alsp$Emitters]
+real      emitter_orient[Max$Alsp$Emitters]
+integer  i, index, litcmp
+integer  alsp_emitter_type, emitter_cat_code, on_flag, mapped_flag
+integer  in_database_flag
+literal  emitter_name
+literal  CSTRIP8				     # SMM 3/00
+integer  RAD$Pointer, JAM$Pointer, index_of_emitter  # SMM 3/00
+
+on_flag = -1
+
+number_of_emitters = 0
+for (i = 1; i <= num_emitters; i = i + 1)
+{
+    mapped_flag = $no     # initialize the found flags
+    in_database_flag = $no
+
+    # get RADAR or JAMMER
+    emitter_cat_code = emitter_category[i]
+    # which emitter by number on unit
+    index_of_emitter = emitter_index[i] 
+    if (emitter_status[i] == $emitter_on)
+        on_flag = $yes
+    else if (emitter_status[i] == $emitter_off)
+        on_flag = $no
+
+    # get the emitter enumeration 
+    if (emitter_type[i] == 0)
+    {
+        number_of_emitters = number_of_emitters + 1
+        sensor_list_sensor_code[number_of_emitters] = $Radar$Code
+        sensor_list_sensor_state[number_of_emitters] = on_flag
+        sensor_list_sensor_index[number_of_emitters] = index_of_emitter
+        next        
+    }   
+    else
+        alsp_emitter_type = emitter_type[i]
+
+    for (index = 1; index <= number_of_emitter_maps; index = index + 1)
+    {
+        if (alsp_emitter_list [1, index] == alsp_emitter_type)
+        {
+            mapped_flag = $yes
+            # get the RESA emitter name
+            emitter_name = alsp_emitter_list [2, index]
+            if (emitter_cat_code == $radar)
+            {
+                for (RAD$Pointer$First; RAD$Pointer$OK; RAD$Pointer$Next)
+                {
+                    if (litcmp(xRAD$Type$C, emitter_name) == 0)
+                    {
+                        in_database_flag = $yes
+                        number_of_emitters = number_of_emitters + 1
+
+                        # do we need to know what kind of radar it is??????
+                        # such as $Air$Code, $Surface$Code, $FireControl$Code,
+                        # or $Approach$Code
+                        sensor_list_sensor_code[number_of_emitters] = $Radar$Code
+                        sensor_list_characteristic_pointer[number_of_emitters] = RAD$Pointer
+                        sensor_list_sensor_state[number_of_emitters] = on_flag
+                        sensor_list_sensor_index[number_of_emitters] = index_of_emitter
+                        break
+                    }
+                }
+
+            }
+            else if (emitter_cat_code == $jammer)
+            {
+                for (JAM$Pointer$First; JAM$Pointer$OK; JAM$Pointer$Next)
+                {
+                    if (litcmp(xJAM$Type$C, emitter_name) == 0)
+                    {
+                        in_database_flag = $yes
+                        number_of_emitters = number_of_emitters + 1
+
+                        # get the category of the jammer:  $Jammer$Code (4), 
+                        # $RadarJammer$Code (51), $CommunicationJammer$Code (31) or 
+                        # $RadComJammer$Code (50)     SMM 2/6/95
+                        sensor_list_sensor_code[number_of_emitters] = xJAM$Category$I
+                        sensor_list_characteristic_pointer[number_of_emitters] = JAM$Pointer
+                        sensor_list_sensor_state[number_of_emitters] = on_flag
+                        sensor_list_sensor_index[number_of_emitters] = index_of_emitter
+                        sensor_list_sensor_orient[number_of_emitters] = emitter_orient[i]
+                        sensor_list_sensor_mode[number_of_emitters] = emitter_mode[i]
+                        break
+                    }
+                }
+
+            }
+        }           # end of matched name in emitter list
+
+        if (mapped_flag == $yes &
+            in_database_flag == $yes)
+          break
+    }               # end of loop through the match list
+
+    if (emitter_cat_code == $radar)
+    {
+        if (in_database_flag == $no)
+        {
+            if (alsp_default_radar > 0)
+            {
+                in_database_flag = $yes
+                number_of_emitters = number_of_emitters + 1
+                sensor_list_sensor_code[number_of_emitters] = $Radar$Code
+                sensor_list_characteristic_pointer[number_of_emitters] = alsp_default_radar
+                sensor_list_sensor_state[number_of_emitters] = on_flag
+                sensor_list_sensor_index[number_of_emitters] = index_of_emitter
+
+                call echov  ("ALSP GENERIC RADAR MAPPING OF  ")
+                call echohn (emitter_name, $$MaxLit)
+                call echor
+            }
+        }
+    }
+    else if (emitter_cat_code == $jammer)
+    {
+        if (in_database_flag == $no)
+        {
+            if (alsp_default_jammer > 0)
+            {
+                in_database_flag = $yes
+                number_of_emitters = number_of_emitters + 1
+                sensor_list_sensor_code[number_of_emitters] = $Jammer$Code
+                sensor_list_characteristic_pointer[number_of_emitters] = alsp_default_jammer
+                sensor_list_sensor_state[number_of_emitters] = on_flag
+                sensor_list_sensor_index[number_of_emitters] = index_of_emitter
+                sensor_list_sensor_orient[number_of_emitters] = emitter_orient[i]
+                sensor_list_sensor_mode[number_of_emitters] = emitter_mode[i]
+
+                call echov  ("ALSP GENERIC JAMMER MAPPING OF  ")
+                call echohn (emitter_name, $$MaxLit)
+                call echor
+
+            }
+        }
+    }
+    if (mapped_flag == $no)
+    {
+        call echov  ("ALSP EMITTER MAPPING PROBLEM:  ")
+        call echov  ("Emitter with enumeration value ")
+        call echoi  (alsp_emitter_type)
+        call echov  (" is not mapped to a RESA recognizable ")
+        call echov  ("emitter name - Unit is ")
+        call echov  ("being created without it.")
+        call echor
+    }
+    else if (in_database_flag == $no)
+    {
+        call echov  ("ALSP EMITTER MAPPING/DATABASE PROBLEM:  ")
+        call echov  ("Emitter with enumeration value ")
+        call echoi  (alsp_emitter_type)
+        call echov  (" was mapped to ")
+        call echohn (emitter_name, $$MaxLit)
+        call echov  (" which is not in the game database - ")
+        call echov  ("Unit is being created without it.")
+    }
+}
+
+return
+end
+
+
+subroutine ALSP_Map_Incoming_Sonars (_
+          num_sonars,    # int   - number of sonars contained in the message
+          sonar_type,    # array - contains the codes for the alsp sonar enumeration
+          sonar_status,  # array - contains the on/off codes for the sonars
+          sonar_mode,    # array - contains the activation mode of sonars (opt)
+          sonar_depth)   # array - contains the depth of sonar (opt) (ft)
+#########################################################################
+#$%
+#$% Purpose:    ALSP_Map_Incoming_Sonars maps the alsp sonar type
+#$%             enumeration to a RESA recognized sonar name.  If the
+#$%             emitter is mapped, search the SON table
+#$%             for the sonar.
+#$%
+#$% Called By:  ALSP_Receive_Create
+#$%
+#$% Calls:      None
+#$%
+#$% Tables:     SON
+#$%
+#$% Date:       June 20, 2006
+#$%
+#$% Author:     James O. Allen
+#$%
+#########################################################################
+BBCommon
+SensorCommon            # <alsp.inc>
+SonarCommon            # <alsp.inc>
+ALSP$Sonar_common
+
+integer   num_sonars,  
+          sonar_type[Max$Alsp$Sonars], sonar_status[Max$Alsp$Sonars],
+          sonar_mode[Max$Alsp$Sonars], sonar_depth[Max$Alsp$Sonars]
+integer  i, index, litcmp
+integer  alsp_sonar_type, on_flag, mapped_flag
+integer  in_database_flag
+literal  sonar_name
+literal  CSTRIP8
+integer  SON$Pointer,index_of_sonar
+
+on_flag = -1
+
+number_of_sonar_eq = 0
+for (i = 1; i <= num_sonars; i = i + 1)
+{
+    mapped_flag = $no     # initialize the found flags
+    in_database_flag = $no
+
+    if (sonar_status[i] == $sonar_on)
+        on_flag = $yes
+    else if (sonar_status[i] == $sonar_off)
+        on_flag = $no
+
+    alsp_sonar_type = sonar_type[i]
+
+    for (index = 1; index <= number_of_sonar_maps; index = index + 1)
+    {
+        if (alsp_sonar_list [1, index] == alsp_sonar_type)
+        {
+            mapped_flag = $yes
+            # get the RESA emitter name
+            sonar_name = alsp_sonar_list [2, index]
+            for (SON$Pointer$First; SON$Pointer$OK; SON$Pointer$Next)
+            {
+                if (litcmp(xSON$Type$C, sonar_name) == 0)
+                {
+                    in_database_flag = $yes
+                    number_of_sonar_eq = number_of_sonar_eq + 1
+
+                    sonar_list_code[number_of_sonar_eq] = $Sonar$Code
+                    sonar_list_characteristic_pointer[number_of_sonar_eq] = SON$Pointer
+                    sonar_list_state[number_of_sonar_eq] = sonar_status[i]
+                    sonar_list_mode[number_of_sonar_eq] = sonar_mode[i]
+                    sonar_list_depth[number_of_sonar_eq] = sonar_depth[i]
+                    break
+                }
+            }
+        }           # end of matched name in sonar list
+
+        if (mapped_flag == $yes &
+            in_database_flag == $yes)
+          break
+    }               # end of loop through the match list
+
+    if (in_database_flag == $no)
+    {
+        if (alsp_default_sonar > 0)
+        {
+            in_database_flag = $yes
+            number_of_sonar_eq = number_of_sonar_eq + 1
+            sonar_list_code[number_of_sonar_eq] = $Sonar$Code
+            sonar_list_characteristic_pointer[number_of_sonar_eq] = alsp_default_sonar
+            sonar_list_state[number_of_sonar_eq] = sonar_status[i]
+            sonar_list_mode[number_of_sonar_eq] = sonar_mode[i]
+            sonar_list_depth[number_of_sonar_eq] = sonar_depth[i]
+
+            call echov  ("ALSP GENERIC SONAR MAPPING OF  ")
+            call echohn (sonar_name, $$MaxLit)
+            call echor
+        }
+    }
+
+    if (mapped_flag == $no)
+    {
+        call echov  ("ALSP SONAR MAPPING PROBLEM:  ")
+        call echov  ("Sonar with enumeration value ")
+        call echoi  (alsp_sonar_type)
+        call echov  (" is not mapped to a RESA recognizable ")
+        call echov  ("sonar name - Unit is ")
+        call echov  ("being created without it.")
+        call echor
+    }
+    else if (in_database_flag == $no)
+    {
+        call echov  ("ALSP SONAR MAPPING/DATABASE PROBLEM:  ")
+        call echov  ("SONAR with enumeration value ")
+        call echoi  (alsp_sonar_type)
+        call echov  (" was mapped to ")
+        call echohn (sonar_name, $$MaxLit)
+        call echov  (" which is not in the game database - ")
+        call echov  ("Unit is being created without it.")
+    }
+}
+
+return
+end
+
+
+subroutine ALSP_Add_Emitter_Eq (UNT$Pointer)
+#########################################################################
+#$%
+#$% Purpose:    ALSP_Add_Emitter_Eq creates the DEQ equipment chain for
+#$%             the ghosted unit.
+#$%
+#$% Called By:  ALSP_Receive_Create
+#$%
+#$% Calls:      Get_DEQ_Entry   <lbcommn.rat>
+#$%
+#$% Tables:     UNT     DEQ
+#$%
+#$% Date:       March 15, 1992
+#$%
+#$% Author:     Carol L. Kropp
+#$%
+#$% Modified:   Carol Kropp - Sept. 1993
+#$%             Forced all ghosted aircraft to have an iff transponder.
+#$%
+#$%             Carol Kropp - Dec. 1993
+#$%             Added setting of DEQ$AllBands$I and DEQ$EM$Band$I 
+#$%             for ghosted Jammer equipment.
+#$%
+#$%            Susan Miller - 10/94
+#$%            Added new emitter characteristics as specified in JECEWSI ICD
+#$%            for ghosted Jammer equipment
+#$%
+#$%            Carol Kropp - 10/95 (E1482)
+#$%            Force an IFF transponder on all surface and subsurface
+#$%            units, in addition to aircraft.
+#$%
+#$%            Carol Kropp - 12/95 (E1525)
+#$%            Set the sensor index of the IFF to zero, not
+#$%            number_of_emitters - caused overlap problems if
+#$%            a units emitters were not in the create but followed
+#$%            in an update.
+#$%
+#########################################################################
+BBCommon
+SensorCommon        # <alsp.inc>
+ALSP$Emitter_Common
+
+integer  UNT$Pointer
+
+integer  UNT$Type$I
+integer  index, DEQ$Pointer, DEQ$Ident$I, DEQ$On$I, DEQ$Pntr$I
+integer  DEQ$EmitterIndx$I
+real     JEW$OR$Bearing$F
+literal  CSTRIP8				  # SMM 3/00
+integer  DEQ$EM$Index, JEW$Pointer, JEW$OR$Index  # SMM 3/00
+
+    UNT$Type$I = xUNT$Type$I
+    if ((UNT$Type$I == $Air$Code     |          # force an IFF transponder
+         UNT$Type$I == $Surface$Code |          # onto the unit if one exists
+         UNT$Type$I == $Sub$Code     )     &    # in the game.
+        default_iff_transponder >= IFF$base)
+    {
+        number_of_emitters = number_of_emitters + 1
+        sensor_list_sensor_code[number_of_emitters] = $IFF$Code
+        sensor_list_characteristic_pointer[number_of_emitters] = default_iff_transponder
+        sensor_list_sensor_state[number_of_emitters] = $yes
+        sensor_list_sensor_index[number_of_emitters] = 0
+    }
+
+    for (index = 1; index <= number_of_emitters; index = index + 1)
+    {
+        call Get_DEQ_Entry (UNT$Pointer, DEQ$Pointer)   # updates UNT$NbrEQ$I
+
+        if (DEQ$Pointer != 0)
+        {
+            DEQ$Pntr$I  = sensor_list_characteristic_pointer[index]
+            putDEQ$Pntr$I
+
+            DEQ$Ident$I = sensor_list_sensor_code[index]
+            putDEQ$Ident$I
+
+            # only change the state if it was part of the message
+            # default to 0 - off
+            if (sensor_list_sensor_state[index] > -1)
+            {
+                DEQ$On$I    = sensor_list_sensor_state[index]
+                putDEQ$On$I
+            }
+
+            DEQ$EmitterIndx$I = mod(sensor_list_sensor_index[index], -
+                                jew$or$slots) + 1
+            putDEQ$EmitterIndx$I
+
+            if ((DEQ$Ident$I == $RadarJammer$Code) |            # SMM 2/6/95
+                (DEQ$Ident$I == $CommunicationJammer$Code) |
+                (DEQ$Ident$I == $RadComJammer$Code) |
+                (DEQ$Ident$I == $Jammer$Code))
+            {
+                if (DEQ$On$I == $yes)
+                {
+                   putDEQ$AllBands$I  ($yes)
+                   for (DEQ$EM$Index = 1; DEQ$EM$Index <= DEQ$EM$Slots;
+                                          DEQ$EM$Index = DEQ$EM$Index + 1)
+                      putDEQ$EM$Band$I ($yes)
+                }
+                else   # jammer equipment is off
+                {
+                   putDEQ$AllBands$I  ($yes)
+                   for (DEQ$EM$Index = 1; DEQ$EM$Index <= DEQ$EM$Slots;
+                                          DEQ$EM$Index = DEQ$EM$Index + 1)
+                      putDEQ$EM$Band$I ($no)
+                }
+
+                JEW$Pointer$To (UNT$Pointer$Index)
+                JEW$OR$Index = DEQ$EmitterIndx$I
+                # don't set JEW$BLL$Flags$i, we will only be receiving bearing
+                # stored in radians for a ghosted unit  SMM 2/95
+                JEW$OR$Bearing$F = sensor_list_sensor_orient[index]
+                putJEW$OR$Bearing$F
+            }   
+        }
+        else
+        {
+            call echov  ("ALSP EMITTER PROBLEM:  ")
+            call echov  ("Unable to add emitter ")
+            call echohn ($$ExtLit(IBB[DEQ$Pntr$I],1,8),$$MaxLit)
+            call echov  (" to ")
+            call echohn (xUNT$Name$C, $$MaxLit)
+            call echov  (" DEQ Table is full.")
+            call echor
+        }
+    }
+
+return
+end
+
+
+subroutine ALSP_Add_Sonar_Eq (UNT$Pointer)
+#########################################################################
+#$%
+#$% Purpose:    ALSP_Add_Sonar_Eq adds sonars to the DEQ equipment chain for
+#$%             the ghosted unit.
+#$%
+#$% Called By:  ALSP_Receive_Create
+#$%
+#$% Calls:      Get_DEQ_Entry   <lbcommn.rat>
+#$%
+#$% Tables:     UNT     DEQ
+#$%
+#$% Date:       June 20, 2006
+#$%
+#$% Author:     James O. Allen
+#$%
+#########################################################################
+BBCommon
+SonarCommon        # <alsp.inc>
+ALSP$sonar_Common
+
+ BBDeclare  (UNT$Pointer,
+             DEQ$Pointer,
+             DEQ$Pntr$I,
+             DEQ$Ident$i,
+             DEQ$On$I,
+             DEQ$Lfapingindex$I,
+             SON$Pulselengthsecs$I,
+             SON$Pulseintervalmin$I,
+             SON$Pointer,
+             PNG$Pointer,
+             PNG$Deqindx$I,
+             PNG$Untindx$I,
+             PNG$Pulselength$I,
+             PNG$Pinginterval$I,
+             PNG$Timeofnextping$F) 
+
+
+integer  UNT$Type$I
+integer  index, iorder, kklen
+literal  CSTRIP8
+Character msg[200]
+
+for (index = 1; index <= number_of_sonar_eq; index = index + 1)
+{
+    call Get_DEQ_Entry (UNT$Pointer, DEQ$Pointer)   # updates UNT$NbrEQ$I
+    if (DEQ$Pointer == 0)
+    {
+        DEQ$Pntr$I  = sonar_list_characteristic_pointer[index]
+        call echov  ("ALSP SONAR PROBLEM:  ")
+        call echov  ("Unable to add sonar ")
+        call echohn ($$ExtLit(IBB[DEQ$Pntr$I],1,8),$$MaxLit)
+        call echov  (" to ")
+        call echohn (xUNT$Name$C, $$MaxLit)
+        call echov  (" DEQ Table is full.")
+        call echor
+        return
+    }
+
+    DEQ$Pntr$I  = sonar_list_characteristic_pointer[index]
+    putDEQ$Pntr$I
+
+    DEQ$Ident$I = sonar_list_code[index]
+    putDEQ$Ident$I
+
+    call ALSP_Update_Sonar_Eq_State (UNT$Pointer, index, deq$pointer)
+}
+
+return
+end
+
+Subroutine alsp_ONOFF(state, mode, iswtch)
+
+#######################################################
+ #$%
+ #$% Purpose:   ONOFF switches equipment on or off
+ #$%            depending on the specified mode.
+ #$%
+ #$% Called By: alsp_add_sonar_eq
+ #$%
+ #$% Calls:     None
+ #$%
+ #$% Tables:    DEQ
+ #$%
+ #$% Date:      June 21, 2006
+ #$%
+ #$% Author:    James O. Allen
+ #$%
+ #######################################################
+
+ BBcommon
+ BBDeclare (UNT$Pointer)
+ integer state,
+         iswtch,
+         MODE
+
+
+ if (state == $Sonar_OFF)               #if order is to silence
+
+     iswtch = $off                      #turn switch to off
+
+ else if (mode == $sonar_bb)            #if BB mode specified
+
+     iswtch = $on$bb                    #turn switch to BB
+
+ else if (mode == $sonar_cz)            #if CZ mode specified
+
+     iswtch = $on$cz                    #turn switch to CZ
+
+ else if (mode == $sonar_dp)             #if DP mode specified
+
+     iswtch = $on$dp                    #turn switch to DP
+
+ else
+    iswtch = $ON
+
+    
+ return
+ end
+
+
+
+subroutine Duplicate_Name_Check (unit_name)
+#########################################################################
+#$%
+#$% Purpose:   Determines if the name of the unit is a duplicate of a
+#$%            RESA unit.  If the name is a duplicate, a "Gxxxx" name
+#$%            will be created and returned in unit_name.  The original
+#$%            name will be tossed.
+#$%
+#$% Called by: alsp_receive_create 
+#$%
+#$% Calls:     lcomp  <lbutil.rat>
+#$%
+#$% Tables:    UNT
+#$%
+#$% Date:      Sept. 1993
+#$%
+#$% Author:    Carol L. Kropp
+#$%
+#$% Modified:  Carol L. Kropp - 1/95
+#$%            Removed storage of the original name in the ForceName
+#$%            field (caused problems trying to locate units, since
+#$%            it was matching as if a collective flight).
+#$%
+#########################################################################
+BBCommon
+
+literal   unit_name
+
+integer   duplicate_name, litcmp  
+character c_name[$$MaxName]
+vaxcharacter v_name*$$MaxName
+equivalence   (v_name, c_name)
+
+literal  CSTRIP8			# SMM 3/00
+integer  UNT2$Pointer, BML$Pointer, AML$Pointer, JJ  # SMM 3/00
+
+  duplicate_name = $no
+
+  #$% Check through the UNT table for a unit with same name
+  for (UNT2$Pointer$First; UNT2$Pointer$Valid; UNT2$Pointer$Next)
+    {
+     if (xUNT2$Status$I == $BeingDeleted$Code) next
+
+     if (litcmp(xUNT2$Name$C, unit_name) == 0)
+       {
+        duplicate_name = $yes
+        break
+       }
+    }
+
+  if (duplicate_name == $no)   # if the name didn't dup an active
+    {                          # unit, check the moored boat names
+     for (AML$Pointer$First; AML$Pointer$OK; AML$Pointer$Next)
+       {
+        if (litcmp(xAML$SideNumber$C, unit_name) == 0)
+          {
+           duplicate_name = $yes
+           break
+          }
+       }
+    }
+
+  if (duplicate_name == $no)   # if the name didn't dup an active
+    {                          # unit, check the moored boat names
+     for (BML$Pointer$First; BML$Pointer$OK; BML$Pointer$Next)
+       {
+        if (litcmp(xBML$Name$C, unit_name) == 0)
+          {
+           duplicate_name = $yes
+           break
+          }
+       }
+    }
+
+  if (duplicate_name == $yes)
+    {
+     if (ALSP$Unit$Name > 9999)
+       ALSP$Unit$Name = 0
+
+     c_name[1] = $LETG
+     jj = 1
+     call smoviz (ALSP$Unit$Name, 4, c_name, jj)
+     call move_str_lit (v_name, unit_name)     # convert back to literal
+
+     ALSP$Unit$Name = ALSP$Unit$Name + 1
+    }
+
+return
+end
+
+
+subroutine alsp_handle_vessel_type (_
+        UNT$Pointer,        # in - UNT slot pointer
+        alsp_class,         # in - ALSP class enumeration
+        unit_type_enum,     # in - the enumeration of the type being created
+        unit_type_status)   # out - successful match flag
+#########################################################################
+#$%
+#$% Purpose:   Maps the enumeration type to a RESA boat, ship or sub
+#$%            type.
+#$%
+#$% Called by: alsp_receive_create 
+#$%
+#$% Calls:     Map_Incoming_Ship_Type   <alsp_mapping.rat>
+#$%
+#$% Tables:    UNT      SHC
+#$%
+#$% Date:      Sept. 1993
+#$%
+#$% Author:    Carol L. Kropp
+#$%
+#########################################################################
+BBCommon
+
+integer  UNT$Pointer, alsp_class, unit_type_enum, unit_type_status
+integer  SHC$Pointer, UNT$SHCPntr$I, UNT$Type$I, UNT$SubType$I  # SMM 3/00
+integer  success
+
+  unit_type_status = $Yes
+
+  call Map_Incoming_Ship_Type (alsp_class, unit_type_enum, SHC$Pointer, unit_type_status)
+
+  #$% If unit_type_status = $yes, then we have found a match in the 
+  #$% vessel_unit_type array and it matches something in the database, so now set the pointers.
+  if (unit_type_status == $yes)
+    {
+     UNT$SHCpntr$I = SHC$Pointer
+     putUNT$SHCpntr$I
+
+     if (alsp_class == $sea_surface_boat)
+       {
+        UNT$Type$I = $Surface$Code
+        UNT$SubType$I = $SmallBoat$SubCode
+       }
+     else if (alsp_class == $sea_surface_ship)
+       {
+        UNT$Type$I = $Surface$Code
+        UNT$SubType$I = $Standard$SubCode
+       }
+     else if (alsp_class == $sea_subsurface)
+       {
+        UNT$Type$I = $Sub$Code
+        UNT$SubType$I = $Standard$SubCode
+       }
+     putUNT$Type$I
+     putUNT$SubType$I
+
+     putUNT$ALSPShared$I (XSHC$ALSPShared$I)
+
+     putUNT$RulesOfEngage$I  ($IfAttacked$Code)
+
+     
+     call Set_UNT_AntennaHeight(_
+                              SHC$Pointer,     # ship characteristics pointer
+                              UNT$Pointer,     # unit pointer
+                              success)         # flag whether height found
+    }
+
+return
+end
+
+
+subroutine alsp_handle_torpedo_type (_
+        UNT$Pointer,        # in - UNT slot pointer
+        alsp_class,         # in - ALSP class enumeration
+        unit_type_enum,     # in - the enumeration of the type being created
+        unit_type_status)   # out - successful match flag
+#########################################################################
+#$%
+#$% Purpose:   Maps the enumeration type to a RESA torpedo
+#$%            type.
+#$%
+#$% Called by: alsp_receive_create 
+#$%
+#$% Calls:     Map_Incoming_Torpedo_Type   <alsp_mapping.rat>
+#$%
+#$% Tables:    UNT      TRP
+#$%
+#$% Date:      June 29, 2006
+#$%
+#$% Author:    James O. Allen
+#$%
+#########################################################################
+BBCommon
+
+integer  UNT$Pointer, alsp_class, unit_type_enum, unit_type_status
+integer  TRP$Pointer, UNT$TRPPntr$I, UNT$Type$I, UNT$SubType$I  # SMM 3/00
+
+  unit_type_status = $Yes
+
+  call Map_Incoming_Torpedo_Type (alsp_class, unit_type_enum, TRP$Pointer, unit_type_status)
+
+  #$% If unit_type_status = $yes, then we have found a match in the 
+  #$% vessel_unit_type array and it matches something in the database, so now set the pointers.
+  if (unit_type_status == $yes)
+    {
+     UNT$TRPpntr$I = TRP$Pointer
+     putUNT$TRPpntr$I
+
+    UNT$Type$I = $Sub$Code
+    UNT$SubType$I = $Torpedo$SubCode
+
+     putUNT$Type$I
+     putUNT$SubType$I
+
+     putUNT$RulesOfEngage$I  ($IfAttacked$Code)
+    }
+
+return
+end
+
+
+subroutine alsp_handle_countermeasure_type (_
+        UNT$Pointer,        # in - UNT slot pointer
+        alsp_class,         # in - ALSP class enumeration
+        unit_type_enum,     # in - the enumeration of the type being created
+        unit_type_status)   # out - successful match flag
+#########################################################################
+#$%
+#$% Purpose:   Maps the enumeration type to a RESA torpedo
+#$%            type.
+#$%
+#$% Called by: alsp_receive_create 
+#$%
+#$% Calls:     Map_Incoming_CTM_Type   <alsp_mapping.rat>
+#$%
+#$% Tables:    UNT      CTM
+#$%
+#$% Date:      June 29, 2006
+#$%
+#$% Author:    James O. Allen
+#$%
+#########################################################################
+BBCommon
+
+integer  UNT$Pointer, alsp_class, unit_type_enum, unit_type_status
+integer  CTM$Pointer, UNT$CTMPntr$I, UNT$Type$I, UNT$SubType$I  # SMM 3/00
+
+  unit_type_status = $Yes
+
+  call Map_Incoming_CTM_Type (alsp_class, 
+                              unit_type_enum,
+                              CTM$Pointer,
+                              unit_type_status)
+
+  #$% If unit_type_status = $yes, then we have found a match in the 
+  #$% vessel_unit_type array and it matches something in the database, so now set the pointers.
+  if (unit_type_status == $yes)
+    {
+     UNT$CTMpntr$I = CTM$Pointer
+     putUNT$CTMpntr$I
+
+    UNT$Type$I = $Sub$Code
+    UNT$SubType$I = $CtrMeasure$SubCode
+
+     putUNT$Type$I
+     putUNT$SubType$I
+
+     putUNT$RulesOfEngage$I  ($IfAttacked$Code)
+    }
+
+return
+end
+
+
+subroutine ALSP_Handle_Missile_Type (_
+        UNT$Pointer,        # in - UNT slot pointer
+        alsp_class,         # in - ALSP class enumeration
+        unit_type_enum,     # in - the enumeration of the type being created
+        unit_type_status)   # out - successful match flag
+#########################################################################
+#$%
+#$% Purpose:   Maps the enumeration type to a RESA cruise/ballistic 
+#$%            missile type.
+#$%
+#$% Called by: alsp_receive_create 
+#$%
+#$% Calls:     Map_Incoming_Missile_Type <alsp_mapping.rat>
+#$%
+#$% Tables:    UNT      CMC
+#$%
+#$% Date:      Dec. 1993
+#$%
+#$% Author:    Carol L. Kropp
+#$%
+#########################################################################
+BBCommon
+
+integer  UNT$Pointer, alsp_class, unit_type_enum, unit_type_status 
+integer  CMC$Pointer, UNT$CMCPntr$I, UNT$Type$I, UNT$Status$I, UNT$AttackTrue$I # SMM 3/00
+real     UNT$TimeSeek$F	 # SMM 3/00
+
+  unit_type_status = $Yes
+
+  call map_incoming_missile_type (alsp_class, unit_type_enum, CMC$Pointer, unit_type_status)
+
+  #$% If unit_type_status = $yes, then we have found a match, so now set the pointers.
+  if (unit_type_status == $yes)
+    {
+     UNT$CMCpntr$I = CMC$Pointer
+     putUNT$CMCpntr$I
+
+     UNT$Type$I = $CruiseMissile$Code
+     putUNT$Type$I
+
+     UNT$Status$I = $Proceeding$Code
+     putUNT$Status$I
+
+     UNT$AttackTrue$I = $yes
+     putUNT$AttackTrue$I
+
+     Unt$TimeSeek$F = Game$Time
+     putUNT$TimeSeek$F
+    }
+
+return
+end
+
+
+subroutine ALSP_Handle_CM_Emitter (UNT$Pointer)
+#########################################################################
+#$%
+#$% Purpose:    ALSP_Handle_CM_Emitter sets up the radar seeker info for
+#$%             cruise missile units, since the seeker has no DEQ entry.
+#$%
+#$% Called By:  ALSP_Receive_Create
+#$%             ALSP_Receive_Update
+#$%
+#$% Calls:      None
+#$%
+#$% Tables:     UNT
+#$%
+#$% Date:       Dec. 7, 1993
+#$%
+#$% Author:     Carol L. Kropp
+#$%
+#########################################################################
+BBCommon
+SensorCommon         # <alsp.inc>
+
+integer  UNT$Pointer
+real     UNT$TimeSeek$F  # SMM 3/00
+
+  if (sensor_list_sensor_state[1] == $yes)  # if on set seeker time
+     UNT$TimeSeek$F = Game$Minute - 1
+  else
+     UNT$TimeSeek$F = Game$Minute + 240  # set to four hours in the future, should
+                                         # receive an update msg when it is turned on. 
+  putUNT$TimeSeek$F
+
+return
+end
+
+
+subroutine Determine_If_Shared_Base (_
+                    ALSP_id,       # in:  ALSP ID of base to be created
+                    str_len,       # in:  string length of ALSP NAME
+                    name,          # in:  ALSP NAME of base
+                    continue_flag) # out: $no if create rejected or it
+                                   #      is a shared/$yes otherwise
+#########################################################################
+#$%
+#$% Purpose:    When a create message is received for a Base, need to
+#$%             check to see if the name matches a RESA "shared/not owned"
+#$%             base.  If there is a match, then assign the ALSP id to it.
+#$%             If the name matches, but the base is "owned", then reject
+#$%             the create message. Otherwise, the create message needs
+#$%             to be handled normally.
+#$%
+#$% Called By:  ALSP_Receive_Create
+#$%
+#$% Calls:      None
+#$%
+#$% Tables:     UNT     SHC
+#$%
+#$% Date:       Aug. 1995
+#$%
+#$% Author:     Carol L. Kropp
+#$%
+#$% Modified:   Carol Kropp - 1/97 (E1705)
+#$%             If the name of the base is less than 5 characters,
+#$%             pad it with blanks (so comparisons will work).  Added
+#$%             the name length to the argument list.
+#$%
+#########################################################################
+BBCommon
+
+include "alsp_io_rat.inc"               # mbx_io common block
+
+integer  ALSP_id,  str_len
+vaxcharacter*max_str_len  name
+integer  continue_flag
+
+literal  base_name
+integer  UNT$Pointer, UNT$ALSPId$I
+integer  SHC$Pointer
+integer  unit_actor_number
+
+integer  kk
+literal  CSTRIP8  # SMM 3/00
+
+  continue_flag = $yes
+
+  base_name = $BLANKLIT
+  kk = 0
+  call smovvn (name[1:$$maxName], base_name, kk)
+
+  for (UNT$Pointer$First; UNT$Pointer$Ok; UNT$Pointer$Next)
+    {
+     if (base_name == xUNT$Name$C)    # if it's a name match
+       {                              # check for shared
+        SHC$Pointer = xUNT$SHCPntr$I
+        if (xSHC$ALSPSharedBase$I == $yes)   # if base is shared,
+          {                                  # check ownership
+           if (xSHC$ALSPOwnedBase$I == $no)
+             {
+              UNT$ALSPId$I = xUNT$ALSPId$I
+              if (UNT$ALSPId$I != 0)        # if the unit is registered
+                {
+                 unit_actor_number = INT (UNT$ALSPid$I * 0.00001)  # see ALSP_Generate_ID <alsp_send_updates.rat>
+                 if (unit_actor_number == actor)     # Does RESA own it in the Confed
+                    call ALSP_Send_Del ($event_message, UNT$AlspID$I)
+                 else
+                   {
+                    call alsp_error_on_create (ALSP_id, $shared_base_registered, base_name)
+                    continue_flag = $no
+                   }
+                }    # end of if base is already registered
+
+              if (continue_flag == $yes)
+                {
+                 UNT$ALSPid$I = ALSP_id
+                 putUNT$ALSPid$I
+                 continue_flag = $no
+                }
+             }    # end of if a proper match is found
+           else   # RESA's DB indicates that RESA is the owner
+             {
+              call alsp_error_on_create (ALSP_id, $shared_base_is_owned, base_name)
+              continue_flag = $no
+             }
+          }    # end of if base is marked as shared
+        else     # a name match, but base is not identified as shared
+          {
+           call alsp_error_on_create (ALSP_id, $base_not_shared, base_name)
+           continue_flag = $no
+          }    # end if/else base is shared
+       }    # end if a name match
+
+     if (continue_flag == $no)
+       break
+    }    # end of loop through the UNT table
+
+
+return
+end
+
+
+subroutine Create_ALSP_Ground_Unit_Entry (_
+                    ALSP_Id,          # in: ID number
+                    ALSP_Class,       # in: CLASS enumeration code
+                    ALSP_Unit_Type,   # in: UNIT_TYPE enumeration code
+                    ALSP_Side,        # in: SIDE enumeration code
+                    ALSP_Size,        # in: SIZE enumeration code
+                    ALSP_Speed,       # in: Integer speed
+                    ALSP_Heading,     # in: Integer degree heading
+                    ALSP_Lat,         # in: Floating point d.ms
+                    ALSP_Long,        # in: Floating pointer d.ms
+                    ALSP_Name)        # in: String name
+#########################################################################
+#$%
+#$% Purpose:    To process ALSP CREATE messages for GROUND.MANEUVER...
+#$%             units.  The information for these units is not part of
+#$%             the UNT table, since RESA is doing display only ghosting
+#$%             of the ground units.  The data is stored in the ALSP
+#$%             Ground Data (ADG) table.  Assumption:  The ACM will not
+#$%             send a create where there is a duplicate ID.
+#$%
+#$% Called By:  ALSP_Receive_Create
+#$%
+#$% Calls:      ALSP_Error_On_Create
+#$%             ALSP_Ground_Type_Translation
+#$%             Determine_Ground_Unit_MC
+#$%             Determine_Ground_Unit_RAD
+#$%             real
+#$%             read
+#$%
+#$% Tables:     AGD     MC     RAD
+#$%
+#$% Date:       Sept. 1995
+#$%
+#$% Author:     Carol L. Kropp
+#$%
+#########################################################################
+BBCommon
+
+literal  unit_name
+integer  ALSP_Id, ALSP_Class, ALSP_Unit_Type, ALSP_Side
+integer  ALSP_Size,  ALSP_Speed, ALSP_Heading
+real     ALSP_Lat, ALSP_Long
+vaxcharacter*max_str_len  ALSP_Name
+
+integer  AGD$Pointer
+integer  unit_type_translation
+integer  MC$Pointer
+integer  category, success
+integer  RAD$Pointer
+literal  AGD$Name$C						    # SMM 3/00
+integer  AGD$Alspid$I, AGD$Alspclass$I, AGD$Mcpntr$I, AGD$Radpntr$I # SMM 3/00
+integer  I_SWITCH_1, AGD$Side$I, AGD$Alspsize$I                     # SMM 3/00
+integer  find_agd_slot, indx
+real     AGD$Truespeed$F, AGD$Truecourse$F, AGD$Truelatitude$F, AGD$Truelongitude$F  # SMM 3/00 
+
+data unit_name/0/
+
+indx = find_agd_slot (alsp_id,$YES)
+if (indx == 0)              # Table full
+{
+    call ALSP_Error_On_Create (ALSP_Id, $no_available_agd_slots, unit_name)
+}
+else
+    {
+     agd$pointer$to indx
+     AGD$ALSPId$I = ALSP_Id
+     putAGD$ALSPId$I
+
+     AGD$ALSPClass$I = ALSP_Class
+     putAGD$ALSPClass$I
+
+     call ALSP_Ground_Type_Translation (ALSP_Class, ALSP_Unit_Type,
+                                        unit_type_translation)
+     if (ALSP_Class == $alsp_class_ground_maneuver_himad |
+         ALSP_Class == $alsp_class_ground_maneuver_allrad)
+       {
+        call ALSP_Map_Incoming_Weapon (ALSP_id, ALSP_id,
+                                       unit_type_translation,
+                                       $ground_to_air,
+                                       MC$Pointer,
+                                       category, success)
+        if (success == $no)
+          MC$Pointer$First
+        AGD$MCPntr$I = MC$Pointer
+        putAGD$MCPntr$I
+       }
+     else  # (ALSP_Class == $alsp_class_ground_maneuver_radar)
+       {
+        call Determine_Ground_Unit_RAD (unit_type_translation, RAD$Pointer)
+        AGD$RADPntr$I = RAD$Pointer
+        putAGD$RADPntr$I
+       }
+
+     switch (ALSP_Side)
+       {
+        case $blue:      AGD$Side$I = $Blue$Code
+        case $red:       AGD$Side$I = $Orange$Code
+        case $neutral:   AGD$Side$I = $Neutral$Code
+       }
+     putAGD$Side$I
+        
+     if (ALSP_Class == $alsp_class_ground_maneuver_support_convoy)
+         AGD$ALSPSize$I = $size_company             # Size not in FOM
+     else
+         AGD$ALSPSize$I = ALSP_Size
+     putAGD$ALSPSize$I
+
+     AGD$TrueSpeed$F = REAL (ALSP_Speed / $knots_to_km)
+     putAGD$TrueSpeed$F
+
+     AGD$TrueCourse$F = (ALSP_Heading * $PI) / 180.0
+     putAGD$TrueCourse$F
+
+     AGD$TrueLatitude$F = (ALSP_Lat * $PI) / 180.0
+     putAGD$TrueLatitude$F
+
+     AGD$TrueLongitude$F = (ALSP_Long * $PI) / 180.0
+     putAGD$TrueLongitude$F
+
+     call move_str_lit (ALSP_Name, AGD$Name$C)
+     putAGD$Name$C
+    }
+
+return
+end
+
+
+subroutine Determine_Ground_Unit_RAD (_
+                    ALSP_enum_code,   # in:  Enumeration code value
+                    RAD$Pointer)      # out: RAD table pointer of radar
+#########################################################################
+#$%
+#$% Purpose:    To determine the RESA Radar Characteristic pointer
+#$%             for the RADAR unit.
+#$%
+#$% Called By:  Create_ALSP_Ground_Unit_Entry
+#$%
+#$% Calls:      none
+#$%
+#$% Tables:     RAD
+#$%
+#$% Date:       Sept. 1995
+#$%
+#$% Author:     Carol L. Kropp
+#$%
+#########################################################################
+BBCommon
+
+ALSP$Emitter_Common     # <alsp.inc>        # E2151  DEW 9/99
+
+integer  ALSP_enum_code, RAD$Pointer, litcmp
+
+integer  index
+literal  emitter_name
+integer  radar_pointer
+literal  CSTRIP8   # SMM 3/00
+
+  radar_pointer = 0
+  for (index = 1; index <= number_of_emitter_maps; index = index + 1)
+    {
+     if (alsp_emitter_list [3, index] == $Radar$Code)
+       {
+        if (alsp_emitter_list [1, index] == ALSP_enum_code)
+          {
+           emitter_name = alsp_emitter_list [2, index]
+           for (RAD$Pointer$First; RAD$Pointer$OK; RAD$Pointer$Next)
+             {
+              if (litcmp(xRAD$Type$C, emitter_name) == 0)
+                {
+                 radar_pointer = RAD$Pointer
+                 break
+                }   # end of if name of radar matches
+             }   # end of loop through the radar table
+           if (radar_pointer != 0)
+             break
+          }   # end of if enumeration code matches
+       }   # end of if entry is a radar mapping
+    }   # end of loop through the emitter mapping table
+
+  RAD$Pointer = radar_pointer
+
+return
+end
+
+
+subroutine ALSP_Add_Passive_Eq (UNT$Pointer)        # E2184
+#########################################################################
+#$%
+#$% Purpose:    ALSP_Add_Passive_Eq expands the DEQ equipment chain for
+#$%             the ghosted unit, with Passive devices. (E2184)
+#$%             Note... IFF interrogators are not PASSIVE, but we load 
+#$%             them also.
+#$%
+#$% Called By:  ALSP_Receive_Create
+#$%
+#$% Calls:      Get_DEQ_Entry   <lbcommn.rat>
+#$%
+#$% Tables:     UNT     DEQ
+#$%
+#$% Date:       February 17, 2000
+#$%
+#$% Author:     Dane Wills
+#$%
+#########################################################################
+BBCommon
+
+integer  UNT$Pointer
+integer  DEQ$Pointer 
+integer  DEQ$On$I 
+integer  ACC$Pointer, ACC$EQ$Index, ACC$EQ$ident$I, ACC$EQ$pntr$I # SMM 3/00
+integer  IFF$Pointer, DEQ$EM$Index                                # SMM 3/00
+
+#------------------------------
+# If this is a SHARED aircraft....
+
+if (xUNT$ALSPShared$I != $yes) return
+
+if (xUNT$Type$I == $Air$Code) 
+    {
+    ACC$pointer = xUNT$ACCpntr$I 
+
+    #------------------------------
+    # For each ACC EQ
+
+    for (ACC$Eq$Index=1; ACC$Eq$Index$OK; ACC$Eq$Index=ACC$Eq$Index+1)
+        {
+        #------------------------------
+        # Find a passive sensor (ESM) or IFF Interrogator
+
+        ACC$EQ$Ident$I = xACC$Eq$Ident$I
+        ACC$EQ$Pntr$I  = xACC$Eq$Pntr$I
+
+        if (ACC$EQ$Ident$I == $ESM$Code) 
+            {
+            continue                                    # Keep ESM
+            }
+        else if (ACC$EQ$Ident$I == $IFF$Code)
+            {
+            IFF$Pointer = ACC$EQ$Pntr$i
+            if (xIFF$Function$i != $INTERROGATOR$Code)   # Keep IFF INTERROGATORs
+                next
+            }
+        else
+            {
+            next
+            }
+
+        #------------------------------
+        # Does it have one already? (No dups)
+
+        For_DEQ_Chain 
+            {
+            if (xDEQ$Ident$i != ACC$EQ$Ident$I) next
+            if (xDEQ$Pntr$I  != ACC$Eq$Pntr$I) next
+
+            next 2              # skip this ACC$EQ entry
+            }
+
+        #------------------------------
+        # Add it to the DEQ list
+
+        call Get_DEQ_Entry (UNT$Pointer, DEQ$Pointer)
+
+        #$% if no DEQ slots, stop trying. Get out (no warning)
+        IF ( DEQ$Pointer == 0 ) break
+
+        #$% save equipment stuff
+        putDEQ$Ident$I (ACC$EQ$Ident$I) 
+        putDEQ$Pntr$I  (ACC$Eq$Pntr$I) 
+
+        if (ACC$EQ$Ident$I == $ESM$Code)
+            {
+            DEQ$On$I = $default$ESM$setting     # see table 7.2 of BBCODE.DEF
+            putDEQ$On$I
+
+            DEQ$Em$Index = 1
+            putDEQ$Em$Band$I (DEQ$On$I)
+            }
+        else if (ACC$EQ$Ident$i == $IFF$Code)
+            {
+            IFF$Pointer = xDEQ$Pntr$i
+            putDEQ$On$i ($YES)                  # initialize ON
+            }
+
+        } # End for each ACC$EQ
+
+    } # end if UNT Type is Aircraft 
+
+return
+end
+
+
+subroutine ALSP_Add_OTG_Info (UNT$Pointer)
+#########################################################################
+#$%
+#$% Purpose:    ALSP_Add_OTG_Info invokes enter otg order processing
+#$%             Unique NOSICID is generated, REPORT = NAVNRU, FLAG = KS,
+#$%             NAMED = 8 char unit name.
+#$%
+#$% Called By:  ALSP_Receive_Create
+#$%
+#$% Calls:
+#$%
+#$% Tables:     UNT
+#$%
+#$% Date:       June 2008
+#$%
+#$% Author:     James O. Allen
+#$%
+#########################################################################
+BBCommon
+
+BBDeclare (UNT$Pointer)
+literal cstrip8
+
+integer get_nosicId
+integer iside
+integer kk, jj
+
+
+BBDeclare (unt$nosicid$i, unt$flag$v, unt$OtgCode$i, unt$alspid$i,
+           unt$type$i, acc$pointer, shc$pointer, unt$name$c,
+           unt$FullName$v)
+
+character untnamec[8]
+equivalence (unt$name$c, untnamec)
+
+unt$Alspid$i = Xunt$Alspid$i
+if ((unt$alspid$i / 100000) == 32)      # Chung Hae federate
+{
+    unt$nosicid$i = get_nosicId()
+    PUTunt$nosicid$i
+
+    call whside (Xunt$view$i, iside)
+    if (iside == $blue$code | iside == $neutral$code)
+        unt$Flag$V = "KS"
+    else
+        unt$Flag$V = "KN"
+        
+    PUTunt$Flag$V
+
+    UNT$OtgCode$I = $NAVNRU$otg_code
+    if (iside == $blue$code)
+    {
+        unt$type$i = Xunt$type$i
+        if (unt$type$i == $air$code)
+        {
+            acc$pointer = Xunt$accpntr$i
+            if (Xacc$AlspShared$i == $yes)
+                UNT$OtgCode$I = $OTH$otg_code
+        }
+        else if (unt$type$i == $surface$code | unt$type$i == $sub$code)
+        {
+            if (Xunt$Status$i != $InPort$Code)
+            {
+                shc$pointer = Xunt$shcpntr$i
+                if (Xshc$AlspShared$i == $yes)
+                    UNT$OtgCode$I = $OTH$otg_code
+            }
+        }
+    }            
+    putUNT$OtgCode$I
+
+    # Full name same as unit name
+    unt$name$c = Xunt$name$c
+    unt$FullName$V  = " "
+    kk = 0
+    jj = 1
+    call vmovh (untnamec[jj], $$Maxlit - (jj - 1), unt$FullName$V, kk)
+    PUTunt$FullName$V            
+}
+
+return
+end
+
+vaxcharacter*max_str_len function remove_Special_chars(v_string)
+
+vaxcharacter*max_str_len v_string
+vaxcharacter*max_str_len v_name
+integer i,k
+
+v_name = ""
+
+k = 0
+for (i=1; i<=max_str_len; i=i+1)
+{
+    if (v_string[i:i] == " ") break
+
+    if (v_string[i:i] == "." |
+        v_string[i:i] == "_" |
+        v_string[i:i] == "!" |
+        v_string[i:i] == "@" |
+        v_string[i:i] == "#" |
+        v_string[i:i] == "$" |
+        v_string[i:i] == "%" |
+        v_string[i:i] == "^" |
+        v_string[i:i] == "&" |
+        v_string[i:i] == "*" |
+        v_string[i:i] == "+" |
+        v_string[i:i] == "<" |
+        v_string[i:i] == ">" |
+        v_string[i:i] == ":" |
+        v_string[i:i] == ";" |
+        v_string[i:i] == "?" |
+        v_string[i:i] == "-")
+        next
+    k = k + 1
+    v_name[k:k] = v_string[i:i]
+}
+
+return (v_name)
+
+end

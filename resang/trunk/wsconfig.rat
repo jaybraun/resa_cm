@@ -1,0 +1,566 @@
+#-------------------------------------------------------------------
+#               File WSCONFIG.rat               J. Bryant
+ 
+# Modification:  Carol Kropp - 4/94
+# Archiving the MegaTek, RamTek and CPM graphics.
+ 
+##  This is the 7/82 version of a subroutine to be called
+#  by STATION's wsSETUP subroutine, to read the Station Configur-
+#  ation File, and store tty names/characteristics/type-codes/
+#  addresses/indices in the BlackBoard (SBI and STA tables).
+#
+#  The program's intent is to:
+#       1.  Open the Work-Station master Configuration File (the
+#         name accepted from the terminal and received as the second of
+#         two arguments).
+#       2.  Read three-quadword lines from the file either until EOF
+#         OR until 14 lines have been "ACCEPTED".  Each line is
+#         a Keyword plus ttyNAME plus ttyTYPE.  Where TOUCH(15) refers
+#         to TOUCH or TOUCH15 (exact equivalents), valid keywords are:
+#
+#          SCREEN                                            ( Up to 6)
+#          GEODISP,VOICEOUT,MESSAGE,MENUOUT   ( Up to 1 of each: max 4)
+#          KEYPAD, KEYBOARD, TOUCH(15)        ( Up to 1 of each: max 3)
+#          TABLET, JOYSTICK, TOUCH19          (Total of no more than 1)
+#                                                                  ----
+#                                        (OVERALL TOTAL:   Up to    14)
+#
+#   NOTE:     THIS IMPLIES THAT THERE COULD BE FOUR INPUT DEVICES AT
+#             A SINGLE STATION:  Keypad, Keyboard, Touch(15), and ONE
+#             display-associated device (Tablet, Joystick or Touch19)
+#
+#               NOTE:  IF input is to be from TABLET, JOYSTICK, or
+#               TOUCH19, the pertinent line should appear as the first
+#               in the Configuration File.  This is not an absolute re-
+#               quirement, but will make it apparent at a glance that
+#               the file is made for input from TABLET etc..  Also,
+#               since ONLY THE FIRST line starting w/ TABLET, JOYSTICK
+#               or TOUCH19  is accepted by the program, this practice
+#               will make it easy to leave lines for these three input
+#               types in the file and then govern the input configura-
+#               tion simply by moving the wanted line to the top of the
+#               file.  Subsequent lines in this category are treated
+#               as invalid (ignored by the program).
+#
+#                       No more than 14 VALID lines will be read by the
+#               program.  Repeat: ANY LINES AFTER THE 14TH VALID ONE
+#               ARE IGNORED.  But any number of INvalid lines, includ-
+#               ing all with NONE as the second word, may be present.
+#
+#                       CAUTION:  In the Configuration File, there must
+#               be AT LEAST ONE BLANK SPACE between words on the same
+#               line, to furnish delimiters for the GETLIN function.
+#
+#       3.  For SCREEN lines, the program will:
+#            . Insert default values to the SBI table for $Req$Side$I,
+#               $Req$Player$I, $Req$Board$I and $Update$Request$I.
+#            . Using information from the input line, insert
+#               SBI$ASTABaddr$C, and the code for SBI$ASTABtype$I, into
+#               the SBI table.  Also, insert values corresponding with
+#               this TYPE into the table for SBI$MaxLines$I and
+#               SBI$MaxCols$I (as of 6/82, these are just specified as
+#               24 and 80, respectively).
+#             . Count the number of screen lines, and on completion
+#               insert the total into STA$NbrASTABs$I (max. of 6)
+#
+#       4.  For a display input device (from the FIRST valid input line
+#           for TABLET, JOYSTICK, or TOUCH19, the address defaults.
+#
+#       5.  For a KEYPAD or KEYBOARD, or TOUCH(15), enter address into
+#           STA$KeyPadAddr$C, STA$KeyBoardAddr$C, or STA$TouchAddr$C.
+#       6.  For output devices, enter the address into the proper one
+#           of the following:  STA$VoiceOutAddr$C, STA$MenuOutAddr$C,
+#           STA$GeoDisp$C, STA$MessageAddr$C.  For VOICEOUT, also
+#           insert the code (from Table 6.25) for ECHO or VOTRAX into
+#           STA$VoiceOutType$I.
+#       7.  Considering that space is reserved in the SBI table for the
+#           6 potential ASTAB entries for each of the maximum 10 Views,
+#           compute the index of the FIRST potential entry for the
+#           View and insert the index into STA$SBIindex$I.
+#       8.  The program saves the ACCEPTED input lines in a 42-quadword
+#           array and types the array (up to 14 lines @ 3 quadwords) on
+#           the terminal.  Also, the input line for the "accepted"
+#           display-associated input device (if any) is displayed on
+#           the screen (e.g., the input TABLET line, if encountered
+#           first).
+
+ 
+define(ConfigCommon,
+      literal    cin[3]
+      integer    lfc
+      Common /cnfgcom/cin,lfc
+      )
+ 
+include "bbctl.inc"
+include "bbcode.inc"
+include "ascii.inc"
+include "bbsbi.inc"
+include "bbsta.inc"
+define (BBimplicit, Implicit None)      # MJC 4/20/2000
+
+                                                        #       8/3/82
+SUBROUTINE config (STA$Pointer,CFILE)
+                                     #arguments: STA$pointer, File name
+#######################################################################
+#$%
+#$% Purpose:   CONFIG initializes appropriate values, reads the Station
+#$%            Configuration File, and stores tty names/characteristics/
+#$%            type-codes/addresses/indices in the BlackBoard (SBI and
+#$%            STA tables)
+#$%
+#$% Called by:  PL_SETUP
+#$%
+#$% Calls:      GET_LN    ws_def_station    ECHOR   ECHOH   SMOVh
+#$%
+#$% Author:     J. BRYANT
+#$%
+#$% Date:       JULY 1982
+#$%
+#######################################################################
+ 
+bbcommon
+ConfigCommon
+define (Nckw,5)				# Number of congiguration keywords
+BBDeclare  (sta$pointer,
+            sta$megmenudisable$I,
+            sbi$pointer)            # MJC 4/20/2000
+integer n, iass, ipct,
+        ifctr, ieof, ihit,
+        i, m, k, kk, i_switch_1,
+        jj, ipos, imeg              # MJC 4/20/2000
+character CFILE[ARB],   # complete name of Work-Sta. Config.File
+          buf[8]
+Literal cbnk,           # for blanks to initialize literal fields
+        blnk            # ( for the word "BLANK"
+LitCharEquiv(cKEY,Nckw)   # holds valid key-words (see DATA cKEY)
+integer iSBI,           # first SBI index for this View
+        iCNT[Nckw]        # counter for EACH of the KEYwords
+integer open_,           # integer funct to open file (s/ware tool)
+        ctoi
+data cKEYC/"SCREEN  ",    # 1   (iHIT Case 1: Up to 6 SCREENS allowed)
+           "GEODISP ",    #   2     (Up
+           "MESSAGE ",    #   3           of EACH
+           "KEYPAD  ",    #   4             of cases
+           "KEYBOARD"/    #   5               2 thru 7)
+ 
+iSBI = 1 + 6 *(STA$Pointer$Index -1)    # Station's POTENTIAL 1st SBI indx
+PUTSTA$SBIindex$I(iSBI)                 # Store 1st SBI index for STA (8/82)
+ 
+call ws_def_station (STA$Pointer)       # set default configuration
+ 
+kk = 0; call smovv ("        ", cbnk, kk) # blanking literal to 8 blanks
+blnk= 'BLANK'                          # flag for indicating NO ENTRY
+ 
+for (n = 1; n <= Nckw; n =n +1)             # 6/18/82
+    iCNT(n) = 0                         # Start counter array as zeroes
+ 
+# ---------------------------------------------------------------------
+# OPEN the WORK_STAtion master Configuration File:
+ 
+lfc = open_(CFILE,READ)                           #open file
+ 
+#$% if error in opening file
+if (lfc == ERR)
+    {
+     #$% display error message for user
+     call remark_v ('Cannot open input configuration file.')
+     return
+    }
+ 
+# ---------------------------------------------------------------------
+ 
+iass = 0                # counter for input device          [ 1  max.]
+                        #  (TABLET/JOYSTICK/TOUCH19             6/18/82
+ 
+ipct = 0                # counter for PERTINENT lines       [13  max.]
+ifctr =0                # counter for lines read - pertinent or not
+ 
+# --------------------------------------------------------------------
+ 
+WHILE (ipct < 15)       # pertinent-line-cntr (up to 14 max.) #6/18/82
+  {
+    call get_ln(ieof)                 #get line from the Config. file
+    if(ieof == $yes)  break           # ( until EOF )
+ 
+    ifctr = ifctr + 1                 # count total lines read
+ 
+    if (cin[2] == 'NONE')       NEXT  # skip nullified lines
+ 
+# @@@@@@@@@@@@@@@@@@@ START 6/18/82 modified ground-rules @@@@@@@@@@@@@
+ 
+    iHIT = 0                            # initialize the KEYword's indx
+ 
+    for (i = 1; i <= Nckw; i = i +1)       # for each of 5 KEYwords
+      {
+ 
+       if (cin[1] == cKEY[i])           # If KEYword is the ith one:
+         {
+           iHIT = i                     # save the KEYword's index
+           BREAK                        # FOUND:  Break from FOR loop
+         }
+      }
+ 
+ 
+# (At this point, IHIT has a value from 0 to 12, inclusive)
+# ---------------------------------------------------------------------
+    IF (iHIT == 1)                      # (if (cin[1] == 'SCREEN':
+      {
+       if (iCNT[1] > 5) NEXT            # 6 screens is the limit..
+       iCNT[1] = iCNT[1] +1             # count the Screens
+       ipct = ipct + 1                  # count # of pertinent lines
+ 
+       m = isbi + iCNT[1] - 1           # FIRST index + screen#, less 1
+       sbi$pointer$to m
+#       putSBI$ASTABaddr$C (cin[2])      # device addr into SBI table
+ 
+       putSBI$CurrFindLine$i (0)
+       putSBI$CurrFindCol$i (0)
+ 
+       putSBI$PrintRemote$i (NO)        # Use local print by default (DEW)
+ 
+       k = xSTA$view$I                 # View # for Sides/Views: 8/3/82
+ 
+       if ( k == 1)                     # View is 'NEUTRAL'    10/14/82
+         {
+          putSBI$ReqSide$I(Xsbi$CurrSide$I) #E2356 ufl03 display last chosen
+          putSBI$ReqPlayer$I (1)        # (only 1 neutral View)
+ 
+          putSBI$PrintRemote$i (YES)    # Use REMOTE for Control & Orange
+          putSBI$PrintSelect$i ($Neutral$code)      # Printer for Control
+         }
+ 
+       ELSE if ( k >= $FIRSTBLUE$VIEW   &    k <= $LASTBLUE$VIEW )
+         {
+          putSBI$ReqSide$I($BLUE$code)
+          m = 1 + ( k - $FIRSTBLUE$VIEW)        # compute BLUE View #
+          putSBI$ReqPlayer$I (m)
+ 
+          putSBI$PrintRemote$i (NO)     # Use LOCAL for BLUE
+          putSBI$PrintSelect$i ($Blue$code)      # Printer for Blue
+         }
+ 
+       ELSE if ( k >= $FIRSTORANGE$VIEW   &   k <= $LASTORANGE$VIEW )
+         {
+          putSBI$ReqSide$I($ORANGE$code)
+          m = 1 + ( k - $FIRSTORANGE$VIEW)      # compute ORANGE View #
+          putSBI$ReqPlayer$I (m)
+ 
+          putSBI$PrintRemote$i (YES)    # Use REMOTE for Control & Orange
+          putSBI$PrintSelect$i ($Orange$code)      # Printer for Orange
+         }
+ 
+       #$% determine board to be displayed
+       # E2356 JOA ufl03 display last chosen astab on restart
+       SWITCH (iCNT[1])
+         {
+           case 1:
+            {
+             if (Xsbi$CurrBoard$i == 0)
+               putSBI$ReqBoard$I ($def$ASTAB1)
+             else
+               putSBI$ReqBoard$i (Xsbi$CurrBoard$i)
+            }
+           case 2:
+            {
+             if (Xsbi$CurrBoard$i == 0)
+               putSBI$ReqBoard$I ($def$ASTAB2)
+             else
+               putSBI$ReqBoard$i (Xsbi$CurrBoard$i)
+            }
+           case 3:
+            {
+             if (Xsbi$CurrBoard$i == 0)
+               putSBI$ReqBoard$I ($def$ASTAB3)
+             else
+               putSBI$ReqBoard$i (Xsbi$CurrBoard$i)
+            }
+           case 4:
+            {
+             if (Xsbi$CurrBoard$i == 0)
+               putSBI$ReqBoard$I ($def$ASTAB4)
+             else
+               putSBI$ReqBoard$i (Xsbi$CurrBoard$i)
+            }
+           case 5:
+            {
+             if (Xsbi$CurrBoard$i == 0)
+               putSBI$ReqBoard$I ($def$ASTAB5)
+             else
+               putSBI$ReqBoard$i (Xsbi$CurrBoard$i)
+            }
+           case 6:
+            {
+             if (Xsbi$CurrBoard$i == 0)
+               putSBI$ReqBoard$I ($def$ASTAB6)
+             else
+               putSBI$ReqBoard$i (Xsbi$CurrBoard$i)
+            }
+         }
+ 
+       #$% save as new game
+       putSBI$UpdateRequest$I ($New$Code)
+ 
+       #$% if display is on a VT100
+       if(cin[3]       == 'VT100')
+         {
+          #$% get applicable data
+          putSBI$ASTABType$I ($VT100$code)
+          putSBI$MaxLines$I  (24)
+          putSBI$MaxCols$I   (80)
+         }
+       #$% if display is on a Newer terminal VT300
+       else if (cin[3] == 'VT300')
+         {
+          #$% get applicable data
+          putSBI$ASTABType$I ($VT300$code)
+          putSBI$MaxLines$I  (40)
+          putSBI$MaxCols$I   (80)
+         }
+       #$% if display is on a MOTOROLA
+       else if (cin[3] == 'MOTOROLA')
+         {
+          #$% get applicable data
+          putSBI$ASTABType$I ($MOTOROLA$code)
+          putSBI$MaxLines$I  (24)
+          putSBI$MaxCols$I   (80)
+         }
+       #$% if display is on a RAMTEK
+       else if (cin[3] == 'RAMTEK')
+         {
+          #$% get applicable data
+          putSBI$ASTABType$I ($RAMTEK$code)
+          putSBI$MaxLines$I  (24)
+          putSBI$MaxCols$I   (80)
+         }
+       #$% if display is on a OMRON
+       else if (cin[3] == 'OMRON')
+         {
+          #$% get applicable data
+          putSBI$ASTABType$I ($OMRON$code)
+          putSBI$MaxLines$I  (24)
+          putSBI$MaxCols$I   (80)
+         }
+       else
+         {
+          print 170                      # WARNING about TYPE match
+          pause 'May enter STOP, DEBUG, or??? continue'
+          putSBI$ASTABtype$I($NONE$code)
+          putSBI$MaxLines$I  (24)
+          putSBI$MaxCols$I   (80)
+         }
+ 
+     }          # END 'if IHIT == 1'  ('if cin[1] == 'SCREEN' ')
+ 
+# --------------------------------------------------------------------
+ 
+    ELSE if ( iHIT > 1  &  iHIT <= 7) # if GEODISP,VOICEOUT,MESSAGE,
+                        # MENUOUT, KEYPAD, KEYBOARD
+      {
+       if (iCNT[iHIT] > 0)    NEXT      # only 1 of each:  Furthermore,
+ 
+       iCNT[iHIT] = iCNT[iHIT] +1       # count # of each valid Case
+       ipct = ipct + 1                  # count # of pertinent lines
+ 
+       SWITCH (iHIT)            # Put TTY addr. into STA Table 6/23/82
+         {
+          case 2:
+            {
+			 call litlower(cin[2])				# Default map
+             putSTA$GeoMap$C   (cin[2])
+ 
+             jj = 0
+             call smovh (cin[3], 6, buf, jj)
+ 
+             if      (buf[1] == 'X') PUTsta$GeoType$i ($geo$xWindow)
+             else if (buf[1] == 'M') PUTsta$GeoType$i ($geo$MapDrawModule)  # joa 7/96 (E1602)
+             else                    PUTsta$GeoType$i ($geo$xWindow)
+ 
+             for (ipos = 1; ipos < 8; ipos=ipos+1)
+                {
+                imeg = ctoi (cin[2],ipos)
+ 
+                if (ipos > 9) imeg = 0
+ 
+                if (imeg != 0) break
+                }
+ 
+             while (imeg > 2) imeg = imeg - 2
+ 
+             putSTA$MegUnit$i (imeg)
+            }
+ 
+          case 3: putSTA$MessageAddr$C  (cin[2])
+          case 4: putSTA$KeyPadAddr$C   (cin[2])
+          case 5: putSTA$KeyBoardAddr$C (cin[2])
+         }                                              # End of SWITCH
+ 
+      } # END if (cin[1] == GEODISP, VOICEOUT, MESSAGE, MENUOUT,
+                                #  KEYPAD, KEYBOARD;
+# ---------------------------------------------------------------------
+ 
+ 
+# ---------------------------------------------------------------------
+ 
+    ELSE        # IHIT still 0: THIS INPUT LINE DOESN'T MATCH a key-wrd
+      {
+       print 110, cin[1], cin[2], cin[3]
+      }
+ 
+  }                             # END iCNTof WHILE line-counter < 15
+                                # (Time to read next line, or wrap-up)
+# ---------------------------------------------------------------------
+ 
+#putSTA$NbrASTABs$I(iCNT[1])     # insert # of ASTABs into STA table
+ 
+return
+ 
+102 FORMAT (' Display input REJECTED:  ', 3(A8,3x))
+110 FORMAT (' CONFIG: NO MATCH ON:  ', 3(A8,3x))
+ 
+170 FORMAT (' CONFIG WARNING:  ASTAB type set to NONE ????')
+171 FORMAT (' CONFIG WARNING:  VOICEOUT type set to ECHO ????') #5/17/82
+end
+
+ 
+subroutine ws_def_station (STA$Pointer)
+ 
+########################################################################
+#$%
+#$% Purpose:    WS_DEF_STATION Initializes the Default configuration
+#$%             for the conditions of a missing/erroneous config file.
+#$%
+#$% Called by:  CONFIG
+#$%
+#$% Calls:      nothing
+#$%
+#$% Author:     D. Wills
+#$%
+#$% Date:       Feb 1983
+#$%
+##########################################################################
+ 
+bbcommon
+ConfigCommon
+ 
+integer isbi, i, k                              # MJC 4/20/2000
+BBDeclare  (sta$pointer,
+            sta$keyboardaddr$C,
+            sta$messageaddr$C,
+            sta$geodisp$C,
+            sta$keypadaddr$C,
+            sbi$pointer)                        # MJC 4/20/2000
+ 
+# ---------------------------------------------------------------------
+#   Initialize SBI and STA fields to blanks (literals) or 0 (integers):
+ 
+isbi = Xsta$SBIindex$i             # extract 1st SBI index for STA
+ 
+for (i = 0; i < 6; i = i+1)
+    {
+    k = isbi + i
+    sbi$pointer$TO (k)
+    PUTsbi$ASTABaddr$I(0)
+    PUTsbi$ASTABtype$i  (0)
+    }
+ 
+sta$KeyboardAddr$C      = 'TT:' ; PUTsta$KeyboardAddr$C
+sta$MessageAddr$C       = 'TT:' ; PUTsta$MessageAddr$C
+sta$GeoDisp$C           = 0     ; PUTsta$GeoDisp$C
+sta$KeyPadAddr$C        = 0     ; PUTsta$KeyPadAddr$C
+#sta$TouchAddr$C         = 0     ; PUTsta$TouchAddr$C
+#sta$VoiceOutAddr$C      = 0     ; PUTsta$VoiceOutAddr$C
+#sta$MenuOutAddr$C       = 0     ; PUTsta$MenuOutAddr$C
+ 
+putSTA$InputType$I          ($NONE$code)
+putSTA$VoiceOutType$I       ($NONE$code)
+putSTA$PlotInputCapable$I   ($YES) #assume we can use ^P
+ 
+#putSTA$NbrASTABs$I          (0)
+ 
+return
+end
+
+ 
+subroutine get_ln(ieof)
+ 
+########################################################################
+#$%
+#$% Purpose:    GET_LN gets a line of input from the text file
+#$%
+#$% Called by:  CONFIG
+#$%
+#$% Calls:      UPPER     SMOVHN
+#$%
+#$% Author:     J. BRYANT
+#$%
+#$% Date:       JULY 1982
+#$%
+##########################################################################
+ 
+ConfigCommon
+ 
+integer    getlin,stat          #integer function getlin
+character  line[80],temp[10]
+integer    getwrd               # MJC 4/20/2000
+integer    ieof, istrt, i       # MJC 4/20/2000
+integer    isize, jj, kk
+ 
+ieof   = $no
+istrt = 1                               #position in string
+ 
+#do i =1,80                              #set line to blanks
+#    {
+#     line[i] = $space
+#    }
+ 
+repeat                                  #get a valid line
+    {
+     stat = getlin(line,lfc)            #stat=# of chars or eof
+ 
+     if (stat == eof)                   #if end of file
+         {
+          ieof = $yes                   #set flag
+          break                         #and return
+         }
+ 
+     if (stat == 0)                     #if no char in line
+         next                           #get next line
+ 
+     call upper(line)                   #convert to upper case
+ 
+     for (istrt=1; istrt<=stat; istrt=istrt+1) #delete leading blanks
+         {
+          if (line[istrt] != $space)
+              break
+         }
+ 
+     if (istrt == stat)                 #if entire line is blank
+         next                           #get next line
+ 
+     else if (line[istrt] == $POUND)    #if line is a comment
+         next                           #get next line
+ 
+     else                               #otherwise valid line
+        {
+         isize = getwrd(line, istrt, temp)
+		 cin[1] = $BLANKLIT
+         jj = 0
+         call smovhn(temp,$$MaxLit,cin[1],jj) # SMM 8/99 E2141
+ 
+         isize = getwrd(line, istrt, temp)
+		 cin[2] = $BLANKLIT
+         jj = 0
+         call smovhn(temp,$$MaxLit,cin[2],jj) # SMM 8/99 E2141
+ 
+         isize = getwrd(line, istrt, temp)
+		 cin[3] = $BLANKLIT
+         jj = 0
+         call smovhn(temp,$$MaxLit,cin[3],jj) # SMM 8/99 E2141
+ 
+         break                          #so...return with it
+        }
+ 
+    }until (ieof == $yes)               #until end of file
+ 
+return
+end

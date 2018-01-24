@@ -1,0 +1,416 @@
+ 
+#####   version 3.1  dated-  7apr81
+ 
+ 
+#####   version 3.0  dated- 22dec80
+ 
+ 
+# 
+ 
+#$%      MODULE                       UTILITY                       DATA
+#$%    SUBROUTINES                  SUBROUTINES                    TABLES
+#$%    ===========                  ===========                    ======
+#$%
+#$%      WGLSOS                        ECHOH                        SOP
+#$%      SOSINT                        ECHOR                        UNT
+#$%      PRBMIN                                                     SHC
+#$%      GETSR  <WGLOAD>                                            DYN
+#$%                                                                 SOS
+#$%
+#$%
+#$%
+#$%    NOTES
+#$%    =====
+#$%
+#$%    1.  <FILENAME> INDICATES WHERE SUBROUTINE IS LOCATED.
+#$%
+#$%    2.  UTILITY SUBROUTINES NOT SHOWN ON FLOWCHART.
+#$%
+#$%    3.  * INDICATES NO OTHER SUBROUTINES CALLED.
+#$%
+#$%
+#$%
+#$%    FLOWCHART FOR WGLSOS
+#$%    ====================
+#$%
+#$%    START0 <WARGAM> - WGLOAD - WGLSOS - GETSR *
+#$%                                      - SOSINT*
+#$%                                      - PRBMIN*
+ 
+
+ 
+include "bbctl.inc"
+include "bbcode.inc"
+include "bbsop.inc"
+include "bbunt.inc"
+include "bbshc.inc"
+Include "ascii.inc"
+include "bbsos.inc"
+ 
+define(BBImplicit, Implicit NONE)           # MJC 5/1/2000 (E-2145)
+ 
+Subroutine WGLSOS(RecCnt,RecSz,Rec)
+ 
+########################################################
+#$%
+#$% Purpose:   WGLSOS initializes the SOP, SOR and
+#$%            SOS tables for the SOSUS detection
+#$%            routines.
+#$%
+#$% Called By: WGLOAD
+#$%
+#$% Calls:     ECHOH      ECHOR      GETSR
+#$%            SOSINT     PRBMIN
+#$%
+#$% Tables:    SOP        UNT        SHC
+#$%            DYN        SOS
+#$%
+#$% Date:      OCT 80
+#$%
+#$% Author:    Ron Williams, Dana Wills
+#$%
+########################################################
+ 
+BBcommon
+ 
+Integer RecCnt,RecSz
+Literal Rec[1500],iclass
+ 
+integer NSOP,LOOP,NSUB,I,
+        IDEPTH,IMODE,
+        UNT$Pointer, SHC$Pointer,
+        SOP$Pointer, SOP$Regionid$I,
+        SOP$VER$Index, SOP$Nbrvertices$I,
+        SOP$CLS$Index, SOP$CLS$SPD$Index,
+        SOP$Meanaxislength$I, SOP$Stddevlength$I,
+        SOP$Depththreshold$I, SOP$Bistaticcapable$I         # MJC 5/1/2000 (E-2145)
+real    SOP$Regionarea$F, SOP$Nodedensity$F,
+        SOP$Nodebistaticrange$F, SOP$VER$latitude$F,
+        SOP$VER$longitude$F, SOP$CLS$SPD$deepnew$F,
+        SOP$CLS$SPD$deepold$F, SOP$CLS$SPD$shallownew$F,
+        SOP$CLS$SPD$shallowold$F,
+        DMS2RAD,PRBMIN                                      # MJC 5/1/2000 (E-2145)
+literal CSTRIP8                                             # MJC 5/1/2000 (E-2145)
+ 
+#$% if file is empty (no record count)
+If (RecCnt <= 1)
+   {
+    #$% display warning message to user and return
+    Call ECHOv ("SOSUS data file empty.  ")
+    Call ECHOR
+    Return
+   }
+ 
+##  This code was moved to wild.rat (subroutine wgload) during the vax
+##  conversion.  The nbr$sosus$target$types must be determined before the
+##  required BB space for the SOP table can be allocated.  Thus this code
+##  now precedes the call to bbaloc in wgload.               8mar82
+##
+##nbr$sosus$target$types = 0
+##
+##for(unt$pointer$first;unt$pointer$ok;unt$pointer$next)
+##   {
+##    if (xunt$type$i != $sub$code)  next
+##
+##    if (xunt$view$i < $firstorange$view)  next
+##
+##    dyn$pointer = xunt$dynapntr$i
+##    shc$pointer = xdyn$shcpntr$i
+##
+##    if (xshc$SOPIndx$i != 0) next
+##
+##    nbr$sosus$target$types = nbr$sosus$target$types + 1
+##
+##    shc$SOPIndx$i = nbr$sosus$target$types
+##    PUTshc$SOPIndx$i
+##
+##    if (Xshc$NoiseIndx$i != Xshc$NoiseIndxElec$i)
+##       {
+##	nbr$sosus$target$types = nbr$sosus$target$types + 1
+##       }
+##
+##    shc$SOPIndxElec$i = nbr$sosus$target$types
+##    PUTshc$SOPIndxElec$i
+##   }
+ 
+#$% if there are no SOSUS targets
+If (nbr$sosus$target$types == 0)
+   {
+    #$% display warning message to user and return
+    call echor
+    call echov ("SOSUS data ignored, no orange subs.")
+    call echor
+    return
+   }
+ 
+#$% initialize number of SOSUS probabilities
+nsop = 0
+ 
+#$% for each SOSUS entry in the record
+For (Loop = 2; Loop <= RecCnt; )
+   {
+    #$% get scenerio record
+    call getsr(loop,recsz,rec)
+ 
+    #$% if array word is REG (first section of SOSUS data)
+    if (rec[2] == 'REG')
+       {
+        #$% increment number of SOSUS prabilities
+	nsop = nsop + 1
+        #$% initialize number of submarines
+	nsub = 0
+ 
+        #$% set probability pointer to number of probabilities
+	sop$pointer$to nsop
+ 
+        #$% get ID number of identifying region (1-20) & save
+	Sop$RegionId$I       = rec[3]
+	PUTSop$RegionId$I
+ 
+        #$% get mean axis length (miles) & save
+	Sop$MeanAxisLength$I = rec[4]
+	PUTSop$MeanAxisLength$I
+ 
+        #$% get standard deviation of axis lengths (miles) & save
+	Sop$StdDevLength$I   = rec[5]
+	PUTSop$StdDevLength$I
+ 
+        #$% get depth threshold for detection (feet) & save
+	Sop$DepthThreshold$I = rec[6]
+	PUTSop$DepthThreshold$I
+ 
+        #$% if the region area is zero then the region       clk 7/8/91
+        #$% was not made Bistatic in FORCE
+        if (rec[8] != 0)
+          {
+           SOP$BistaticCapable$I = $yes
+           putSOP$BistaticCapable$I
+ 
+           #$% get bistatic data and save
+           SOP$RegionArea$f = rec[8]
+           putSOP$RegionArea$f
+           SOP$NodeDensity$F = rec[9]
+           putSOP$NodeDensity$F
+           SOP$NodeBistaticRange$f = rec[10]
+           putSOP$NodeBistaticRange$f
+          }
+        else
+          {
+           SOP$BistaticCapable$I = $no
+           putSOP$BistaticCapable$I
+          }
+ 
+        #$% initialize value
+	i = 11
+        #$% for each vertex entry
+	for (Sop$Ver$Index = 1 ; Sop$Ver$Index <= Sop$Ver$Slots ;_
+	     Sop$Ver$Index = Sop$Ver$Index + 1)
+	   {
+            #$% if number of vertices exceeded, break
+	    if (rec[i] > 9000 | i >= rec[1]) break
+ 
+            #$% get vertex position and save
+	    Sop$Ver$Latitude$F = DMS2rad(Rec[i])
+	    PUTSop$Ver$Latitude$F
+	    Sop$Ver$Longitude$F = DMS2rad(Rec[i+1])
+	    PUTSop$Ver$Longitude$F
+ 
+            #$% increment index
+	    i = i + 2
+	   }
+ 
+        #$% decrement number of vertices and save
+	Sop$NbrVertices$I = Sop$Ver$Index - 1
+	PUTSop$NbrVertices$I
+       }
+    #$% else if array word is not SUB or there are no probabilities entered
+    #$% or region not found, get next entry
+    else if (rec[2] != 'SUB' | nsop == 0 | rec[3] != Sop$RegionId$i)
+       {
+	next                            # bum record
+       }
+    #$% else word array is SUB, etc
+    else # (rec[2] == 'SUB')
+       {
+        #$% increment total sub count
+	nsub = nsub + 1
+ 
+        #$% get submarine data
+	iclass = rec[4]
+	idepth = rec[5]         # $yes = deep, $no = shallow
+	imode  = rec[6]         # $yes = diesel, $no = electric
+ 
+        #$% initialize probability index
+	Sop$Cls$Index = 0
+ 
+        #$% for each unit entered
+	for (Unt$Pointer$First ; Unt$Pointer$Ok ; Unt$Pointer$Next)
+	   {
+            #$% if unit type is not a submarine, get next entry
+	    if (xunt$type$i != $sub$code) next
+ 
+            #$% if unit view is BLUE view (ie. sub is BLUE), get next entry
+	    if (xunt$view$i < $firstorange$view) next
+ 
+            #$% get pointer locations
+#@	    dyn$pointer = xunt$dynapntr$i
+#@	    shc$pointer = xdyn$shcpntr$i
+ 
+            shc$pointer = xunt$shcpntr$i    # reh, 3/89
+ 
+            #$% if ship class not sound, get next entry
+	    if (xshc$Type$C != iclass) next
+ 
+            #$% if sub is diesel, index to SOP table
+	    if (imode == $Yes) Sop$Cls$Index = xShc$SopIndx$I
+            #$% if sub is electric, index to SOP (electric) table
+	    else               Sop$Cls$Index = xShc$SopIndxElec$I
+ 
+	    break
+	   }
+        #$% is class not found
+	if (Sop$Cls$Index == 0) next            # bum record
+ 
+        #$% initialize value
+	i = 7
+        #$% for each probability of detection entered
+	For (Sop$Cls$Spd$Index = 1 ; Sop$Cls$Spd$Index <= Sop$Cls$Spd$Slots ;
+	     Sop$Cls$Spd$Index = Sop$Cls$Spd$Index + 1)
+	   {
+ 
+##            for (i = 7;  i <= 19 ;  i = i + 1)
+##                {
+                    #$% if submarine deep
+         	    If (idepth == $Yes)
+        	       {
+                        #$% compute probability of new detection and save
+        		Sop$Cls$Spd$DeepNew$F = prbmin (real(Rec[i] * .01))
+        		putSop$Cls$Spd$DeepNew$F
+ 
+                        #$% compute probability of an old detection and save
+        		Sop$Cls$Spd$DeepOld$F = prbmin (real(Rec[i+6] * .01))
+        		putSop$Cls$Spd$DeepOld$F
+        	       }
+                    #$% else if submarine is shallow
+        	    Else
+        	       {
+                        #$% compute probability of an new detection and save
+        		Sop$Cls$Spd$ShallowNew$F = prbmin (real(Rec[i] * .01))
+        		putSop$Cls$Spd$ShallowNew$F
+ 
+                        #$% compute probability of an old detection and save
+        		Sop$Cls$Spd$ShallowOld$F = prbmin (real(Rec[i+6] * .01))
+        		putSop$Cls$Spd$ShallowOld$F
+        	       }
+##                }
+	    i = i + 1
+	   }
+       }
+ 
+   }
+#$% update probability pointers
+sop$pointer$to (nsop+1)
+Sop$Last$To Sop$pointer - 1
+ 
+Return
+End
+ 
+
+ 
+ subroutine SOSINT
+ 
+ #######################################################
+ #$%
+ #$% Purpose:   SOSINT initializes the SOS table.
+ #$%
+ #$% Called By: WGLSOS
+ #$%
+ #$% Calls:     None
+ #$%
+ #$% Tables:    SOS
+ #$%
+ #$% Date:      OCT 80
+ #$%
+ #$% Author:    Ron Williams, Dana Wills
+ #$%
+ #######################################################
+ 
+ BBcommon
+ 
+ integer SOS$Pointer,NSOS                  # MJC 5/1/2000
+ 
+ #$% initialize all values
+ Sosus$First$Track = 0
+ 
+ Sosus$Last$Track = 0
+ 
+ Sosus$First$Free = 1
+ 
+ Sosus$Last$Free = sos$slots
+ 
+ Sos$Pointer$First
+ 
+ nSOS = SOS$Size / SOS$Entry
+ 
+ Repeat
+    {
+     #$% if index has exceeded the number of slots, break
+     if (Sos$Pointer$Index > nSOS) break
+ 
+     #$% increment next index and save
+     PUTSos$NextIndx$I (Sos$Pointer$Index + 1)
+     Sos$Pointer$Next
+    }
+ 
+ #$% set pointer to number of slots
+ Sos$Pointer$to nSOS
+ putSos$NextIndx$I (0)          # E2278 JOA 8/02 UFL02 - Avoid loop in free list
+ 
+ Return
+ End
+ 
+ 
+ 
+Function PRBMIN(X)
+ 
+########################################################
+#$%
+#$% Purpose:   PRBMIN converts the probability of
+#$%            detection in the SOSUS glimpse in-
+#$%            terval to the probability of detec-
+#$%            tion in one minute.
+#$%
+#$% Called By: WGLSOS
+#$%
+#$% Calls:     None
+#$%
+#$% Tables:    None
+#$%
+#$% Date:      OCT 80
+#$%
+#$% Author:    Ron Williams, Dana Wills
+#$%
+########################################################
+ 
+BBcommon
+ 
+real    X,G,PRBMIN              # MJC 5/1/2000 (E-2145)
+ 
+#$% initialize to current input
+x = x
+ 
+#$% get SOSUS glimpse interval
+G = Sosus$Glimpse$Interval
+ 
+#$% compute probability in minute
+if (x > .9 & x > 1.0 - 1.0/G)
+   {
+    PrbMin = 1.0 - (1.0 - x)/G
+   }
+else
+   {
+    PrbMin = 1.0 - EXP(ALOG(1.0 - X)/G)
+   }
+ 
+Return
+End

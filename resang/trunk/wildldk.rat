@@ -1,0 +1,161 @@
+#$%  FILE WILDLDK.RAT
+#$%  Loads LIDAR diffuse probability data
+ 
+undefine err
+undefine write
+undefine read
+include "bbctl.inc"
+include "bbcode.inc"
+include "bbldk.inc"
+ 
+define (BBImplicit, Implicit None)
+ 
+Subroutine LDLDK (filnam,nerror)        # file name (input)
+                                        # (output)(-1 = fatal error)
+################################################################
+#$%
+#$% Purpose:   LDLDK loads the LIDAR K data and associated
+#$%            probabilities from the LID file.
+#$%
+#$% Called By: START0  <wimain.rat>
+#$%
+#$% Calls:     SMOVHN     SMOV       OPEN
+#$%            ECHOV      ECHOR      GETERR_FORT
+#$%            ECHOH      LD1LDK     CLOSE
+#$%
+#$% Tables:    NONE
+#$%
+#$% Date:      March 1991
+#$%
+#$% Author:    Carol Kropp and Susan Miller
+#$%
+################################################################
+BBcommon
+ 
+character   filnam[11],    # the file name
+            msg[ARB]
+character   fname[ARB]
+vaxcharacter*ARB   v_fname
+equivalence (fname, v_fname)
+ 
+integer     ibuf[8, 527]
+real        buf[8,527]
+integer     nerror, msg_len, ios,
+            I, J           # loop control variables
+ 
+equivalence (buf,ibuf)
+ 
+common/scratch$pad/ibuf
+ 
+  LDK$Used = LDK$Size
+ 
+  nerror = 0                    # Initialize error flag
+  msg_len = 0
+  call smovhn (filnam, ARB, fname, msg_len);
+  call smov (EOS, fname, msg_len)       # Cap it off
+ 
+  open (unit     =   $LFC$LIDAR,        # Open the LIDAR Probability file
+        file     =   v_fname,
+        status   =  'old',
+        access   =  'sequential',
+        form     =  'unformatted',
+        iostat   =   ios,
+        err      =   998)
+ 
+  do I = 1, 8
+   read ($LFC$LIDAR, iostat=ios, err=999) (ibuf[I, J], J=1,527)
+ 
+  call ld1ldk                      # Call to load file into BB tables
+ 
+  close ($LFC$LIDAR)               # Close the lidar file
+ 
+##  if (1 == 2)
+REPEAT          # jb E2143 (BRNCHINTOBLK)   7/13/00
+    {
+    BREAK       # jb E2143 (BRNCHINTOBLK)   7/13/00
+     #Error exit if disk I/O problem
+     #------------------------------         # Notify user of problem and
+                                             # type I/O error number
+     999        # error on read
+        close ($LFC$LIDAR)               # Close the lidar file
+ 
+     998        # error on open
+     call echov ("I/O error.  LIDAR Probability File.")
+     call echor
+     call geterr_fort (ios, msg)   # get FORTRAN Error Messages
+     call echoh (msg, ARB)
+     call echor
+     nerror = -1                   # Indicates fatal error
+    }
+ 
+return
+end
+ 
+ 
+
+ 
+Subroutine LD1LDK
+##############################################################
+#$%
+#$% Purpose:   LD1LDK loads the Blackboard LIDAR Diffuse
+#$%            Coefficient Probability Data tables.
+#$%
+#$% Called By: LDLDK
+#$%
+#$% Calls:     SMOVH     ECHOH      ECHOR
+#$%
+#$% Tables:    LDK
+#$%
+#$% Date:      March 1991
+#$%
+#$% Author:    Carol Kropp and Susan Miller
+#$%
+##############################################################
+BBcommon
+ 
+literal     time           # day or night
+integer     offset,        # offset position in the buffer for start of depth
+            len,           # length of time msg
+            I,  depth    # loop control variables
+integer     LDK$Pointer,
+            LDK$KV$index
+integer     ibuf[8,527]
+real        buf[8,527]
+ 
+equivalence (buf,ibuf)
+ 
+common/scratch$pad/ibuf
+ 
+  #$% Load the 24 Diffuse Coefficient values from the 1st table - all
+  #$% 24 coefficient values are consistent across the eight tables
+  LDK$Pointer$First            # point to first entry
+  putLDK$ValueKey$I (1)        # indicates that this is the K value key
+  for (LDK$KV$index = 1; LDK$KV$index$ok; LDK$KV$index = LDK$KV$index + 1)
+    putLDK$KV$Value$F  (buf[1,3+LDK$KV$index])
+ 
+  do I = 1, 8         # loop through the eight tables
+    {
+     len = 0
+     call smovh (ibuf[I,1], $$maxLit, time, len)
+ 
+     do depth = 1, 20
+       {
+        LDK$Pointer$To (((I-1)*20) + depth + 1)
+        if (time == 'DAY')
+          putLDK$Time$I (1)         # 1 indicates day and 0 night
+        else
+          putLDK$Time$I (0)         # it's night
+ 
+        putLDK$AircraftAlt$I (ibuf[I,3])
+ 
+        offset = 28 + (25 * (depth-1))   # each depth row has 25 numbers
+                                         # (depth + 24 probabilities)
+        putLDK$SubDepth$I (ibuf[I,offset])
+ 
+        for (LDK$KV$index = 1; LDK$KV$index$ok; LDK$KV$index = LDK$KV$index + 1)
+            putLDK$KV$DetectionProb$F  (buf[I,offset+LDK$KV$index])
+       }
+    }
+ 
+return
+end

@@ -1,0 +1,758 @@
+##############################################################################
+#                                                                            #
+#  File:     ALSP_RECEIVE_REFRESH.RAT                                        #
+#                                                                            #
+#  Created:  May 18, 1992                                                    #
+#                                                                            #
+#  Author:   Carol L. Kropp                                                  #
+#                                                                            #
+#  Purpose:  Processes refresh requests received from the ACM.               #
+#                                                                            #
+#  Modified: Carol Kropp - 1/94                                              #
+#            Added processing of incoming PING and PING_ACK messages         #
+#            from the ACM.                                                   #
+#                                                                            #
+##############################################################################
+ 
+include "alsp.inc"
+include "alsp_resa.inc"
+include "bbswp.inc"
+ 
+define (BBImplicit, Implicit None) # SMM 3/00
+
+ 
+subroutine alsp_receive_refresh (alsp_id,    # ALSP id of the unit
+                                 num_attr,   # number of attributes to be refreshed
+                                 attr_array) # attribute flags
+#########################################################################
+#$%
+#$% Purpose:    ALSP_Receive_Refresh handles incoming ALSP refresh
+#$%             request messages.
+#$%
+#$% Called By:  Handle_AT_Refresh     <at_mess_handler.c>
+#$%
+#$% Calls:      ALSP_Get_UNT_Pointer            <alsp_update.rat>
+#$%             ALSP_Error_on_Refresh
+#$%             ALSP_Send_Full_Refresh
+#$%             ALSP_Send_Partial_Refresh
+#$%
+#$% Tables:     UNT
+#$%
+#$% Date:       May 18, 1992
+#$%
+#$% Author:     Carol L. Kropp
+#$%
+#########################################################################
+BBCommon
+ 
+integer  alsp_id, num_attr, attr_array[MAX_PARAM]
+ 
+integer  id_found
+BBDeclare (UNT$Pointer, BOY$Pointer, MFD$Pointer, SWP$Pointer)
+ 
+if (alsp_id <= 0)
+{
+    call ALSP_Error_on_Refresh (alsp_id, $zero_id)
+    return
+}
+ 
+call ALSP_Get_UNT_Pointer (UNT$Pointer, alsp_id, id_found)
+ 
+if (id_found == $yes)
+{
+    if (num_attr < 1 | num_attr > MAX_PARAM)  # if num_attr not valid, send everything
+        call ALSP_Send_Full_Refresh (UNT$Pointer)
+    else                                                  # if no attribute arg, send all
+        call ALSP_Send_Partial_Refresh (UNT$Pointer, num_attr, attr_array)
+    return
+}
+ 
+call ALSP_Get_BOY_Pointer (BOY$Pointer, alsp_id, id_found)
+ 
+if (id_found == $yes)
+{
+    call ALSP_Update_Sonobuoy_Barrier (BOY$Pointer, $event_message)
+    return
+}
+ 
+call ALSP_Locate_Minefield (alsp_id, mfd$pointer)
+ 
+if (mfd$pointer != 0)
+{
+    call ALSP_Update_Minefield_Barrier (MFD$Pointer, $event_message)
+    return
+}
+ 
+call ALSP_Get_SWP_Pointer (SWP$Pointer, alsp_id, id_found)
+ 
+if (id_found != 0)
+{
+    call ALSP_Update_Sweeparea_Barrier (SWP$Pointer, $event_message)
+    return
+}
+ 
+call ALSP_Error_on_Refresh (alsp_id, $no_id_match)
+ 
+return
+end
+
+ 
+subroutine ALSP_Error_on_Refresh (id,           # ALSP id of unit
+                                  error_code)   # error code number
+#########################################################################
+#$%
+#$% Purpose:    ALSP_Error_on_Refresh prints out messages to the
+#$%             wargame terminal when an error occured during the
+#$%             processing of a refresh_request message.
+#$%
+#$% Called By:  ALSP_Receive_Refresh
+#$%
+#$% Calls:      Echo..
+#$%
+#$% Tables:     None
+#$%
+#$% Date:       May 18, 1992
+#$%
+#$% Author:     Carol L. Kropp
+#$%
+#$% Modified:   Carol L. Kropp - Feb. 1994
+#$%             Changed all echo.. calls to smov.. & write error to log.
+#$%
+#########################################################################
+BBcommon
+include "alsp_io_rat.inc"
+ 
+integer id, error_code
+ 
+integer    msg_len, i
+character  message[100]
+vaxcharacter*100 v_message
+integer    i_switch_1  # SMM 3/00
+ 
+Equivalence  (message, v_message)
+ 
+  for (i = 1; i <= 100; i = i + 1)
+     message[i] = $SPACE
+ 
+  msg_len = 0
+  call smovv ("ALSP ERROR: Refresh for ALSPID = ", message, msg_len)
+  call smovi (id, message, msg_len)
+ 
+  switch (error_code)
+    {
+     case $no_id_match:
+        call smovv (" - No matching ALSP id in unit table.", message, msg_len)
+     case $unit_deleted:
+        call smovv (" - Unit has been deleted.", message, msg_len)
+     case $zero_id:
+        call smovv (" - Zero ALSP id number.", message, msg_len)
+    }
+ 
+  if (ALSP$Logging == $ON)
+  {
+      write (msg_log_unit, fmt=*)
+      write (msg_log_unit, fmt=*) v_message         # write the message to the log file
+      write (msg_log_unit, fmt=*)
+  }
+ 
+return
+end
+
+ 
+subroutine ALSP_Send_Full_Refresh (UNT$Pointer)  # in: Unit's UNT Pointer
+#########################################################################
+#$%
+#$% Purpose:    ALSP_Send_Full_Refresh is called when a REFRESH_REQUEST
+#$%             is received with no attributes in the message, meaning
+#$%             a full refresh is desired.
+#$%
+#$% Called By:  ALSP_Receive_Refresh
+#$%
+#$% Calls:      ALSP_Update_Aircraft_Flight     <alsp_send_updates.rat>
+#$%             ALSP_Send_Full_SS_Update        <alsp_send_updates.rat>
+#$%             ALSP_Update_Base                <alsp_send_updates.rat>
+#$%
+#$% Tables:     UNT
+#$%
+#$% Date:       Feb. 28, 1994
+#$%
+#$% Author:     Code moved from ALSP_Receive_Refresh - clk
+#$%
+#########################################################################
+BBCommon
+ 
+integer  UNT$Pointer
+integer  UNT$Type$I, UNT$SuperType$I
+integer  full_msg_flag
+ 
+  UNT$Type$I = xUNT$Type$I
+  UNT$SuperType$I = xUNT$SuperType$I
+  if (UNT$Type$I == $Air$Code)       # if unit is an aircraft
+     call ALSP_Update_Aircraft_Flight (UNT$Pointer, $event_message, $yes)
+  else if (UNT$Type$I      == $Sub$Code             |
+           UNT$SuperType$I == $Torpedo$SuperCode    |
+           UNT$SuperType$I == $CtrMeasure$SuperCode |
+           UNT$Type$I == $Surface$Code)
+     call ALSP_Send_Full_SS_Update (UNT$Pointer, $event_message)
+  else if (UNT$Type$I == $Shorebase$Code)
+    {
+     full_msg_flag = $yes
+     call ALSP_Update_Base (UNT$Pointer, $yes, full_msg_flag)
+    }
+ 
+return
+end
+
+ 
+subroutine ALSP_Send_Partial_Refresh (UNT$Pointer,  # in: Unit's UNT Pointer
+                                      num_attr,     # in: number of attributes
+                                      attr_array)   # in: attribute codes
+#########################################################################
+#$%
+#$% Purpose:    ALSP_Send_Partial_Refresh is called when a REFRESH_REQUEST
+#$%             is received with attributes in the message.
+#$%
+#$% Called By:  ALSP_Receive_Refresh
+#$%
+#$% Calls:      ALSP_Literal_to_Char
+#$%             RESA_Type_To_ALSP_Class
+#$%             ALSP_Get_UNT_Mission
+#$%             ALSP_Map_Side
+#$%             Map_Outgoing_Unit_Type
+#$%             ALSP_Get_Target_Loc
+#$%
+#$% Tables:     UNT
+#$%
+#$% Date:       March 1, 1994
+#$%
+#$% Author:     Carol L. Kropp
+#$%
+#$% Modified:   Susan Miller - 10/94
+#$%             Added new variable arrays:  orient_array,mode_array
+#$%             Changed name_array to category_array
+#$%
+#$%             Susan Miller - 12/95 (E1526)
+#$%             Added variable send_refresh to alleviate sending refresh
+#$%             response messages containing only class and id.
+#$%
+#$%             Stephanie Paden - 2/98 (E1907)
+#$%             Added handling of refresh requests for IFF data.
+#$%
+#$%             John McCormick - 3/99 (E2109)
+#$%             Ensure that FLIGHT_OPS attribute sent on refresh request.
+#$%
+#########################################################################
+BBCommon
+alsp$Sonar_common
+alsp$Position_common
+ 
+integer  UNT$Pointer, num_attr, attr_array[MAX_PARAM]
+ 
+integer  attr_index, attribute
+integer  orbit_requested_flag
+integer  alsp_unit_type_code
+real     target_lat, target_long
+integer  target_status
+integer  send_refresh
+integer  full_list_flag
+ 
+integer                  ALSP_Get_UNT_Mission
+integer                  ALSP_Map_Side
+integer                  RESA_Type_To_ALSP_Class
+integer                  localPropulsion2ALSPPropulsion
+vaxcharacter*MAX_STR_LEN alsp_literal_to_char
+integer litlen
+integer                   param_flag[MAX_PARAM], int_params[MAX_PARAM]
+real                      f_params[MAX_PARAM]
+vaxcharacter*MAX_STR_LEN  string_params[MAX_PARAM]
+integer                   strlen[MAX_PARAM], qualifier[MAX_PARAM]
+integer                   n_args, index
+integer  number_of_emitters, all_emitters_flag,
+         category_array[Max$Alsp$Emitters],
+         type_array[Max$Alsp$Emitters],
+         status_array[Max$Alsp$Emitters],
+         index_array[Max$Alsp$Emitters],
+         mode_array[Max$Alsp$Emitters]
+real     orient_array[Max$Alsp$Emitters]
+integer  all_iffmodes_flag,     # smp 2/98 (E1907)
+         iffmaster_status,
+         iffmode_status_array[Max$Alsp$Iffmodes],
+         iffmode_value_array[Max$Alsp$Iffmodes],
+         iffmode_params[Max$Alsp$Iffmodes + 1]
+literal  cstrip8	  # SMM 3/00
+literal  atoid_check
+integer  i_switch_1	  # SMM 3/00
+real     UNT$TrueSpeed$F  # SMM 3/00
+ 
+ 
+  orbit_requested_flag = $no
+  send_refresh = $no
+ 
+  #$%     initialize the param_flag[n] array to zero's
+  for (index = 1; index <= MAX_PARAM; index = index + 1)   # initialize the
+    {                                                      # parameter arrays
+     param_flag [index]    = 0
+     int_params [index]    = 0
+     f_params [index]      = 0.0
+     string_params [index] = "                                "
+     strlen [index]        = 0
+     qualifier [index]     = 0
+    }
+ 
+  # initialize the parameter arrays
+  for (index = 1; index <= Max$Alsp$Emitters; index = index + 1)
+    {
+     category_array[index] = 0
+     type_array[index]     = -1
+     status_array[index]   = 0
+     index_array[index]    = 0
+     orient_array[index]   = -1.
+     mode_array[index]     = -1
+    }
+ 
+  iffmaster_status = $iffmode_off     # initialize the IFF data - smp 2/98 (E1907)
+  for (index = 1; index <= Max$Alsp$Iffmodes; index = index + 1)
+    {
+     iffmode_status_array[index]   = $iffmode_off
+     iffmode_value_array[index]    = 0
+     iffmode_params[index]         = 0
+    }
+  iffmode_params[Max$Alsp$Iffmodes + 1] = 0
+ 
+  n_args = MAX_PARAM
+ 
+ 
+  # ID and CLASS should be in every message
+  param_flag[$id] = $Yes
+  int_params[$id] = xUNT$ALSPid$I
+  param_flag[$class] = $Yes
+  int_params[$class] = RESA_Type_To_ALSP_Class (UNT$Pointer)
+ 
+ 
+  # Loop through the attr_array to determine which attributes are
+  # to be sent.
+  for (attr_index = 1; attr_index <= num_attr; attr_index = attr_index + 1)
+    {
+     attribute = attr_array [attr_index]
+     if ( (attribute > 0) &
+          (attribute <=  MAX_PARAM) )   #  if a legal attribute number
+       {
+        switch (attribute)
+          {
+           case $altitude,        # air units
+                $depth   :        # subsurface units
+             {
+              param_flag [attribute] = $Yes
+              int_params [attribute] = xUNT$TrueAltDepth$I
+              send_refresh = $yes
+             }                 # end of altitude or depth case
+ 
+           case $propulsion_mode:        # submarine units
+             {
+              param_flag [attribute] = $Yes
+              int_params [attribute] = localPropulsion2ALSPPropulsion(xUNT$PropulsionMode$I)
+              send_refresh = $yes
+             }                 # end of propulsion mode
+ 
+           case $call_sign:
+             {
+              param_flag[$call_sign] = $Yes
+              string_params[$call_sign] =
+                  ALSP_Literal_to_Char (xUNT$Event$C, litlen)
+              strlen[$call_sign] = litlen
+              send_refresh = $yes
+             }                 # end of call_sign case
+ 
+           case $emitter:
+             {
+              call Setup_Emitter_Arrays (UNT$Pointer, param_flag, $yes,
+                                         number_of_emitters, category_array,
+                                         type_array, status_array,
+                                         index_array, orient_array,
+                                         mode_array,
+                                         all_emitters_flag)
+              if (number_of_emitters > 0)
+                {
+                 param_flag[$emitter] = $yes
+                 qualifier[$emitter] = all_emitters_flag
+                 send_refresh = $yes
+                }
+              else
+                {
+                 param_flag[$emitter] = $alsp_send_no_attribute_value
+                 param_flag[$radar] = $alsp_send_no_attribute_value
+ 
+                 param_flag[$emitter_index] = $alsp_send_no_attribute_value
+                 param_flag[$emitter_orient] = $alsp_send_no_attribute_value
+                 param_flag[$emitter_status] = $alsp_send_no_attribute_value
+                 param_flag[$emitter_mode] = $alsp_send_no_attribute_value
+                 param_flag[$emitter_type] = $alsp_send_no_attribute_value
+                }
+             }                 # end of emitter case
+ 
+           case $sonar:
+             {
+              full_list_flag = $YES
+              call Setup_Sonar_Arrays   (UNT$Pointer, param_flag,
+                                         full_list_flag)
+              if (number_of_sonars > 0)
+                {
+                 qualifier[$sonar] = sonar_all_qualifier
+                 send_refresh = $yes
+                }
+              else
+                {
+                 param_flag[$sonar]        = $alsp_send_no_attribute_value
+                 param_flag[$sonar_depth]  = $alsp_send_no_attribute_value
+                 param_flag[$sonar_mode]   = $alsp_send_no_attribute_value
+                 param_flag[$sonar_type]   = $alsp_send_no_attribute_value
+                 param_flag[$sonar_status] = $alsp_send_no_attribute_value
+                }
+             }                 # end of sonar case
+ 
+           case $iff:                 # smp 2/98 (E1907)
+             {
+              call Setup_Iffmode_Arrays (UNT$Pointer, iffmode_params, $yes,
+                                         iffmaster_status,
+                                         iffmode_status_array,
+                                         iffmode_value_array,
+                                         all_iffmodes_flag)
+              param_flag[$iff] = iffmode_params[1]
+ 
+              if (param_flag[$iff] == $yes)
+                {
+                 param_flag[$iffmaster] = iffmode_params[2]
+                 param_flag[$iffmode1] = iffmode_params[3]
+                 param_flag[$iffmode2] = iffmode_params[4]
+                 param_flag[$iffmode3] = iffmode_params[5]
+                 param_flag[$iffmodeC] = iffmode_params[6]
+                 param_flag[$iffmode4] = iffmode_params[7]
+ 
+                 qualifier[$iff] = all_iffmodes_flag
+                 send_refresh = $yes
+                }
+             }                 # end of iffmode case
+ 
+           case $alsp_attr_flight_ops:    # jhm (E2109) 3/99 CT99, added this case
+              {
+               param_flag[$alsp_attr_flight_ops] = $Yes
+               if (xUNT$FltsokTime$F > Game$Time |             # if the time that the base can launch
+                   xUNT$TimeBingo$F  > Game$Time)              # or recover is in the future
+                int_params[$alsp_attr_flight_ops] = $alsp_flight_ops_closed
+               else
+                int_params[$alsp_attr_flight_ops] = $alsp_flight_ops_open
+               send_refresh = $yes
+              }              # end case $alsp_attr_flight_ops (E2109)
+           case $heading:
+             {
+              param_flag[$heading] = $Yes
+              int_params[$heading] = INT (xUNT$TrueCourse$F * 180.0 / $pi) # in degrees
+              send_refresh = $yes
+             }                 # end case $heading
+ 
+           case $latitude:
+             {
+              param_flag[$latitude] = $Yes
+              f_params[$latitude]   = (xUNT$TrueLatitude$F * 180.0 / $pi)  # in degrees
+              send_refresh = $yes
+             }                 # end of latitude case
+ 
+           case $longitude:
+             {
+              param_flag[$longitude] = $Yes
+              f_params[$longitude]   = (xUNT$TrueLongitude$F * 180.0 / $pi) # in degrees
+              send_refresh = $yes
+             }                 # end of longitude case
+ 
+           case $mission:
+             {
+              param_flag[$mission] = $Yes
+              int_params[$mission] = ALSP_Get_UNT_Mission (XUNT$Mission$I)
+              send_refresh = $yes
+             }                 # end of mission case
+ 
+           case $name:
+             {
+              param_flag[$name] = $Yes
+              send_refresh = $yes
+ 
+              if (int_params [$class] == $air_fixedwing  |  # for aircraft the
+                  int_params [$class] == $air_helicopter |  # name attribute is the
+                  int_params [$class] == $air_helicopter_airlift)  #  name
+                string_params[$name] =
+                    ALSP_Literal_to_Char (atoid_check(unt$pointer,xUNT$Name$C),
+                                          litlen)
+              else
+                string_params[$name] =
+                    ALSP_Literal_to_Char (xUNT$Name$C, litlen)
+              strlen[$name] = litlen
+             }                 # end of name case
+ 
+           case $orb_lat1, $orb_lon1,
+                $orb_lat2, $orb_lon2:
+             {
+              param_flag [$orb_lat1] = $alsp_send_no_attribute_value
+              param_flag [$orb_lon1] = $alsp_send_no_attribute_value
+              orbit_requested_flag = $yes
+              send_refresh = $yes
+             }                 # end of name case
+ 
+           case $side:
+             {
+              param_flag[$side] = $Yes
+              int_params[$side] = ALSP_Map_Side (xUNT$View$I)
+              send_refresh = $yes
+             }                 # end of side case
+ 
+           case $size_attr:
+             {
+              if (int_params [$class] == $air_fixedwing  |       # for aircraft, size
+                  int_params [$class] == $air_helicopter |       # indicates the number
+                  int_params [$class] == $air_helicopter_airlift)       # of a/c in the flight.
+                {
+                 param_flag[$size_attr] = $Yes
+                 int_params[$size_attr] = xUNT$NbrAc$I
+                 send_refresh = $yes
+                }
+             }                 # end of side case
+ 
+           case $speed:
+             {
+              param_flag[$speed] = $Yes
+              int_params[$speed] = INT (xUNT$TrueSpeed$F * $knots_to_km) # convert to km/hour
+              send_refresh = $yes
+             }                 # end case $speed
+ 
+           case $status:       # air and missile units only
+             {
+              if (int_params [$class] == $air_fixedwing  |
+                  int_params [$class] == $air_helicopter |
+                  int_params [$class] == $air_helicopter_airlift)
+                {
+                 param_flag [$status] = $yes
+                 int_params [$status] = $fly
+ 
+                 UNT$TrueSpeed$F = xUNT$TrueSpeed$F
+                 if (UNT$TrueSpeed$F <= 0)
+                   int_params [$status] = $orbit
+                 send_refresh = $yes
+                }
+             }                 # end case $status
+ 
+           case $target_lat, $target_long:
+             {
+              call ALSP_Get_Target_Loc (UNT$Pointer, int_params [$class],
+                                        target_lat, target_long, target_status)
+              if (target_status == $Yes)
+                {
+                 param_flag [$target_lat]  = $Yes
+                 f_params   [$target_lat]  = target_lat
+                 param_flag [$target_long] = $Yes
+                 f_params   [$target_long] = target_long
+                 send_refresh = $yes
+                }
+              else
+                {
+                 param_flag [$target_lat] = $alsp_send_no_attribute_value
+                 param_flag [$target_long] = $alsp_send_no_attribute_value
+                }
+             }
+ 
+           case $unit_type:
+             {
+              call Map_Outgoing_Unit_Type (UNT$Pointer, int_params[$class],
+                                           alsp_unit_type_code)
+              param_flag[$unit_type] = $Yes
+              int_params[$unit_type] = alsp_unit_type_code
+              send_refresh = $yes
+             }                 # end of case $unit_type
+          }    # end of switch statement
+       }   # end of a legal attribute number
+    }  # end of loop through attr_array
+ 
+  if ((param_flag [$status] == $yes  &
+       int_params [$status] == $orbit) &
+      (orbit_requested_flag == $yes)   )
+    {
+     param_flag [$orb_lat1] = $Yes
+     f_params   [$orb_lat1] = (xUNT$TrueLatitude$F * 180.0 / $pi)  # in degrees
+     param_flag [$orb_lon1] = $Yes
+     f_params   [$orb_lon1] = (xUNT$TrueLongitude$F * 180.0 / $pi) # in degrees
+     send_refresh = $yes
+    }
+ 
+  if (send_refresh == $yes)
+    call ALSP_Send_Update ($event_message, n_args, param_flag, int_params,
+                           f_params, number_of_emitters, category_array,
+                           type_array, status_array, index_array,
+                           orient_array, mode_array,
+                           number_of_sonars,
+                           sonar_type_array,
+                           sonar_status_array,
+                           sonar_mode_array,
+                           sonar_depth_array,
+                           number_of_positions,
+                           position_lat_array,
+                           position_lon_array,
+                           iffmaster_status, iffmode_status_array,
+                           iffmode_value_array,
+                           strlen, %%REF(string_params), qualifier)
+ 
+return
+end
+
+ 
+integer function RESA_Type_To_ALSP_Class (UNT$Pointer) # in: UNT Pointer
+#########################################################################
+#$%
+#$% Purpose:    RESA_Type_To_ALSP_Class determines the ALSP class of the
+#$%             unit from the RESA unit type.  The ALSP class code is
+#$%             returned.
+#$%
+#$% Called By:  ALSP_Send_Partial_Refresh
+#$%
+#$% Calls:      None
+#$%
+#$% Tables:     UNT     ACC     CMC
+#$%
+#$% Date:       March 1, 1994
+#$%
+#$% Author:     Carol L. Kropp
+#$%
+#########################################################################
+BBCommon
+ 
+integer  UNT$Pointer
+ 
+integer  class
+integer  UNT$Type$I, ACC$Pointer, ACC$Category$I	 # SMM 3/00
+integer  CMC$Pointer, CMC$Cat$I, UNT$Subtype$I           # SMM 3/00
+ 
+  UNT$Type$I = xUNT$Type$I
+ 
+  if (UNT$Type$I == $Air$Code)
+    {
+     ACC$Pointer = xUNT$AccPntr$I
+     ACC$Category$I = xACC$Category$I
+     if (ACC$Category$I == $Helo$Code)
+       class = $air_helicopter
+     else    # $Jet$Code or $Prop$Code
+       class = $air_fixedwing
+    }
+  else if (UNT$Type$I == $CruiseMissile$Code)
+    {
+     CMC$Pointer = xUNT$CMCPntr$I
+     CMC$Cat$i = xCMC$Cat$I
+     if (CMC$Cat$I == $Ball$Code)
+       class = $air_ballistic_missile
+     else
+       class = $air_cruise_missile
+    }
+  else if (UNT$Type$I == $ShoreBase$Code)
+    {
+     class = $shore_base
+    }
+  else if (UNT$Type$I == $SubSurface$Code)
+    {
+     class = $sea_subsurface
+    }
+  else if (UNT$Type$I == $Surface$Code)
+    {
+     UNT$SubType$I = xUNT$SubType$I
+     if (UNT$SubType$I == $Standard$SubCode)
+       class = $sea_surface_ship
+     else # (UNT$SubType$I == $SmallBoat$SubCode)
+       class = $sea_surface_boat
+    }
+ 
+  RESA_Type_To_ALSP_Class = class
+ 
+return
+end
+
+subroutine Map_Outgoing_Unit_Type (UNT$Pointer,          # in: UNT Pointer
+                                   alsp_class_code,      # in: class enumeration
+                                   alsp_unit_type_code)  # out: unit type enumeration
+#########################################################################
+#$%
+#$% Purpose:    Map_Outgoing_Unit_Type determines the ALSP unit type
+#$%             enumeration for the unit, by calling the mapping routine
+#$%             for the type of unit.
+#$%
+#$% Called By:  ALSP_Send_Partial_Refresh
+#$%
+#$% Calls:      Map_Outgoing_Aircraft_Type
+#$%             ALSP_Map_Outgoing_Missile_Unit
+#$%             Map_Outgoing_Ship_Type
+#$%
+#$% Tables:     UNT     ACC     CMC     SHC
+#$%
+#$% Date:       March 1, 1994
+#$%
+#$% Author:     Carol L. Kropp
+#$%
+#$% Modified:   Carol L. Kropp - 10/95 (E1489)
+#$%             The check for cm was typoed and the tbm was
+#$%             listed twice.
+#$%
+#########################################################################
+BBCommon
+ 
+integer  UNT$Pointer, alsp_class_code, alsp_unit_type_code
+integer  ACC$Pointer, CMC$Pointer, SHC$Pointer  # SMM 3/00
+ 
+  if (alsp_class_code == $air_fixedwing  |       # for aircraft, size
+      alsp_class_code == $air_helicopter |       # indicates the number
+      alsp_class_code == $air_helicopter_airlift)       # of a/c in the flight.
+    {
+     ACC$Pointer = xUNT$AccPntr$I
+     call Map_Outgoing_Aircraft_Type (ACC$Pointer, alsp_unit_type_code)
+    }
+  else if (alsp_class_code == $air_cruise_missile    |
+           alsp_class_code == $air_ballistic_missile )
+    {
+     CMC$Pointer = xUNT$CMCPntr$I
+     call ALSP_Map_Outgoing_Missile_Unit (CMC$Pointer, alsp_unit_type_code)
+    }
+  else if (alsp_class_code == $sea_surface_boat |
+           alsp_class_code == $sea_surface_ship |
+           alsp_class_code == $sea_subsurface)
+    {
+     SHC$Pointer = xUNT$ShcPntr$I
+     call Map_Outgoing_Ship_Type (SHC$Pointer, alsp_unit_type_code)
+    }
+ 
+ 
+return
+end
+ 
+
+ 
+integer function localPropulsion2ALSPPropulsion(localPropulsion)
+ 
+# convert internal RESA propulsion code to alsp propulsion code
+ 
+integer localPropulsion, alspPropulsion
+ 
+if (localPropulsion == $Diesel$code) alspPropulsion = $propulsion_diesel
+else if (localPropulsion == $Electric$code) alspPropulsion = $propulsion_electric
+else if (localPropulsion == $nuclear$code) alspPropulsion = $propulsion_nuclear
+else alspPropulsion = $propulsion_nuclear
+ 
+return(alspPropulsion)
+end
+
+ 
+integer function ALSPPropulsion2localPropulsion(ALSPPropulsion)
+ 
+# convert alsp propulsion code to internal RESA propulsion code
+ 
+integer localPropulsion, alspPropulsion
+ 
+if      (ALSPPropulsion == $propulsion_diesel) localPropulsion = $Diesel$code
+else if (ALSPPropulsion == $propulsion_electric) localPropulsion = $Electric$code
+else if (ALSPPropulsion == $propulsion_nuclear) localPropulsion = $Nuclear$code
+else localPropulsion = $Diesel$code
+ 
+return(localPropulsion)
+end

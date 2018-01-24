@@ -1,0 +1,1894 @@
+#______________________________________________________________________
+# Gun model !!!
+
+subroutine artill (unt$pointer) #engage enemy/nonfriendly surface
+
+########################################################
+#$%
+#$% Purpose:   ARTILL initializes surface-to-surface
+#$%            engagements using GUNs as applicable.
+#$%
+#$% Called By: EPROSS
+#$%
+#$% Calls:     GET_SKUNKS  GUNENG  DEQGET  Sort_Eqlist
+#$%                                        get_skunks
+#$% Tables:    UNT        TOR
+#$%
+#$% Date:      APR 83
+#$%
+#$% Author:    Dana Wills
+#$%
+########################################################
+bbcommon
+
+LITERAL CSTRIP8                                         # jb  E2145   6/27/00
+REAL    RANGE,BRG, UNT$Orderedspeed$F                   # jb  E2145   6/26/00
+integer         eqlist[5,ARB], nfound
+integer*4       nraid[ARB], ranges[ARB], 
+                gun_targ[ARB], gun_flag[ARB]
+Integer N, MRANGE, MLIMIT,                               # jb  E2145   6/26/00
+    UNT$Pointer, UNT$Assignedtarget$I,UNT$Attackindx$I,  # jb  E2145   6/26/00
+    UNT2$Pointer, TOR$Pointer, DEQ$Pointer               # jb  E2145   6/26/00
+logical         auto_mode
+
+nfound = 0                      # init item count
+call DEQGET(unt$pointer,        # UNT pointer    
+            $GUN$Code,          # equipment ident code
+            nfound,             # <- nbr items fnd ->
+            eqlist)             # send/receive list of EQ
+
+mrange = 0
+mlimit = 0
+
+unt$AssignedTarget$i = Xunt$AssignedTarget$i        # get assigned target
+unt$AttackIndx$i = Xunt$AttackIndx$i                # get target vectoring to
+
+if (unt$AssignedTarget$i != 0 &        # jb  May exclude TAKE of NON-air
+    unt$AssignedTarget$i == unt$AttackIndx$i)      # DEW 1/11/90
+    {  # target from ARTILL if order did NOT specify using GUNS    8/7/89
+
+    unt2$pointer$to unt$AssignedTarget$i
+    call getrb (unt$Pointer,unt2$Pointer,RANGE,Brg)     # jb 8/9/89 \/
+
+    if( (RANGE <= Xunt$AttackRange$F | Xunt$status$i ==$ONGUIDE$CODE) &
+         xunt$type$i == $air$code & Xunt$UseGuns$i == $NO ) # & # jb 8/9/89
+        {
+        unt$orderedspeed$f =max(Xunt$orderedspeed$f,223.3)
+        unt$orderedspeed$f =max(Xunt2$orderedSpeed$f+60.,unt$orderedspeed$f)
+
+        PUTunt$orderedspeed$f    # To isolate TAKE (NO using guns)
+        return   # ARTILL when range has already closed.. 8/9/89
+        }
+    }
+
+if (nfound < 1)    RETURN                     # jb            8/29/89
+
+for (n=1; n <= nfound; n=n+1)
+    {
+    tor$pointer   = eqlist[2,n]                 # get TOR (Gun) pointer
+    eqlist[4,n]   = Xtor$MaxRange$i             # get max range 
+    eqlist[5,n]   = Xtor$NbrSimEngages$i        # get Simul Engagement limit
+    mlimit = mlimit + eqlist[5,n]               # summ limits
+    mrange = max(mrange,eqlist[4,n])            # save maximum range (yds)
+    }
+
+mlimit = min(mlimit,99)
+mrange = mrange * $Yds$Per$Mile                 # change from Miles to Yards
+
+#______________________________________________________________________
+# sort weapons by increasing range
+
+call sort_eqlist (eqlist,nfound,4)              # sort equip list by range
+
+auto_mode = .true.
+for (n=1; n <= nfound; n=n+1)
+    {
+    deq$pointer$to eqlist[1,n]
+    gun_targ[n] = xdeq$guntarget$i
+    gun_flag[n] = xdeq$gunflag$i    
+    if (gun_flag[n] == $take$guncode | 
+        gun_flag[n] == $fired$guncode) # take command given
+        {
+        auto_mode = .false.                     # no auto engagements
+        }
+    }
+
+call gun_targets(unt$pointer,gun_targ,gun_flag,eqlist,nfound)
+
+if (auto_mode)
+    {
+    call get_skunks (unt$pointer,           # get MLIMIT targets within MRANGE
+                     mrange,                # Pass Max Range
+                     mlimit,                # pass engagement limit
+                     Nraid,                 # return target pointers
+                     ranges)                # return target ranges (miles)
+
+    if (nraid[1] != 0) 
+        {
+        if (trace$engage$exe != $no | trace$engage$gun != $no)
+            {
+            call echor
+            call echov  ("!Artillery (auto)....")
+            call echohn (xunt$name$c,$$MaxLit)
+            call echov  (" MRng (yds)=")
+            call echoi  (mrange)
+            call echov  (" ELim=")
+            call echoi  (mlimit)
+            }
+ 
+        call guneng(_                     # call gun engagement
+                    unt$pointer,          # pass unit pointer
+                    eqlist,               # pass sam&ciws data 
+                    nfound,               # pass nbr of EQs
+                    Nraid,                # pass target pointers
+                    ranges)               # pass target ranges (mile)
+        }
+    }
+
+for (n=1; n<= nfound; n=n+1)                    # update equipment remaining
+    {
+    deq$Pointer$TO (eqlist[1,n])
+    if (eqlist[3,n] < 0) 
+        eqlist[3,n] = 0        # jb        5/18/89      
+
+    PUTdeq$remaining$i (eqlist[3,n])    
+    PUTdeq$guntarget$i (gun_targ[n])
+    PUTdeq$gunflag$i   (gun_flag[n])
+    }
+
+return
+end                     # end of artill                    nfound
+
+
+subroutine gun_targets(_                # process ordered gun engagements
+                       unt$pointer,     # UNT is the attacker...
+                       gun_targ,
+                       gun_flag,
+                       eqlist,
+                       nfound)
+
+########################################################
+#$%
+#$% Purpose:   
+#$%
+#$% Called By: ARTILL
+#$%
+#$% Calls:      (echo..)   (smov..)
+#$%
+#$% Tables:    UNT        MC
+#$%            AML        DEQ
+#$%
+#$% Date:      APR 83
+#$%
+#$% Author:
+#$%
+#$%
+#$% Modified:  Carol Kropp - 3/95
+#$%            When a platform is firing at a position,
+#$%            only send one ALSP interaction message
+#$%            including all the rounds to be fired.
+#$%            (The saloves entry in the command is now
+#$%            required.)  If a player issues the command,
+#$%            cancels the command before completion and
+#$%            re-issues it, incorrect numbers will be
+#$%            sent, but Dan Bacon said to do it this way.
+#$%
+#$%            Carol Kropp - 7/95 (E1419)
+#$%            Added computation of epus and changed the
+#$%            the call to Log_Posit_Eng to be done ALSP
+#$%            or not (so that gun engagements against a
+#$%            position would follow other position 
+#$%            engagements).
+#$%
+########################################################
+BBcommon
+ENcommon
+
+LITERAL CSTRIP8                                # jb  E2145   6/27/00
+LITERAL ORD$W04$C,ORD$W05$C                    # jb  E2145   6/27/00
+literal     target_name
+literal     shooter, shootee, gun_name, shootee_name
+real*4      range,p,rnd,dms2rad
+real        target_lat, target_long    # for translation of dms to radians - clk 10/93
+real*4      TimeSinceFire  # JFR for VTS - 7/28/94
+REAL  X, RANDOM                 # jb E2145  6/26/00
+integer*4   gun_targ[ARB],gun_flag[ARB],eqlist[5,ARB], flag_sent[ARB], rounds,
+            nfound, n, i, id, pounds , rangey, out, salvo, gtarget, salvo_num,
+            alsp_rounds
+
+REAL  TARCOS,UNTLAT,UNTLON,UNTCOS,BRNG         # jb E2145  6/26/00
+Integer  ILEN, ILEN_SAV,                       # jb E2145  6/26/00
+    UNT$Pointer,UNT$View$I,UNT$Targettype$I,   # jb E2145  6/26/00
+    ORD$Pointer,ORD$Start$I,                   # jb E2145  6/26/00
+    TOR$Pointer,TOR$PH$Index,                  # jb E2145  6/26/00
+    UNT3$Pointer, DEQ$Pointer                  # jb E2145  6/26/00
+integer     nhits, iepus
+logical     take_ok,first_take
+character   msgx[ARB]
+
+take_ok = .true.
+first_take = .true.
+id = 0
+unt$view$i = xunt$view$i
+
+shooter = Xunt$name$c
+
+for (i=1; i <= ARB; i = i + 1) flag_sent[i] = 0
+  
+for (n=1; n <= nfound; n=n+1)
+    {
+    if (gun_targ[n] == 0) NEXT
+
+    out = 0
+    ord$pointer = 0
+
+    if (gun_flag[n] == $posit$guncode)
+        {
+        shootee      = 8HPosition
+        shootee_name = 8HPosition
+        }
+    else 
+        {
+        shootee = target_name(unt$pointer,gun_targ[n])
+
+        unt3$pointer$to gun_targ[n]
+        shootee_name = Xunt3$name$c
+        }
+
+    tor$pointer = eqlist[2,n]
+    gun_name = Xtor$type$c
+
+    if (trace$engage$gun != $no)
+        {
+        call echor
+        call echov  ('! ')
+        call echohn (shooter,8)
+        call echov  (" targeting gun ")
+        call echohn (gun_name,8)
+        call echov  (" at ")
+        call echohn (shootee_name,8)
+        call echov  (" (")
+        call echohn (shootee,8)
+        call echov  (")")
+        }
+
+    if (gun_flag[n] == $take$guncode | gun_flag[n] == $fired$guncode)
+        {
+        if (!take_ok) NEXT
+
+        # NOW check to see if the gun should fire with variable time step - JFR for VTS - 7/28/94
+        if (model$interval != 1.0) # JFR for VTS - 7/28/94
+           { # check to see if we need to skip - JFR for VTS - 7/28/94
+            DEQ$Pointer$To Eqlist[1,n] # JFR for VTS - 7/28/94 (get pointer)
+            TimeSinceFire = game$time - Xdeq$TimeLastUsed$f # JFR for VTS - 7/28/94
+            if (TimeSinceFire < 1.0) Next # JFR for VTS - 7/28/94 (fire salvo minimum of minute apart)
+           } # JFR for VTS - 7/28/94
+
+        call gun_sights(unt$pointer,gun_targ[n],eqlist,n,rangey)
+
+        if (first_take)
+            {
+            first_take = .false.
+
+            if (rangey < 0)
+                {
+                if (gun_flag[n] == $fired$guncode)
+                    {
+                    ilen = 0
+                    call smovhn (shooter,8, msgx,ilen)
+                    call smovv  (" terminating gunfire at ",msgx,ilen)
+                    call smovhn (shootee,8, msgx,ilen)
+
+                    if (rangey == -1)
+                        call smovv (". Track lost.",msgx,ilen)
+                    else if (rangey == -2)
+                        call smovv (". Target outside range.",msgx,ilen)
+
+                    if (trace$engage$gun != $no)
+                        {
+                        if (rangey == -1)
+                            call echov (". Track lost.")
+                        else if (rangey == -2)
+                            call echov (". Target outside range.")
+                        }
+
+                    call send_(unt$view$i,0,ilen,msgx)
+
+                    gtarget = gun_targ[n]
+                    call deassign_guns(unt$Pointer,gtarget,
+                                       $take$guncode,$fired$guncode)
+                    for (i = 1; i <= nfound; i = i + 1)
+                        {
+                        if (gun_targ[i] == gtarget &
+                            (gun_flag[i] == $take$guncode | 
+                             gun_flag[i] == $fired$guncode))
+                            {
+                            gun_targ[i] = 0
+                            gun_flag[i] = 0
+                            } # end if
+                        }
+                    } # end if fired$code
+                } # end if range < 0
+            else if (gun_flag[n] == $take$guncode)
+                {
+                ilen = 0
+                call smovhn(shooter,8,msgx,ilen)
+                call smovv (" commencing to fire guns at ",msgx,ilen)
+                call smovhn(shootee,8,msgx,ilen)
+
+                call send_(unt$view$I,0,ilen,msgx)   # DEW 1/11/90
+                } # end if $take$guncode
+            } # end if first_take
+        if (rangey < 0)     # was there an error above somewhere?
+            { 
+            take_ok = .false.
+            NEXT
+            }
+                # for take track :
+        call gun_fire(unt$pointer,gun_targ[n],eqlist,n,rangey)
+
+        gun_flag[n] = $fired$guncode # fired at track for take command
+
+        if (eqlist[3,n] <= 0) 
+            {
+            out = 3                     # out of ammo
+            }
+         # now store the time last used ---  JFR 7/28/94
+         putdeq$TimeLastUsed$f (game$time) # JFR 7/28/94
+        } # end if take or fired guncode
+    else if (gun_flag[n] == $posit$guncode) # commence fire position 
+        {
+        if (id != gun_targ[n])
+            call fndord(gun_targ[n],ord$pointer)
+
+        if (ord$pointer == 0)
+            {
+            out = 1
+            }
+        else
+            {
+            ord$w04$c = xord$w04$c
+            ord$w05$c = xord$w05$c
+            target_lat = dms2rad(ord$w04$c)
+            target_long = dms2rad(ord$w05$c)
+            tarcos = cos(target_lat)
+            untlat = xunt$truelatitude$f
+            untlon = xunt$truelongitude$f
+            untcos = xunt$costruelat$f
+            call rll2rb(untlat,untlon,untcos,
+                        target_lat,target_long,tarcos,
+                        range,brng)
+            if (range > eqlist[4,n])
+                {
+                out = 2
+                }
+            else
+                {
+                p = 1.0
+                rangey = INT (range * $yds$per$Mile + 0.5)
+                tor$pointer = eqlist[2,n]
+                for (tor$ph$index = 1; tor$ph$index$ok; 
+                     tor$ph$index = tor$ph$index + 1)
+                    {
+                    if (rangey <= xtor$ph$range$i) break
+                    p = p - 0.1
+                    }
+
+                # AV - 4/23/93: Get number of remaining salvoes
+                DEQ$Pointer$To  eqlist[1,n]
+                # NOW check to see if the gun should fire with variable time step - JFR for VTS - 7/28/94
+                if (model$interval != 1.0) # JFR for VTS - 7/28/94
+                   { # check to see if we need to skip - JFR for VTS - 7/28/94
+                    TimeSinceFire = game$time - Xdeq$TimeLastUsed$f # JFR for VTS - 7/28/94
+                    if (TimeSinceFire < 1.0) Next # JFR for VTS - 7/28/94 (fire salvo minimum of minute apart)
+                   }
+                salvo_num = xDEQ$SalvoNumber$I
+                if (salvo_num > 0)
+                  {
+                    salvo_num = salvo_num - 1
+                    if (salvo_num == 0)       # time to stop firing
+                       out = 4
+                    putDEQ$SalvoNumber$I (salvo_num)
+                  }
+                
+                salvo = xtor$salvo$i
+                rounds = min(eqlist[3,n],(salvo*eqlist[5,n]))
+                eqlist[3,n] = eqlist[3,n] - rounds
+                if (eqlist[3,n] <= 0) 
+                    {
+                    out = 3
+                    }
+                iepus = INT ((xTOR$Weight$I * 0.01) + 0.5) * rounds
+
+
+                if (ALSP$Active == $yes)    # clk 10/93
+                  {
+                   nhits = rounds
+                   ORD$Start$I = xORD$Start$I        # clk 3/95
+                   if (Game$Minute == ORD$Start$I)   # Only send one ALSP msg
+                     {                               # with the total rounds
+                      alsp_rounds = salvo * (salvo_num + 1)
+                      UNT$TargetType$I = xUNT$TargetType$I
+
+                      call ALSP_Send_Posit_Engage (UNT$Pointer, $Gun$Code,
+                                                   TOR$Pointer, alsp_rounds,
+                                                   target_lat, target_long,
+                                                   UNT$TargetType$I)
+                     } # end of if this is the first time
+                  }
+                else
+                  {
+                   nhits = INT (p * rounds)
+
+                   rnd = random(x)
+                   if (p >= rnd)        # no intra emi degradation at this time
+                       pounds = xtor$weight$i * p * rounds    # for commence fire
+                   else                                       # at position
+                     {
+                       pounds = 0
+                       nhits = 0
+                     }
+
+                   if (trace$engage$gun != $no)
+                     {
+                       call echov(", ")
+                       call echoi(rounds)
+                       call echov(" rounds, Hit w/")
+                       call echoi(pounds)
+                       call echov(" lbs TNT")
+                     }
+                  }  # end of non-alsp processing of gun engagement against a posit
+
+                if (log$engage != $no) # if engagement log is desired
+                  {
+                   call Log_Posit_Eng (UNT$Pointer, TOR$Pointer,
+                                       target_lat, target_long,
+                                       INT(rangey/$yds$per$mile + 0.5),
+                                       nhits, rounds, iepus)
+                  } 
+
+                 # now store the time last used ---  JFR 7/28/94
+                 putdeq$TimeLastUsed$f (game$time) # JFR 7/28/94
+               }   # end of if a good position engagement
+            }   # end of if position engagement order not located
+        eqlist[5,n] = 0  # prevent auto mode from using this gun...
+        }   # end of if a position engagement
+    else # must be a commence fire target...
+        {
+        call gun_sights(unt$pointer,gun_targ[n],eqlist,n,rangey)  # added UNT
+        if (rangey < 0) 
+            {
+            out = abs(rangey)
+            }
+        else 
+            {                                   # commence firing at track :
+             # Get number of remaining salvoes   AV  4/21/93      
+             DEQ$Pointer$To  eqlist[1,n]
+             if (model$interval != 1.0) # JFR for VTS - 7/28/94
+                { # check to see if we need to skip - JFR for VTS - 7/28/94
+                 # NOW check to see if the gun should fire with variable time step - JFR for VTS - 7/28/94
+                 TimeSinceFire = game$time - Xdeq$TimeLastUsed$f # JFR for VTS - 7/28/94
+                 if (TimeSinceFire < 1.0) Next # JFR for VTS - 7/28/94 (fire salvo minimum of minute apart)
+                }
+             salvo_num = xDEQ$SalvoNumber$I
+             if(salvo_num > 0)
+                {
+                  salvo_num = salvo_num - 1
+                  if (salvo_num == 0)  out = 4       # time to stop firing
+                  putdeq$SalvoNumber$i (salvo_num)
+                }
+
+            call gun_fire(unt$pointer,gun_targ[n],eqlist,n,rangey)
+            if (eqlist[3,n] <= 0) 
+                {
+                out = 3
+                }
+             # now store the time last used ---  JFR 7/28/94
+             putdeq$TimeLastUsed$f (game$time) # JFR 7/28/94
+            }
+        eqlist[5,n] = 0  # prevent auto mode from using this gun...
+        }
+
+    if (out != 0)
+        {
+        ilen = 0
+        call smovhn(shooter,8,msgx,ilen)
+        call smovv (" terminating gunfire with ", msgx,ilen)
+        call smovhn(gun_name,8,msgx,ilen)
+        call smovv (" at ",msgx,ilen)
+        call smovhn(shootee,8,msgx,ilen)
+
+        call smovv(". ",msgx,ilen)
+
+        ilen_sav = ilen
+        if      (out == 1) call smovv("Track lost", msgx, ilen)
+        else if (out == 2) call smovv("Target outside range", msgx, ilen)
+        else if (out == 3) call smovv("All ammunition expended", msgx, ilen)
+        else if (out == 4) call smovv("All salvoes have been fired", msgx, ilen)            
+        call send_(unt$view$i,0,ilen,msgx)
+
+        gun_flag[n] = 0
+        gun_targ[n] = 0
+
+        call Clear_BTT_Info (UNT$Pointer)   # clk 7/95 (E1419)
+
+        # Clear attack
+        PUTunt$status$i ($proceeding$code)
+        PUTunt$AssignedTarget$i ($NO)
+        PUTunt$attackindx$i ($NO)
+
+        if (trace$engage$gun != $no)
+            {
+            call echov(", terminating- ")
+            call echoh(msgx[ilen_sav], ARB)
+            }
+        } # end if out of ammo/range/etc
+    }
+
+return
+end
+
+
+subroutine guneng(_                             #process surf/surf engagements
+                  unt$pointer,                  # receive unit pointer
+                  eqlist,                       # receive GUN data 
+                  nfound,                       # receive nbr of EQs
+                  Nraid,                        # receive target pointers
+                  ranges)                       # receive target ranges (yds)
+
+########################################################
+#$%
+#$% Purpose:   GUNENG processes Surface-to-surface
+#$%            engagements, computes number of
+#$%            hits, damage level, and weapon
+#$%            assets remaining.  Multiple en-
+#$%            gagements are also processed.
+#$%
+#$% Called By: ARTILL
+#$%
+#$% Calls:      (echo..)   (smov..)
+#$%             UPDATE_NAVAL_UNIT_BDA       GET_DSS_DATA
+#$%
+#$% Tables:    UNT        MC
+#$%            AML        DEQ
+#$%
+#$% Date:      APR 83
+#$%
+#$% Author:    Dana Wills
+#$%
+#$% Modified:  1/92 - Carol L. Kropp
+#$%            Added call to disengage when during
+#$%            gunfights between two surface vessels
+#$%            the target has at least 50% hull damage
+#$%            and is sinking.
+#$%
+#$%            10/93 - Carol L. Kropp
+#$%            Moved code to compute ph and process a
+#$%            hit to separate subroutines and added
+#$%            ALSP gun engagements against ghosted units.
+#$%
+#$%            Carol Kropp - 7/95 (E1419)
+#$%            Call process_gun_hit for all gun engagements
+#$%            (which will log the engagement).
+#$%
+#$%            Carol Kropp - 10/95 (E1455)
+#$%            When the target is a "shared" base, an ALSP
+#$%            interaction message needs to be sent as well
+#$%            as damage assessment to the RESA version of
+#$%            the base.
+#$%
+#$%            JFR - 12/95 (E1104)
+#$%            Added code to handle BDA along with 8 BDA 
+#$%            specific variables.
+#$%
+#$%            Susan Miller - 12/97 (E1697)
+#$%            Increased size of BDA_list to hold target
+#$%            UNT2$pointer and DEQ$Pointer$Index
+#$%            Added 2 update_naval_unit_bda parameters to 
+#$%            indicate whether damage is deferred. 
+#$%
+########################################################
+BBcommon
+ENcommon
+
+literal         ixname
+Literal         BDA_class
+LITERAL  UNT$Name$C,UNT2$Name$C, CSTRIP8          # jb  E2145 6/27/00
+real*4          ph, rnd, BDA_Dam 
+Real    X, RANDOM, TIMESINCEFIRE                  # jb E2145  6/26/00
+integer         eqlist[5,ARB], nfound
+integer         nraid[ARB], ranges[ARB], i, j, RangeY
+integer         raid_gun[ARB,30],gun_nr[30],raid_ng[ARB],max_raid,simul
+integer*4       rounds,old_target,temp,ptr
+integer         SHC$Pointer
+integer*4       BDA_list[30,5], BDA_weaps       # parameters to process_gun_hit
+integer*4       BDA_tracknumber, BDA_Result_code 
+integer*4       BDA_nbr_fired, BDA_Gunhits
+Integer NX,NFIRE,IPH,NHITS,BDA_CLASSID,         # jb E2145  6/26/00
+    UNT$Pointer, UNT$View$I,                    # jb E2145  6/26/00
+    TOR$Pointer, DEQ$Pointer, UNT2$Pointer      # jb E2145  6/26/00
+
+if ( (trace$engage$exe != $no | trace$engage$gun != $no) & nraid[1] != 0)
+   {
+    call echor
+    call echov ("!-Skunks:")
+    for (nx=1; nx<=ARB; nx=nx+1)
+        {
+         if (nraid[nx]==0) break
+         call echo  ($space)
+         unt2$pointer = nraid[nx]
+         unt2$name$c = xunt2$name$c
+         if (unt2$name$c != 0)  call echohn (unt2$name$c,$$MaxLit)
+         else                   call echoi (unt2$pointer$index)
+         call echov ("@")
+         call echoi (ranges[nx]*$Yds$Per$Mile)
+         call echov (" yds")
+        }
+   }
+
+for (i = 1 ; i <= 30 ; i = i + 1)
+    {
+     for (j = 1 ; j <= 5 ; j = j + 1)   # SMM 12/97 (E1697)
+         {
+          bda_list[i,j] = 0 # init the BDA temporary arrays - JFR (E1104)
+         }
+    }
+
+unt$view$i = xunt$view$i                    # initialize pointers and 
+unt$name$c = xunt$name$c                    # variables for messages 
+old_target = 0
+
+for (i = 1; nraid[i] != 0; i = i + 1)
+  for (j = 1; j <= nfound; j = j + 1)
+    raid_gun[i,j] = $No
+
+max_raid = i - 1
+
+if (max_raid == 0) RETURN
+
+for (j = 1; j <= 30; j = j + 1)
+  gun_nr[j] = 0
+
+for (i = 1; i <= max_raid; i = i + 1)
+  raid_ng[i] = 0
+
+for (i = 1; i <= max_raid; i = i + 1) # make sure each target has a gun on it
+  {
+   for (j = 1; j <= nfound; j = j + 1)
+     if ((ranges[i] <= eqlist[4,j]) & (eqlist[5,j] > gun_nr[j]))
+       {
+        raid_gun[i,j] = $yes
+        gun_nr[j] = gun_nr[j] + 1
+        raid_ng[i] = raid_ng[i] + 1
+        BREAK
+       }
+  }
+
+for (j = 1; j <= nfound; j = j + 1) # make sure each gun has a target
+  {
+   temp = 99999
+   if (eqlist[5,j] == 0 | gun_nr[j] != 0) NEXT # can't fire; has target already
+
+   ptr = 0
+   for (i = 1; i <= max_raid; i = i + 1)
+     {
+     if (ranges[i] <= eqlist[4,j] & raid_ng[i] < temp) # find least covered 
+       {                                               # target...
+        temp = raid_ng[i]
+        ptr = i
+       }
+     }
+
+   gun_nr[j] = gun_nr[j] + 1
+
+   if (ptr != 0)
+     {
+     raid_gun[ptr,j] = $yes
+     raid_ng[ptr] = raid_ng[ptr] + 1
+     }
+  }
+
+old_target = 0
+
+bda_weaps = 0 # init for nbr of DSS entries - JFR (E1104)
+for (i=1; i <= max_raid; i = i + 1)
+  {
+   for (j=1; j <= nfound; j = j + 1)
+     {
+      if (raid_gun[i,j] == $no) NEXT
+
+      unt2$pointer = nraid[i]
+      tor$pointer = eqlist[2,j]           # set TOR (gun) pointer
+
+      if (eqlist[3,j] <= 0 | eqlist[5,j] <= 0) # no shells or ability to shoot
+        next
+
+      # NOW check to see if the gun should fire with variable time step - JFR for VTS - 7/28/94
+      if (model$interval != 1.0) # JFR for VTS - 7/28/94
+         { # check to see if we need to skip - JFR for VTS - 7/28/94
+          DEQ$Pointer$To Eqlist[1,j] # JFR for VTS - 7/28/94 (get pointer)
+          TimeSinceFire = game$time - Xdeq$TimeLastUsed$f # JFR for VTS - 7/28/94
+          if (TimeSinceFire < 1.0) Next # JFR for VTS - 7/28/94 (fire salvo minimum of minute apart)
+         } # JFR for VTS - 7/28/94
+
+      PUTunt$engagestatus$i ($engaging$code)      # set engage status
+      PUTunt2$UnderAttack$i ($YES)                # set under attack to YES
+
+      nfire = Xtor$Salvo$i                        # number to fire 
+      simul = eqlist[5,j] / gun_nr[j]
+      rounds = min(eqlist[3,j],nfire*simul)
+
+      gun_nr[j] = gun_nr[j] - 1
+
+      eqlist[3,j] = eqlist[3,j] - rounds
+      eqlist[5,j] = eqlist[5,j] - simul
+
+      # now store the time last used ---  JFR 7/28/94
+      putdeq$TimeLastUsed$f (game$time) # JFR 7/28/94
+
+      RangeY = ranges[i] * $Yds$Per$Mile
+
+      if (xUNT2$GhostedUnit$I == $yes)   # if target is a ghost
+        {                                # clk 10/93
+         if (ALSP$Active == $yes & (xUNT2$ALSPid$I != 0))
+           {
+            call ALSP_Send_Gun_Engage (UNT$Pointer, TOR$Pointer,
+                                       UNT2$Pointer, rounds,
+                                       xUNT$TargetType$I)
+            call Log_ALSP_Engagement_engdata (unt$pointer,unt2$pointer, 
+                                           xTOR$Type$C,
+                                           rangey, rounds)
+            next
+           }
+        }
+      else if (xUNT2$Type$I == $ShoreBase$Code)    # clk 10/95 (E1455)
+        {
+         SHC$Pointer = xUNT2$SHCpntr$I
+         if (xSHC$ALSPSharedBase$I == $yes & ALSP$Active == $yes)
+           {
+            call ALSP_Send_Gun_Engage (UNT$Pointer, TOR$Pointer,
+                                       UNT2$Pointer, rounds,
+                                       xUNT$TargetType$I)
+            call Log_ALSP_Engagement_engdata (unt$pointer,unt2$pointer, 
+                                           xTOR$Type$C,
+                                           rangey, rounds)
+           }
+        }
+
+      call Calculate_Gun_Ph (UNT2$Pointer, TOR$Pointer,
+                             RangeY, ph)
+
+      if (trace$engage$exe != $no | trace$engage$gun != $no)
+        {
+         call echor
+         call echov ("! Gun Fire....")
+ 
+         call echov (" w/")
+         call echohn (Xtor$Type$c,$$MaxLit)
+         call echov ("   ")
+         unt2$pointer = nraid[i]
+         ixname = xunt2$name$c
+         if (ixname != 0) call echohn (ixname,$$MaxLit)
+         else             call echoi(unt2$pointer$index)
+         call echov (" (@")
+         call echoi (rangey)
+         call echov (" yds, Ph=")
+         iph = ph * 100 + .5
+         call echoi (iph)
+         call echov (") ")
+        }
+
+      #______________________________________________________________
+      # determine how many hit
+      NHITS = 0
+      DEQ$Pointer$To  eqlist[1,j]
+
+      rnd = random(x)
+      if (ph >= rnd)                    # if hit
+        {
+         if (trace$engage$exe != $no | trace$engage$gun != $no)
+            call echoV ('*')            # jb E2144  (echoV) 8/2/00
+        }
+      else
+        {
+         if (trace$engage$exe != $no | trace$engage$gun != $no)
+            call echoV ('.')            # jb E2144  (echoV) 8/2/00
+         rounds = 0
+        }
+
+      call Process_Gun_Hit (UNT$Pointer, UNT2$Pointer, TOR$Pointer,
+                            DEQ$Pointer, rangey, rnd, rounds, ph, nhits,
+                            BDA_Weaps, BDA_List)
+
+     }                                            
+  }
+
+# if damaged unit is an aircraft then skip this since the
+# update_destroyed_aircraft routine takes care of this BDA
+if (xUNT2$type$I == $air$code) return
+
+# if attacker unit is a cruise missile then skip this since
+# BDA is not performed for cruise missiles unless it is a victim
+# in which case update_destroyed_aircraft takes care of it
+if (xUNT$type$I == $cruisemissile$code) return
+
+# now cycle through the weapons list to generate DSS entry for
+# each type of gun JFR (E1104)
+
+for (i = 1 ; i <= bda_weaps ; i = i + 1)
+    {
+     TOR$Pointer = BDA_list[i,1]    
+     BDA_Gunhits = BDA_list[i,3]    
+     UNT2$Pointer = BDA_list[i,4]  # SMM 12/97 (E1697)
+
+     # now get the values for input to update routine 
+     BDA_NBR_FIRED = BDA_list[i,2] # get nbr of bombs fired
+     BDA_Result_Code = $DamagedByGunfire$Code
+
+     if (BDA_GunHits > 0)  # if guns actually hit the target SMM 1/96 (E1104)
+        {
+         call GET_DSS_DATA(UNT2$POINTER,    # send damaged unit pointer
+                       UNT$Pointer,     # send attacking unit pointer
+                       BDA_GunHits,     # send warhead weight
+                       BDA_Result_code, # receive damage result
+                       BDA_Dam,         # receive hull damage from DSS table
+                       BDA_TrackNumber, # receive tracknumber
+                       BDA_Class,       # receive classification
+                       BDA_ClassID)     # receive trackcode for display
+
+         #$% Enter data into the DSS table.  
+         call Update_Naval_unit_BDA(UNT2$Pointer,  
+                                UNT$Pointer,   
+                                $DestroyedbyGunfire$Code,
+                                BDA_Result_code, 
+                                BDA_Dam,
+                                BDA_TrackNumber,
+                                BDA_Class,
+                                BDA_ClassID,
+                                BDA_Nbr_Fired,
+                                xTOR$Type$C,
+                                $no, 0.0) # no deferred time SMM 12/97 (E1697)
+        }               #  jb E2208 (0.0 vice $NO)    9/27/00          
+    }
+
+return
+end                     # end of GUNENG
+
+
+subroutine Msg_Observe_Gun (unt$pointer, unt2$pointer)       # clk 1/92
+
+########################################################
+#$%
+#$% Purpose:   Msg_Observe_Gun provides one message per cycle
+#$%
+#$% Called By: Process_Gun_Hit 
+#$%
+#$% Calls:     target_name     smov..      send
+#$%
+#$% Tables:    UNT       
+#$%
+#$% Date:      JAN 90
+#$%
+#$% Author:    Dana Wills
+#$%
+#$% Modified:  1/92 - Carol L. Kropp
+#$%            Changed the second parameter to the UNT
+#$%            pointer of the target rather than just the
+#$%            target name to be able to extract data &
+#$%            added additional battle damage assessment
+#$%            information output for vessel gunfights.
+#$%
+########################################################
+bbcommon
+
+define ($MaxArray,50)
+
+literal     target, targets[$MaxArray]
+literal     target_name                           # literal function   1/92 clk
+LITERAL CSTRIP8                                # jb  E2145   6/27/00
+Integer     N, ILEN                         # jb E2145  6/26/00
+integer     unt$pointer, unt2$pointer             # added unt2$pointer 1/92 clk
+integer     unt$view$i, ilast, last_minute        # added unt$view     1/92 clk
+integer     units[$MaxArray]
+character msg[ARB]
+
+            #01234567890123456789012345678901234567890123456789012
+#string msg1 "XXXXX observes gunfire hit on XXXXX"
+#       msg2 "XXXXX observes gunfire hit on XXXXX - target on fire"   # clk 1/92
+#       msg3 "XXXXX observes gunfire hit on XXXXX - target sinking"   # clk 1/92
+
+# initialize variables  SMM 2/95
+last_minute = 0
+target = $BLANKLIT
+
+if (game$Minute != last_minute )
+    {
+    last_minute = Game$minute
+    ilast = 0    
+    }
+
+for (n = 1; n <= ilast; n=n+1)
+    {
+    if (unt$pointer != units[n]) next
+    if (target != targets[n]) next
+
+    return          # already sent a message this cycle
+    }
+
+target = target_name (unt$pointer, unt2$pointer$index)     # clk 1/92
+UNT$View$I = xUNT$View$I                                   # clk 1/92
+
+ilen = 0
+call smovhn(Xunt$name$c,$$MaxLit,msg,ilen)
+Call SMOVV(" observes gunfire hit on ",msg,ilen)
+call smovhn(target,$$MaxLit,msg,ilen)
+
+#$% Additional battle damage assessment (BDA) added
+#$% for gunfights between two surface vessels              # clk 1/92
+if (xUNT$Type$I == $Surface$Code  &  xUNT2$Type$I == $Surface$Code)
+  {
+   if (xUNT2$HullDamage$F >= 0.50)    # if the hull is 50% or more damaged,
+     {                                # provide additional BDA
+      if (xUNT2$Status$I == $Sinking$Code)  # if the target is sinking
+        call smovv (" - target sinking", msg, ilen)
+      else
+        call smovv (" - target on fire", msg, ilen)
+     }
+  }
+
+call send_(unt$View$i,0,ilen,msg) 
+
+# now, store it to remember 
+
+if (ilast < $MaxArray)
+    {
+    ilast = ilast + 1
+    units[ilast] = unt$pointer
+    targets[ilast] = target
+    }
+
+end                     
+
+
+subroutine Msg_receive_gun (unt$pointer)
+
+########################################################
+#$%
+#$% Purpose:   Msg_Receive_Gun provides one message per cycle
+#$%
+#$% Called By: ??
+#$%
+#$% Tables:    UNT       
+#$%
+#$% Date:      JAN 90
+#$%
+#$% Author:    Dana Wills
+#$%
+########################################################
+bbcommon
+
+define ($MaxArray,50)
+
+LITERAL CSTRIP8                                # jb  E2145   6/27/00
+integer     unt$pointer, ilast, last_minute
+integer     units[$MaxArray]
+Integer     N, ILEN                         # jb E2145  6/26/00
+
+character msg[ARB]
+
+            #012345678901234567890123456789012345
+#string msg1 "XXXXX receiving gunfire hits"          # 28 bytes long
+
+last_minute = 0
+
+if (game$minute != last_minute )
+    {
+    last_minute = Game$minute
+    ilast = 0    
+    }
+
+for (n = 1; n <= ilast; n=n+1)
+    {
+    if (unt$pointer != units[n]) next
+
+    return          # already sent a message this cycle
+    }
+
+ilen = 0
+call smovhn(Xunt$name$c,$$MaxLit,msg,ilen)
+Call SMOVV(" receiving gunfire hits",msg,ilen)
+call send_(Xunt$View$i,0,ilen,msg) # 1/24/91 hdf
+
+# now, store it to remember 
+
+if (ilast < $MaxArray)
+    {
+    ilast = ilast + 1
+    units[ilast] = unt$pointer
+    }
+
+end                     
+
+
+subroutine get_skunks (unt$pointer,     #get MLIMIT targets within MRANGE
+                       mrange,          # get max range
+                       mlimit,          # get engagement limit
+                       Nraid,           # return target pointers
+                       ranges)          # return target ranges (miles)
+
+########################################################
+#$%
+#$% Purpose:   GET_skunks generates a list of acceptable
+#$%            targets and ranges as a function of
+#$%            available GUN weapons (Range/Limit).
+#$%
+#$% Called By: ARTILL 
+#$%
+#$% Calls:     GETLCL_ACT    CKROE      
+#$%
+#$% Tables:    UNT        LCL
+#$%
+#$% Date:      APR 83
+#$%
+#$% Author:    Dana Wills
+#$%
+########################################################
+bbcommon
+
+REAL X,RANDOM, LCL$Range$F                          # jb E2145  6/26/00
+Integer N,II,IEQ,ILOSE,INDX,IPNT,ISTAT,JSTAT,       # jb E2145  6/26/00
+    LARGST,MRANGE,NEQTOT,MULT,NCOUNT,MLIMIT,        # jb E2145  6/26/00
+    UNT$Pointer,UNT$View$I,UNT$Type$I,              # jb E2145  6/26/00
+    LCL$Pointer,LCL$Nextindx$I,LCL$Class$I,         # jb E2145  6/26/00
+    LCL$Detectee$I,LCL$Targetid$I,                  # jb E2145  6/26/00
+    UNT2$Pointer,UNT2$Type$I,UNT2$Truealtdepth$I    # jb E2145  6/26/00
+integer NRAID[ARB],RANGES[ARB]
+logical sub_surfaced
+
+indx = unt$pointer$index
+ieq = mlimit + 1
+ncount = 0
+for (n=1; n<= ieq; n=n+1) nraid[n] = 0          # for each target entry
+
+unt$view$i = Xunt$view$i                        # get view
+unt$type$i = Xunt$type$i                        # get type
+
+if (unt$view$i == $Neutral$view) return         # if view is Neutral, return
+
+for (lcl$NextIndx$i = Xunt$FirstLCLIndx$i; lcl$NextIndx$i != 0; ) # each entry
+   {
+    lcl$pointer$to lcl$NextIndx$i                       # get next index
+    lcl$NextIndx$i = Xlcl$NextIndx$i
+
+    if (xlcl$inuse$i == 0) next                         # slot not in use......
+
+    if ((xlcl$detectionType$i != $ActiveNonVisual$code &
+         xlcl$detectionType$i != $ActiveVisual$code)   |  # not active....
+        (xlcl$tmaflag$i == $yes))    next                   # DEW 1/11/90
+
+    if (xlcl$LastDetTime$f < game$time) next          # not current....
+
+    lcl$Class$i = Xlcl$Class$i 
+      
+    lcl$detectee$i = xlcl$detectee$i
+    lcl$targetid$i = Xlcl$targetid$i
+
+    unt2$pointer$to lcl$detectee$i
+    unt2$type$i = xunt2$type$i
+                                                        # submerged sub
+    if ((unt2$type$i == $sub$code & !sub_surfaced(unt2$pointer)) |
+        unt2$type$i == $cruisemissile$code)
+      next
+
+    if(Xunt2$Status$i == $BeingDeleted$code) next
+
+    jstat = $no                                 # check for already on list of
+    for (n=1; n<=ncount; n=n+1)                 # targets selected
+       {
+        if (nraid[n] != unt2$pointer) next      # if not same target
+        jstat = $yes
+        break
+       }
+    if (jstat == $yes) next                     # on list.... skip it
+
+    lcl$Range$F = xlcl$Range$F 
+    if (unt2$type$i == $air$code & unt$type$i != $air$code) 
+      {
+       unt2$truealtdepth$i = xunt2$truealtdepth$i
+       if (unt2$truealtdepth$i >= (6 * lcl$range$f * $Yds$per$Mile)) NEXT
+       lcl$range$f = lcl$range$f / abs(cos(atan(unt2$truealtdepth$i/(3*$yds$per$mile*lcl$range$f))))
+      }
+
+    if (lcl$Range$F*$Yds$Per$Mile > mrange) next # if greater than Max Range
+        call ckroe (unt$pointer,                 # check DET model ROE select
+                lcl$pointer,
+                istat)
+
+#$% Alex Vagus - 4/28/93
+#$% H1034 - Remove the automatic return of gunfire.
+#    unt2$assignedTarget$i = Xunt2$assignedTarget$i      # get assigned target
+#
+#    if (unt2$assignedTarget$i == indx & istat >= 0)     # if object firing at
+#                        # unit AND unit might shoot back...# jb 3/17/86
+#        { continue }            # ... allow return fire..
+#    else if (istat == $yes)                     # if within ROE
+
+    if (istat == $yes)                     # if within ROE
+       {
+        continue
+       }
+    else next
+
+    ipnt = ncount + 1
+    for (n=1; n <= ncount; n=n+1)               # find correct slot
+       {
+        if (ranges[n] <= lcl$Range$F +0.5) next
+        ipnt = n
+        break
+       }
+
+    ncount = ncount + 1                         # increment target counter
+    for (n = ncount; n>ipnt; n=n-1)             # shift targets right
+       {
+        nraid[n] = nraid[n-1]
+        ranges[n] = ranges[n-1]
+       }
+
+    nraid[ipnt] = unt2$pointer                  # insert new entry
+    ranges[ipnt] = lcl$Range$F +0.5
+
+ #### The following scheme gives uniform probability of selection
+ #### whenever there is no clear-cut choice because of a tie.
+
+    if (ncount > mlimit)                        # if one has to be discarded
+       {
+        if (ipnt < ieq)  ieq = ieq + 1
+
+        if (ranges[ncount] == ranges[mlimit])   # if bumped value is in tie
+           {
+            if (ieq > mlimit)                   # if string of largest needs
+               {                                #          to be identified
+                ieq = mlimit
+                largst = ranges[mlimit]
+                neqtot = 2
+
+                for (ii=mlimit-1;ii>=1;ii=ii-1)     # work backwards
+                   {
+                    if (ranges[ii] < largst) break  # until range is smaller
+                    ieq = ii                        # pointer to first of tied
+                    neqtot = neqtot + 1             # number tied for largest
+                   }
+               }
+            else if (ranges[ipnt] == ranges[ieq]) # else if new one in tie
+                neqtot = neqtot + 1             # add one to total with value
+
+            if (ipnt != ncount)                 # if new entry not tied for
+                mult = mlimit - ipnt + 2        #                    largest
+            else
+                mult = neqtot
+
+            ilose = ieq + int(mult*random(x))   # randomly selected loser
+
+            if (ilose <= mlimit)                # if bumped value is not loser
+               {
+                nraid[ilose] = nraid[ncount]    # overwrite loser with
+                ranges[ilose] = ranges[ncount]  #            bumped data
+               }
+           }
+
+        ncount = mlimit                         # number of good entries
+       }
+   }
+
+nraid[ncount+1] = 0                             # clear extra name
+
+return
+end             # end of get_skunks
+
+
+
+literal function target_name(unt$pointer,target_indx)
+BBcommon
+
+LITERAL  VUE$Trackcode$C, CSTRIP,CSTRIP8   # jb  E2145   6/27/00
+literal name
+integer target_indx,lastrmt
+Integer UNT$Pointer,UNT$View$I,         # jb E2145  6/26/00
+    RMT$Pointer,RMT$Detectiontype$I,    # jb E2145  6/26/00
+    RMT$Class$I,RMT$Tracknumber$I,      # jb E2145  6/26/00
+    UNT2$Pointer,  VUE$Pointer          # jb E2145  6/26/00
+
+name = $BLANKLIT
+
+unt2$pointer$to target_indx
+if (xunt2$type$I == $shorebase$code)
+    name = xunt2$name$c
+else 
+    {
+    unt$view$i = xunt$view$I
+    vue$pointer$to unt$view$i
+    rmt$pointer$to xvue$lastrmtindx$i
+    lastrmt = rmt$Pointer
+    for (rmt$pointer$to xvue$firstrmtindx$i; 
+         rmt$Pointer <= lastrmt; rmt$Pointer$Next)
+        {
+        if (xrmt$detectee$i == target_indx)
+            {
+            rmt$detectiontype$i = xrmt$detectiontype$i
+            if ((rmt$detectiontype$i == $ActiveVisual$Code |
+                 rmt$detectiontype$i == $ActiveNonVisual$Code) &
+                (xrmt$tmaflag$i != $yes))    
+                {
+                BREAK
+                }
+            }
+        }
+    vue$trackCode$c = xvue$trackcode$c
+    rmt$class$i = xrmt$class$i
+    rmt$tracknumber$i = xrmt$tracknumber$i
+    call TRKNUM(vue$TrackCode$C,rmt$detectiontype$i,
+                rmt$Class$i,RMT$TrackNumber$i,name)
+    }
+
+target_name = name
+
+return
+end
+
+
+subroutine gun_sights(unt$pointer,target,eqlist,n,rangey)
+
+BBcommon
+real*4     untlat,untlon,untcos,
+           tarlat,tarlon,tarcos,
+           brng,range
+integer*4  target,eqlist[5,30],rangey,n,            # jb E2145  6/26/00
+    UNT$Pointer,UNT$Type$I,                         # jb E2145  6/26/00
+    UNT2$Pointer,UNT2$Type$I,UNT2$Truealtdepth$I,   # jb E2145  6/26/00
+    LCL$Pointer,LCL$Nextindx$I,LCL$Detectiontype$I  # jb E2145  6/26/00
+logical    found,sub_surfaced
+
+# 
+# UNT  is the one shooting
+# UNT2 is the target
+# RANGEY is the range in yards to the target or a flag indicating if the
+#        target is in sight
+#           -1 => Track Lost (or never held)
+#           -2 => Out of Range
+#
+
+rangey = -1
+unt2$pointer$to target
+unt2$type$i = xunt2$type$i
+unt$type$i  = xunt$type$i
+
+if (unt2$type$i != $shorebase$code)
+    {
+    for (lcl$NextIndx$i = Xunt$FirstLCLIndx$i; lcl$NextIndx$i != 0; ) 
+        {
+        lcl$pointer$to lcl$NextIndx$i                  # get next index
+        lcl$NextIndx$i = Xlcl$NextIndx$i
+        if (xlcl$inuse$i == 0) NEXT                    # slot not in use......
+        if (Xlcl$detectee$i != target) NEXT
+        lcl$detectiontype$i = xlcl$detectiontype$i
+        if ((lcl$detectionType$i != $ActiveNonVisual$code &
+             lcl$detectionType$i != $ActiveVisual$code)   |
+            (xlcl$tmaflag$i == $yes))    next   
+
+        found = (xlcl$LastDetTime$f >= game$time) 
+
+        break
+        }
+
+    if (!found) return
+    }
+
+rangey = -2
+if (unt2$type$i == $sub$code & !sub_surfaced(unt2$pointer)) RETURN
+
+if (Xunt2$Status$i == $BeingDeleted$code) RETURN
+
+untlat = xunt$truelatitude$f
+untlon = xunt$truelongitude$f
+untcos = xunt$costruelat$f
+
+tarlat = xunt2$truelatitude$f
+tarlon = xunt2$truelongitude$f
+tarcos = xunt2$costruelat$f
+
+call rll2rb(untlat,untlon,untcos,
+            tarlat,tarlon,tarcos,
+            range,brng)
+
+if (unt2$type$i == $air$code & unt$type$i != $air$code)
+    {
+    unt2$truealtdepth$i = xunt2$truealtdepth$i
+    if (unt2$truealtdepth$i >= (6 * range * $Yds$per$Mile)) 
+        {
+        RETURN
+        }
+
+    range = range / abs(cos(atan(unt2$truealtdepth$i/(3*$yds$per$Mile*range))))
+    }    
+
+if(!(Xunt$useguns$i == $YES & range <= Xunt$TrueSpeed$F/60.0)) # jb  7/26/89
+    {
+    if (range >= eqlist[4,n]) RETURN                        # jb    7/26/89
+    rangey = int(range * $Yds$Per$Mile)                     # jb    7/26/89
+    }
+else                                                       # jb    7/26/89
+    {
+    rangey = int(range * $Yds$Per$Mile / 3.0)               # jb    7/26/89
+    }
+
+return
+end
+
+
+subroutine gun_fire(unt$pointer,gtarget,eqlist,n,rangey)
+
+#
+# Fire one gun at the target
+#
+# Send messages to both UNTs when hit(s) recorded
+#
+#$% Modified:  1/92 - Carol L. Kropp
+#$%            Added call to disengage when during
+#$%            gunfights between two surface vessels
+#$%            the target has at least 50% hull damage
+#$%            and is sinking.
+#$%
+#$%            10/93 - Carol L. Kropp
+#$%            Moved code to compute ph and process a
+#$%            hit to separate subroutines and added
+#$%            ALSP gun engagements against ghosted units.
+#$%
+#$%            Carol Kropp - 7/95 (E1419)
+#$%            
+#$%            JFR - 12/95 (E1104)
+#$%            Added code to handle BDA along with 7 
+#$%            BDA specific variables.
+#$%
+#$%            Susan Miller - 12/97 (E1697)
+#$%            Increased size of BDA_list to hold target
+#$%            UNT2$Pointer and DEQ$Pointer$index.
+#$%            Added 2 update_naval_unit_bda parameters to 
+#$%            indicate whether damage is deferred. 
+
+BBcommon
+ENcommon
+
+Literal    BDA_class
+LITERAL CSTRIP8                                # jb  E2145   6/27/00
+real*4     p,rnd
+REAL    X, RANDOM                       # jb E2145  6/26/00
+real    BDA_DAM
+integer*4  gtarget,eqlist[5,30],n,rangey, rounds, pounds
+integer*4       BDA_list[30,5], BDA_weaps     # parameters to process_gun_hit
+integer*4       BDA_tracknumber, BDA_Result_code 
+integer*4       BDA_nbr_fired, BDA_Gunhits
+Integer I, J, BDA_CLASSID,
+    UNT$Pointer, UNT2$Pointer,      # jb E2145  6/26/00
+    TOR$Pointer, DEQ$Pointer        # jb E2145  6/26/00
+                #0123456789012345678901234567890
+# string     msg1 "XXXXX observes gunfire hit on XXXXX"
+# string     msg2 "XXXXX receiving gunfire hits"
+
+for (i = 1 ; i <= 30 ; i = i + 1)
+    {
+     for (j = 1 ; j <= 5 ; j = j + 1)  # SMM 12/97 (E1697)
+         {
+          bda_list[i,j] = 0 # init the BDA temporary arrays - JFR (E1104)
+         }
+    }
+
+unt2$pointer$to gtarget
+tor$pointer = eqlist[2,n]
+
+rounds = min(eqlist[3,n],(xtor$salvo$i * eqlist[5,n]))
+eqlist[3,n] = eqlist[3,n] - rounds
+
+if (xUNT2$GhostedUnit$I == $yes)   # if target is a ghost
+  {                                # clk 10/93
+   if (ALSP$Active == $yes & (xUNT2$ALSPid$I != 0))
+     {
+      call ALSP_Send_Gun_Engage (UNT$Pointer, TOR$Pointer,
+                                 UNT2$Pointer, rounds,
+                                 xUNT$TargetType$I)
+      call Log_ALSP_Engagement_engdata (unt$pointer,unt2$pointer, 
+                                     xTOR$Type$C,
+                                     rangey, rounds)
+      return
+     }
+  }
+
+call Calculate_Gun_Ph (UNT2$Pointer, TOR$Pointer, rangey, p)
+
+if (trace$engage$gun != $no)
+  {
+   call echov(", ")
+   call echoi(rounds)
+   call echov(" rounds")
+  }
+
+rnd = random(x)
+IF  (p >= Rnd)      # a hit is scored
+  {
+   DEQ$Pointer$To Eqlist[1,n]
+   if ((xUNT$Type$I == $Surface$Code  &  xUNT2$Type$I == $Surface$Code)  &
+       (xUNT2$HullDamage$F >= 0.50  &  xUNT2$Status$I == $Sinking$Code))
+     gtarget = 0         # remove the target from the gun_targ list
+  }
+else
+   rounds = 0 
+
+bda_weaps = 0 # init for nbr of DSS entries - JFR (E1104)
+call Process_Gun_Hit (UNT$Pointer, UNT2$Pointer,
+                      TOR$Pointer, DEQ$Pointer,
+                      rangey, rnd, rounds, p, pounds,
+                      BDA_Weaps, BDA_List)
+# now cycle through the weapons list to generate DSS entry for
+#  each type of bomb
+for (i = 1 ; i <= BDA_weaps ; i = i + 1)
+    {
+     TOR$Pointer = BDA_list[i,1]    
+     BDA_Gunhits = BDA_list[i,3]    
+     UNT2$Pointer = BDA_list[i,4]  # SMM 12/97 (E1697)
+
+     # now get the values for input to update routine 
+     BDA_Nbr_Fired = BDA_list[i,2] # get nbr of bombs fired
+     BDA_Result_Code = $DamagedByGunfire$Code
+
+     if (BDA_GunHits > 0)  # if guns actually hit the target SMM 1/96 (E1104)
+        {
+         call GET_DSS_DATA(UNT2$Pointer,    # send damaged unit pointer
+                       UNT$Pointer,     # send attacking unit pointer 
+                       BDA_GunHits,     # send warhead weight
+                       BDA_Result_code, # receive damage result
+                       BDA_Dam,         # receive hull damage from DSS table
+                       BDA_TrackNumber, # receive tracknumber
+                       BDA_Class,       # receive classification
+                       BDA_ClassID)     # receive trackcode for display
+
+         #$% Enter data into the DSS table.  
+         call Update_Naval_unit_BDA(UNT2$Pointer,  
+                                UNT$Pointer,   
+                                $DestroyedbyGunfire$Code,
+                                BDA_Result_code,         
+                                BDA_Dam,                 
+                                BDA_TrackNumber,         
+                                BDA_Class,               
+                                BDA_ClassID,           
+                                BDA_Nbr_Fired,         
+                                xTOR$Type$C,
+                                $no, 0.0) # no deferred time SMM 12/97 (E1697)
+        }               # jb E2208   0.0 vice $NO   9/27/00
+    }
+
+return
+end
+
+
+
+subroutine disengage (UNT$pointer,     # input - UNT pointer to attcker
+                      UNT2$pointer)    # input - UNT pointer to target
+########################################################
+#$%
+#$% Purpose:   During gun fights between two surface
+#$%            vessels, if the target has 50% or more
+#$%            hull damage and has a status code of
+#$%            sinking the gunfight will disengage
+#$%            automatically.
+#$%
+#$% Called By: gun_targets
+#$%
+#$% Calls:     exptst          target_name
+#$%            smov..          send
+#$%
+#$% Tables:    UNT             DEQ
+#$%
+#$% Date:      January 1992
+#$%
+#$% Author:    Carol L. Kropp
+#$%
+########################################################
+BBcommon
+
+literal    target_name, target
+LITERAL CSTRIP8                                # jb  E2145   6/27/00
+integer  UNT$Pointer, UNT2$Pointer
+integer    DEQ$Pointer
+integer    DEQ2$Pointer, DEQ2$Ident$I
+integer    isexp, msg_len
+
+character  msg[ARB]
+
+  #$% First deplete all of the targets expendables
+  FOR_DEQ2_CHAIN
+    {
+     DEQ2$Ident$I = xDEQ2$Ident$I
+     call exptst (DEQ2$Ident$I, isexp)   # check if equipment is expendable
+     if (isexp == $no)        # if equipment is not expendable - next entry
+       next
+     putDEQ2$Remaining$I (0)
+    }
+
+  msg_len = 0
+  target = target_name (UNT$Pointer, UNT2$Pointer$Index)
+
+  #$% Second set the EngageStatus to $EngagementOver$Code
+  #$% and if the attackers ROE isn't weapons tight make it so 
+  #$% otherwise, deassign the attackers guns for the target
+  putUNT$EngageStatus$I  ($EngagementOver$Code)
+  if (xUNT$RulesOfEngage$I != $IfAttacked$Code)
+    {
+     putUNT$RulesOfEngage$I  ($IfAttacked$Code)
+
+     #$% Send a message indicating gunfire has been terminated
+     call smovhn (xUNT$Name$C, $$MaxLit, msg, msg_len)
+     call smovv  (" terminating gunfire at ", msg, msg_len)
+     call smovhn (target, $$MaxLit, msg, msg_len)
+     call smovv  (" - target sinking", msg, msg_len)
+     call send_   (xUNT$View$i, 0, msg_len, msg) 
+    }
+  else   # for each gun terminate gunfire between the attacker and the target
+    {
+     FOR_DEQ_CHAIN
+       {
+        if (xDEQ$Ident$I != $Gun$Code)   # if equipment isn't a gun - next
+          next
+
+        if (xDEQ$GunTarget$I != UNT2$Pointer$Index)  # if not the target in question
+          next
+
+        putDEQ$GunTarget$I (0)        # deassign the target for the gun
+#        putDEQ$GunFlag$I   (0)        # deassign the gun flag code
+        putDEQ$GunFlag$I   ($fired$guncode)        # deassign the gun flag code # 1/93 clk
+
+        #$% Send a message indicating gunfire has been terminated with this gun
+        call smovhn (xUNT$Name$C, $$MaxLit, msg, msg_len)
+        call smovv  (" terminating gunfire with ", msg, msg_len)
+        call smovhn (xDEQ$Type$C, $$MaxLit, msg, msg_len)
+        call smovv  (" at ", msg, msg_len)
+        call smovhn (target, $$MaxLit, msg, msg_len)
+        call smovv  (" - target sinking", msg, msg_len)
+        call send_   (xUNT$View$i, 0, msg_len, msg) 
+        msg_len = 0
+       }
+    }
+
+return
+end
+
+
+Subroutine Calculate_Gun_Ph (_
+               UNT$Pointer,     # in:  target unit pointer
+               TOR$Pointer,     # in:  gun characteristic pointer
+               int_range,       # in:  integer range to target
+               prob_hit)        # out
+########################################################
+#$%
+#$% Purpose:   Calculate_Gun_Ph computes the probability
+#$%            of hit for a gun engagement.
+#$%
+#$% Called By: GunEng     Gun_Fire
+#$%
+#$% Calls:     FLOAT      AMAX1
+#$%
+#$% Tables:    TOR     UNT     SHC
+#$%
+#$% Date:      Sept. 1993
+#$%
+#$% Author:    Code moved from GunEng and Gun_Fire.
+#$%
+#$% Modified:  Susan Miller 5/98 (E1987)
+#$%            Changed the equation that calculates the
+#$%            probability of hitting surface and small
+#$%            boats.
+#$%
+########################################################
+BBCommon
+
+real     boat_cross_section
+real     prob_hit
+integer  ph1_range, adj_factor          # SMM 5/98 (E1987) 
+integer  tgt_speed_squared, tgt_speed   # SMM 5/98 (E1987)
+integer  UNT$Pointer, TOR$Pointer, int_range
+Integer UNT$Type$I, UNT$Supertype$I,    # jb E2145  6/26/00
+    TOR$PH$Index,   SHC$Pointer         # jb E2145  6/26/00
+
+  prob_hit = 1.0
+  UNT$Type$I = xUNT$Type$I              # SMM 5/98 (E1987) moved up
+  UNT$SuperType$I = xUNT$SuperType$I    # SMM 5/98 (E1987) moved up
+
+  # if the target is a surface or sub type (sub must be surfaced
+  # if we are at this point), get the adjusted range to target            
+  # SMM 5/98 (E1987)
+  if ((UNT$Type$I == $Surface$Code) | (UNT$Type$I == $Sub$Code))
+    {
+     TOR$PH$Index = 10            # set 10% probability of hit index
+     ph1_range = xTOR$PH$Range$I   # get the range
+
+     tgt_speed = INT(xUNT$TrueSpeed$F)
+     tgt_speed_squared = tgt_speed * tgt_speed
+     
+     adj_factor = tgt_speed_squared * (ph1_range/9000)
+
+     int_range = int_range + adj_factor
+    }
+
+  for (TOR$PH$Index = 1; TOR$PH$Index$OK; TOR$PH$Index = TOR$PH$Index + 1)
+    {
+     if (int_range <= xTOR$PH$Range$I)
+       break
+     prob_hit = prob_hit - 0.1
+    }
+
+  if (UNT$Type$I == $Air$Code)
+     prob_hit = prob_hit * 0.1
+  else if (UNT$SuperType$I == $SmallBoat$SuperCode)
+    {                # jb 2/20/91:  Adjust ph to represent ph for Small Boats..
+     SHC$Pointer = xUNT$ShcPntr$I
+
+###     prob_hit = prob_hit * 0.5   # removed SMM 5/98 (E1987)
+
+     boat_cross_section = FLOAT (xSHC$CrossSect$I) 
+# changed 0.5 to 0.1 SMM 5/98 (E1987)
+     boat_cross_section = AMAX1 (0.1, boat_cross_section)
+
+###     UNT$TrueSpeed$F = AMAX1 (5.0, xUNT$TrueSpeed$F) # removed SMM 5/98 (E1987)
+###     if (UNT$TrueSpeed$F > boat_cross_section)       # removed SMM 5/98 (E1987)
+###         prob_hit = prob_hit * (boat_cross_section / UNT$TrueSpeed$F)
+     if (boat_cross_section < 28.0)                     # SMM 5/98 (E1987)
+        prob_hit = prob_hit * SQRT(boat_cross_section/28.0)
+
+    }
+  # reduce the effectiveness of guns against cruise missile targets
+  # per #h1011 SMM 6/94
+  else if (UNT$Type$I == $cruisemissile$code)
+    {
+     prob_hit = prob_hit * GunvsCM$Factor
+    }
+
+return
+end
+
+
+Subroutine Process_Gun_Hit (_
+               UNT$Pointer,     # in:  attacker unit pointer
+               UNT2$Pointer,    # in:  target unit pointer
+               TOR$Pointer,     # in:  gun characteristic pointer
+               DEQ$Pointer,     # in:  attacker's equipment pointer
+               int_range,       # in:  range in yards
+               random_num,      # in:  the random number draw
+               number_rounds,   # in:  the number of rounds fired
+               prob_hit,        # in/out:  the computed ph
+               pounds_tnt,      # out: the number of pounds of tnt delivered
+               BDA_Weaps,       # out: 
+               BDA_List)        # out: 
+########################################################
+#$%
+#$% Purpose:   Process_Gun_Hit computes the amount of tnt
+#$%            delivered and calls the various routines
+#$%            for logging, informing players of engagement,
+#$%            assessing damage and continuation of engagement.
+#$%
+#$% Called By: GunEng     Gun_Fire
+#$%
+#$% Calls:     
+#$%            Echo..
+#$%            Msg_Observe_Gun
+#$%            Msg_Receive_Gun
+#$%            Disengage
+#$%            Update_Destroyed_Aircraft
+#$%            Engdata
+#$%            MBURange
+#$%            Update_DAC_CM_BDA            <lbcommn.rat>
+#$%
+#$% Tables:    UNT     TOR     DEQ     AML
+#$%
+#$% Date:      Sept. 1993
+#$%
+#$% Author:    Code moved from GunEng and Gun_Fire.
+#$%
+#$% Modified:  Oct. 1993 - Carol Kropp
+#$%            Made sure that a non-destroyed a/c is
+#$%            hit and that a splash entry is made in
+#$%            the engagement log.
+#$%
+#$%            Carol Kropp - 7/95 (E1419)
+#$%            Added comutation of number of hits and
+#$%            epus delivered for sending to 
+#$%            Record_Ground_Unit_Attack (C2 and TMS).
+#$%            
+#$%            JFR 12/95 - (E1104)
+#$%            Added two parameters and code to handle BDA.
+#$%
+#$%            SMM 2/96 - (E1104)
+#$%            Added call to Update_DAC_CM_BDA to handle cruise
+#$%            missile as gun targets
+#$%
+#$%            Susan Miller 12/97 (E1697)
+#$%            Increased size of BDA_List array to hold target
+#$%            UNT2$Pointer and DEQ$Pointer$index.
+#$%
+#$%            Susan Miller 12/98 - (E2007)
+#$%            PGA/ENG not displaying a miss for gun engagements.
+#$%            Changed eng$result for a miss from eng$gun$code to 
+#$%            eng$miss$code and entered 0 for GunEpu.
+########################################################
+BBCommon
+ENCommon
+
+LITERAL CSTRIP8                                # jb  E2145   6/27/00
+real     MBUrange      # function to determine the Main Battle Unit Range
+real     random_num, prob_hit
+integer  int_range, number_rounds, pounds_tnt
+integer*4 BDA_list[30,5], BDA_weaps  # JFR (E1104)
+integer  AML$Pointer, AML2$Pointer
+integer  nhits, iepus
+integer*4 BDA_found 
+integer  UNT$Pointer, UNT2$Pointer, TOR$Pointer, DEQ$Pointer
+Integer I, UNT2$Hits$I,UNT2$Gunhits$I,  # jb E2145  6/26/00
+    UNT2$Type$I,UNT2$Amlindx$I,         # jb E2145  6/26/00
+    AML$Nextindx$I, AML2$Status$I       # jb E2145  6/26/00
+
+  if (prob_hit >= random_num)   
+    {
+     pounds_tnt = INT (xTOR$Weight$I * prob_hit * number_rounds)
+     nhits = INT ((prob_hit * number_rounds) + 0.5)
+     iepus = INT ((pounds_tnt / 100.0) + 0.5)
+
+     UNT2$Hits$I = xUNT2$Hits$I + pounds_tnt
+     putUNT2$Hits$I
+     UNT2$GunHits$I = xUNT2$GunHits$I + pounds_tnt
+     putUNT2$GunHits$I
+
+     putUNT$EngageStatus$I ($Engaging$Code)      # set engage status
+     putUNT2$UnderAttack$I ($yes)                # set under attack to YES
+
+     if (trace$engage$gun != $no)
+       {
+        call echov ("  Hit w/")
+        call echoi (pounds_tnt)
+        call echov (" lbs TNT")
+       }
+
+     UNT2$Type$I = xUNT2$Type$I
+     if (UNT2$Type$I != $ShoreBase$Code)   # send message to user
+       {
+        call Msg_Observe_Gun (UNT$Pointer, UNT2$Pointer)
+        call Msg_Receive_Gun (UNT2$Pointer)
+
+        #$% If a gunfight between two surface vessels & the target has 50% or
+        #$% more hull damage and is sinking - disengage the gunfight
+        if ((xUNT$Type$I == $Surface$Code  &  xUNT2$Type$I == $Surface$Code)  &
+            (xUNT2$HullDamage$F >= 0.50  &  xUNT2$Status$I == $Sinking$Code))
+          {
+           call Disengage (UNT$Pointer, UNT2$Pointer)
+          }
+       }
+
+     if (log$engage != $no)                # if engagement log is desired
+       {
+        call engdata (UNT$Pointer, UNT2$Pointer)
+        PUTeng$Time$f( game$time )
+        PUTeng$Weapon$c( xTOR$Type$C )
+        PUTeng$Range$f(  int_range / $yds$per$mile )
+        PUTeng$MBUrange$f( MBURange (UNT2$Pointer) )
+        PUTeng$Result$i( eng$Gun$code )
+        PUTeng$ResultPh$f( prob_hit * 100. )
+        PUTeng$GunEpu$i( pounds_tnt )
+        putENG$NumberFired$I (number_rounds)
+        call write_eng_rec
+       } 
+
+     if (UNT2$Type$I == $Air$Code)  # if Aircraft target hit
+       {
+        UNT2$AMLIndx$I = xUNT2$AMLIndx$I       # clk 10/93 - added code to
+        AML$Pointer$To   (UNT2$AMLIndx$I)      # make sure that a non-destroyed
+        AML$NextIndx$I = xAML$NextIndx$I       # a/c is killed.
+        if (AML$NextIndx$I == 0)
+          AML2$Status$I = $Destroyed$Code
+        else  # the index is valid
+          {
+           AML2$Pointer$To  (AML$NextIndx$I)
+           AML2$Status$I = xAML2$Status$I
+          }
+        while (AML$NextIndx$I != 0  &
+               AML2$Status$I != $Destroyed$code)
+          {
+           AML$Pointer$To  (AML$NextIndx$I)
+           AML$NextIndx$I = xAML$NextIndx$I
+           if (AML$NextIndx$I != 0)
+             {
+              AML2$Pointer$To  (AML$NextIndx$I)
+              AML2$Status$I = xAML2$Status$I
+             }
+          }
+
+        if (xAML$Status$I != $Destroyed$code)
+          {
+           putAML$Status$I  ($Destroyed$Code)
+           if (log$engage != $no)   # if engagement log desired
+             call Generate_eng_rec ("SPLASH  ", "ENGAGE  ", xAML$SideNumber$C)
+
+           call Update_Destroyed_Aircraft (UNT2$Pointer, UNT$Pointer,
+                                           $DestroyedByGunfire$Code,
+                                           xTOR$Type$C, AML$Pointer,
+                                           number_rounds) # E1104 JFR 
+          }
+       }  # end of if target hit was an aircraft flight
+     else if (UNT2$Type$I == $cruisemissile$code) # if CM target hit
+        call Update_DAC_CM_BDA(UNT$Pointer,  # in/attacker pointer
+                               UNT2$Pointer, # in/destroyed target pointer
+                               $DestroyedByGunfire$Code,  # in/how destroyed code
+                               xTOR$Type$C,  # in/weapon name
+                               number_rounds)# in
+
+     call Record_Ground_Unit_Attack (UNT$Pointer, UNT2$Pointer,
+                                     xUNT2$TrueLatitude$F, 
+                                     xUNT2$TrueLongitude$F, 
+                                     TOR$Pointer, nhits, iepus)
+
+     # Now find out if this is a similar gun  - JFR (E1104)
+     bda_found = $no
+     for (i = 1 ; i <= bda_weaps ; i = i + 1)
+        {
+         # find match between gun pointer and
+         # DEQ$Pointer$Index   SMM 12/97 (E1697)
+         if ((tor$pointer == bda_list[i,1]) &
+             (DEQ$Pointer$index == bda_list[i,5]))
+           {
+            bda_found = $yes  
+    
+            # incr nbr of rounds fired
+            bda_list[i,2] = bda_list[i,2] + number_rounds 
+            if (prob_hit >= random_num)
+                # increment warhead wgt for this type of bomb
+                bda_list[i,3] = bda_list[i,3] + NHITS  
+
+            # save the target unt$pointer SMM 12/97 (E1697)
+            bda_list(i,4) = UNT2$Pointer
+           }                                       
+        }
+    
+     # if new type of bomb for BDA - JFR (E1104)
+     if (bda_found == $no)
+        { 
+         bda_weaps = bda_weaps + 1 
+    
+         bda_list[i,1] = tor$pointer   
+         # incr nbr of hits 
+         bda_list[i,2] = bda_list[i,2] + number_rounds 
+    
+         # increment warhead wgt for this type of bomb
+         bda_list[i,3] = bda_list[i,3] + NHITS  
+
+         # save the target unt$pointer SMM 12/97 (E1697)
+         bda_list(i,4) = UNT2$Pointer
+
+         # save DEQ$Pointer$index in case there are more than one
+         # of this type of gun on unit.    SMM 12/97 (E1697)
+         bda_list[i,5] = DEQ$Pointer$Index 
+        }                                       
+    }
+  else    # no hit after emi taken into account
+    {
+     if (log$engage != $no)                # if engagement log is desired
+       {
+        call engdata (UNT$Pointer, UNT2$Pointer)
+        PUTeng$Time$f( game$time )
+        PUTeng$Weapon$c( xTOR$Type$C )
+        PUTeng$Range$f(  int_range / $yds$per$mile )
+        PUTeng$MBUrange$f( MBURange (UNT2$Pointer) )
+        PUTeng$Result$i( eng$Miss$code ) # SMM 11/98 (E2007)
+        PUTeng$ResultPh$f( prob_hit * 100. )
+        PUTeng$GunEpu$i( 0 )             # SMM 6/99 (E2007)
+        putENG$NumberFired$I (number_rounds)
+        call write_eng_rec
+       } 
+    }
+
+return
+end

@@ -1,0 +1,519 @@
+include "ascii.inc"                             #$% include ascii constants
+include "bbacc.inc"
+include "bbcode.inc"                            #$% and blackboard defines
+include "bbctl.inc"
+include "bbird.inc"
+include "bbrvu.inc"
+include "bbshc.inc"
+include "stmain.inc"
+ 
+define (BBimplicit, IMPLICIT NONE)  # jb E2145      1/26/00
+ 
+define ($low$order$key,ikey)
+define ($low$order$key,ikey2)
+ 
+Subroutine EOISTA
+ 
+#####################################################################
+#$%
+#$% EOISTA generates electro-optical/infrared detection status board.
+#$%
+#$% Call sequence :           |
+#$%                           |
+#$%                           V
+#$%             |--------- EOISTA ---------|
+#$%             |                          |
+#$%             V                          V
+#$%          EOITIT          |--------- EOIDATA ---------|
+#$%                          |                           |
+#$%                          V                           V
+#$%                       EOIHED                       NXTEOI
+#$%                                                      |
+#$%                                                      V
+#$%                                                    SORTEOI
+#$%                                                      |
+#$%                                                      V
+#$%                                                    EOIBLD
+#$%
+#$% Description :
+#$%
+#$% The Electro-Optical/Infrared status display is generated as follows :
+#$% The driver, EOIDATA, calls NXTEOI to determine the lowest detector
+#$% name within the view. When that has been found, NXTEOI calls EOISORT
+#$% which determines the lowest target name within that detector. Successive
+#$% iterations identify and print all entries within a detector name, in
+#$% ascending order. When no more targets for a detector can be found, (i.e.
+#$% when the lowest name of the current pass is equal to the lowest name
+#$% in the last pass) control is returned to EOIDATA via NXTEOI and the
+#$% cycle is repeated.
+#$%
+#$% author : hfisher - CSC 3/90
+#$%
+########################################################################
+BBcommon
+STATUScommon
+ 
+call EOITIT      #$% Display title
+ 
+call EOIDATA     #$% Call main driver routine
+ 
+RETURN
+END
+ 
+
+ 
+Subroutine EOIDATA
+ 
+#######################################################################
+#$%
+#$% EOIDATA is the driver for the electro-optical/infrared status board
+#$% generation subroutines.
+#$%
+#######################################################################
+BBcommon
+STATUScommon
+ 
+Integer Ifound,Headswitch,Endpoint,Cont_Ind # jb E2145  1/26/00
+Common Ifound
+Common Headswitch
+Common Endpoint
+Common Cont_Ind
+ 
+call EOIHED                      #$% Display heading
+ 
+Endpoint = 0                     #$% Initialize end flag
+ 
+ifound = $no                     #$% Initialize test flag
+ 
+IF  (IKEY != 1)
+    Cont_Ind = 1
+ELSE
+    Cont_Ind = 0
+ 
+repeat
+   {
+    call NXTEOI                  #$% Get next IRD table entry
+    IF  (Endpoint == 1) BREAK    #$% At end break loop
+    $exit$on$overflow        # Exit if overflow
+   }
+if (ifound == $no)  call EOINUN  #$% No entries in table - display message
+ 
+RETURN
+END
+ 
+ 
+
+Subroutine NXTEOI
+ 
+##########################################################
+#$%
+#$% Purpose:   NXTEOI locates next DETECTOR entry
+#$%
+#$%  This module contains the first (major level) sort.
+#$%  The routine walks the entire IRD table, determining the
+#$%  lowest value of the Detector name. When the lowest name
+#$%  has been identified, it is stored in IKEY and EOISORT
+#$%  is called.
+#$%
+##########################################################
+BBcommon
+StatusCommon
+ 
+Common Ifound
+Common Headswitch
+Common Endpoint
+Common Cont_Ind
+ 
+LITERAL CSTRIP8                             # jb E2145  1/26/00
+Literal iplat,keys, lowest
+Integer Ifound,Headswitch,Endpoint,Cont_Ind # jb E2145  1/26/00
+Integer irsult, IRD$Pointer                 # jb E2145  1/26/00
+ 
+lowest = $highest$ascii    #$% Set identifier to zzzzzzzz
+ 
+Endpoint = 0               #$% Reset endpoint indicator
+ 
+Headswitch = 0             #$% Reset indicator to print platform name
+                           #$% (used by EOIBLD)
+ 
+IF  (ikey  == 1)           #$% On the first pass, load
+    {
+    keys = $lowest$ascii
+    lkey = 200
+    }
+ELSE
+    keys = ikey            #$% else use lowest from last pass
+ 
+FOR ( ird$pointer$first; Ird$Pointer$valid; Ird$pointer$next )
+   {
+    IF  (xIrd$View$I == iview)
+        CONTINUE
+    ELSE
+        NEXT                           #$% If not same view, ignore
+ 
+    Iplat = xIrd$DetectorName$C        #$% Get detector name
+ 
+    call COMPAR(1,iplat,keys,irsult)   #$% Compare keys
+ 
+    IF  (irsult <  0) NEXT             #$% Record has already been processed
+ 
+    IF  (irsult == 0) NEXT             #$% Ignore - only first occurrence of
+                                       #$% name is processed
+    call COMPAR(1,iplat,lowest,irsult)
+    IF  (irsult > 0)
+        NEXT                           #$% Larger than lowest found
+    lowest = iplat                     #$% The new 'lowest'
+   }
+ 
+IF  ( ikey == lowest )    #$% This condition is true one pass after the last
+    {                     #$% entry has been processed
+    Endpoint = 1          #$% Set exit switch
+    RETURN
+    }
+ 
+IF  (Cont_Ind == 1)
+    {
+    cont_Ind = 0
+    IKEY2 = NKEY2
+    }
+ELSE
+   {
+   ikey  = lowest            #$% The lowest key
+   IKEY2 = 1
+   }
+ 
+repeat
+      {
+       call EOISORT                    #$% Loop thru target entries
+       IF  (Endpoint == 1) BREAK       #$% At end, break loop
+       $exit$on$overflow        # Exit if overflow
+      }
+Endpoint = 0                           #$% Reset exit switch
+RETURN
+END
+ 
+
+ 
+Subroutine EOISORT
+ 
+##########################################################
+#$%
+#$% Purpose:   EOISORT locates next TARGET within DETECTOR
+#$%
+#$% This routine compares the platform name to IKEY.
+#$% The lowest entry is found among those
+#$% entries that meet this requirement. The lowest track
+#$% number is contained in IKEY2.
+#$%
+##########################################################
+BBcommon
+StatusCommon
+ 
+Common Ifound
+Common Headswitch
+Common Endpoint
+Common Cont_Ind
+ 
+LITERAL CSTRIP8                             # jb E2145  1/26/00
+Integer Ifound,Headswitch,Endpoint,Cont_Ind # jb E2145  1/26/00
+ 
+integer iplat2,keys2,lowest2,
+        IRD$Pointer                         # jb E2145  1/26/00
+ 
+lowest2 = 999           #$% Set to highest 3 digit number (track is 3 digits)
+ 
+IF  (lkey  == 200)
+     {
+      ikey2 = 0
+      lkey = 0
+      keys2 = 0
+     }
+ELSE
+    keys2 = ikey2                  #$% else use the last lowest for comparison
+ 
+FOR ( ird$pointer$first; Ird$Pointer$valid; Ird$pointer$next )
+   {
+    IF  ( xIrd$DetectorName$C == IKEY )     #$% Current detector only
+        {
+         IF  (xIrd$View$I == iview)
+             CONTINUE
+         ELSE
+             NEXT                              #$% If not same view, ignore
+ 
+         Iplat2 = xIrd$TrackSEQ$I              #$%  Get track number
+ 
+         IF  (iplat2 < keys2) NEXT             #$% Has already been processed
+ 
+         IF  (iplat2 == keys2)                 #$% Print the table entry
+             {
+             call EOIBLD(ird$pointer)          #$% Build display data
+             ifound = $yes                     #$% At least one entry was found
+             $exit$on$overflow                 #$% Exit if overflow
+             }
+         ELSE                                  #$% Possibly a lower number
+             {
+             IF  (iplat2 > lowest2)            #$% Larger than lowest found
+                 NEXT
+             ELSE
+                lowest2 = iplat2               #$% Lowest so far this pass
+             }
+        }
+   }
+IF  ( ikey2 == lowest2 )            #$% End condition - one pass after last
+    {                               #$% processed record in this series
+     Endpoint = 1
+     RETURN
+    }
+ELSE
+    {
+     ikey2  = lowest2               #$% Save low key
+    }
+RETURN
+END
+ 
+
+ 
+ 
+Subroutine EOIBLD(IRD$Pointer)
+ 
+##########################################################################
+#$%
+#$% Purpose:   EOIBLD builds display for electro-opt/infrared detectors
+#$%
+##########################################################################
+BBcommon
+STATUScommon
+ 
+Common Ifound
+Common Headswitch
+Common Endpoint
+Common Cont_Ind
+ 
+literal  D_Type, Astab_EOIR_Class
+literal  Icode,D_Platform, CSTRIP,CSTRIP8   # jb E2145  1/26/00
+Real D_Lat, D_Long
+Real    D_Time        # clk 3/99 (E2062) - Was previously an integer
+                      # causing conversion problems when the floating
+                      # point value was extraced from the IRD table.
+ 
+Integer D_Track, D_Course, D_Speed
+Integer Ifound,Headswitch,Endpoint,Cont_Ind # jb E2145  1/26/00
+Integer I_SWITCH_1, RVU$Pointer, Game_DTG, kk,
+        IRD$Pointer, IRD$DamageLevel$I      # jb E2145  1/26/00
+ 
+$test$next$line
+IF   (LINCNT >= LIMIT)
+     {
+      IOVFLO = 1
+      RETURN
+     }
+#$exit$on$overflow        # Exit if overflow
+ 
+LINSAV=LINCNT
+NSECT=ISECT
+NSECT2=ISECT2
+NKEY=IKEY
+NKEY2=IKEY2
+ 
+$prepare$next$line
+ 
+D_Type      =   Astab_EOIR_Class (IRD$pointer) # jb (From BEES) 3/1/00
+ 
+D_Track     =   xIrd$TrackSEQ$I       #   Items not dependent on
+D_Time      =   xird$Time$f           #   level of detection are
+D_Lat       =   xIrd$Latitude$F       #   loaded here
+D_Long      =   xIrd$Longitude$F      #
+D_Course    =   xIrd$course$I         #
+D_Speed     =   xIrd$Speed$I          #
+ 
+ 
+RVU$pointer$to iview                  #$% Set RVU pointer; set track code
+icode = xRVU$trackcode$c
+ 
+#$% Load Track into output line
+ 
+Ibyte = 10
+CALL SMOVH (Icode,1,IPAGE[1,LINCNT],Ibyte)
+Ibyte = 11
+CALL SMOVv ("I",IPAGE[1,LINCNT],Ibyte)
+Ibyte = 12
+CALL SMOVIZ (D_Track,3,IPAGE[1,LINCNT],Ibyte)
+ 
+ 
+IF  (Headswitch == 0)                                   #$% If name has
+    {                                                   #$% appeared before,
+     Headswitch = 1                                     #$% Don't print it
+     D_Platform  = xIRD$DetectorName$c
+    }
+ELSE
+{
+     D_Platform = $BLANKLIT
+}
+#$% Load Detector Platform into output line
+Ibyte = 0
+CALL SMOVH (D_Platform,$$MAXname,IPAGE[1,LINCNT],Ibyte) # jb E2141  1/26/00
+ 
+IF  (xIrd$Motion$I == 0)
+     {
+      Ibyte = 57
+      CALL SMOVv ("STATIONARY",IPAGE[1,LINCNT],Ibyte)
+     }
+ELSE
+     {
+      Ibyte = 58
+      CALL SMOVIZ (D_Course,3,IPAGE[1,LINCNT],Ibyte)
+      Ibyte = 61
+      CALL SMOVv ("/",IPAGE[1,LINCNT],Ibyte)
+      Ibyte = 62
+      CALL SMOVI (D_Speed,IPAGE[1,LINCNT],Ibyte)
+     }
+ 
+Ird$DamageLevel$I = xIrd$DamageLevel$I        # 4/9/90
+Ibyte = 70          # jb E2141      1/26/00
+SWITCH ( Ird$DamageLevel$I )
+       {
+        Case $Destroyed$code :
+              CALL SMOVv ("DESTROYED",IPAGE[1,LINCNT],Ibyte)
+        Case $Severe$Code    :
+              CALL SMOVv (" SEVERE  ",IPAGE[1,LINCNT],Ibyte)
+        Case $Moderate$Code  :
+              CALL SMOVv ("MODERATE ",IPAGE[1,LINCNT],Ibyte)
+        Case $Minor$Code     :
+              CALL SMOVv ("  MINOR  ",IPAGE[1,LINCNT],Ibyte)
+        DEFAULT :                            # i.e. $NODamage$Code
+              CALL SMOVv ("  NONE   ",IPAGE[1,LINCNT],Ibyte)
+       }
+ 
+#$% Load Type into output line
+Ibyte = 25
+CALL SMOVH (D_Type,$$MAXLit,IPAGE[1,LINCNT],Ibyte) # jb E2141   1/26/00
+ 
+#$% Convert time to Zulu and load into output line
+$column 17      # jb E2141  (17 vice 18)    3/1/00
+$outIZ(Game_DTG(D_Time),6)
+ 
+#$% Load Latitude into output line
+Ibyte = 35      # jb E2141  (35 vice 34)    3/1/00
+CALL SMOVLLS (D_Lat,"NS",IPAGE[1,LINCNT],Ibyte)
+ 
+#$% Load Longitude into output line
+Ibyte = 45
+CALL SMOVLLS (D_Long,"EW",IPAGE[1,LINCNT],Ibyte)
+ 
+#$% set line length
+linlen[lincnt] = 79
+ 
+IF  (mside == $Control$code)         #$% Control view parenthetical data :
+   {
+    $test$next$line
+    $exit$on$overflow
+    $save$line$count
+    $prepare$next$line
+    D_Type = xIRD$TargetName$C
+    Ibyte = 24
+    CALL SMOVvN ("(",IPAGE[1,LINCNT],Ibyte)
+    CALL SMOVHN (D_Type,$$MAXLit,IPAGE[1,LINCNT],Ibyte) # jb E2141  1/26/00
+    CALL SMOVvN (")",IPAGE[1,LINCNT],Ibyte)
+    linlen[lincnt] = 79
+   }
+ELSE
+    CONTINUE
+ 
+ 
+ 
+RETURN
+END
+ 
+
+ 
+#####  Headers and fixed displays ########### :
+ 
+Subroutine EOINUN
+ 
+#####################################################################
+#$%
+#$% Purpose:   EOINUN displays message if no electro-optical/infra-
+#$%                   red detctions have been made
+#$%
+#####################################################################
+BBcommon
+STATUScommon
+ 
+#$% test for overflow
+$test$next$line
+$exit$on$overflow
+ 
+$prepare$next$line
+ 
+#$% send message
+$column 1 ; $outV("No Electro-Optical/InfraRed Detections for this view") # /00
+ 
+RETURN
+END
+ 
+
+ 
+Subroutine EOIHED
+ 
+##########################################################################
+#$%
+#$% Purpose:   EOIHED generates heading for electro-optical/infrared
+#$%            status board.
+#$%
+##########################################################################
+BBcommon
+STATUScommon
+ 
+## Sjb E2141    MSG2 & IDASH modified:      3/1/00
+string  MSG2 "PLATFORM  TRACK   TIME     TYPE         LOCATION           MOTION      DAMAGE  "
+string IDASH "--------  -----  ------  -------- ---------------------   --------    ---------"
+#             CF001     BI001  010140  SUKENSIN  32-23-14N 165-12-18E    MOBILE     DESTROYED
+#                                                                       270/1234
+#                       1         2         3         4         5         6         7         8
+#             012345678901234567890123456789012345678901234567890123456789012345678901234567890
+ 
+#$% Write report headers
+ 
+ibyte = 0
+CALL SMOVH (MSG2, 79,ipage[1,2],ibyte)
+LINLEN[2] = ibyte   # jb E2141  3/1/00
+ibyte = 0
+CALL SMOVH (IDASH,79,ipage[1,3],ibyte)
+LINLEN[3] = ibyte   # jb E2141  3/1/00
+ 
+#$% set line count
+LINCNT = 3
+ 
+RETURN
+END
+ 
+ 
+
+Subroutine EOITIT
+ 
+############################################################################
+#$%
+#$% Purpose:   EOITIT generates title for electro-optical/infrared data
+#$%                   status board.
+#$%
+############################################################################
+BBcommon
+STATUScommon
+ 
+integer Game_DTGs
+ 
+$prepare$next$line
+ 
+#$% load title for status board:
+$column  1
+$outV("View: ")
+$outH(nmvue,5)
+$column 18
+$outV("ELECTRO-OPT/IR STATUS BOARD [") ; $outI(iboard)
+             $outV("] - Page ") ; $outIB(kpage,2)
+$column 61 ; $outV("Game Time: ") ;  $outIZ(Game_DTGs(igmin),8)
+ 
+RETURN
+END
+ 
+ 

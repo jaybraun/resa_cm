@@ -1,0 +1,531 @@
+##### FILE:  LBROTHR.RAT
+ 
+### Record of modifications
+###
+###   date    prog module       comments
+### ========= ==== =========  ==============================================
+###   3/90    CML  noise_rot  Modified code in order to remove calls to qkdb
+###                           and qkpowr.
+###
+###                rottim     Modified code in order to remove call to qktrig.
+###
+###                rothr_snr  Modified code in order to remove call to qklg10.
+###
+###                dir_find   Removed call to rll2rb as range and bearing are
+###                           now calculated in the routines that call rll2rb.
+###
+###############################################################################
+ 
+include "ascii.inc"
+include "bbctl.inc"
+include "bbcode.inc"
+include "bbdeq.inc"
+include "bbrth.inc"
+include "bbunt.inc"
+include "bbjam.inc"
+include "bbsta.inc"
+include "wgmdrot.inc"
+ 
+define (BBImplicit,Implicit None)
+ 
+
+ 
+real*4 function noise_rot(nf,irot)
+ 
+########################################################
+#$%
+#$% Purpose:   Noise_rot calculates the noise figure from
+#$%            jamming units. A jamming unit is a candidate
+#$%            if it is within maxrothr range from the rothr site
+#$%            and within 32 degrees of the oth radar bearing.
+#$%
+#$% Called By:
+#$%
+#$% Calls:
+#$%
+#$% Tables:
+#$%
+#$% Date:      AUG 87
+#$%
+#$% Author:    Richard Schauer
+#$%
+########################################################
+ 
+BBcommon
+ 
+integer freq,gain,irot,
+        DEQ$EM$Index,
+        DEQ$Pointer,
+        JAM$FQ$Index,
+        JAM$Pointer,
+        RTH$Pointer,
+        UNT$Pointer
+ 
+real*4  baselat,baselon,brng,dbnos,diff,nf,othbr,range,
+        tarlat,tarlon,tcos1,tcos2
+ 
+  RTH$pointer$to irot                # irot slot in rothr table
+  UNT$Pointer$to (XRTH$UnitIndx$I)
+ 
+  baselat = Xunt$TrueLatitude$F      # init data for bearing and range
+  baselon = Xunt$TrueLongitude$F     # calculations
+  tcos1   = cos(baselat)
+  othbr   = XRTH$Othbr$F
+  freq    = XRTH$Freq$I
+  gain    = XRTH$Gain$I
+ 
+  # find applicable units that could jam rothr site
+ 
+  for (UNT$Pointer$First; UNT$Pointer$OK; UNT$Pointer$Next)
+    {
+     if (Xunt$InUse$I == $NO) NEXT
+     if (Xunt$Status$I == $BeingDeleted$code) NEXT
+ 
+     tarlat = Xunt$TrueLatitude$F
+     tarlon = Xunt$TrueLongitude$F
+     tcos2 = cos(tarlat)
+ 
+     call rll2rb(baselat,baselon,tcos1,tarlat,tarlon,tcos2,range,brng)
+ 
+     # determine if in proper range and bearing to the rothr site
+ 
+     if ((range < 0.0) | (range > Rothr$Max$Range)) NEXT
+     diff = othbr - brng
+     $angpi(diff)
+     if (abs(diff) > 0.5585024)      ## 32 degrees in radians
+       NEXT
+ 
+     # look through equipment table to see if it has a jammer
+ 
+     for_DEQ_CHAIN
+       {
+        if (Xdeq$TimeWhenUse$f > game$time) NEXT
+        if (Xdeq$ident$I != $jammer$code) NEXT
+ 
+        ## see if jammer is in right frequency and if its on
+ 
+        jam$pointer = Xdeq$Pntr$I
+ 
+        for (deq$em$Index = 1; deq$em$index$ok;
+             deq$em$index = deq$em$index + 1)
+          {
+           if (Xdeq$em$band$i == $no) next
+           jam$fq$index = deq$em$index
+           if (freq != Xjam$fq$centerfreq$i) next
+ 
+           # if on and right frequency, then sum up noise figure
+ 
+#           dbnos = Xjam$fq$performfactor$i + gain - (2.0 * qkdb(range))
+#   The following two lines replace the line above, CML 3/90
+           if (range < 1.0)  range = 1.0
+           dbnos = Xjam$fq$performfactor$i + gain - (2.0 * 10.0 * log10(range))
+ 
+           if (dbnos > 0.0)
+             {
+#             nf = qkdb( qkpowr(nf) + qkpowr(dbnos))
+#   The following three lines replace the line above, CML 3/90
+              diff = 10.0**(nf/10.0) + 10.0**(dbnos/10.0)
+              if (diff < 1.0)  diff = 1.0
+              nf = 10.0 * log10(diff)
+             }
+ 
+           BREAK
+ 
+          }
+       }
+    }
+ 
+noise_rot = nf
+ 
+return
+end
+ 
+
+ 
+Subroutine rottim
+ 
+########################################################
+#$%
+#$% Purpose:   ROTTIM calculates the sunrise/sunset
+#$%            time for Rothr site centroids using the same
+#$%            convention as the visual model
+#$%
+#$% Called By: WGLROT     OSET
+#$%
+#$% Calls:     QKTRIG
+#$%
+#$% Tables:    RTH
+#$%
+#$% Date:      JUNE 87
+#$%
+#$% Author:    Richard Schauer
+#$%
+########################################################
+ 
+BBcommon
+ 
+integer Msr,Mss,zulutime,
+        RTH$Pointer
+ 
+real*4 flat,flcos,flon,fsin,k1,scos,ssin,term
+ 
+data k1/-.0151/
+ 
+#  call qktrig(sun$latitude,scos,ssin)	# calculate sin/cos of sun latitude
+#  The following two lines replace the line above, CML 3/90
+scos = cos(sun$latitude)
+ssin = sin(sun$latitude)
+ 
+zulutime = zulu$starttime + game$Minute # get the zulutime
+ 
+for (RTH$pointer$first; RTH$pointer$ok; RTH$pointer$next) # for each rothr
+  {
+   if (XRTH$InUse$I == $NO) NEXT
+ 
+   #$% get rothr centroid latitude and longitude
+   flat = XRTH$CentroidLatitude$F
+   flon = XRTH$CentroidLongitude$F
+ 
+   fsin = sin(flat)                    # calculate sin base lat
+   flcos = cos(flat)                   #     cos  lat
+   term = (k1 - ssin * fsin) / (scos * flcos)
+   if (term >= 1.0)          # rothr is always in nighttime
+     {
+      PUTrth$DayNight$i (night$RTH)
+      PUTrth$NextTranTime$f (0)
+     }
+   else if (term <= -1.0)    # rothr is always in daytime
+     {
+      PUTrth$DayNight$i (day$rth)
+      PUTrth$NextTranTime$f (0)
+     }
+   else
+     {
+      term = acos(term)
+ 
+      # get number of minutes from beginning of day to sunrise and sunset
+      Msr  = 720 / $PI * ( $PI - flon - term ) - 69
+      Mss  = 720 / $PI * ( $PI - flon + term ) + 69
+      while (Msr < 0)
+        Msr = Msr + 1440   # adjust Msr if <0
+      while (Msr >= 1440)
+        Msr = Msr - 1440   # adjust Msr if >=1440
+      while (Mss < 0)
+        Mss = Mss + 1440   # adjust Mss if <0
+      while (Mss >= 1440)
+        Mss = Mss - 1440   # adjust Mss if >=1440
+ 
+      while (Msr < zulutime)  # adjust sunrise time so that:
+        Msr = Msr + 1440      #   zulutime <= Msr <= zulutime + 1440
+      while (Mss < zulutime)  # adjust sunset time so that:
+        Mss = Mss + 1440      #   zulutime <= Mss <= zulutime + 1440
+ 
+      if (Msr < Mss)  # rothr is considered to be in nighttime
+        {
+         PUTrth$DayNight$i (night$RTH)
+         Msr = Msr - zulu$starttime  # zulu$starttime is added back in
+                                     # function Game_DTG
+         PUTrth$NextTranTime$f (Msr)  # transition to day next time
+        }
+      else            # rothr is considered to be in daytime
+        {
+         PUTrth$DayNight$i (day$RTH)
+         Mss = Mss - zulu$starttime  # zulu$starttime is added back in
+                                     # function Game_DTG
+         PUTrth$NextTranTime$f (Mss)  # transition to night next time
+        }
+     }
+ 
+   PUTRTH$Modified$I (1)   # signal rothr slot changed
+  }
+ 
+return
+end
+ 
+
+ 
+subroutine dirsleft(irot,   # rothr index
+                    ias,    # day or night
+                    idn,    # air or surface
+                    ileft,  # number of dirs left for that type
+                    inum)   # number of dirs used of that type
+ 
+########################################################
+#$%
+#$% Purpose:   dirsleft echoes the number of air and ship
+#$%            dirs in the CSA for day or night...
+#$%
+#$% Called By: OACTROT   PL_DISPLY
+#$%
+#$% Calls:
+#$%
+#$% Tables:    RTH
+#$%
+#$% Date:      JUNE 87
+#$%
+#$% Author:    Richard Schauer
+#$%
+########################################################
+ 
+BBcommon
+ 
+integer iair,iairrem,ias,idn,ileft,inum,irot,isurf,isurfrem,
+        RTH$Pointer
+ 
+ 
+RTH$pointer$to irot
+ 
+# calculate air and surface dirs and how many are remaining
+ 
+if (idn == day$RTH)
+  {
+   iair = XRTH$AirDirDay$I
+   isurf = XRTH$SurfDirDay$I
+   iairrem = int(maxair$dir$day - iair - 3.0 / 2.0 * isurf) # remaining air
+   isurfrem = int(maxsurf$dir$day - isurf - 2.0 / 3.0 * iair) # rem. surf
+  }
+else
+  {
+   iair = XRTH$AirDirNight$I
+   isurf = XRTH$SurfDirNight$I
+   iairrem = int(maxair$dir$night - iair - 3.0 / 2.0 * isurf) # rem. air
+   isurfrem = int(maxsurf$dir$night - isurf - 2.0 / 3.0 * iair) # rem. surf
+  }
+ 
+if (ias == air$pca)
+  {
+   ileft = iairrem   # number left to use
+   inum = iair       # number used already
+  }
+else
+  {
+   ileft = isurfrem
+   inum  = isurf
+  }
+ 
+return
+end
+ 
+
+ 
+real*4 function rothr_snr(perfact,           # rothr performance factor
+                           xsect,            # target radar cross section
+                           range,            # range between target & rothr
+                           icitf,            # coherent integration time factor
+                           itranloss,        # transmission loss from DIR table
+                           nf)               # noise figure
+ 
+###########################################################################
+#$%
+#$% Purpose:   rothr_snr calculates the signal to noise ratio for the
+#$%            rothr site
+#$%
+#$% Called By:
+#$%
+#$% Calls:
+#$%
+#$% Tables:    RTH
+#$%
+#$% Date:      JUNE 87
+#$%
+#$% Author:    Richard Schauer
+#$%
+##########################################################################
+implicit none
+integer icitf,itranloss
+ 
+real*4 nf,perfact,range,rlog,xsect
+ 
+#  rlog = 40.0 * qklg10(rang)
+#  The following two lines replace the line above.
+if (range < 1.0) range = 1.0
+rlog = 40.0 * log10(range)
+ 
+## standard signal noise calculation
+ 
+rothr_snr = perfact + xsect + 12 + icitf - rlog - itranloss - nf
+ 
+return
+end
+ 
+
+ 
+integer function dir_find(irot,          # rothr indx
+                          irotas,        # air/surface
+                          range,         # range from base
+                          brng)          # bearing from base
+ 
+###########################################################################
+#$%
+#$% Purpose:   Dir_find determines which dir the lat long given falls into.
+#$%            This is used primarily by the interactive setup of dirs and
+#$%            the rothr detection model.
+#$%
+#$% Called By:
+#$%
+#$% Calls:
+#$%
+#$% Tables:    RTH
+#$%
+#$% Date:      JUNE 87
+#$%
+#$% Author:    Richard Schauer
+#$%
+##########################################################################
+ 
+BBcommon
+ 
+integer irot,irotas,
+        RTH$Pointer
+ 
+real*4  addrange,brng,diffrad,othbr,radialadd[9],range,
+        xrange
+ 
+## incremental $pi division units for radials of dirs
+ 
+data      radialadd/-0.5585024,-0.4188768,-0.2792512,-0.1396256,0.0,
+                     0.1396256,0.2792512,0.4188768,0.5585024/
+ 
+  dir_find = 0                    # get rothr information
+  RTH$pointer$to irot
+  othbr = XRTH$Othbr$F
+ 
+  if (irotas == air$pca)             # use specific ranges for air or surface
+    addrange = air$dir$length
+  else
+    addrange = surf$dir$length
+ 
+  if ((range < 500.0 ) | (range > Rothr$Max$Range)) RETURN     # too far,
+                                                               # too close
+ 
+  if (othbr < 0.0) othbr = othbr + 2*$PI
+ 
+  if (othbr+radialadd[9] > 2*$PI)
+    {
+     if (brng < othbr+radialadd[1])
+       brng = brng + 2 * $PI
+    }
+  if (othbr+radialadd[1] < 0.0)
+    {
+     if (brng > othbr + radialadd[9])
+       brng = brng - 2 * $PI
+    }
+ 
+  diffrad = abs(othbr - brng)
+  if (diffrad > radialadd[9])
+    RETURN
+ 
+  xrange = range
+  if ((irotas == air$pca) & (range > Rothr$Last$Air$DIR))
+    xrange = Rothr$Last$Air$DIR - 1
+  else if ((irotas == surf$pca) & (range > Rothr$Last$Surface$DIR))
+    xrange = Rothr$Last$Surface$DIR - 1
+ 
+  dir_find = int((xrange-500.0)/addrange) * 8 +             # thought this one up
+             int((brng-othbr)/radialadd[6] + 4) + 1  # by myself
+ 
+return
+end
+
+ 
+# This subroutine is no longer called, CML 6/12/90
+subroutine sndrot_station (ista,text,ilen)
+ 
+########################################################
+#$%
+#$% Purpose:   Sndrot_station sends rothr selection messages
+#$%            to the player via the station message table.
+#$%
+#$% Called By:
+#$%
+#$% Calls:
+#$%
+#$% Tables:
+#$%
+#$% Date:      NOV 87
+#$%
+#$% Author:    Richard Schauer
+#$%
+########################################################
+ 
+BBcommon
+ 
+integer i,iavail,ii,ilen,imsg[100],ineed,ista,jlen,text[100],
+        STA$MSG$For$i,
+        STA$MSG$GM$i,
+        STA$MSG$Index,
+        STA$MSG$Len$i,
+        STA$MsgRead$i,
+        STA$MSG$Type$i,
+        STA$Msg$Word$i,
+        STA$MsgWrite$i,
+        STA$Pointer,
+        STA$View$i
+ 
+character lmsg[400]
+equivalence(imsg,lmsg)
+ 
+  sta$pointer$to ista                           # set station number
+  sta$msgread$i  = xsta$msgread$i		# get read and write pointers
+  sta$msgwrite$i = xsta$msgwrite$i
+  sta$view$i     = xsta$view$i
+  iavail = sta$msgread$i - sta$msgwrite$i	# determine available slots
+  if (iavail <= 0)
+    iavail = sta$msg$slots + iavail
+ 
+  ## build message into temporary buffer
+ 
+  jlen = ilen
+  for (ii = 1; ii <= 100; ii = ii + 1) imsg[ii] = text[ii]
+  while (mod(jlen,4) != 0)
+    {
+     jlen = jlen + 1
+     lmsg[jlen] = $NULL
+    }
+ 
+  ineed = jlen / 4  				# actual space needed
+  if (ineed+1 >= iavail)				# if not enough space, ...
+    {
+     call echov ("Losing ROTHR info to station #") # jb E2144  5/23/00
+     call echoi (sta$pointer$index)
+     call echor
+     return
+    }
+ 
+  sta$msg$index = sta$msgwrite$i        # set message write index
+ 
+  sta$msg$word$i = 0                # clear the control word
+  putsta$msg$word$i
+ 
+  sta$msg$Len$i = ineed + 1        # fill
+  PUTsta$msg$Len$i
+ 
+  sta$msg$For$i = sta$view$i       #   in
+  PUTsta$msg$For$i
+ 
+  sta$msg$GM$i = Game$Minute       #       the
+  PUTsta$msg$GM$i
+ 
+  sta$msg$Type$i = 0               #           info
+  PUTsta$msg$Type$i
+ 
+  sta$msg$index = sta$msg$index + 1        # increment index
+  if(sta$msg$index > sta$msg$slots) sta$msg$index = 1
+ 
+  for (i=1; i<=ineed; i=i+1)            # for each word message
+    {
+     # store the word in the MSG subtable in the sta table
+     sta$msg$word$i = imsg[i]
+     putsta$msg$word$i
+ 
+     # increment index, if message entries are greater than slots,
+     # set index to one
+     sta$msg$index = sta$msg$index + 1
+     if(sta$msg$index > sta$msg$slots) sta$msg$index = 1
+    }
+ 
+  sta$msgwrite$i = sta$msg$index        # store write pointer in STA
+  putsta$msgwrite$i
+ 
+return
+end

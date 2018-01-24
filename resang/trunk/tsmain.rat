@@ -1,0 +1,495 @@
+#$%    TSMAIN.RAT   PRESCRIPT file reader/distributor
+#$%
+#$%    Note:  Although a station number must be specified on the
+#$%    command line, the prescript can alter the station that
+#$%    receives the commands by entering a greater-than (>) symbol
+#$%    as the first character on a line followed by the new
+#$%    station number.
+#$%
+#$%    Note:  If the first character of the line is a less-than
+#$%    (<) symbol the next entry on the line is a file that the
+#$%    program will read and process as additional commands.
+#$%
+#$%    Note:  The "*" symbol as the first character on a line is
+#$%    used to pause the script processing for a relative number
+#$%    of simulation minutes.
+ 
+#$%  Modified:  Carol Kropp - 12/98 (E2046)
+#$%             The prescript program was opening a mailbox for each
+#$%             possible station, storing the mailbox channel in an
+#$%             array; however, only the channel that was associated
+#$%             with the station number in the command line or any
+#$%             redirection (using the >) were ever used.  This scheme
+#$%             was placing an unnecessary load on the system resources.
+#$%             The initialization sequence was modified to only create
+#$%             the mailbox for the command line station.  If the the
+#$%             redirection is used then additional mailboxes are
+#$%             created.  The mailbox service call was also modified to
+#$%             indicate that the mailboxes are to be temporary.
+ 
+include "ascii.inc"
+include "bbctl.inc"
+include "bbcode.inc"
+#include "csf.inc"
+include "macros.inc"
+include "bbsta.inc"
+ 
+define(BBImplicit, Implicit None)                 # MJC 5/10/2000 (E2145)
+define(ts$common,
+    integer     script_fd,
+                sta_chan[sta$slots],
+                station_nbr,
+                Requested_cycle
+    logical     sta_chan_created [sta$slots],     # clk (E2046) - 12/98
+                verbose_msg,
+                absolute_mode,
+                in_sync,
+                skip_mode
+    character   script_name[100]
+ 
+ 
+    common /tcom/ script_fd, sta_chan, station_nbr, requested_cycle,
+                  script_name, sta_chan_created, verbose_msg,
+                  absolute_mode, in_sync, skip_mode
+    )
+ 
+program test_script
+#######################################################
+#$%
+#$% Purpose:   Test_script synchronizes a pre-scripted series
+#$%            of orders with the cycle of the Wargame.
+#$%
+#$% Called By: None
+#$%
+#$% Calls:     None
+#$%
+#$% Tables:    None
+#$%
+#$% Date:      JUL 83
+#$%
+#$% Author:    Dana Wills
+#$%
+#######################################################
+ 
+BBcommon
+ts$common
+ 
+call initr4                 #$% initialize RATFOR environment
+ 
+BBmap                       #$% map in the BB global section
+ 
+call init_script
+ 
+call execute_script
+ 
+end
+
+ 
+subroutine execute_script
+bbcommon
+ts$common
+ 
+real*4     gm
+integer         old_station_nbr
+integer         getlin, ctoi, open_, skip_count, proc_cycle, length
+integer         kk, i       # jb    1/12/00
+integer*2       iosb[4]
+character       line[800], line2[800], buf[100]
+string          flush " ! Pre-Script flushed, waiting for minute "
+vmschar*100		line2_v
+equivalence 	(line2, line2_v)
+ 
+external    CLOSE_   # jb E2149  1/12/00
+ 
+integer     LAST_CYCLE,ILEN,IPOS,INC,
+            JLEN,NEW_FD                        # MJC 5/10/2000 (E2145)
+BBdeclare  (STA$Pointer)                       # MJC 5/10/2000 (E2145)
+ 
+flush[1] = $control(K)
+skip_count = 0
+proc_cycle = 0
+last_cycle = game$minute - 1
+requested_cycle = game$minute
+ 
+repeat
+    {
+    #______________________________________________________________________
+    # Determine if the game has cycled
+ 
+    if (game$minute == last_cycle & game$minute < requested_cycle)
+        {
+        call delay (1000)
+        # Cause swar to continue
+        $swar_wakeup = $YES
+        next
+        }
+ 
+    last_cycle = game$minute
+ 
+    if (verbose_msg)
+        {
+		print *, "# Cycle ", last_cycle
+        #call putlin_v ("# Cycle ",STDOUT)
+        #call putdec (last_cycle,1)
+        }
+ 
+    if (requested_cycle > last_cycle)
+        {
+        if (verbose_msg)
+            {
+			print *, ",  Waiting for ", requested_cycle
+            #call putlin_v (",  Waiting for ",STDOUT)
+            #call putdec (requested_cycle,1)
+            #call putch  (NEWLINE,STDOUT)
+            }
+        # Cause swar to continue
+        $swar_wakeup = $YES
+        next
+        }
+ 
+ 
+    #if (verbose_msg)
+    #    {
+    #    call putch  (NEWLINE,STDOUT)
+    #    }
+ 
+    #______________________________________________________________________
+    # begin reading scripted commands
+ 
+    repeat
+        {
+        ilen = getlin(line,script_fd)       # get a line of script
+ 
+        if (ilen == EOF) break 2
+ 
+        if (ilen == 0) next
+        if (line[1] == NEWLINE) next
+ 
+        #______________________________________________________________________
+        # Process Time-Mark Line
+ 
+        if (line[1] == $ASTER)
+            {
+            ipos = 2
+ 
+            call skipbl (line,ipos)
+ 
+            if (line[ipos] == $PLUS)              # relative time ??
+                {
+                inc = requested_cycle           # Yes
+                ipos = ipos + 1
+                requested_cycle = ctoi (line,ipos) + inc
+                }
+            else if (line[ipos] == $EQUAL)              # dtg
+                {
+                absolute_mode = .true.
+                ipos = ipos + 1
+                call convert_to_gm (ctoi(line,ipos),gm)
+                requested_cycle = gm
+                }
+            else
+                {
+                absolute_mode = .true.
+                inc           = 0
+                requested_cycle = ctoi (line,ipos) + inc
+                }
+ 
+ 
+            if (requested_cycle <= last_cycle) next     # NOW already (or past)
+ 
+            if (verbose_msg)
+                {
+				print *, "# Now waiting for ", requested_cycle
+                #call putlin_v ("# Now waiting for ",STDOUT)
+                #call putdec (requested_cycle,1)
+                #call putch  (NEWLINE,STDOUT)
+                }
+ 
+            # Generate FLUSH sequence to purge any half-generated commands
+            # 1/8/2001 dew
+ 
+            kk = 0
+            call smovh (flush,ARB, line2, kk)
+            call smovi (requested_cycle, line2, kk)
+			call smov (NEWLINE, line2, kk)
+            call smov  (EOS, line2, kk)
+            call copy_to_sta_prescript_buf (station_nbr, line2)
+ 
+             # Cause swar to continue
+            $swar_wakeup = $YES
+            break
+            }
+ 
+        #______________________________________________________________________
+        # Process Re-direction Line
+ 
+        else if (line[1] == $GREAT)
+            {
+            ipos = 2
+            old_station_nbr = station_nbr
+            station_nbr = ctoi (line,ipos)
+            STA$Pointer$To (station_nbr)
+            if (!STA$Pointer$Valid)
+              {
+			   print *, "Cannot output to station ", station_nbr
+			   print *, ".     Using old station number."
+               #call putlin_v ("Cannot output to station ",STDOUT)
+               #call putdec (station_nbr,1)
+               #call putlin_v (".     Using old station number.",STDOUT)
+               #call putch  (NEWLINE,STDOUT)
+               station_nbr = old_station_nbr
+              }
+ 
+            if (sta_chan_created [station_nbr] == .false.)    # clk (E2046) - 12/98
+              {                                               # create mailbox if needed
+		PUTsta$PreLen$i(0)
+		sta_chan_created [station_nbr] = .true.
+              }
+ 
+ 
+            if (verbose_msg)
+                {
+				print *, "# Now outputing to station ", station_nbr
+                #call putlin_v ("# Now outputing to station ",STDOUT)
+                #call putdec (station_nbr,1)
+                #call putch  (NEWLINE,STDOUT)
+                }
+ 
+            next
+            }
+ 
+        #______________________________________________________________________
+        # Check for requirement to RE-SYNC
+ 
+        if (absolute_mode & ! in_sync)
+            {
+            if (last_cycle == requested_cycle)
+                {
+                in_sync = .true.
+                skip_mode = .false.
+                if (skip_count != 0)
+                    {
+                    print *,"#", skip_count,
+                        " lines skipped to Re-Syncronize the Script."
+                    }
+                }
+            else
+                {
+#                type 9001,last_cycle, requested_cycle
+9001            format  (x,"last=",i4,"      next=",i4)
+ 
+                skip_mode = .true.
+                }
+            }
+ 
+        if (skip_mode)
+            {
+            skip_count = skip_count + 1
+            next
+            }
+ 
+        #--------------------------------------------------------------------
+        # In sync... (or don't care)  process line
+ 
+        if (line[1] == $LESS)
+            {
+            #_________________________________________________________________
+            # Process Include Line
+ 
+            ipos = 2
+            call getwrd (line,ipos,buf)
+ 
+            new_fd = open_ (buf,READ)
+ 
+            if (new_fd == ERR)
+                {
+				print 9002, "Cannot open the Include File: ", (buf[i],i=1,length(buf))
+9002	format(a,50a1)
+                #call putlin_v ("Cannot open the Include File: ",ERROUT)
+                #call remark (buf)
+ 
+                next
+                }
+ 
+            if (verbose_msg)
+                {
+				print 9002, "# Inputing commands from: ", buf
+                #call putlin_v ("# Inputing commands from: ",STDOUT)
+                #call putlin (buf,STDOUT)
+                #call putch  (NEWLINE,STDOUT)
+                }
+ 
+            #__________________________________________________________
+            # Pass along lines from included file
+ 
+            repeat
+                {
+                ilen = getlin(line,new_fd)
+ 
+                if (ilen == EOF) break
+ 
+                if (ilen <= 1) next
+ 
+                call strip_comments (line, line2, jlen)
+ 
+                if (jlen > 1)
+                    {
+                    #call delay (100)                # E2178 - JHM 1/2000
+                    call copy_to_sta_prescript_buf (station_nbr, line2)
+                    }
+ 
+                if (verbose_msg)
+                    {
+					print 9003, (line[i], i=1,length(line))
+9003	format (200a1)
+                    #call putlin (line,STDOUT)
+                    }
+                }
+ 
+            call close_ (new_fd)
+ 
+            if (verbose_msg)
+                {
+				print 9002, "# End-of-File: ", buf
+                #call putlin_v ("# End-of-File: ",STDOUT)
+                #call putlin (buf,STDOUT)
+                #call putch  (NEWLINE,STDOUT)
+                #call putch  (NEWLINE,STDOUT)
+                }
+            }
+        else
+            {
+            #______________________________________________________________________
+            # output standard line
+ 
+            call strip_comments (line, line2, jlen)
+ 
+            if (jlen > 1)
+                {
+                #call delay (100)                    # E2178 - JHM 1/2000
+                call copy_to_sta_prescript_buf (station_nbr, line2)
+                }
+ 
+            if (verbose_msg)
+                {
+				print 9003, (line[i],i=1,length(line))
+                #call putlin (line,STDOUT)
+                }
+            } # end if standard line
+        } # end repeat command loop
+    } # end repeat cycle loop
+ 
+return
+end
+
+ 
+subroutine strip_comments (line1, line2, len)
+character       line1[ARB], line2[ARB]
+integer         len
+integer         k                       # MJC 5/10/2000 (E2145)
+len = 0
+for (k=1; line1[k] != EOS; k=k+1)       # drop off comments
+    {
+    if (line1[k] == NEWLINE)  break
+    if (line1[k] == $POUND)   break
+    if (line1[k] == $EXCLAIM) break
+ 
+    if ((line1[k] == $TAB | line1[k] == $SPACE)&
+        (line1[k+1]==$TAB | line1[k+1]==$SPACE) ) next
+ 
+    if (len == 0 &
+        (line1[k] == $TAB | line1[k] == $SPACE)) next   # 1st byte is BLANK
+ 
+    len = len + 1
+    line2[len] = line1[k]
+    }
+ 
+if (line2[len] == $TAB | line2[len] == $SPACE) continue # last byte is BLANK
+else                                           len=len+1
+ 
+line2[len]   = NEWLINE                  # terminate line here
+line2[len+1] = EOS
+ 
+return
+end
+
+ 
+subroutine init_script
+bbcommon
+ts$common
+ 
+integer*4  ef_status                 # return status variable for EF calls
+ 
+integer         open_, ctoi, getarg3
+character       buf[100]
+external        scopy
+ 
+integer         K,IPOS                          # MJC 5/10/2000 (E2145)
+BBdeclare      (STA$Pointer)                    # MJC 5/10/2000 (E2145)
+ 
+ 
+$swar_wakeup = $YES
+ 
+# Command Line Argumenets: <file name> <station #> <verbose ?>
+ 
+ call help_pgm(3,
+              "prescript: Meter orders into station based on game minute",
+              "prescript Tags: Prescript",
+              "Usage: prescript <prescript file> <station #> <verbose y/n>",
+              "<prescript file> Prescript file name",
+              "<station #> Station # receiving prescript orders",
+              "<verbose y/n> y means echo orders to screen",
+              "",
+              "Example: prescript orders.pre 6 y")
+ 
+  for (station_nbr = 1; station_nbr <= STA$Slots; station_nbr = station_nbr + 1)
+    sta_chan_created [station_nbr] = .false.
+ 
+  k = getarg3(1, buf, 50)
+#  call upper (buf)
+  script_fd = open_ (buf,READ)
+ 
+  if (script_fd == ERR)
+    {
+	 print 9004, "Cannot open the Script File: ", buf
+9004	format(a, 50a1)
+     #call putlin_v ("Cannot open the Script File: ",ERROUT)
+     #call remark (buf)
+     call endr4
+    }
+ 
+ call scopy (buf,1, script_name, 1)
+ k = getarg3(2, buf, 20)                  # Station Number is 2nd Argument
+ if (buf[1] != EOS)
+   {
+    ipos = 1
+    station_nbr = ctoi (buf,ipos)
+   }
+ else
+   {
+    station_nbr = 1
+   }
+ 
+  STA$Pointer$To station_nbr
+  if (STA$Pointer$Valid)
+    {
+     k = getarg3(3, buf, 20)                  # Verbose Mode Yes or No?
+	 call upper (buf)
+     verbose_msg = (buf[1] != $LETN)
+ 
+     requested_cycle = 0
+     absolute_mode = .false.
+     skip_mode     = .false.
+     in_sync       = .false.
+    }   # end of if the station number is legal
+  else
+    {
+	 print *, "Invalid Station Number."
+     #call putlin_v ("Invalid Station Number.",ERROUT)
+     call exit
+    }
+ 
+return
+end
+
+ 

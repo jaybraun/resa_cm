@@ -1,0 +1,1103 @@
+#####   version 3.1  dated-  7apr81
+###
+### mod to version 3.0          dated 29-dec-1980
+###
+### smn prog    module  comments
+### === ====    ======  =================================================
+### 002 rjw     bldcom  added 2nd path indx; changed path pntr to indx
+###
+#####   version 3.0  dated- 22dec80
+ 
+# 
+ 
+#$%     MODULE                        UTILITY                    DATA
+#$%   SUBROUTINES                   SUBROUTINES                 TABLES
+#$%   ===========                   ===========                 ======
+#$%
+#$%     OCOMM                          SEND                       ORD
+#$%     PCMMSG                         ECHOR                      UNT
+#$%     FNDPAT                         ECHOH                      MEM
+#$%     CHKMEM                         ECHOI                      PAT
+#$%     COMMNH                                                    COM
+#$%     COMRED                                                    ACC
+#$%     COMNED
+#$%     BLDCOM
+#$%     COM2WY
+#$%     FNDORD <WGORDP>
+#$%
+#$%
+#$%
+#$%   NOTES
+#$%   =====
+#$%
+#$%   1.  <FILENAME> INDICATES WHERE SUBROUTINE IS LOCATED.
+#$%
+#$%   2.  UTILITY SUBROUTINES NOT SHOWN ON FLOWCHART.
+#$%
+#$%   3.  * INDICATES NO OTHER SUBROUTINES CALLED.
+#$%
+#$%
+#$%
+#$%   FLOWCHART FOR FILE OCOMM
+#$%   ========================
+#$%
+#$%   EXEORD<WGORDP> - OCOMM  - PCMSG  - FNDORD*
+#$%                           - FNDPAT*
+#$%                           - CHKMEM*
+#$%                           - BLDCOM - COM2WY*
+#$%                           - COMMNH*
+#$%                  - COMRED*
+#$%                  - COMNED - BLDCOM - COM2WY*
+ 
+
+ 
+undefine read
+undefine write
+undefine err
+include "macros.inc"
+include "bbacc.inc"
+include "bbshc.inc"
+include "bbctl.inc"
+include "bbcode.inc"
+include "bbord.inc"
+include "bbcom.inc"
+include "bbmem.inc"
+include "bbpat.inc"
+include "bbunt.inc"
+include "orders.inc"
+include "ascii.inc"
+include "hscmt.inc"
+include "hsnod.inc"
+define (BBImplicit, Implicit None)                # MJC 6/24/2K (E2145 - Implicit None)
+
+# process commtext orders
+subroutine ocomm(id,                              #id = order id number
+                 iview,                           #iview = vue index of player
+                 nargs,                           # 6/91 reh
+                 ilex)                            # 6/91
+ 
+#######################################################
+#$%
+#$% Purpose:   OCOMM processes COMMTEXT commands for
+#$%            messages from sender to receiver.
+#$%
+#$% Called By: EXEORD
+#$%
+#$% Calls:     PCMMSG     SEND       FNDPAT
+#$%            CHKMEM     BLDCOM     COMMNH
+#$%
+#$% Tables:    ORD        UNT        MEM
+#$%            PAT        COM
+#$%
+#$% Date
+#$%
+#$% Author:
+#$%
+#######################################################
+ 
+BBcommon
+BBDeclare  (ORD$Pointer,
+            ORD$WRD$Index,
+            COM$Pointer,
+            COM$Acknowledge$I,
+            COM$Roger$I,
+            COM$Messageid$I,
+            COM$Diskaddr$I,
+            COM$Flightindx$I,
+            UNT2$Pointer,
+            UNT$Pointer,
+            MEM$Pointer,
+            PAT$Pointer)                    # MJC 6/24/2K (E2145 - Implicit None)
+integer ID, litcmp,
+        KKLEN,
+        IVIEW,
+        INFO,
+        IPNT,
+        IFLPNT,
+        JSTAT,
+        NRCVR,
+        KPNTR                               # MJC 6/24/2K (E2145 - Implicit None)
+literal CSTRIP8                             # MJC 6/24/2K (E2145 - Implicit None)
+integer*4   nargs
+literal ipath,isend,iflght,krcvr
+Literal     ilex[nargs]
+integer rpntr[5],msgid,msgadr,len1
+Character msg[ARB],msg1[ARB]
+ 
+integer*4   Data_Type
+ 
+#String msg0 "ERROR- message could not be found."
+#String msg1 "Path       has no members."
+#String msg2 "      is not a valid receiver."
+#String msg3 "      is not a member of path      ."
+#String msg4 "The message queue is full.       max."
+#String msg5 "      is not a valid flight name."
+ 
+ 
+#$% call to put COMM message to disk
+call pcmmsg (id,ord$pointer,msgid,msgadr)       # put comm msg to disk
+                                                # and return ord$pointer
+#$% if ORD pointer or message ID are zero
+if (ord$pointer == 0 | msgid == 0)
+   {
+    kklen = 0
+    #$% call to display error message
+    call smovv("ERROR- message could not be found.",msg,kklen)
+    call send_ (iview,0,kklen,msg)
+    return
+   }
+ipath = xord$w02$c
+#$% move path name to message formats for display
+kklen = 0
+call smovv("Path ",msg1,kklen)
+call smovhn(ipath,$$MaxName,msg1,kklen) # SMM 8/99 E2141
+call smovv(" has no members.",msg1,kklen)
+len1 = kklen
+ 
+#kklen = 28
+##$% enter COM table size into message format for display
+#call smovi(com$slots,msg,kklen) # 'msg' is unknown! hdf, 1/91
+ 
+#$% get adressee
+isend = xord$addressee$c
+ 
+unt2$pointer$to xord$addindx$i           # addressee unit pointer
+ 
+info = 0                                # set no-error status
+ 
+#$% if using specified flight
+if (xord$w03$c == $lex$using$)
+   {
+    #$% get flight order
+    ipnt = 5
+    iflght = xord$w04$c
+ 
+    #$% for each unit entry
+    for (unt$pointer$first;unt$pointer$ok;unt$pointer$next)
+       {
+        #$% if aircraft type and flight name match, break loop
+        if (xunt$type$i == $air$code & litcmp(xunt$name$c, iflght) == 0)  break
+       }
+    #$% if unit pointer in range, set relay flight pointer
+    if (unt$pointer$ok)  iflpnt = unt$pointer
+    else
+       {
+        kklen = 0
+        #$% enter flight name in message 5 format for display
+        call smovhn(iflght,$$MaxName,msg,kklen) # SMM 8/99 E2141
+        call smovv(" is not a valid flight name.",msg,kklen)
+        call send_ (iview,0,kklen,msg) # msg5
+ 
+        #$% initialize values
+        iflpnt = 0
+        info = 5
+       }
+   }
+else
+   {
+    #$% set pointers
+    iflpnt = 0
+    ipnt = 4
+   }
+ 
+call fndpat (ipath,mem$pointer)         # find path, return pointer(or zero)
+ 
+#$% if no members
+if (mem$pointer == 0)
+   {
+    info = 1                            # set bad-path status
+    #$% call to display error message 1
+    call send_ (iview,0,len1,msg1)
+   }
+else
+   {
+    #$% call to check membership for unit name
+    call chkmem (mem$pointer,isend,jstat,unt2$pointer)
+ 
+    #$% if sender status is NO
+    if (jstat == $No)
+       {
+        #$% enter sender into message format for display
+        kklen = 0
+        call smovhn(isend,$$MaxLit,msg,kklen)
+        call smovv(" is not a member of path ",msg,kklen)
+        call smovhn(ipath,$$MaxName,msg,kklen) # SMM 8/99 E2141
+        call send_ (iview,0,kklen,msg) # msg3
+ 
+        if (info == 0) info = 2         # sender not a member
+       }
+    #$% clear receiver flag
+    nrcvr = 0
+    #$% for each word entry in the range of those entered
+    for(ord$wrd$index=ipnt; ord$wrd$index$ok; ord$wrd$index=ord$wrd$index+1)
+       {
+        #$% increment receiver counter and zero pointers
+        nrcvr = nrcvr + 1
+        krcvr = xord$wrd$$c
+ 
+        #$% initialize pointers
+        kpntr = 0
+        rpntr[nrcvr] = 0
+ 
+        #$% for each unit entered
+        for (unt$pointer$first; unt$pointer$ok; unt$pointer$next)
+           {
+            #$% if name does not have a receiver, get next
+            if (xunt$name$c != krcvr) next
+            kpntr = unt$pointer
+            break
+           }
+ 
+        #$% if receiver could not be matched with a unit
+        if (kpntr == 0)
+           {
+            #$% enter receiver name into message 2 format
+            kklen = 0
+            call smovhn(krcvr,$$MaxLit,msg,kklen)
+            call smovv(" is not a valid receiver.",msg,kklen)
+            call send_ (iview,0,kklen,msg) # msg2
+ 
+            if (info == 0) info = 3     # set receiver not valid
+            next
+           }
+ 
+        #$% call to check membership for unit name
+        call chkmem (mem$pointer,krcvr,jstat,unt$pointer)
+ 
+        #$% if status is NO
+        if (jstat == $No)
+           {
+            #$% enter receiver name into message 3 format
+            kklen = 0
+            call smovhn(krcvr,$$MaxLit,msg,kklen)
+            call smovv(" is not a member of path ",msg,kklen)
+            call smovhn(ipath,$$MaxName,msg,kklen) # SMM 8/99 E2141
+            call send_ (iview,0,kklen,msg) # msg3
+ 
+            if (info == 0) info = 3     # receiver not a member
+           }
+ 
+        rpntr[nrcvr] = unt$pointer$index
+       }
+   }
+#$% for each path entry
+for (pat$pointer$first;pat$pointer$ok;pat$pointer$next)
+   {
+    #$% if path is same, break loop
+    if (litcmp(xpat$type$c, ipath) == 0)  break
+   }
+ 
+COM$Pointer = 0                          # set flag indicating this commun.
+                                         # has no relationship to previous msg
+                                         # 4/91, reh
+ 
+Data_Type = $commtext$code               # 6/91 reh
+ 
+#if ( ilex [ 1 ] == $LEX$COMMDATA$ )
+#    {
+#    Data_Type = $CommData$code           # 6/91 reh
+#    }
+ 
+call bldcom(Data_Type,                   #build COM entry
+            pat$pointer,
+            0,                                                        # smn002
+            unt2$pointer$index,
+            rpntr,
+            nrcvr,
+            com$pointer)                 # in/out
+ 
+#$% if COM pointer is zero
+if (com$pointer == 0)
+   {
+    #$% call to display that table is full
+    kklen = 0
+    call smovv("The message queue is full.",msg,kklen)
+    call send_ (iview,0,kklen,msg) # no max number was specified. hdf 1/91
+    #$% set info to table full
+    if (info == 0) info = 4
+   }
+#$% if info is needed
+if (info != 0)
+  {
+   if (info == 5)  info = 1       ###### there is currently no provision
+                                  ###### in COMLOG for 'invalid flight name'
+   #$% call to write COMM node history to disk
+   call commnh (msgid,0,info,0)
+   #$% if COM pointer is valid
+   if (com$pointer != 0) {com$zero}
+   return
+  }
+#$% set acknowledge to YES
+com$acknowledge$i = $yes
+PUTcom$acknowledge$i
+com$roger$i = $yes
+#$% set roger to YES
+PUTcom$roger$i
+com$messageid$i = msgid                         # set message id
+putcom$messageid$i
+com$DiskAddr$i = msgadr                         # set message disk address
+putcom$DiskAddr$i
+if (iflpnt == 0)                                #if no flight relay used
+    {
+     com$flightIndx$i = 0                       #flight index is 0
+    }
+else
+    {
+     unt$pointer = iflpnt                       # set relay flight pointer
+     com$flightIndx$i = unt$pointer$index
+    }
+putcom$FlightIndx$i
+ 
+return                                          # return to order processing
+end
+ 
+
+ 
+subroutine pcmmsg (id,iordpt,msgid,msgadr)      # find commtext order in ORD
+ 
+#######################################################
+#$%
+#$% Purpose:   PCMMSG locates commtext orders in
+#$%            ORD table and puts message to disk.
+#$%
+#$% Called By: OCOMM
+#$%
+#$% Calls:     FNDORD     ECHOR      ECHOH
+#$%            ECHOI
+#$%
+#$% Tables:    ORD
+#$%
+#$% Date:      APRIL 80
+#$%
+#$% Author:    Dana Wills
+#$%
+#######################################################
+ 
+bbcommon                                        # build disk file with text
+integer IORDPT,
+        MSGID,
+        MSGADR,
+        ID,
+        IDSK,
+        NLINES,
+        IPNT,
+        K,
+        ILEN                                    # MJC 6/24/2K (E2145 - Implicit None)
+BBDeclare  (CMT$REC$Index,
+            ORD$Pointer,
+            ORD$WRD$Index,
+            ORD$W02$C,
+            ORD$Addressee$C,
+            ORD$WRD$$C)                         # MJC 6/24/2K (E2145 - Implicit None)
+literal CSTRIP8                                 # MJC 6/24/2K (E2145 - Implicit None)
+CMT$Record$Definition         #PGA interface, from HSCMT.inc
+ 
+#$% clear flags
+iordpt = 0
+msgid = 0
+msgadr = 0
+ 
+#$% call to find order
+call fndord (id,ord$pointer)
+if (ord$pointer == 0) return
+ 
+#$% set COMM message data
+iordpt = ord$pointer
+msgid = Next$Comm$MsgNbr
+msgadr = Next$Comm$Disk
+idsk = msgadr
+ 
+#$% decrement order counter
+nlines = xord$count$i - 1
+ 
+#$% increment next COMM message number and next COMM disk
+Next$Comm$MsgNbr = Next$Comm$MsgNbr + 1
+Next$Comm$Disk = Next$Comm$Disk + nlines + 1
+ 
+#$% enter line data
+cmt$zero
+ 
+PUTcmt$NLines$I(nlines)
+PUTCMT$GameTime$f(game$time)
+PUTcmt$MsgId$I(msgid)
+ 
+ORD$W02$C = xORD$W02$C                        # set path name
+putCMT$PathType$C(Ord$W02$C)
+ 
+ORD$Addressee$C = xORD$Addressee$C            # set addressee
+putCMT$Sender$C(ORD$Addressee$C)
+ 
+if (xORD$W03$C == $lex$using$) ipnt = 5
+else                          ipnt = 4
+ 
+CMT$Rec$Index = 0
+ 
+#$% for each entry
+for (ord$wrd$index = ipnt; ord$wrd$index$ok; ord$wrd$index=ord$wrd$index+1)
+   {
+    #$% increment counter and get ORD word
+    CMT$Rec$Index = CMT$Rec$Index + 1
+ 
+    ORD$Wrd$$C = xORD$Wrd$$C
+    putCMT$Rec$Name$C(ORD$Wrd$$C)
+   }
+ 
+#$% write message header and increment disk
+write ($lfc$comm,rec=idsk) cmt$record          #write msg header
+idsk = idsk + 1
+ 
+for (k = 1; k <= nlines; k=k+1)
+   {
+    cmt$zero
+ 
+    #$% call to find order
+    call fndord (id+k,ord$pointer)
+    if (ord$pointer != 0)
+       {
+        ilen = 0
+ 
+        #$% for each entry
+        for (ord$wrd$index=1;ord$wrd$index$ok;ord$wrd$index=ord$wrd$index+1)
+           {
+            #$% move orders to format for display
+            Call SMOVHN(xOrd$wrd$$C,$$MaxLit,cmt$record,ilen) # SMM 8/99 E2141
+           }
+       }
+    else
+       {
+        #$% display message
+        call echor
+        call echov ("Cannot find order ")
+        call echoi (id+k)
+        call echov (" for COMMTEXT text")
+        call echor
+       }
+ 
+    #$% write message to disk and increment disk
+    write ($lfc$comm,rec=idsk) cmt$record               # write msg line
+    idsk = idsk + 1
+   }
+ 
+return
+end
+ 
+
+ 
+ 
+ 
+subroutine fndpat (ipath,mem$pointer)           # find 'path' in membership
+ 
+#######################################################
+#$%
+#$% Purpose:   FNDPAT locates a path in the
+#$%            membership matrix.
+#$%
+#$% Called By: OCOMM
+#$%
+#$% Calls:     None
+#$%
+#$% Tables:    MEM
+#$%
+#$% Date:      APRIL 80
+#$%
+#$% Author:    Dana Wills
+#$%
+#######################################################
+ 
+bbcommon                                        # matrix
+BBDeclare  (MEM$Pointer)                        # MJC 6/24/2K (E2145 - Implicit None)
+literal CSTRIP8
+literal ipath
+integer litcmp                                  # JHM 5/01/02 (E2259)
+                                                # path compare failing without this
+#$% for each path membership entry
+for (mem$pointer$first; mem$pointer$ok; mem$pointer$next)
+   {
+    #$% if path name is same, return
+    if (litcmp(Xmem$PathName$c, ipath) == 0) return
+   }
+ 
+#$% clear member ship pointer
+mem$pointer = 0
+ 
+return
+end
+ 
+
+ 
+ 
+ 
+subroutine chkmem (mem$pointer,name,istat,      # find 'name' in membership
+                   unt$pointer)                 # matrix
+ 
+#######################################################
+#$%
+#$% Purpose:   CHKMEM checks membership matrix
+#$%            for unit name.
+#$%
+#$% Called By: OCOMM
+#$%
+#$% Calls:     None
+#$%
+#$% Tables:    UNT        ACC
+#$%            MEM
+#$%
+#$% Date:      APRIL 80
+#$%
+#$% Author:    Dana Wills
+#$%
+#######################################################
+ 
+BBcommon
+BBDeclare  (UNT$Pointer,
+            ACC$Pointer,
+            SHC$Pointer,
+            MEM$NO$Index,
+            MEM$Pointer)                    # MJC 6/24/2K (E2145 - Implicit None)
+literal CSTRIP8                             # MJC 6/24/2K (E2145 - Implicit None)
+integer ISTAT, litcmp
+ 
+literal name,jname
+ 
+#$% set status to YES
+istat = $yes
+ 
+if ( xUNT$Type$i == $air$code )
+    {                                       #     matrix for aircraft type
+    acc$pointer = xunt$accpntr$i
+ 
+    #$% get name of aircraft
+    jname = xacc$type$c
+    }
+else if ( xUNT$SuperType$i == $SmallBoat$SuperCode )       # added 4/91, reh
+    {
+    SHC$Pointer = xUNT$ShcPntr$i
+ 
+    #$% get name of aircraft
+    jname = xSHC$Type$c
+    }
+else
+    {
+    jname = name
+    }
+ 
+#$% for each member entred
+for (mem$no$index = 1; mem$no$index$ok; mem$no$index = mem$no$index+1)
+   {
+    #$% if membership matrix name matches aircraft name, return
+    if (litcmp(Xmem$NO$ForceName$c, jname) == 0) return
+   }
+#$% set status to NO
+istat = $no
+ 
+return
+end
+ 
+
+ 
+ 
+ 
+subroutine commnh (msgid,node,info,com$pointer)  # put com node history record
+ 
+#######################################################
+#$%
+#$% Purpose:   COMMNH writes the communication node
+#$%            history to disk.
+#$%
+#$% Called By: OCOMM
+#$%
+#$% Calls:     None
+#$%
+#$% Tables:    None
+#$%
+#$% Date:      APRIL 80
+#$%
+#$% Author:    Dana Wills
+#$%
+#######################################################
+ 
+bbcommon
+integer MSGID,
+        NADDR,
+        NODE,
+        INFO,
+        M                                           # MJC 6/24/2K (E2145 - Implicit None)
+BBDeclare  (COM$Pointer)                            # MJC 6/24/2K (E2145 - Implicit None)
+ 
+NOD$Record$Definition         #PGA interface, from HSNOD.inc
+ 
+#------------------------------------------------------------------
+#                             |                                   |
+#  When NODE == 0             | When NODE != 0                    |
+#  ==============             | ==============                    |
+#                             |                                   |
+#  INFO DESCRIPTION           | INFO DESCRIPTION                  |
+#  ---- -----------           | ---- -----------                  |
+#   1   Invalid Path          |  1   Internode Delivery           |
+#   2   Invald Sender         |  2   Last Node Delivery           |
+#   3   Invalid Receiver      |  3   Message Life Exceeded        |
+#   4   COM table full        |  4   Commbuoy Life Exceeded       |
+#                             |  5   Relay Flight Landed          |
+#                             |  6   Wargame Ended-Message in Node|
+#                             |  7   Message Rogered              |
+#                             |  8   All holders deleted          |
+#                             |  9   All receivers deleted        |
+#                             |                                   |
+#------------------------------------------------------------------
+ 
+if (msgid == 0) return                  #ignore non-commtext messages
+ 
+#$% enter message ID, node and information in log
+naddr = next$node$disk
+next$node$disk = next$node$disk + 1
+ 
+PUTNOD$GameTime$f      (game$minute        )
+PUTnod$MsgId$i         (msgid              )
+PUTnod$node$i          (node               )
+PUTnod$info$i          (info               )
+ 
+#$% if node is zero
+if (node == 0)
+   {
+    m = 3
+   }
+else
+   {
+    #$% enter commtext message data
+    PUTNOD$ReceiveTime$f     (xcom$ReceiveTime$f )
+    PUTNOD$ReadyTime$f       (xcom$ReadyTime$f   )
+    PUTnod$Holders$i         (xcom$Holders$i     )
+    PUTnod$Trys$i            (xcom$Trys$i        )
+    PUTNOD$SendTime$f        (xcom$SendTime$f    )
+    PUTnod$Overs$i           (xcom$Overs$i       )
+ 
+    m = 9
+   }
+ 
+#$% write COMM node history
+write ($LFC$node,rec=naddr) nod$record
+ 
+return
+end
+ 
+ 
+ 
+Subroutine comred                       # check for current orders if COM done
+ 
+#######################################################
+#$%
+#$% Purpose:   COMRED checks for current orders
+#$%            if communication data is finished
+#$%            and ready.
+#$%
+#$% Called By: WGORDP
+#$%
+#$% Calls:     None
+#$%
+#$% Tables:    ORD        COM
+#$%
+#$% Date:      APRIL 80
+#$%
+#$% Author:    Dana Wills
+#$%
+#######################################################
+ 
+bbcommon
+BBDeclare  (ORD$Pointer,
+            ORD$Comindx$I,
+            ORD$Status$I,
+            COM$Pointer,
+            COM$Type$I,
+            COM$Status$I)                       # MJC 6/24/2K (E2145 - Implicit None)
+ 
+#$% for each order entry
+for (ord$pointer$first; ord$pointer$ok; ord$pointer$next)
+   {
+    #$% if not in COMM, get next
+    if (xord$status$i != $InComm$code) next
+ 
+    #$% get COM index
+    ord$COMIndx$i = Xord$COMIndx$i
+ 
+    #$% if COMM index is zero
+    if (ord$COMIndx$i == 0)
+       {
+        #$% set order status to executable and save
+        ord$status$i = $Executable$code
+        PUTord$status$i
+        next
+       }
+ 
+    #$% set COM pointer
+    com$pointer$to ord$COMIndx$i
+ 
+    #$% get COM type
+    com$type$i = Xcom$type$i
+ 
+    #$% if not a player order, set status to being deleted
+    if (com$type$i != $PlayerOrder$code) com$status$i = $BeingDeleted$code
+    #$% else set COM status
+    else                                 com$status$i = Xcom$status$i
+ 
+    #$% determine COMM status
+    if      (com$status$i==$Received$code    )ord$status$i=$Executable$code
+    else if (com$status$i==$DidntRoger$code  )ord$status$i=$DidntRoger$code
+    else if (com$status$i==$CantSend$code    )ord$status$i=$CantSend$code
+    else if (com$status$i==$BeingDeleted$code)ord$status$i=$BeingDeleted$code
+    else                                      next
+ 
+    #$% save status
+    PUTord$status$i
+   }
+ 
+#$% for each COMM entry
+for (com$pointer$first; com$pointer$ok; com$pointer$next)   # clean up COM
+   {
+    #$% get type; if not a player order, get next
+    com$type$i = Xcom$type$i
+    if (com$type$i != $PlayerOrder$code) next
+ 
+    #$% get COM status
+    com$status$i = Xcom$status$i
+ 
+    #$% determine COM status
+    if (com$status$i != $Received$code    &
+        com$status$i != $DidntRoger$code  &
+        com$status$i != $CantSend$code  &
+        com$status$i != $BeingDeleted$code) next
+ 
+#   com$status$i = $BeingDeleted$code           # remove the entry
+#   PUTcom$status$i
+ 
+    #$% sero COM
+    com$zero
+   }
+ 
+return
+end
+ 
+ 
+ 
+Subroutine comned                       # generate COM for those needed
+ 
+#######################################################
+#$%
+#$% Purpose:   COMNED generates communication
+#$%            data for those needed.
+#$%
+#$% Called By: WGORDP
+#$%
+#$% Calls:     BLDCOM     ECHOH
+#$%
+#$% Tables:    ORD        PAT        COM
+#$%
+#$% Date:      APRIL 80
+#$%
+#$% Author:    Dana Wills
+#$%
+#######################################################
+ 
+bbcommon
+integer ICKT,
+        IORIG,
+        IDEST,
+        INDX                                # MJC 6/24/2K (E2145 - Implicit None)
+BBDeclare  (ORD$Pointer,
+            ORD$Comindx$I,
+            ORD$Status$I,
+            PAT$Pointer,
+            COM$Pointer)                    # MJC 6/24/2K (E2145 - Implicit None)
+repeat
+   {
+    #$% zero flags
+    ickt = 0
+    iorig = 0
+    idest = 0
+    indx = 0
+ 
+    #$% for each order entry
+    for (ord$pointer$first; ord$pointer$ok; ord$pointer$next)
+       {
+        #$% if COMM is not needed, get next
+        if (xord$status$i != $NeedComm$code) next
+ 
+        if (ickt  == xord$Circuit$i       &     # is this in the same package?
+            idest == xord$AddIndx$i       &
+            iorig == xord$OriginatorIndx$i)
+           {
+            #$% set COM index and save
+            ord$COMindx$i = indx                # yes.....
+            PUTord$COMindx$i
+ 
+            #$% set status to in COMM and save
+            ord$status$i = $InComm$code
+            PUTord$status$i
+ 
+            next
+           }
+ 
+        if (ickt != 0) next             # look for others to group together
+ 
+                                        # start a new package
+        ickt  = xord$Circuit$i          # save info about this package
+        idest = xord$AddIndx$i
+        iorig = xord$OriginatorIndx$i
+ 
+        #$% for each path entry
+        for (pat$pointer$first;pat$pointer$ok;pat$pointer$next)
+           {
+            #$% if same circuit, break loop
+            if (xpat$circuit$i == ickt)  break
+           }
+ 
+        COM$Pointer = 0                  # set flag indicating this commun.
+                                         # has no relationship to previous msg
+                                         # 4/91, reh
+ 
+        call bldcom($playerorder$code,                  #build COM entry
+                    pat$pointer,
+                    0,                                               # smn002
+                    iorig,
+                    idest,
+                    1,
+                    com$pointer)
+ 
+        if (com$pointer == 0)                         # if no slot
+           {
+            #$% send orders delayed message, return
+            call echov ('Comm queue full -- orders delayed')
+            return
+           }
+ 
+        #$% set COM pointer and save
+        ord$COMindx$i = com$pointer$index
+        PUTord$COMindx$i
+ 
+        #$% set status to in COMM and save
+        ord$status$i = $InComm$code
+        PUTord$status$i
+       }
+ 
+     #$% until circuit is zero
+   } until (ickt == 0)
+ 
+return
+end
+ 
+
+ 
+ 
+Subroutine bldcom(itype,          #builds COM entry
+                  ipath1,         #itype = type of entry (in)
+                  ipath2,         #ipath1 = 1st path pntr (in)
+                  iorig,          #ipath2 = 2nd path pntr (in)   #smn002
+                  idest,          #iorig = originator index (in)
+                  ndest,          #idest = array of destination indexes (in)
+                  com$pointer)    #ndest = number of destinations (in)
+                                  #com$pointer = pointer to entry created (in/out)
+                                  #com$pointer is set when a message requires
+                                  #    autoroger, set to zero when message is
+                                  #    being built. 4/91 reh
+############################################################
+#$%
+#$% Purpose:   BLDCOM builds a communication data entry.
+#$%
+#$% Called By: COMNED
+#$%
+#$% Calls:     COM2WY
+#$%
+#$% Tables:    COM
+#$%
+#$% Date:      APRIL 80
+#$%
+#$% Author:    Dana Wills
+#$%
+############################################################
+ 
+BBcommon
+BBDeclare  (COM$Pointer,
+            COM$Datatype$I,
+            COM$Pathpntr$I,
+            COM$Twoway$I,
+            COM$Tryaltpath$I,
+            COM$Altpathtwoway$I,
+            COM$Altpathpntr$I,
+            COM$Senderindx$I,
+            COM$Type$I)                 # MJC 6/24/2K (E2145 - Implicit None)
+BBDeclare  (COM$Status$I,
+            COM$Receivetime$F,
+            COM$Receivers$I,
+            COM$RE$Index,
+            COM$RE$indx$I,
+            COM$Node$I,
+            COM$HO$Index,
+            COM$HO$indx$I,
+            COM$HO$node$I,
+            COM$Holders$I)              # MJC 6/24/2K (E2145 - Implicit None)
+integer ITYPE,
+        IPATH1,
+        IPATH2,
+        IORIG,
+        NDEST                           # MJC 6/24/2K (E2145 - Implicit None)
+integer*4   COM2$Pointer
+integer idest[arb]
+ 
+#$% if pointer is OK, message requiring an autoroger is pointer to
+COM2$Pointer = COM$Pointer          # 4/91, reh
+ 
+for(com$pointer$first;com$pointer$valid;com$pointer$next) # each msg slot
+   {
+    if(xcom$senderIndx$i == 0) break            #find blank slot
+   }
+ 
+if (!com$pointer$valid)                         # if no slot
+   {
+    com$pointer = 0
+    return
+   }
+ 
+com$zero                                        # zero slot
+ 
+if (com$last <= com$pointer)
+   {
+    com$last$to com$pointer + com$entry - 1
+   }
+ 
+#$% COM$DataType$i field and associated logic added 4/91 reh
+#$% define default data type
+COM$DataType$i = $DataCommunication$Code
+ 
+#$% if type of message is text
+if ( itype == $commtext$code )
+    {
+    COM$DataType$i = $TextCommunication$Code
+    }
+#$% else if message is digital data
+else if ( itype == $report$code |
+          itype == $CommData$Code )
+    {
+    COM$DataType$i = $DataCommunication$Code
+    }
+#$% else if message is a player order
+else if ( itype == $playerorder$code )
+    {
+    COM$DataType$i = $VoiceCommunication$Code
+    }
+#$% else if pointer to previous message is OK
+else if ( COM2$Pointer$OK )
+    {
+    #$% if roger required
+    if ( itype == $AutoRoger$Code )
+        {
+        COM$DataType$i = xCOM2$DataType$i
+        }
+    }
+ 
+putCOM$DataType$i                           # 4/91
+ 
+#$% set path pointer to first path
+com$PathPntr$i = ipath1
+PUTcom$PathPntr$i
+ 
+#$% call to generate two way COMM path
+call com2wy(ipath1,com$TwoWay$i)
+PUTcom$TwoWay$i
+ 
+#$% if second path is valid
+if (ipath2 != 0)
+   {
+    #$% initialize try alternate path flag
+    com$TryAltPath$i = $yes
+    PUTcom$TryAltPath$i
+ 
+    #$% call to generate two way COMM path
+    call com2wy(ipath2,com$AltPathTwoWay$i)
+    PUTcom$AltPathTwoWay$i
+ 
+    #$% set alternate path pointer to second path
+    com$AltPathPntr$i = ipath2
+    PUTcom$AltPathPntr$i
+   }
+ 
+#$% set sender index
+com$senderIndx$i = iorig
+putcom$senderIndx$i
+ 
+#$% set COMM type
+com$type$i = itype
+putcom$type$i
+ 
+#$% set status to OK to process
+com$status$i = $OkToProcess$code
+putcom$status$i
+ 
+com$ReceiveTime$f = order$minute                # time when msg will be first
+putcom$ReceiveTime$f                            #       processed
+ 
+#$% set COMM receivers
+com$receivers$i = ndest
+putcom$receivers$i
+ 
+#$% for each receiver entry
+for (com$re$index = 1; com$re$index<=ndest; com$re$index=com$re$index+1)
+  {
+   com$re$indx$i = idest[com$re$index]      # set rcvr index
+   putcom$re$indx$i
+  }
+ 
+#$% set pointers to first slot
+com$node$i = 1
+putcom$node$i
+ 
+com$ho$index = 1
+ 
+com$ho$indx$i = iorig
+putcom$ho$indx$i
+ 
+com$ho$node$i = 1
+putcom$ho$node$i
+ 
+com$holders$i = 1
+putcom$holders$i
+ 
+return
+end
+ 
+
+ 
+Subroutine com2wy(pat$pointer,is2way)
+ 
+#######################################################
+#$%
+#$% Purpose:   COM2WY generates a two way
+#$%            communication path.
+#$%
+#$% Called By: BLDCOM
+#$%
+#$% Calls:     None
+#$%
+#$% Tables:    PAT
+#$%
+#$% Date:      APRIL 80
+#$%
+#$% Author:    Dana Wills
+#$%
+#######################################################
+ 
+BBcommon
+BBDeclare  (PAT$NOD$Index,
+            PAT$Pointer)                        # MJC 6/24/2K (E2145 - Implicit None)
+integer IS2WAY                                  # MJC 6/24/2K (E2145 - Implicit None)
+#$% set to first node index
+pat$nod$index = 1
+ 
+#$% if number of nodes is less than two, and roger is requested,
+#$% then path is two way
+if (xpat$NumberOfNodes$i <= 2 & xpat$nod$RogerFlag$i != $no) is2way = $yes
+#$% else path is not two way
+else                                                         is2way = $no
+ 
+return
+end
+ 
+ 

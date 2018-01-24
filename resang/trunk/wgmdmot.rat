@@ -1,0 +1,3828 @@
+#####   FILE:   WGMDMOT.RAT
+ 
+# Modified 2/96
+#       Implemented use of new fuel model (E1467)
+#       Moved following routines to wgmdfuel.rat:
+#                   BoatFuel became Boat_Fuel_Consumption
+#                   Aircraft_Fuel_Consumption
+#                   Aircraft_Fuel_Expended
+#                   AC_Fuel_Per_Sec
+#
+# October 1993 - Carol Kropp
+# To do Variable Time Step required the addition of a variable to most
+# routines to know the amount of time (in minutes) that has elapsed since motion
+# was last processed.  All motion related computations are based on this elapsed
+# time and no longer on 60 seconds worth of time.
+# The subroutine SATTST was removed (ERRPOS was the only caller), since it didn't
+# do anything but set the return value to true.
+#
+# Removed subroutine FUEL which was "left in place temporarily", when
+# NWFUEL was created in 1984.  Wildair.rat default the value of ACC$LoiterFuel$I
+# to one (1), so this routine FUEL would never be called.
+#
+# Combined the routines NWfuel and Air_Fuel_Consumption into one routine
+# Aircraft_Fuel_Consumption.  Also combined the functionality of computing
+# the number of pounds consumed into one routine AC_Fuel_Per_Sec, from
+# FuelPerMin and Air_Fuel_Consumption.
+ 
+#
+# Modified 3/89 by REH, required because UNT, POS and part
+#        of DYN have been combined into UNT.
+#        The dynamc EQuipment part of the DYN table is now
+#        included in the new DEQ table.
+#
+ 
+ 
+define ($DEBUGM,)                               # test game minute
+ 
+# "RESA Model Description:  Variable Cycle Time", 12 Aug 1993
+define($NonShip$TurnRate$PerMinute,(180.*$deg2rad))  # 180 degree/min to rad
+define($Ship$TurnRate$PerMinute   ,(60. * $deg2rad)) # 60 degree/min to rad
+define($Ship$AccelRate$PerMinute  ,5.)               # 5 knt/min
+define($Boat$AccelRate$PerMinute  ,10.)              # 10 knt/min
+define($Boat$AccelRate$Percent    ,0.50)             # 50 percent
+ 
+define($epsilon,(1.0/6000.0))   # Added to prevent problem with roundoff  DEW 8/99
+ 
+include "ascii.inc"
+include "bbctl.inc"
+include "bbcode.inc"
+ 
+include "bbacc.inc"
+include "bbasw.inc"                     # jb    5/31/90
+include "bbaml.inc"                     #       9/19/85
+include "bbbml.inc"                     # jb    4/28/89
+include "bbdeq.inc"
+include "bblcl.inc"
+include "bbnav.inc"
+include "bbpim.inc"
+include "bbrte.inc"             #$% YYY   1Aug85.  jb    11/20/89
+include "bbshc.inc"
+include "bbunt.inc"
+include "bbwet.inc"
+include "bbnrt.inc"             # SMM 12/92  PER #E1101
+include "bbcmc.inc"             # AV  6/17/93 BALL missiles
+include "elevation.inc"           # joa 11/95 (E1422)
+include "plplay.inc"
+ 
+#define ($debugf,  $$Debug$Control)      # trace fltops
+ 
+define(trace$fltops$rcn,istrip(trace$fltops,5,M1bits)) # trace reconn
+ 
+define(Itrace$motion,1)
+define(Itrace$motion,trace$motion)
+ 
+define ($$$Course     ,1)     # these are priority ranked
+define ($$$LatLon     ,2)     # units stationed | attacking
+define ($$$Pim        ,3)     # must be moved after the
+define ($$$Fltops     ,4)     # guide.
+define ($$$Guiding    ,6)
+define ($$$Attacking  ,7)
+define ($$$MaxModes   ,7)
+ 
+define (BBimplicit, IMPLICIT NONE)  # jb E2145  5/10/00
+ 
+#$% khc 9/92 - HIDE SITES  # jb E2145 (a)superceded; (b) not used  7/17/00
+#define(OAcommon,common/OACT/IORDER,IEQTYP,IMODE,ieq,
+#                ALLFLG,OKFLAG,NOSUCH,EQFIND,SENFND,NFOUND[7]
+#                literal ieq
+#                logical ALLFLG,OKFLAG,NOSUCH,EQFIND,SENFND)
+ 
+#define(OAcommon,common/OACT/ieq,    # jb Common not used??  jb  7/17/00
+#                IORDER,IEQTYP,IMODE,NFOUND[7],
+#                ALLFLG,OKFLAG,NOSUCH,EQFIND,SENFND
+#                literal ieq
+#                integer iorder,ieqtyp,imode,nfound      # jb #2145 5/11/00
+#                logical ALLFLG,OKFLAG,NOSUCH,EQFIND,SENFND)
+ 
+
+ 
+Subroutine MOTMAN
+#######################################################
+#$%
+#$% Purpose:   MOTMAN provides executive control for
+#$%            the motion and maneuver modules.
+#$%
+#$% Called By: WARCYC
+#$%
+#$% Calls:     MLAUNC     FUEL       ALTDEP
+#$%            SURSPD     GUIMAN
+#$%            DAYTST     MANUVR, _pim
+#$%
+#$% Tables:    UNT
+#$%
+#$% Date:      DEC 80
+#$%
+#$% Author:    Gary Thoma
+#$%
+#$% Modified:  Carol L. Kropp  3/92  air-to-air upgrade
+#$%            If Level$Air$Engagement = 1 use the
+#$%            AWSIMS fuel consumption algorithm,
+#$%            otherwise use NWFuel
+#$%
+#$%            12/92  Susan Miller  Added movement of
+#$%            Non-RealTime Tracks PER #E1101
+#$%
+#$%            5/93 Susan Miller Added return to CAP
+#$%            station when a/c isn't assigned a track
+#$%
+#$%            10/93 clk - Moved code to validate a route
+#$%            to its own subroutine.  Also combined NWfuel
+#$%            and Air_Fuel_Consumption into
+#$%            Aircraft_Fuel_Consumption.
+#$%
+#$%            1/94 Susan Miller Added handling of advanced SAM
+#$%
+#$%            Jim Allen - 11/95 (E1422)
+#$%            Terrain processing - added a positive elevation
+#$%            check prior to calling ALTDEP.  Also added
+#$%            call to update the elevation of platforms.
+#$%
+#$%            Jim Allen - 2/96 (E1467)
+#$%            Removed refuel routines for aircraft and
+#$%            small boats.  They are now handled an a
+#$%            separate model called in wgmain.  Moved code
+#$%            that handles a unit with a route index to
+#$%            a separate subroutine called Validate_Current_Route
+#$%            located at the end of this file.
+#$%
+#$%            Jim Allen - 2/96 (E1564)
+#$%            Move units based on nested guiding level.
+#$%
+#$%            Alex Vagus - 6/96 (E1479)
+#$%            If the unit is being deleted do not process it.
+#$%            (Being deleted ghosts were skipped, but not RESA units.)
+#$%
+#$%            Carol Kropp - 6/97 (E1812)
+#$%            Added SAM RADAR warning messages for a/c.
+#$%            Action Request Messages are received by the
+#$%            RTU and the appropriate bits in the BB are set.
+#$%
+#######################################################
+BBcommon
+integer*2   motion_cnt [$$$MaxModes],           # joa rsoi04 scratch$pad conflict
+            motion_list[unt$slots,$$$MaxModes]
+ 
+# jb E2145 (IMPLICIT NONE) declarations:        5/10/00
+literal     cstrip8                             # 7/14/93 trs
+real elapsed_time, time         # jb E2145  5/11/00
+real UNT$TrueLatitude$F         # jb E2145  5/11/00
+real UNT$TrueLongitude$F        # jb E2145  5/11/00
+real UNT$OrderedLatitude$F      # jb E2145  5/11/00
+real UNT$OrderedLongitude$F     # jb E2145  5/11/00
+real UNT$CosTrueLat$F           # jb E2145  5/11/00
+real unt$ALSPPosChgTime$f       # jb E2145  5/11/00
+real f_travel_dist              # jb E2145  5/11/00
+real f_range_nmi                # jb E2145  5/11/00
+real f_bearing_degrees          # jb E2145  5/11/00
+real f_cos_ord_lat              # jb E2145  5/11/00
+integer icnt                    # jb E2145  5/11/00
+integer CurrentGuideLevel, NextGuideLevel, ThisGuideLevel
+integer*4   i_switch_1                          # 7/14/93 trs
+ 
+integer*4   UNT$Pointer, UNT$Status$i                        # 7/14/93 trs
+integer*4   UNT$Type$I, UNT$SuperType$I         # 7/14/93 trs
+integer*4   UNT$ASWIndx$I, UNT$RteIndx$i        # 7/14/93 trs
+integer*4   UNT$AttackIndx$I, UNT$GuideIndx$I   # 7/14/93 trs
+integer*4   UNT$OrderedAltDepth$I               # 7/14/93 trs
+ 
+integer*4   ASW$Pointer, ASW$Phase$I            # 7/14/93 trs
+integer*4   UNT2$Pointer, UNT3$Pointer          # 7/14/93 trs
+integer*4   SHC$Pointer                         # 7/14/93 trs
+ 
+integer  dummy1,dummy2, engine_failure
+integer GuideLevel      # function to provide the number of nested guides
+integer*4   iairtgt, ipnt, mode                 # 7/14/93 trs
+integer   msg_len      # added so that a message could be sent to
+character msg[ARB]     # aircraft for DIS AAA/SAM warning - clk 6/97 (E1812)
+ 
+elapsed_time = Model$Interval
+ 
+call daytst                              # test platforms for in daylight
+ 
+for (mode = 1; mode <= $$$MaxModes; mode = mode + 1)
+    motion_cnt[mode] = 0
+ 
+for (UNT$POINTER$FIRST;still_ok(UNT);UNT$POINTER$NEXT)  #search unit (9/26/88)
+    {
+    if (xUNT$InUse$I == $no)  # if slot is not in use, skip it
+      next
+    unt$type$i = Xunt$Type$i
+    unt$status$i = Xunt$status$i                #get status
+    if (unt$status$i == $BeingDeleted$code |
+        unt$status$i == $DeadInWater$code  |
+        unt$status$i == $Sinking$code      )
+      next
+ 
+    if (xUNT$GhostedUnit$I == $yes)         # ALSP - clk 2/93
+      {
+       if (xUNT$ALSPId$I != 0)              # make sure that this ghost
+         {                                  # is an ALSP v. DIS ghost
+          unt$ALSPPosChgTime$f = xunt$ALSPPosChgTime$f
+          if (UNT$ALSPPosChgTime$f < Game$Time)
+            {
+             time = Game$Time - UNT$ALSPPosChgTime$F
+             putUNT$ALSPPosChgTime$F (Game$Time)
+ 
+             if (UNT$Type$I == $CruiseMissile$Code)      # clk 1/94 - So that cruise
+               {                                          # won't over dr target locations
+                UNT$OrderedLatitude$F = xUNT$OrderedLatitude$F
+                if (UNT$OrderedLatitude$F < $PI/2.0)
+                  {
+                    UNT$TrueLatitude$F = xUNT$TrueLatitude$F
+                    UNT$TrueLongitude$F = xUNT$TrueLongitude$F
+                    UNT$CosTrueLat$F = xUNT$CosTrueLat$F
+                    f_travel_dist = xUNT$TrueSpeed$F * (1./60.)
+ 
+                    UNT$OrderedLongitude$F = xUNT$OrderedLongitude$F
+                    f_cos_ord_lat = COS (UNT$OrderedLatitude$F)
+ 
+                    call RLL2RB (UNT$TrueLatitude$F, UNT$TrueLongitude$F,
+                                 UNT$CosTrueLat$F,
+                                 UNT$OrderedLatitude$F, UNT$OrderedLongitude$F,
+                                 f_cos_ord_lat,
+                                 f_range_nmi, f_bearing_degrees)
+                    if (f_range_nmi <= f_travel_dist)
+                      {
+                        call MOVASS (UNT$Pointer, UNT$OrderedLatitude$F,
+                                     UNT$OrderedLongitude$F, time)
+                        next
+                      }     # end of is the cruise missile reaches its target this time
+                  }        # end of is cruise missile has a target location
+               }          # end of if a cruise missile unit
+ 
+             call Motion (UNT$Pointer, time)
+             putUNT$AssumedLatitude$F  (xUNT$TrueLatitude$F)    # since it is possible that
+             putUNT$AssumedLongitude$F (xUNT$TrueLongitude$F)   # heading error was introduced
+            }    # end of if time of last position update is old
+         }    # end of unit is an ALSP ghost
+       next
+      }       # end of unit is ghosted
+ 
+    unt$type$i = Xunt$type$i                    # get the type
+    if (unt$type$i == $ShoreBase$code)          # if shorebase, skip it !
+      NEXT
+ 
+    PUTUnt$AtStationThisCycle$i ($NO)          #E2353 joa UFL03
+                                               #JHM from put$unt to putunt 10/03
+ 
+    unt$SuperType$I = Xunt$SuperType$I          # get the super type
+    UNT$Status$I = xUNT$Status$I                # get the status of the unit
+ 
+    if (UNT$SuperType$I == $Submarine$SuperCode)     # if it's a sub
+      {
+       SHC$Pointer = xUNT$SHCPntr$I                  # get the characteristics pointer
+       if (xSHC$NuclearPowered$I != $yes)            # and it's diesel
+            call Check_Battery_Charge (UNT$Pointer, elapsed_time)  # change UNT$BatteryCharge
+        call TimeUpPeriscope (unt$pointer)      # Manage periscope position
+      }
+    else if (UNT$SuperType$i == $SmallBoat$SuperCode)           # DEW 5/1/90
+      {
+        if ((Xunt$BMLindx$i == 0) &
+            (UNT$Status$I != $BeingDeleted$Code))      # per #H1044 SMM 2/10/93
+          {
+            # if someone screwed up in BBTEST, and re-enabled a moored boat,
+            # then set the boat's status back to being deleted.
+ 
+            call echov  (" Setting status of boat ")
+            call echohn (xUNT$Name$C,$$MaxLit)
+            call echov  (" back to being deleted - status was ")
+            call echov  ("changed after boat moored.")
+ 
+            putunt$status$i ( $BeingDeleted$code )
+            next
+          }
+ 
+        call Boat_Engine_Fail (UNT$Pointer, engine_failure)     # jb        6/7/89
+        if (engine_failure == $yes)
+          next
+ 
+        if (unt$Status$i == $ReadyToRecover$Code)# jb        6/7/89
+          {
+            call boat_recover (unt$Pointer)     # jb        6/7/89
+            next
+          }
+ 
+        if (unt$Status$i == $UnderTow$Code)  # is the TUG still there ?
+          {
+            unt$guideindx$i = Xunt$guideindx$i          # get guide index
+ 
+            unt3$pointer$to (unt$guideindx$i)
+            if (Xunt3$status$i != $Towing$code)    # NO - NOT still towing !
+              {
+                PUTunt$Status$i ($proceeding$code)
+                PUTunt$GuideIndx$i       (0)
+              }
+          }     # end of a boat under tow
+      }         # end of if a boat unit
+ 
+    if (unt$status$i == $AwaitingLaunch$code)
+      {
+        call mlaunc ( unt$pointer )
+        next
+      }
+ 
+    if (unt$type$i ==$Air$code)
+      {
+#        The aircraft fuel consumption is done in wgmdfuel.rat
+#        call Aircraft_Fuel_Consumption (UNT$Pointer, elapsed_time)   # clk 10/93
+#
+#        UNT$Status$I = xUNT$Status$I              # fuel consumption could
+#        if (UNT$Status$I == $BeingDeleted$Code)   # have changed a/c status
+#          next
+ 
+        # Reasons not to change the aircraft altitude to the ordered altitude:
+        # 1. The unit is attacking an air unit, so process any altitude changes
+        #    in GUIMAN to make the aircraft climb and dive to meet target.
+        # 2. The unit is using a route, so process any altitude adjustments
+        #    within the route motion routines.
+ 
+        Iairtgt = $NO    # initialize flag to non-a/c attacking
+        Unt$AttackIndx$i = xUnt$AttackIndx$i
+        if (Unt$AttackIndx$i != $NO)    # If attacking, check to see if it's
+          {                             # an air target
+            Unt2$Pointer$To Unt$AttackIndx$i
+            if (XUnt2$Type$i == $Air$Code)
+                 Iairtgt = $Yes
+          }
+        else # It doesn't have an AttackIndx
+          {  # SMM 5/5/93
+             if (xUNT$AssignedCap$I != $no) # if the aircraft is assigned to CAP
+                 call Proc_CAP (UNT$Pointer, dummy1, dummy2)
+          }
+ 
+        If (Iairtgt == $No)     # If not attacking an aircraft
+          {
+            UNT$OrderedAltDepth$i = XUNT$OrderedAltDepth$i
+            if ((XUNT$TrueAltDepth$i != UNT$OrderedAltDepth$i) |
+                 xUNT$MarshallStatus$I == $Recovering$code     |
+                (xUNT$AltAboveGround$I > 0))    # joa 11/95 (E1422)
+                  {                   #if an altitude change is requested
+                    if (Itrace$motion != $no)
+                      {
+                        call echor
+                        call echov("> ")
+                        call echohn(xunt$Name$c,$$MaxLit)
+                        call echov(" Changing altitude to ")
+                        call echoi(UNT$OrderedAltDepth$i)
+                      }
+ 
+                    call ALTDEP (UNT$Pointer, UNT$OrderedAltDepth$i, elapsed_time)
+            }  # of ordered altitude differs from current altitude
+          } # end of if not attacking an air unit
+ 
+        unt$ASWindx$i = Xunt$ASWindx$i        # jb            5/31/90
+        if (unt$ASWindx$i != $NO)  # jb a/c doing ASW search  5/31/90
+          {
+            ASW$Pointer$TO (unt$ASWindx$i)
+            ASW$Phase$i = xASW$Phase$i
+            if (ASW$Phase$i == 2 |    # If may need to decrement, find
+                ASW$Phase$i  > 3  )    # or delete buoys or BOY slot
+                    call do_macroASW (unt$pointer, elapsed_time)
+          }
+      } # End if (unt$type$i == $Air$code)
+    else if (unt$Type$i == $Sub$code)     # else if submarine
+      {
+        call surspd ( unt$pointer )     #check survival speeds
+ 
+        unt$OrderedAltDepth$i = Xunt$OrderedAltDepth$i
+        if (Xunt$TrueAltDepth$i != unt$OrderedAltDepth$i)  #if order exists
+           call altdep (unt$pointer, unt$OrderedAltDepth$i, elapsed_time)
+      }
+    else if ((unt$Type$i == $CruiseMissile$Code) |
+             (UNT$Type$I == $SAMissile$Code))   # SMM 4/28/94
+      {
+         unt$OrderedAltDepth$i = xUNT$OrderedAltDepth$i
+         if ((Xunt$TrueAltDepth$i != unt$OrderedAltDepth$i) |
+             (xUNT$AltAboveGround$I > 0))           # joa 11/95 (E1422)
+           call altdep (unt$pointer, unt$OrderedAltDepth$i, elapsed_time)
+      }
+#    The processing of the boat fuel consumption is done in wgmdfuel.rat
+#    else if(UNT$SuperType$i == $SmallBoat$SuperCode)           # DEW 5/1/90
+#      {
+#         If (unt$status$i != $UnderTow$Code  &          # jb               5/10/89
+#             unt$status$i != $ReadyToRecover$Code  )    # jb               6/5/89
+#           call boatfuel (unt$Pointer, elapsed_time)
+#      }
+ 
+    unt$guideindx$i = Xunt$guideindx$i          #E2352 JOA  block below  get guide index
+    if (unt$guideindx$i != $NO)                 # check for guide destroyed
+      {
+        unt2$pointer$to unt$guideindx$i
+        if(Xunt2$status$i == $BeingDeleted$Code)  # if the guide is on the way out
+          {
+            PUTunt$guideindx$i ($no)              # clear guide index in BB
+            if (unt$Status$I == $Onguide$Code)
+              {
+                unt$Status$I = $Proceeding$Code
+                PUTunt$Status$I
+              }
+          }
+      }
+ 
+    unt$attackindx$i = Xunt$attackindx$i        # get attack index
+    if (unt$attackindx$i != $NO)                # check for target destroyed
+      {
+        unt2$pointer$to unt$attackindx$i
+        if (Xunt2$status$i == $beingdeleted$code)  # if target is on the way out
+          {
+            PUTunt$attackindx$i  ($no)             # clear target index in BB
+            if (unt$Status$I == $Onguide$Code)
+              {
+                unt$Status$I = $Proceeding$Code
+                PUTunt$Status$I
+              }
+          }
+      }
+ 
+    #______________________________________________________________________
+    # determine mode of motion for this unit
+    # Those modes tested for first, overide those modes that follow.
+ 
+    # Note: TUGs should be moved before the boat under tow....
+    #       that is why the following tests are convoluted for Towing/Undertow
+ 
+    if (unt$status$i == $UnderTow$code |
+        unt$AttackIndx$i != $NO )
+        {
+        mode = $$$Attacking
+        }
+    else if (Xunt$PimIndx$i != 0)
+        {
+        mode = $$$Pim
+        }
+    else if (unt$status$i == $fltops$code)      # flight ops (turn into wind)
+        {
+        mode = $$$Fltops
+        }
+    else if(unt$GuideIndx$i != $NO & unt$status$i != $LOITERING$code) #jb 7/1/87
+        {               # if guide designated & a/c not in REfuel extremis
+        mode = $$$Guiding
+        }
+    else if (Xunt$OrderedLatitude$f < $PI/2.0 & unt$status$i != $LOITERING$code)
+        {               #if position ordered and a/c not in fuel extremis
+        mode = $$$LatLon
+        }
+    else
+        {
+        mode = $$$Course
+        }
+ 
+    motion_cnt[mode] = motion_cnt[mode] + 1
+    motion_list[motion_cnt[mode],mode] = unt$pointer$index
+    }
+ 
+for (mode = 1; mode <= $$$MaxModes; mode = mode + 1)
+    {
+    for (ipnt = 1; ipnt <= motion_cnt[mode]; ipnt = ipnt + 1)
+        {
+        unt$pointer$to motion_list[ipnt,mode]
+ 
+        switch (mode)
+            {
+             case $$$Course:
+                {
+                call manuvr ( unt$pointer, elapsed_time )
+                }
+             case $$$LatLon:
+                {
+                call manuvr_ll ( unt$pointer, elapsed_time )
+                }
+             case $$$Pim:
+                {
+                call manuvr_pim ( unt$pointer, elapsed_time )
+                }
+             case $$$Fltops:
+                {
+                call manuvr_flt ( unt$pointer, elapsed_time )
+                }
+#            process all guiding movements below - joa 3/96 (E1564)
+#             case $$$Guiding:
+#                {
+#                call guiman ( unt$pointer, elapsed_time )
+#                }
+#             case $$$Attacking:
+#                {
+#                call guiman ( unt$pointer, elapsed_time )
+#                }
+            }           # end of switch (mode)
+        }               # end of motion_cnt loop
+    }                   # end of mode loop
+ 
+  # Acount for nested guiding - Guide level 1 means this unit's guide has no guide.
+  mode = $$$Guiding                               # joa 3/96 (E1564)
+  NextGuideLevel = $CircularGuideDefinition
+  icnt = motion_cnt[mode]
+  while (icnt > 0)
+    {
+     CurrentGuideLevel = NextGuideLevel
+     NextGuideLevel = 99999999
+     for (ipnt = 1; ipnt <= icnt ; )
+       {
+        UNT$Pointer$To motion_list[ipnt,mode]
+        ThisGuideLevel = GuideLevel (UNT$Pointer)
+        if (ThisGuideLevel == CurrentGuideLevel)
+          {
+           call guiman (UNT$Pointer, elapsed_time)
+           motion_list[ipnt,mode] = motion_list[icnt,mode]
+           icnt = icnt - 1
+          }
+        else
+          {
+           NextGuideLevel = min (NextGuideLevel, ThisGuideLevel)
+           ipnt = ipnt + 1
+          }
+       }   # end of loop through the units who are guiding
+    }   # end of while there are more units to move by guiding
+ 
+  mode = $$$Attacking
+  for (ipnt = 1; ipnt <= motion_cnt[mode]; ipnt = ipnt + 1)
+    {
+     UNT$Pointer$To  motion_list[ipnt,mode]
+     call guiman (UNT$Pointer, elapsed_time)
+    }
+ 
+call Move_NRTs (elapsed_time)  # move the Non-RealTime Tracks  (E1101)
+ 
+call update_unit_elevation( elapsed_time )
+ 
+return
+end
+ 
+
+ 
+subroutine ALTDEP(unt$pointer,
+                  unt2$OrderedAltDepth$i,
+                  elapsed_time)
+#######################################################
+#$%
+#$% Purpose:   ALTDEP computes the incremental change
+#$%            in altitude or depth for the platform.
+#$%
+#$% Called By: MOTMAN
+#$%
+#$% Calls:     None
+#$%
+#$% Tables:    UNT
+#$%            ACC        SHC
+#$%
+#$% Date:      DEC 80
+#$%
+#$% Author:    Gary Thoma
+#$%
+#$% Modified:  Oct. 1993 - Carol Kropp
+#$%            Send in amt of time passed (minutes) and
+#$%            compute the climb|dive based on that, no
+#$%            longer on one minutes worth of time.
+#$%
+#$%            Susan Miller - 1/94
+#$%            Added handling of advanced SAM
+#$%
+#$%            Jim Allen - 11/95 (E1422)
+#$%            Added terrain elevation.  Allow altitude
+#$%            change for cruise missiles as long as it
+#$%            is above the ground.
+#$%
+#$%            Susan Miller 5/97 (E1745)
+#$%            If an a/c is at marshall status and is flying
+#$%            at a relative altitude, it will never BINGO
+#$%            since it never gets to the marshall altitude.
+#$%            Allow the altitude of aircraft in marshall status
+#$%            to changed regardless of its relative altitude.
+#$%
+#$%            Jim Allen - 2/98 (E1864)
+#$%            Dropped the concept of advanced cruise missiles
+#$%            for the Improved Cruise Missile Model.
+#$%
+#######################################################
+BBcommon
+ 
+literal     cstrip8      # 8/93 trs; jb E2145 7/17/00
+real     elapsed_time
+real     feet_per_min, change_rate
+# jb E2145 (IMPLICIT NONE) declarations:        5/10/00
+integer*4   ACC$Pointer                         # 7/14/93 trs
+integer*4   AcC$MaxAlt$i        # 8/93 trs
+integer*4   SHC$Pointer                         # 7/14/93 trs
+integer*4   UNT$Pointer
+integer*4   UNT$TrueAltDepth$I                  # 7/14/93 trs
+integer*4   UNT$OrderedAltDepth$I               # 7/14/93 trs
+integer*4   UNT$Type$I                          # 7/14/93 trs
+integer*4   UNT$PropulsionMode$I    # jb E2145  5/11/00
+integer*4   UNT$AltAboveGround$I    # jb E2145  5/11/00
+integer  UNT$RecoverIndx$I, UNT2$Pointer     # SMM 5/97 (E1745)
+Integer  unt2$OrderedAltDepth$i,unt2$TrueAltDepth$i # jb 2145  5/10/00
+integer*4   CMC$Pointer, CMC$Cat$I      # jb E2145  5/11/00
+integer     the_elevation, alt_at_point       # jb 8/9/96
+integer*4   idelt                               # 7/14/93 trs
+ 
+integer   kk
+character smsg1[ARB]
+ 
+ 
+unt$OrderedAltDepth$i = unt2$OrderedAltDepth$i
+unt$TrueAltDepth$i    = Xunt$TrueAltDepth$i     #get true alt or depth
+ 
+UNT$AltAboveGround$I = xUNT$AltAboveGround$I
+ 
+if (UNT$AltAboveGround$I != 0)     # joa 11/95 (E1422)
+  {
+   # if unit is at marshall status and in position to be
+   # recovered, let it fly below the set relative altitude
+   # so it can land.    SMM 5/97 (E1745)
+   if (xUNT$MarshallStatus$I == $Recovering$code)
+     {
+      UNT$RecoverIndx$I = xUNT$RecoverIndx$I          # get recovering unit
+      UNT2$Pointer$To  UNT$RecoverIndx$I
+      UNT2$TrueAltDepth$I = xUNT2$TrueAltDepth$I
+      UNT$OrderedAltDepth$I = marshall$altitude + UNT2$TrueAltDepth$i
+     }   # end of if the unit is recovering
+   else
+     {
+      alt_at_point = the_elevation (xUNT$Truelatitude$F*$rad2deg,
+                                    xUNT$TrueLongitude$F*$rad2deg)
+      UNT$OrderedAltDepth$I = alt_at_point + UNT$AltAboveGround$I
+     }   # end of if the unit is not in a recovery state
+  }
+else
+   alt_at_point = 0
+ 
+unt$type$i = Xunt$type$i                        #get unit type
+if (UNT$TYPE$I == $AIR$CODE)                    #if aircraft
+    {
+    ACC$POINTER = Xunt$ACCPNTR$I                #get characteristics pointer
+ 
+    feet_per_min = XACC$MAXCLIMB$I              #get aircraft climb rate
+    acc$maxalt$i = Xacc$maxalt$i
+ 
+    if(unt$ORDEREDALTDEPTH$I > ACC$MAXALT$I)    #if ordered greater than max
+        unt$ORDEREDALTDEPTH$I = ACC$MAXALT$I    #set ordered to max
+    }                                           #end if aircraft
+else if (UNT$TYPE$I == $SUB$CODE)               #if Submarine
+    {
+    SHC$POINTER = Xunt$SHCPNTR$I                #get characteristics pointer
+    feet_per_min = XSHC$DIVECLIMBRATE$I         #get submarine dive/climb rate
+    }                                           #end else sub
+else if (UNT$TYPE$I == $CRUISEMISSILE$CODE)
+    {
+     CMC$POINTER = xUNT$CMCPNTR$I                #get characteristics pointer
+     cmc$cat$i  = Xcmc$cat$i
+ 
+     if (CMC$CAT$I == $BALL$CODE)               # only ballistic missiles
+       {
+         call compute_altitude (unt$pointer, elapsed_time)  # follow parabolic paths
+         return
+       }
+     else # if (CMC$CAT$I == $CRUZ$CODE)            #regular cruise missiles don't
+       {                                            #change altitude
+        if (UNT$AltAboveGround$I == 0)              # joa 11/95 - E1422
+           return
+       }
+    }
+else if (UNT$Type$I == $SAMissile$Code)       # is it an advanced SAM?
+    {                                           # SMM 1/94
+     call Compute_SAM_Alt(unt$pointer)
+     return
+    }
+else                                            # none of the above
+    return
+ 
+# Terrain hugging platforms ignore max climb/dive rates because will look ahead
+if (unt$AltAboveGround$i == 0)                  # joa 11/95 (E1422)
+{
+    IDELT = unt$ORDEREDALTDEPTH$I - unt$TRUEALTDEPTH$I   #get alt/depth diffrence
+    if(IDELT < 0)                                   # if dive
+    {
+        if (UNT$TYPE$I == $AIR$CODE)                # if aircraft, dive twice as fast
+            feet_per_min = feet_per_min * 2
+        feet_per_min = -feet_per_min                # set rate to negative
+    }                                           # end if dive
+ 
+    change_rate = feet_per_min  * elapsed_time      # ft per cycle
+ 
+    if (ABS(IDELT) <= ABS(change_rate))                   #if change can be made now
+    {
+        unt$TRUEALTDEPTH$I = unt$ORDEREDALTDEPTH$I  #make the change
+    }                                           #end if change can be made now
+    else if(unt$type$i == $cruisemissile$code)
+    {
+        unt$TRUEALTDEPTH$I = unt$ORDEREDALTDEPTH$I  #for now, assume missile is fast enough
+    }                                            #that it will reach that point
+                                                #within this game minute.
+    else
+        unt$TRUEALTDEPTH$I = unt$TRUEALTDEPTH$I + change_rate
+}
+else
+    unt$TRUEALTDEPTH$I = unt$ORDEREDALTDEPTH$I  #make the change
+ 
+PUTunt$TrueAltDepth$i                           #store new alt/depth
+ 
+if (UNT$Type$I == $Sub$Code)                   #if Submarine
+  {
+   SHC$Pointer = xUNT$SHCPntr$I                #get characteristics pointer
+   if (xSHC$NuclearPowered$I == $no)
+     {
+      if ((xUNT$PropulsionMode$I == $Diesel$Code) &
+          (UNT$TrueAltDepth$I > xSHC$ScopeDepth$I))
+        {
+         UNT$PropulsionMode$i = $Electric$Code     # switch mode.  PER E1328  AV 9/94
+         PUTunt$PropulsionMode$i
+ 
+         #inform user about it
+         kk = 0
+         call smovhn (Xunt$name$c,$$MaxLit,smsg1,kk)
+         call smovv  (": SNORKEL SHUTDOWN ",smsg1,kk)
+         call smov   ($bell,smsg1,kk)
+         call send_ (Xunt$view$i,0,kk,smsg1)
+        }     # end of is mode is diesel and now below periscope depth
+     }     # end of if unit is not nuclear powered
+  }     # end of if unit is a submarine
+ 
+return
+end
+ 
+
+ 
+subroutine MLAUNC( unt$pointer ) # un-launched AC follow flight deck
+ 
+#############################################################
+#$%
+#$% Purpose:   MLAUNC sets position of launching aircraft/boats
+#$%            to equal launch platforms position
+#$%
+#$% Called By: MOTMAN
+#$%
+#$% Calls:     None
+#$%
+#$% Tables:    UNT
+#$%
+#$% Date:      DEC 80
+#$%
+#$% Author:    Gary Thoma
+#$%
+#############################################################
+BBcommon
+ 
+Integer UNT$Pointer, UNT2$Pointer   # jb E2145  5/11/00
+ 
+unt2$pointer$to Xunt$LaunchIndx$i       # get launch Platform's UNT pointer
+ 
+# set aircraft true/assumed position to that of launching platform
+ 
+PUTunt$TrueLatitude$f      (Xunt2$TrueLatitude$f)
+PUTunt$TrueLongitude$f     (Xunt2$TrueLongitude$f)
+PUTunt$AssumedLatitude$f   (Xunt2$AssumedLatitude$f)
+PUTunt$AssumedLongitude$f  (Xunt2$AssumedLongitude$f)
+ 
+return
+end
+ 
+
+ 
+subroutine manuvr_LL (unt$pointer,   # in: Unit UNT pointer
+                      elapsed_time)  # in: time since last processed
+#######################################################
+#$%
+#$% Purpose:   MANUVR_LL processes speed and course
+#$%            changes for each platform ordered to a Lat/Long
+#$%
+#$% Called By: MOTMAN
+#$%
+#$% Calls:     QCOS       SPDCHG     CRSCHG
+#$%            RLL2RB     MOVASS     MOTION
+#$%
+#$% Tables:    UNT
+#$%
+#$% Date:      DEC 83
+#$%
+#$% Author:    Dane Wills
+#$%
+#$% Modified   James Allen - 12/97 (E1832)
+#$%            Clear the flag which indicates that the unit's
+#$%            available maneuver commands should be restrictred
+#$%            when the maneuver is completed.
+#$%
+#$%            Susan Miller 6/98 (E2000)
+#$%            UNT$FiredAtPosit$I no longer exists...
+#$%            Replace with UNT$AssignedTarget$I
+#$%
+#$%            Susan Miller 7/98 (E1983)
+#$%            If status is $LayingBarrier$Code, don't change
+#$%            to $Proceeding$Code.
+#$%
+#######################################################
+include "orders.inc"               #khc 9/92
+ 
+BBcommon
+##OAcommon  # jb Not used in this module..  E2145   7/17/00
+ 
+literal args[$max$args]                   #khc 9/92
+real  elapsed_time
+# jb E2145 (IMPLICIT NONE) declarations:        5/11/00
+real*4      UNT$RangeToNext$F                   # 7/14/93 trs
+real*4      UNT$AssumedLatitude$F               # 7/14/93 trs
+real*4      UNT$AssumedLongitude$F              # 7/14/93 trs
+real*4      UNT$OrderedCourse$F                 # 7/14/93 trs
+real*4      UNT$OrderedLatitude$F               # 7/14/93 trs
+real*4      UNT$OrderedLongitude$F              # 7/14/93 trs
+real*4      UNT$OrderedSpeed$F                  # 7/14/93 trs
+real*4      tcosa, tcos                         # 8/93 trs
+integer  UNT$Pointer, UNT$Status$i              # 7/14/93 trs
+integer  UNT$ASWIndx$I, UNT$AssignedTarget$I    # SMM 6/98 (E2000)
+integer  ASW$Pointer                            # 7/14/93 trs
+ 
+UNT$OrderedSpeed$F = xUNT$OrderedSpeed$F
+call SPDCHG (UNT$POINTER, UNT$OrderedSpeed$F, elapsed_time)
+ 
+UNT$ORDEREDLATITUDE$F = XUNT$ORDEREDLATITUDE$F          #get ordered latitude
+UNT$ORDEREDLONGITUDE$F = XUNT$ORDEREDLONGITUDE$F        #get ordered longitude
+UNT$ASSUMEDLATITUDE$F = XUNT$ASSUMEDLATITUDE$F          #get assumed latitude
+UNT$ASSUMEDLONGITUDE$F = XUNT$ASSUMEDLONGITUDE$F        #get assumed longitude
+ 
+TCOS = COS(UNT$ORDEREDLATITUDE$F)               #get cosine of ordered lat
+TCOSA = COS(UNT$ASSUMEDLATITUDE$F)              #get cosine of assumed lat
+ 
+call RLL2RB(                                    #get range and bearing
+         UNT$ASSUMEDLATITUDE$F,                 #lat of start
+         UNT$ASSUMEDLONGITUDE$F,                #lon of start
+         TCOSA,                                 #cosine of assumed lat
+         UNT$ORDEREDLATITUDE$F,                 #lat of end
+         UNT$ORDEREDLONGITUDE$F,                #lon of end
+         TCOS,                                  #cosine of ordered lat
+         UNT$RANGETONEXT$F,                     #receive range to go
+         UNT$ORDEREDCOURSE$F)                   #receive course order
+$ANG2PI (UNT$ORDEREDCOURSE$F)                   #               8/1/84
+ 
+call CRSCHG (UNT$POINTER, UNT$ORDEREDCOURSE$F, elapsed_time)
+ 
+PUTUNT$RANGETONEXT$F                            #save range to go
+ 
+UNT$Status$I = xUNT$Status$I                         # jb    8/18/89
+if (UNT$Status$I != $Sinking$Code &
+    UNT$Status$I != $UnderTow$Code &
+    UNT$Status$I != $DeadInWater$Code &    # jb    8/18/89
+    UNT$Status$I != $LayingBarrier$Code)   # SMM 7/98 (E1983)
+   putUNT$Status$I ($Proceeding$Code)
+ 
+if(Xunt$Type$i == $Air$Code &                           #<<<>>> 10/8/86
+    Xunt$MarshallStatus$i == $Recovering$Code)          #<<<>>> 10/7/86
+        PUTunt$MarshallStatus$i ($inflight$code)        #<<<>>> 10/7/86
+ 
+if(UNT$RANGETONEXT$F <= xUNT$TrueSpeed$F * ($Hours$Per$Minute * elapsed_time))
+    {                                        # if unit can get there this pass
+    call MOVASS(UNT$POINTER,                             # move to assumed pos
+                UNT$ORDEREDLATITUDE$F,
+                UNT$ORDEREDLONGITUDE$F,
+                ELAPSED_TIME)
+ 
+    UNT$AssignedTarget$i = xUNT$AssignedTarget$i          # SMM 6/98 (E2000)
+    if (xUNT$Type$I == $CruiseMissile$Code &              # clk 2/94 - if a cruise
+        (UNT$AssignedTarget$i == UNT$Engaging$Position |  # missile fired at a position,
+         UNT$AssignedTarget$i == Missile$Engaging$Land))  # trip the attacked target flag
+      {                                                   # (so that the engagement portion
+       putUNT$AttackedTarget$I ($yes)                     # of previously coded tlam at
+      }                                                   # position could be reused).
+ 
+    if (xUNT$HideSiteIndx$I != 0)                                  # khc 6/92
+       {
+       putunt$status$i          ($Hiding$Code)
+       putunt$hidestatus$i      ($currentlyhiding)
+       putunt$orderedspeed$f    (0.0)
+       putunt$truespeed$f       (0.0)       # no deceleration
+       putunt$assumedspeed$f    (0.0)
+       putUNT$OrderedLatitude$F ($pi)       # this indicates no ordered position
+       putUNT$RulesOfEngage$I   ($IfAttacked$Code)
+       putUNT$LastManeuverOrderCode$I (NO$order)   # Remove maneuver restriction - joa 12/97 (E1832)
+ 
+       args[1] = $lex$silence$
+ 
+       #$% silence all emitters to prevent being detected
+       args[2] = $lex$emitter$
+       call oactiv(HIDE$order,unt$pointer,2,args)
+ 
+       #$% silence the sonars to prevent being detected
+       args[2] = $lex$sonar$
+       call oactiv(HIDE$order,unt$pointer,2,args)
+ 
+       #$% silence the IFF to prevent being detected
+       args[2] = $lex$IFF$
+       call oactiv(HIDE$order,unt$pointer,2,args)
+       }
+ 
+    if (Xunt$ALZIndx$i != 0)                            # dew 11/29/89
+        {
+        call do_amphib (unt$pointer)                    # off/on load stuff
+        }
+ 
+    unt$ASWIndx$i = Xunt$ASWIndx$i
+    if (unt$ASWIndx$i != 0)               # jb    5/15/90
+        {
+        ASW$Pointer$TO (unt$ASWindx$i)
+        if (xASW$Phase$i == 1 | xASW$Phase$i == 3 )
+            call do_macroASW (unt$pointer, elapsed_time) # End of Phases 1
+        }          # (Enroute to Search Area center), and 3 (Enroute to datum)
+    }
+else
+    {
+    call MOTION( UNT$POINTER, elapsed_time )
+    }
+ 
+return
+end
+ 
+
+ 
+subroutine MANUVR_pim ( unt$pointer, elapsed_time ) # pass UNT pointer 3/89
+#######################################################
+#$%
+#$% Purpose:   MANUVR_Pim processes speed and course
+#$%            changes for each platform on a PIM
+#$%
+#$% Called By: MOTMAN
+#$%
+#$% Calls:     QCOS       SPDCHG     CRSCHG
+#$%            RLL2RB     MOVASS     MOTION
+#$%
+#$% Tables:    UNT
+#$%
+#$% Date:      Dec 83
+#$%
+#$% Author:    Dane Wills
+#$%
+#$% Modified:  Susan Miller 4/93 to allow cruise missiles
+#$%            to be launched at a position PER #E1165
+#$%
+#$% Modified:  Carol Kropp - 10/93
+#$%
+#$%            James Allen - 2/98 (E1864)
+#$%            Replaced LastLegTLAM with LastLegCM, since
+#$%            all cruise missiles have PIMs now.  Dropped
+#$%            the concept of advanced cruise missiles.
+#$%
+#$%           John McCormick - (E2043) 10/98
+#$%           Fixed missile disappearing before last waypoint.
+#######################################################
+BBcommon
+ 
+real  elapsed_time
+real       lat, lon
+# jb E2145 (IMPLICIT NONE) declarations:        5/11/00
+real*4      UNT$OrderedCourse$F                 # 7/14/93 trs
+real*4      UNT$OrderedLatitude$F               # 7/14/93 trs
+real*4      UNT$OrderedLongitude$F              # 7/14/93 trs
+real*4      UNT$OrderedSpeed$F                  # 7/14/93 trs
+real*4      UNT$RangeToNext$F                   # 7/14/93 trs
+real*4      PIM$TimeStart$F                     # jb E2145  5/11/00
+real        tcos, tcost                         # jb E2145  5/11/00
+integer     UNT$Pointer, UNT$Type$I             # 7/14/93 trs
+integer*4   PIM$Pointer, PIM$NLegs$I            # 7/14/93 trs
+integer*4   PIM$LegNumber$I, PIM$PTS$Index      # 7/14/93 trs
+integer*4   lastlegcm                           # jb E2145  5/11/00
+integer*4   UNT2$Pointer                        # 7/14/93 trs
+integer*4   UNT$AssignedTarget$I                # 7/14/93 trs
+integer*4   icallerr, istuck    # jb E2145  5/11/00
+integer*4   UNT3$Pointer        # JHM UFL02
+pim$pointer$to Xunt$PimIndx$i
+if (Xpim$TimeStart$f > Game$Time)             # check if I should LOITER
+    return                                      # YES...
+ 
+pim$LegNumber$i = Xpim$LegNumber$i              #               11/7/85
+pim$Nlegs$i     = Xpim$Nlegs$i                  #               11/7/85
+ 
+unt$type$i = Xunt$type$i                        # moved up      6/27/85
+unt$AssignedTarget$i = Xunt$AssignedTarget$i    # moved up      11/12/85
+ 
+iSTUCK = $YES   # Flag: May be stuck on coincident PTS in pim   6/27/85
+while ( iSTUCK != $NO & pim$LegNumber$i <= pim$Nlegs$i)       # 11/7/85
+ {
+  pim$pts$index   =  pim$LegNumber$i + 1
+ 
+  UNT$OrderedSpeed$F = Xpim$pts$Speed$i
+ 
+  UNT$OrderedLatitude$F = Xpim$pts$Latitude$F           #get next latitude
+  PUTUNT$orderedlatitude$f
+  UNT$OrderedLongitude$F = Xpim$pts$Longitude$F         #get next longitude
+  PUTUNT$orderedlongitude$f
+ 
+  if (unt$type$i == $PIM$code)
+    {
+    lat = XUNT$TrueLatitude$F                   #get true latitude
+    lon = XUNT$TrueLongitude$F                  #get true longitude
+    }
+  else
+    {
+    lat = XUNT$AssumedLatitude$F                #get Assumed latitude
+    lon = XUNT$AssumedLongitude$F               #get Assumed longitude
+    }
+ 
+  TCOS = COS(UNT$OrderedLatitude$F)             #get cosine of ordered lat
+  TCOST = COS(lat)                              #get cosine of current lat
+ 
+  call RLL2RB(                                  #get range and bearing
+         lat,                                   #lat of start
+         lon,                                   #lon of start
+         TCOST,                                 #cosine of assumed lat
+         UNT$OrderedLatitude$f,                 #lat of end
+         UNT$OrderedLongitude$f,                #lon of end
+         TCOS,                                  #cosine of ordered lat
+         UNT$RangeToNext$F,                     #receive range to go
+         UNT$OrderedCourse$F)                   #receive course order
+  $ANG2PI (UNT$ORDEREDCOURSE$F)                 #               8/1/84
+ 
+  # PIMs should go to speed zero when they have reached the end of their
+  # PIM.  SMM 5/95
+  if ((PIM$LegNumber$I == PIM$Nlegs$I) & (UNT$RangeToNext$F == 0.0))
+     UNT$OrderedSpeed$F = 0.0
+ 
+  call SPDCHG (UNT$Pointer, UNT$OrderedSpeed$F, elapsed_time)
+ 
+                                         # Don't adjust course if 6/27/85
+  if (UNT$RangeToNext$F > 1.)            #  adjacent PTS ~ coincide
+   {
+    iSTUCK = $NO                # PTS don't coincide, so not stuck 6/27/85
+    call CRSCHG (UNT$Pointer, UNT$OrderedCourse$F, elapsed_time)
+   }
+  else if (unt$type$i != $CruiseMissile$code)           #       6/27/85
+    iSTUCK = $NO        # If not cruise-missile, press on       6/27/85
+  else if (pim$LegNumber$i < pim$Nlegs$i) # For CruiseMissile,  6/27/85
+    {
+    pim$LegNumber$i = pim$LegNumber$i +1 #  advance to next Leg 6/27/85
+    putPIM$LegNumber$i                                    # 1/18/91 trs
+    }
+ else                  # CruiseMissile already ON FINAL LEG    11/12/85
+   {
+    UNT3$Pointer$to UNT$AssignedTarget$i
+    if (UNT3$Pointer$Valid)         # E2288 JHM UFL02 - Land is invalid unit
+     {
+      if (unt$AssignedTarget$i > 0) # (In case tgt is SHORE- )    11/12/85
+       {
+        putunt$Attackindx$i (unt$AssignedTarget$i)        # BASE? 11/12/85
+       }
+     }
+    BREAK       # (Next logic takes care of attack leg) 11/12/85
+   }
+ } # End while ( iSTUCK != $NO)
+ 
+ 
+PUTUNT$RangeToNext$f                            #save range to go
+ 
+LastLegCM = $NO       # Initlz flag for last leg
+if (unt$type$i == $CruiseMissile$code &
+                pim$LegNumber$i == Xpim$Nlegs$i)        # jhm (e2043) 10/98
+     {                                                  #       6/18/85
+      LastLegCM = $YES
+      if (unt$AssignedTarget$i > 0)                     #       6/18/85
+       {
+        unt2$Pointer$TO ( unt$AssignedTarget$i )        #       12/2/85
+        if(UNT2$Pointer$Valid)
+         {
+          if ( Xunt2$TYPE$I == $ShoreBase$Code )
+           {
+            putunt$Attackindx$i (unt$AssignedTarget$i)    #       6/18/85
+           }  # (See LastLeg, below, for ONGUIDE..            12/2/85
+         }    # end if unt2$pointer$valid            E2288 JHM 8/02 UFL
+       }
+     }
+ 
+ 
+if (UNT$RangeToNext$F <= xUNT$TrueSpeed$F * ($Hours$Per$Minute * elapsed_time))
+    {                            # if unit can get there this recurrance
+    if (unt$type$i == $PIM$code)
+        {
+         iCALLerr = $YES                # flag DO call ERRPOS   3/25/86
+         call MOVTRU(iCALLerr,          #place at desired spot  3/25/86
+                unt$pointer,
+                UNT$OrderedLatitude$f,
+                UNT$OrderedLongitude$f,
+                elapsed_time)
+        }
+    else
+        {
+        call movass(unt$pointer,                        #move to assumed pos
+                UNT$OrderedLatitude$f,
+                UNT$OrderedLongitude$f,
+                elapsed_time)
+        }
+ 
+    if ( LastLegCM != $NO )   # If CM reaching target NOW   12/2/85
+      {
+         if (xUNT$CMFireMode$I == $CMPos$code)
+            {
+             putUNT$AttackedTarget$I ($yes)  # this is used in cmepro
+            }                                # on last leg processing
+         putunt$Status$i ($OnGuide$Code)                 #       6/19/85
+      }
+ 
+    if (pim$LegNumber$i < pim$Nlegs$i)                  #       12/14/83
+        {
+        PUTpim$LegNumber$i (pim$LegNumber$i + 1)
+        pim$TimeStart$f = Game$Time + xPIM$PTS$Delay$I
+        putpim$TimeStart$f
+        }
+    else if (Xpim$ContinuousFlag$i == YES)
+        {
+        pim$TimeStart$f = Game$Time + xPIM$PTS$Delay$I
+        putpim$TimeStart$f
+ 
+        PUTpim$LegNumber$i (2)  # start of rect. search 12/7/83
+        }
+    }
+else
+    {
+    call motion( unt$pointer, elapsed_time )
+    }
+ 
+return
+end             # End Subroutine Manuvr_PIM  leg
+ 
+
+ 
+subroutine MANUVR_flt ( unt$pointer, elapsed_time)
+ 
+#######################################################
+#$%
+#$% Purpose:   MANUVR_Flt processes speed and course
+#$%            changes for each platform during Flight Ops
+#$%             (turn into the wind w/20 knots across the deck)
+#$%
+#$% Called By: MOTMAN
+#$%
+#$% Calls:     QCOS       SPDCHG     CRSCHG
+#$%            RLL2RB     MOVASS     MOTION
+#$%
+#$% Tables:    UNT
+#$%
+#$% Date:      DEC 83
+#$%
+#$% Author:    Dane Wills
+#$%
+#$% Modified:  Carol Kropp - 10/93
+#$%
+#$% Modified:  Susan Miller 5/97 (E1633)
+#$%            Added check for true course and speed along with
+#$%            assumed course and speed so that MarshallStatus
+#$%            will get set to $InFlight$Code and a recovering
+#$%            platform can recover a/c.
+#$%
+#######################################################
+BBcommon
+ 
+real     elapsed_time
+real     UNT$OrderedSpeed$F, UNT$OrderedCourse$F
+ 
+# jb E2145 (IMPLICIT NONE) declarations:        5/11/00
+real*4      WET$WindDirection$F                 # 7/14/93 trs
+real*4      difcs, smax                         # 7/14/93 trs
+real*4      UNT$TrueCourse$F                    # 7/14/93 trs
+real*4      UNT$TrueLatitude$F                  # 7/14/93 trs
+real*4      UNT$TrueLongitude$F                 # 7/14/93 trs
+real*4      UNT$TrueSpeed$F                     # 7/14/93 trs
+integer*4   UNT$Pointer                         # 7/14/93 trs
+integer*4   WET$Pointer                         # 7/14/93 trs
+integer*4   WET$WindSpeed$I                     # 7/14/93 trs
+ 
+#______________________________________________________________________
+# First.... Locate Weather region and current Wind Dir/Speed    12/7/83
+ 
+UNT$TrueLatitude$f  = XUNT$TrueLatitude$f
+UNT$TrueLongitude$f = XUNT$TrueLongitude$f
+UNT$TrueSpeed$f     = XUNT$TrueSpeed$f
+UNT$TrueCourse$f    = XUNT$TrueCourse$f
+ 
+call FNDWET (UNT$TrueLatitude$f, UNT$TrueLongitude$f, WET$Pointer)
+ 
+WET$WindDirection$F = xWET$WindDirection$F
+WET$WindSpeed$i     = xWET$WindSpeed$i
+ 
+#______________________________________________________________________
+# Next.... Calculate Proper Course & Speed for Launch/Recover of Aircraft
+ 
+#  --steering 10 degrees to right of oncoming true wind and computing
+# shipspeed so that             WIND + shipspeed * cos(10 deg) = 20 kts.
+# (Note: if course is within 45 deg. of movement, keep present speed,
+# subject to max of 30 kts over the deck.)
+ 
+# Assuming that WindDirection is 000 deg. for a wind coming from
+# due North:
+ 
+UNT$OrderedCourse$F = WET$WindDirection$F + (10.*$PI/180.) # 10-deg on port bow
+call ang2PI(UNT$OrderedCourse$F)
+ 
+difCS = UNT$OrderedCourse$F - UNT$TrueCourse$F          #       2/12/85
+call angPI (difCS)                                      #       2/12/85
+ 
+if ( abs(difCS) < $PI/4. )      # (45 degrees) keep speed if course in
+ {                              #  general direction of PIM's:  2/12/85
+  Smax = 30. - WET$WindSpeed$i                          #       2/12/85
+  Smax = min(UNT$TrueSpeed$f,Smax)                      #       2/12/85
+  UNT$OrderedSpeed$F = Smax                             #       2/12/85
+ }
+else                            # else, 20 kts across deck      2/12/85
+  UNT$OrderedSpeed$F = (20.- WET$WindSpeed$i) / 0.9848 # .9848 ~ cos(10deg)
+ 
+#______________________________________________________________________
+# Then.... Process Course/Speed Changes
+ 
+UNT$OrderedSpeed$F = max(4.0, UNT$OrderedSpeed$F) #This is PUT in SPDCHG
+ 
+call SPDCHG (UNT$Pointer, UNT$OrderedSpeed$F, elapsed_time)
+ 
+call CRSCHG (UNT$Pointer, UNT$OrderedCourse$F, elapsed_time)
+ 
+call MOTION (UNT$Pointer, elapsed_time )
+ 
+#______________________________________________________________________
+# Last.... Check if we are on the approved Course/Speed
+# Last.... Check if we are on the approved Course/Speed
+# use the true speed/course in addition to the assumed - SMM 3/17/97 (E1633)
+UNT$OrderedSpeed$F = xUNT$OrderedSpeed$F
+UNT$OrderedCourse$F = xUNT$OrderedCourse$F
+if ((UNT$OrderedSpeed$F  == XUNT$TrueSpeed$F &
+     UNT$OrderedCourse$F == XUNT$TrueCourse$F) |
+    (UNT$OrderedSpeed$F  == XUNT$AssumedSpeed$F &
+     UNT$OrderedCourse$F == XUNT$AssumedCourse$F ))
+    {
+    PUTunt$MarshallStatus$i ($InFlight$Code)            # Ready for FltOps
+    }
+else
+    {
+    PUTunt$MarshallStatus$i ($AwaitLaunch$Code)         # Not in position yet
+    }
+ 
+#______________________________________________________________________
+ 
+return
+end
+ 
+
+ 
+subroutine MANUVR (unt$pointer,   # in: unit pointer
+                   elapsed_time)  # in: amt of time in minutes
+#######################################################
+#$%
+#$% Purpose:   MANUVR processes speed and course
+#$%            changes for each platform on an ordered course
+#$%
+#$% Called By: MOTMAN     GUIMAN
+#$%
+#$% Calls:     QCOS       SPDCHG     CRSCHG
+#$%            RLL2RB     MOVASS     MOTION
+#$%
+#$% Tables:    UNT
+#$%
+#$% Date:      DEC 80
+#$%
+#$% Author:    Gary Thoma
+#$%
+#######################################################
+BBcommon
+ 
+real*4  UNT$OrderedCourse$F, UNT$OrderedSpeed$F # jb E2145  5/11/00
+real    elapsed_time
+integer  UNT$Pointer
+ 
+UNT$OrderedSpeed$F = xUNT$OrderedSpeed$F
+call SPDCHG (UNT$POINTER, UNT$OrderedSpeed$F, elapsed_time)
+ 
+UNT$OrderedCourse$F = xUNT$OrderedCourse$F
+call CRSCHG (UNT$POINTER, UNT$ORDEREDCOURSE$F, elapsed_time)
+ 
+call MOTION (UNT$POINTER, elapsed_time)
+ 
+return
+end
+ 
+
+ 
+Subroutine MOTION (UNT$Pointer,    # in: unit UNT pointer
+                   elapsed_time)   # in: time since motion was processed
+#######################################################
+#$%
+#$% Purpose:   MOTION processes incremental position
+#$%            changes for each platform.
+#$%
+#$% Called By: INTCPT          MANUVR, _pim, _flt, _LL
+#$%
+#$% Calls:     RRB2LL     ERRPOS    call Check_SAM_range
+#$%
+#$% Tables:    UNT
+#$%
+#$% Date:      DEC 80
+#$%
+#$% Author:    Gary Thoma
+#$%
+#$% Modified:  SMM 2/94 added call to Check_SAM_range for
+#$%            advanced SAM
+#$%
+#######################################################
+BBcommon
+ 
+real     elapsed_time
+real     range, start_lat, start_lon
+real     delta_lat, delta_lon
+ 
+# jb E2145 (IMPLICIT NONE) declarations:        5/11/00
+real*4      UNT$COSTrueLat$F                    # 7/14/93 trs
+real*4      UNT$TrueCourse$F                    # 7/14/93 trs
+real*4      UNT$TrueLatitude$F                  # 7/14/93 trs
+real*4      UNT$TrueLongitude$F                 # 7/14/93 trs
+real*4      rngdum                              # 7/14/93 trs
+integer  UNT$Pointer
+ 
+    range = xUNT$TrueSpeed$F * ($Hours$Per$Minute * elapsed_time)  # get range unit can travel
+ 
+    if (range > 0.0)    # if the unit can travel any distance - clk 3/7/94
+      {
+       UNT$TrueLatitude$F  = xUNT$TrueLatitude$F   # get current latitude
+       UNT$TrueLongitude$F = xUNT$TrueLongitude$F  # get current longitude
+       UNT$CosTrueLat$F    = xUNT$CosTrueLat$F     # get cosine of latitude
+       UNT$TrueCourse$F    = xUNT$TrueCourse$F     # get current course
+ 
+       start_lat = UNT$TrueLatitude$F              # save latitude
+       start_lon = UNT$TrueLongitude$F             # save longitude
+ 
+       rngdum = 0.0
+       call RRB2LL (UNT$TrueLatitude$F, UNT$TrueLongitude$F,
+                    range, UNT$TrueCourse$F,
+                    rngdum, UNT$CosTrueLat$F)
+ 
+       putUNT$TrueLatitude$F        # store new latitude
+       putUNT$TrueLongitude$F       # store new longitude
+       putUNT$CosTrueLat$F          # store new cosine lat
+ 
+       delta_lat = UNT$TrueLatitude$F - start_lat
+       delta_lon = UNT$TrueLongitude$F - start_lon
+       $angPI(delta_lon)
+      }
+    else     # since the unit did not move, the delta change
+      {      # in the latitude and longitude are zero - clk 3/7/94
+       delta_lat = 0.0
+       delta_lon = 0.0
+      }
+ 
+    #compute navigation error
+    call ERRPOS (UNT$Pointer, delta_lat, delta_lon, elapsed_time)
+ 
+    if (xUNT$Type$I == $SAMissile$Code) call Check_SAM_range(UNT$Pointer)
+ 
+ return
+ end
+ 
+
+ 
+Subroutine MOVASS(UNT$POINTER,
+                  ALAT,
+                  ALON,
+                  elapsed_time)
+###################################################################
+#$%
+#$% Purpose:   MOVASS moves platform to assumed position if
+#$%            it can be accomplished during the game increment.
+#$%
+#$% Called By: MANUVR_pim, _LL
+#$%
+#$% Calls:     SPDCHG     QCOS
+#$%
+#$% Tables:    UNT
+#$%
+#$% Date:      DEC 80
+#$%
+#$% Author:    Gary Thoma
+#$%
+#$% Modified:  Susan Miller - 5/95 (E1375)
+#$%            If this is a DIS$game, the unit is an aircraft
+#$%            and it is on a pim, don't allow the aircraft
+#$%            to slow to speed 0.
+#$%
+#$%            Susan Miller - 5/26/95 (E1409)
+#$%            Missiles fired at positions were not stopping,
+#$%            since subroutine spdchg does not handle them.
+#$%
+#$%            Carol Kropp - 7/95 (E1437)
+#$%            If unit was fired at a position and is on a
+#$%            pim or route use the ordered speed, not 0
+#$%            (was causing missiles to impact on 1st way-point).
+#$%
+#$%            James Allen - 2/96 (E1467)
+#$%            If now within range set the AtStationThisCycle
+#$%            flag, so that messages are not sent to
+#$%            unit multiple times.
+#$%
+#$%            Susan Miller 6/98 (E2000)
+#$%            UNT$FiredAtPosit$I no longer exists...
+#$%            Replace with UNT$AssignedTarget$I
+#$%
+###################################################################
+BBcommon
+ 
+real elapsed_time
+real     ALAT, ALON, newspeed
+ 
+# jb E2145 (IMPLICIT NONE) declarations:        5/11/00
+real*4      UNT$AssumedLatitude$F               # 7/14/93 trs
+real*4      UNT$AssumedLongitude$F              # 7/14/93 trs
+real*4      UNT$COSTrueLat$F                    # 7/14/93 trs
+real*4      UNT$OrderedLatitude$F               # 7/14/93 trs
+real*4      UNT$RangeToNext$F                   # 7/14/93 trs
+real*4      UNT$TrueLatitude$F                  # 7/14/93 trs
+real*4      UNT$TrueLongitude$F                 # 7/14/93 trs
+integer*4   UNT$Pointer, UNT$Status$i           # 7/14/93 trs
+real*4      dellat, dellon                      # 7/14/93 trs
+integer     UNT$AssignedTarget$I                # SMM 6/98 (E2000)
+ 
+ DELLAT = ALAT - XUNT$ASSUMEDLATITUDE$F
+ DELLON = ALON - XUNT$ASSUMEDLONGITUDE$F
+ 
+ UNT$ASSUMEDLATITUDE$F = ALAT
+ PUTUNT$ASSUMEDLATITUDE$F
+ 
+ UNT$ASSUMEDLONGITUDE$F = ALON
+ PUTUNT$ASSUMEDLONGITUDE$F
+ 
+ UNT$TRUELATITUDE$F = XUNT$TRUELATITUDE$F + DELLAT   #to keep things simple,
+ PUTUNT$TRUELATITUDE$F                               #  ignore one recurrance
+                                                     #    worth of navigation
+ UNT$TRUELONGITUDE$F = XUNT$TRUELONGITUDE$F + DELLON #      error
+ $angPI(UNT$trueLONGITUDE$F)
+ PUTUNT$TRUELONGITUDE$F
+ 
+ UNT$COSTRUELAT$F = COS(UNT$TRUELATITUDE$F)
+ PUTUNT$COSTRUELAT$F
+ 
+ UNT$ORDEREDLATITUDE$F = $PI                    #delete position order
+ PUTUNT$ORDEREDLATITUDE$F
+ 
+ UNT$STATUS$I = $ONSTATION$CODE                 #status on station
+ PUTUNT$STATUS$I
+ 
+ if (Xunt$RangeToNext$f > 0.0)            # joa 2/96 (E1467)
+    PUTunt$AtStationThisCycle$i ($YES)
+ 
+ UNT$RANGETONEXT$F = 0.0                        #range to go zero
+ PUTUNT$RANGETONEXT$F
+ 
+ newspeed = 0.0
+ # if the unit was fired at a position, set it's speed to zero and
+ # it's status to onguide (since spdchg does not handle missiles),
+ # unless it is on a PIM or ROUTE.
+ UNT$AssignedTarget$i = xUNT$AssignedTarget$i         # SMM 6/98 (E2000)
+ if (UNT$AssignedTarget$i == UNT$Engaging$Position |  # SMM 6/98 (E2000)
+     UNT$AssignedTarget$i == Missile$Engaging$Land)   # SMM 6/98 (E2000)
+# if (xUNT$FiredAtPosit$I == $yes)          # SMM 5/26/95 (E1409)
+    {
+     if ((xUNT$PimIndx$I != 0) | (xUNT$RteIndx$I != $No))
+        newspeed = xUNT$OrderedSpeed$f
+     else
+        putUNT$AttackedTarget$I ($yes)
+ 
+     putUNT$Status$I          ($OnGuide$Code)
+     putUNT$AssumedSpeed$F    (newspeed)
+     putUNT$OrderedSpeed$F    (newspeed)
+     putUNT$TrueSpeed$F       (newspeed)
+    }
+  else
+    {
+     # if an a/c is on a pim or a route and this is a DIS game,
+     # don't allow the speed to go 0.            SMM E1375 5/95
+     if ((DIS$game == $yes) & (xUNT$Type$I == $Air$Code) &
+        ((xUNT$PimIndx$I != 0) | (xUNT$RteIndx$I != $No)))
+        newspeed = xUNT$OrderedSpeed$f
+     else
+       {
+        UNT$ORDEREDLATITUDE$F = $PI                    #delete position order
+        PUTUNT$ORDEREDLATITUDE$F
+       }
+ 
+     call SPDCHG (UNT$POINTER, newspeed, elapsed_time)
+    }
+ 
+ return
+ end    # routine MOVASS
+
+ 
+ Subroutine MOVTRU(iCALLerr,            #place at desired spot  3/25/86
+                   UNT$POINTER,
+                   TLAT,
+                   TLON,
+                   elapsed_time)   # in: time passed in minutes
+#######################################################
+#$%
+#$% Purpose:   MOVTRU moves platform to true position.
+#$%
+#$% Called By: INTCPT     GUIMAN       MANUVR_pim
+#$%
+#$% Calls:     ERRPOS     QCOS
+#$%
+#$% Tables:    UNT
+#$%
+#$% Date:      DEC 80
+#$%
+#$% Author:    Gary Thoma
+#$%
+#$% Modified:  James Allen - 2/96 (E1467)
+#$%            If now within range set the AtStationThisCycle
+#$%            flag, so that messages are not sent to
+#$%            unit multiple times.
+#$%
+#######################################################
+BBcommon
+ 
+real elapsed_time
+ 
+# jb E2145 (IMPLICIT NONE) declarations:        5/11/00
+real*4      tlat, tlon, delon, delat            # 7/14/93 trs
+real*4      UNT$COSTrueLat$F                    # 7/14/93 trs
+real*4      UNT$RangeToNext$F                   # 7/14/93 trs
+real*4      UNT$TrueLatitude$F                  # 7/14/93 trs
+real*4      UNT$TrueLongitude$F                 # 7/14/93 trs
+integer*4   UNT$Pointer                         # 7/14/93 trs
+integer*4   icallerr                            # 7/14/93 trs
+ 
+ DELAT = TLAT - XUNT$TRUELATITUDE$F          #get delta latitude
+ 
+ DELON = TLON - XUNT$TRUELONGITUDE$F         #get delta longitude
+ $angPI(DELON)                          #  ANGPI call inserted   4/6/82
+ 
+ UNT$TRUELATITUDE$F = TLAT
+ PUTUNT$TRUELATITUDE$F
+ 
+ UNT$TRUELONGITUDE$F = TLON
+ $angPI(UNT$trueLONGITUDE$F)            # ANGPI call inserted    4/6/82
+ PUTUNT$TRUELONGITUDE$F
+ 
+ UNT$COSTRUELAT$F = COS(TLAT)
+ PUTUNT$COSTRUELAT$F
+ 
+ if (Xunt$RangeToNext$f > 0.0)           # joa 2/96 (E1467)
+    PUTunt$AtStationThisCycle$i ($YES)
+ 
+ UNT$RANGETONEXT$F = 0.0
+ PUTUNT$RANGETONEXT$F
+ 
+ if (iCallERR != $NO )                                   # 3/25/86
+   call ERRPOS (UNT$POINTER, DELAT, DELON, elapsed_time) # compute navigation error
+ 
+  # clk 3/23/94 - Make sure that the UseOrdSpeed flag is cleared
+  # when the unit reaches its intended guide/target.  This caused
+  # problems with subsequent intercepting type commands.
+  putUNT$UseOrdSpeed$I ($no)
+ 
+ return
+ end
+ 
+
+ 
+ Subroutine GUIMAN (UNT$Pointer, elapsed_time)
+ 
+#######################################################
+#$%
+#$% Purpose:   GUIMAN process manuver for unit that
+#$%            attack guide or leader to follow.
+#$%
+#$% Called By: MOTMAN
+#$%
+#$% Calls:     DOISEE     MANUVR     INTCPT
+#$%            ECHOH      ECHOR      RRB2LL
+#$%            ANGPI      ANG2PI     MOVTRU
+#$%            ABS        GETRB_M
+#$%            AC_Fuel_Per_Sec
+#$%
+#$% Tables:    UNT
+#$%
+#$% Date:      FEB 81
+#$%
+#$% Author:    Ron Williams
+#$%
+#$% Modified:  Carol Kropp - 10/93
+#$%            Variable cycle time - change in minutes (elapsed_time).
+#$%            Changed call to Min_to_Target to Rmin_To_Target,
+#$%            so that the float number of minutes to target can be computed.
+#$%
+#$%            Susan Miller - 5/95 PER # E1380
+#$%            During a variable cycle time exercise, there is a chance that
+#$%            an assigned target will be deleted by the time we get to this
+#$%            point, so it is important to check the status of the assigned
+#$%            target in order to prevent the attacking unit from heading off
+#$%            on a course toward 0n 0e.
+#$%            Also, it is possible that by the time the attacking unit's
+#$%            motion is calculated, the DIS target may already be deleted
+#$%            and in the process the AttackIndx may be cleared and so the
+#$%            attacking unit would be processed as if it had a guideindx
+#$%            rather than neither a guideindx nor an attackindx.
+#$%
+#$%            Susan Miller PER E1375 5/95 If unit is an aircraft and it
+#$%            is a DIS$game, send a warning message when the aircraft speed
+#$%            goes to zero.
+#$%
+#$%            Jim Allen - 11/95 (E1422)
+#$%            For terrain processing, when an a/c ordered altitude
+#$%            is set to match a target reset the AltAboveGround.
+#$%
+#$%            Susan Miller - 7/97 (E1385)
+#$%            Set UNT$TestIntercept$I to $no when the
+#$%            assigned target is being deleted or unit
+#$%            loses sight of its assigned target.
+#$%
+#$%            Jim Allen - 2/96 (E1467)
+#$%            Replaced FuelPerMin with AC_Fuel_Per_Sec
+#$%
+#$%            Jim Allen - 12/02 (E2317)
+#$%            Use max of cruise or current speed when aircraft refueling
+#$%
+#######################################################
+BBcommon
+ 
+literal     cstrip8                # jb E2145  5/11/00
+real elapsed_time,previous_time,rtim
+real           speed                             # clk 10/93
+real           pounds_of_fuel                    # clk 10/93
+ 
+# jb E2145 (IMPLICIT NONE) declarations:        5/11/00
+real*4      UNT$OrderedSpeed$F                  # 7/14/93 trs
+real*4      brg, hdg, head                      # 7/14/93 trs
+real*4      oacse, oaspd                        # 7/14/93 trs
+real*4      radius                              # 7/14/93 trs
+real*4      rng                                 # 7/14/93 trs
+real*4      spdmax, spdnow #, speed               # 7/14/93 trs
+real*4      talat, talon                        # 7/14/93 trs
+real*4      tgt_coslat                          # 7/14/93 trs
+real*4      tgt_course, tgt_speed               # 7/14/93 trs
+real*4      tgt_lat, tgt_lon                    # 7/14/93 trs
+real*4      xbrg, xrng                          # 7/14/93 trs
+real*4      UNT$InterceptTime$F          # jb E2145 5/11/00
+integer*4   ACC$Pointer, LCL$Pointer            # 7/14/93 trs
+integer*4   UNT$Pointer,UNT$Type$I,UNT$Status$i # 7/14/93 trs
+Integer*4   UNT$Mission$I                # jb E2145 5/11/00
+Integer*4   UNT$OrderedAltDepth$I        # jb E2145 5/11/00
+integer*4   UNT$TNK$Index                # jb E2145 5/11/00
+integer*4   UNT$AttackIndx$I                    # 7/14/93 trs
+integer*4   UNT$GuideIndx$I                     # 7/14/93 trs
+integer*4   UNT2$Pointer, UNT2$Type$I           # 7/14/93 trs
+integer*4   icallerr, ichgalt            # jb E2145 5/11/00
+integer*4   ican,  isaw,isee                    # 7/14/93 trs
+integer*4   itrue                               # 7/14/93 trs
+ 
+integer   kk
+character      nmsg1[ARB]
+ 
+ 
+UNT$STATUS$I = XUNT$STATUS$I
+if (UNT$STATUS$I == $BEINGDELETED$CODE    |
+    UNT$STATUS$I == $SINKING$CODE         |
+    UNT$STATUS$I == $ACAWAITINGLAUNCH$CODE)
+  return
+ 
+unt$Type$i = xunt$type$i
+UNT$ATTACKINDX$I = XUNT$ATTACKINDX$I            # get attack index
+ 
+if (UNT$ATTACKINDX$I != $NO)                    # if unit has attack guide
+    {
+    UNT2$POINTER$TO UNT$ATTACKINDX$I            # get guides unit pointer
+ 
+    # if the target is being deleted, treat the attacker as proceeding
+    # along a speed and course and clear it's attackindx and assignedtarget
+    if (xUNT2$Status$I == $BeingDeleted$code)   # SMM 5/95 PER # E1380
+        {
+         putUNT$AttackIndx$I ($NO)
+         putUNT$AssignedTarget$I ($NO)
+         putUNT$TestIntercept$I ($NO)       # SMM 7/97 (E1385)
+ 
+         call MANUVR (UNT$Pointer, elapsed_time)
+         return
+        }
+ 
+    unt2$Type$i = xunt2$type$i
+ 
+    # 5/27/86 - For air-to-air, have unit adjust altitude to target altitude
+    if (unt$Type$i == $AIR$code & unt2$Type$i == $Air$Code)
+      {
+        putunt$OrderedAltDepth$I (Xunt2$OrderedAltDepth$I)
+        putUNT$AltAboveGround$I  (0)                    # joa 11/95 (E1422)
+      }
+ 
+    if (unt$type$i   != $CruiseMissile$code &                      # smn002
+        UNT$Type$I   != $SAMissile$Code     & # added SMM 1/94
+        unt2$type$i  != $ShoreBase$code & xunt2$view$i != xunt$view$i)
+        {
+        previous_time = game$time - elapsed_time
+ 
+        #$% determine if target is seen
+        call DOISEE (unt$pointer, unt$AttackIndx$i,
+                     previous_time, isee, isaw, lcl$pointer)
+ 
+        if (isee == $no)
+            {
+             PUTunt$status$i ($proceeding$code)
+ 
+             if (isaw == $no  &  xunt$InterceptTime$f < Game$Time)
+                {
+                if (trace$fltops$rcn != $no)
+                    {
+                    call echor
+                    call echohn (xunt$Name$c,$$MaxLit)
+                    call echov  (" giving up pursuit of ")
+                    call echohn (xunt2$Name$c,$$MaxLit)
+                    }
+ 
+                kk = 0
+                call smovhn (Xunt$name$c, $$MaxLit, nmsg1, kk)
+                call smovv  (": Target never acquired", nmsg1, kk)
+                call smov   ($bell, nmsg1, kk)
+                call send_   (Xunt$view$i, 0, kk, nmsg1)
+ 
+                PUTunt$AttackIndx$i ($NO)
+                PUTunt$AssignedTarget$i (0)
+                putUNT$TestIntercept$I ($NO)       # SMM 7/97 (E1385)
+                }
+ 
+            call MANUVR (UNT$Pointer, elapsed_time)
+ 
+            return
+            } # end of IF (isee == NO)      # smn002
+        else   # target is seen
+            {
+            if (Xlcl$TMAflag$i == YES)
+                {
+                tgt_lat    = Xlcl$TmaLat$F              #get guide latitude
+                tgt_lon    = Xlcl$TmaLon$F              #get guide longitude
+                tgt_coslat = cos(tgt_lat)               #get cosine of latitude
+                tgt_course = Xlcl$course$i * $pi/180.0  #get heading of guide
+                tgt_speed  = Xlcl$speed$i
+                }
+            else
+                {
+                tgt_lat    = Xunt2$TrueLatitude$f       #get guide latitude
+                tgt_lon    = Xunt2$TrueLongitude$f      #get guide longitude
+                tgt_coslat = Xunt2$CosTrueLat$f         #get cosine of latitude
+                tgt_course = Xunt2$TrueCourse$f         #get heading of guide
+                tgt_speed  = Xunt2$TrueSpeed$f
+                }
+            }
+        } # end if unit type is not a CM, SAM or shore base, and views are
+          # not the same between the target and the attacker
+    else # if (Same_View or ShoreBase)
+       {
+        tgt_lat    = Xunt2$TrueLatitude$f               #get guide latitude
+        tgt_lon    = Xunt2$TrueLongitude$f              #get guide longitude
+        tgt_coslat = Xunt2$CosTrueLat$f                 #get cosine of latitude
+        tgt_course = Xunt2$TrueCourse$f                 #get heading of guide
+        tgt_speed  = Xunt2$TrueSpeed$f
+       }    # End if (Same_View or ShoreBase)
+ 
+    BRG = XUNT$ATTACKBEARING$F                  #get bearing from guide
+    RNG = XUNT$ATTACKRANGE$F                    #get range from guide
+    ITRUE = XUNT$ATTACKTRUE$I                   #get true bearing flag
+   }                                            #end if unit has attack guide
+else if (XUNT$GUIDEINDX$I != $NO)   # Guide is not an ATTACK guide....
+   {
+    UNT$GUIDEINDX$I = XUNT$GUIDEINDX$I          #get guide index
+    UNT2$POINTER$TO UNT$GUIDEINDX$I             #get guides unit pointer
+ 
+    unt2$Type$i = xunt2$type$i
+ 
+    # 5/27/86 - For air-to-air, have unit adjust altitude to target altitude
+    if (unt$Type$i == $AIR$code & unt2$Type$i == $Air$Code)
+        putunt$OrderedAltDepth$I (Xunt2$OrderedAltDepth$I)
+ 
+    BRG   = XUNT$GUIDEBEARING$F                 #get bearing from guide
+    RNG   = XUNT$GUIDERANGE$F                   #get range from guide
+    ITRUE = XUNT$GUIDETRUE$i                    #get true bearing flag
+ 
+    tgt_lat    = XUNT2$TRUELATITUDE$F           #get guide latitude
+    tgt_lon    = XUNT2$TRUELONGITUDE$F          #get guide longitude
+    tgt_coslat = XUNT2$COSTRUELAT$F             #get cosine of latitude
+    tgt_course = XUNT2$TRUECOURSE$F             #get heading of guide
+    tgt_speed  = XUNT2$TRUESPEED$F
+   }    # end else NOT an ATTACK guide
+else # No attack nor guide index, probably deleted within the cycle due to RTU
+    {# processing separate from the wargame.  This code inserted in an effort
+     # to prevent units attacking a DIS ghosted unit that may have been
+     # removed, from turning to bearing 220    SMM 5/5/95 PER # E1380
+     call MANUVR (UNT$Pointer, elapsed_time)
+     return
+    }
+ 
+#$% CLK 4/92:  For level of engagement air = 1
+#$% If the attacker is an air unit and the target is also an air unit,
+#$% call ALTDEP to climb or dive to meet the target.
+if (Level$Air$Engagement == 1 &
+   (xunt$Type$i == $Air$Code & xunt2$Type$i == $Air$Code))
+  {
+   iChgAlt = $yes
+   #$% If the attacker was a result of REACTion to attack, don't change
+   #$% altitude if it is on a defensive mission.
+   unt$Mission$i = xunt$Mission$i
+   if (xUNT$ReactFlag$I == $yes &
+       (UNT$Mission$I == $AirDefense$code | UNT$Mission$I == $Cap$Code   |
+        UNT$Mission$I == $Escort$code     | UNT$Mission$I == $Sweep$code ))
+     iChgAlt = $no
+   if (iChgAlt == $yes)
+     {
+      #$% The attackers ordered altitude was set previous in the routine.
+      UNT$OrderedAltDepth$I = xUNT$OrderedAltDepth$I
+      call ALTDEP (UNT$Pointer, UNT$OrderedAltDepth$I, elapsed_time)
+     }
+  }  # end of Level$Engagement$Air == 1 - for changing altitude in air-to-air
+ 
+if (ITRUE == $NO)                               #if not true bearing
+    HDG = tgt_course                            #get heading of guide
+else
+    HDG = 0.0
+ 
+if (RNG > 0.)    # IF desired lat/long differs from tgt_lat/lon, then   3/25/86
+  {              #      put lat/lon of desired point into tgt_LAT/tgt_LON
+   call RRB2LL(_                                #get lat/lon of guide point
+      tgt_LAT,                                  #pass guide latitude
+      tgt_lon,                                  #pass guide longitude
+      RNG,                                      #pass range from guide
+      BRG,                                      #pass bearing from guide
+      HDG,                                      #pass guide heading or zero
+      tgt_coslat)                               #pass cosine of guide latitude
+ 
+   $angPI(tgt_LON)                                      #       3/25/86
+   tgt_coslat = cos(tgt_LAT)                            #       3/25/86
+  }
+ 
+UNT$STATUS$I = XUNT$STATUS$I    # May have been changed above..
+ 
+HEAD = tgt_course                          #will want to face same dirctn
+ 
+if ( UNT$TYPE$I != $AIR$CODE )    # if ship, check for reduced speed..
+  {            # Default:
+   SPDMAX = FLOAT(xUNT$SPEED$I) #max speed available jb             5/12/89
+   SPDNOW = xUNT$truespeed$f
+  }
+else                            # find a/c vector speed
+  {
+   ACC$POINTER = Xunt$ACCPNTR$I         #get characteristics pointer
+   SPDMAX      = FLOAT(XACC$VECTORspeed$I) #max spd eventually 4/24/84
+  }
+ 
+ 
+iCAN = $NO                                      #      3/26/86
+if (UNT$STATUS$I == $UNDERTOW$CODE)             # jb   6/5/89
+    iCAN = $YES                                 #      3/26/86
+else if ( UNT$STATUS$I == $ONGUIDE$CODE  &   # if was on guide, and  2/20/86
+          SPDMAX       >= tgt_speed       )  #  speed is available.. 3/19/86
+    {
+    if (iTrue      == $YES        )          # non-Relative station commands
+        iCAN = $YES                                     #       3/26/86
+    else if (unt$type$i == $air$code)       # disallow surface craft with
+        iCAN = $YES                                     #       3/26/86
+    }
+else if (UNT$STATUS$I == $ACREFUEL$CODE  |        #       3/26/86
+         unt$Status$i == $ShipRefuel$Code)        # joa 3/96 (E1467)
+  {
+   if (unt$type$i == $air$code)
+       SPDMAX = max(FLOAT(XACC$CRUISEspeed$I),
+                    Xunt$TrueSpeed$f) # joa 12/02 E2317 Will exceed cruise if chasing
+   else                                   # this is a TUG
+       SPDMAX = SPDNOW
+ 
+   RADIUS = 1. + tgt_speed * ($Hours$Per$Minute * elapsed_time)
+   call GETRB_M(_         #get range from guide to this unit      3/26/86
+                UNT2$POINTER,        #pass base pointer
+                UNT$POINTER,         #pass aircraft position
+                XRNG,                #receive range from guide
+                XBRG)                #receive bearing from guide
+ 
+   if (XRNG < RADIUS)                # within this recurrance travel distance
+      ican = $yes
+   else                                                 #       4/8/86
+    {
+     RADIUS = 1.0               # Need to be within 1.+ mile    3/26/86
+     call RMIN_TO_TARGET(_                               #       3/26/86
+            RADIUS,             # Desig. intercept distance = 1.0 mile
+            tgt_course,         # (radians) course of TARGET        real
+            tgt_speed,          # (knots)   speed  of TARGET        real
+            SPDMAX,             # (knots)   max INTERCEPTOR speed   real
+            XRNG,               # (n.mi.) Initial rng between units real
+            XBRG,               # (radians) init. brg FROM tgt TO INTERCEPTOR
+            RTIM)               # RETURNED value (min.) elapsed time to reach RADIUS
+ 
+     if(RTIM == -3 | RTIM == 0) # within range already
+        iCAN = $YES
+     else if (RTIM < 0.0 )
+        iCAN = $NO
+     else
+       {
+        if (RTIM <= elapsed_time)  # can make it this time
+          ican = $yes
+       }
+    }
+  }     #       End if...ACREFUEL$Code
+ 
+if (iCAN == $YES )                              #               3/26/86
+   {
+    oaspd = tgt_speed  + Xunt2$SpeedError$f     #               3/20/86
+    oacse = tgt_course + Xunt2$HeadingError$f   #               3/20/86
+    $ang2PI(oacse)                              #               3/25/86
+ 
+    # clk 3/7/94 - Rather than setting the 3 course and speed variables,
+    # call the routine CRSCHG and SPDCHG.
+    call CrsChg (UNT$Pointer, oacse, elapsed_time)
+    call SpdChg (UNT$Pointer, oaspd, elapsed_time)
+ 
+    talat =tgt_lat -(XUNT2$TrueLatitude$f - XUNT2$AssumedLatitude$f)
+    PUTUNT$AssumedLatitude$F  (talat)
+ 
+    talon =tgt_lon -(XUNT2$TrueLongitude$f -XUNT2$AssumedLongitude$f)
+    $angPI(talon)                               #               3/25/86
+    PUTUNT$AssumedLongitude$F (talon)
+ 
+    unt$InterceptTime$f = game$time   # PUT is below..        3/6/86
+ 
+    iCALLerr = $NO              # assumed LAT/LON already set   3/17/86
+    call MOVTRU(iCALLerr,               #place at desired spot  3/17/86
+                UNT$POINTER,
+                tgt_lat,
+                tgt_LON,
+                elapsed_time)
+   }
+else    # else if ICAN == $NO..
+    {
+    if( UNT$STATUS$I == $ACREFUEL$CODE )             # jb     6/17/87
+        {
+         #$% Determine the fuel used per minute      # clk 12/16/92
+         if (Level$Air$Engagement < 1 |
+             xACC$Category$I == $HELO$code) # use the previous fuel calculations
+            speed = SPDMAX
+         else                            # use the fuel calculations from awsims
+            speed = FLOAT (xACC$CruiseSpeed$I)
+         call AC_Fuel_Per_Sec (ACC$Pointer, xUNT$Status$I,
+                               xUNT$MarshallStatus$I,
+                               speed, xUNT$TrueAltDepth$I,
+                               pounds_of_fuel)
+         pounds_of_fuel = pounds_of_fuel * $Seconds$Per$Minute
+ 
+        UNT$TNK$Index = AviationFuelTank$Code       # clk 1/97 (E1467)
+        if (INT(xUNT$TNK$FuelRemaining$F) - (pounds_of_fuel*elapsed_time) >
+                                                       (pounds_of_fuel * rtim)) {}
+        else                                              # jb    6/17/87
+            {
+            kk = 0                                        # jb    6/17/87
+            call smovhn (Xunt$name$c,$$MaxLit,nmsg1,kk)
+            call smovv  (" sends: TOO LITTLE FUEL: Loitering on tnkr brg..",nmsg1,kk)
+            call smovv  (" Vector tanker to close",nmsg1,kk)
+            call smov   ($bell,nmsg1,kk)
+            call send_   (Xunt$view$i,0,kk,nmsg1)          # jb    6/17/87
+ 
+            UNT$OrderedSpeed$F = Xacc$LoiterSpeed$i         # jb    6/17/87
+            PUTUNT$OrderedSpeed$F                           # jb    6/17/87
+            XBRG = XBRG + $PI       # Reverse brg FROM tnkr TO flight
+            call ang2PI(XBRG)                               # jb    6/17/87
+            PUTUNT$OrderedCourse$F (XBRG)                   # jb    6/17/87
+            PUTunt$status$i ($Loitering$code)               # jb    6/18/87
+            PUTunt$AttackIndx$i ($NO)                       # jb    6/22/87
+            call MANUVR (unt$pointer, elapsed_time)
+            RETURN                                          # jb    6/17/87
+            }
+        } # end if status $ACREFUeL$code                    # jb    6/17/87
+ 
+    call INTCPT (UNT$Pointer, tgt_lat, tgt_lon,
+                 tgt_course, tgt_speed, HEAD, elapsed_time)
+ 
+    speed = amax1 (.0001, xUNT$OrderedSpeed$f)
+    unt$InterceptTime$f = game$time +
+                          $Minutes$Per$Hour * xUNT$RangeToNext$f / speed
+   }
+ 
+PUTunt$InterceptTime$f
+ 
+return
+end
+
+ 
+Subroutine INTCPT(_
+                   UNT$POINTER,
+                   TGTLAT,
+                   TGTLON,
+                   TGTCRS,
+                   TGTSPD,
+                   HEAD,
+                   elapsed_time)  # in: time span in minutes
+#$% Modified:  Carol Kropp - 10/93
+#$%            Variable cycle time - change in minutes (elapsed_time).
+#$%            Changed call to Min_to_Target to Rmin_To_Target,
+#$%            so that the number of minutes to target can be computed.
+#$%
+#$%            James Allen - 12/97 (E1832)
+#$%            Clear the flag which indicates that the ship's
+#$%            available maneuver commands should be restrictred
+#$%            when the port maneuver is completed.
+#$%
+ 
+BBcommon
+ 
+real     real_minutes_to_target, travel_distance
+real     elapsed_time
+ 
+# jb E2145 (IMPLICIT NONE) declarations:        5/11/00
+real*4      UNT$COSTrueLat$F                    # 7/14/93 trs
+real*4      UNT$OrderedSpeed$F                  # 7/14/93 trs
+real*4      UNT$RangeToNext$F                   # 7/14/93 trs
+real*4      UNT$SpeedError$F                    # 7/14/93 trs
+real*4      UNT$TrueCourse$F                    # 7/14/93 trs
+real*4      UNT$TrueLatitude$F                  # 7/14/93 trs
+real*4      UNT$TrueLongitude$F                 # 7/14/93 trs
+integer*4   UNT$Pointer,UNT$Type$I,UNT$Status$i # 7/14/93 trs
+Integer*4   UNT$TrueAltDepth$I      # jb E2145  5/11/00
+integer*4   UNT$UseOrdSpeed$I                   # 7/14/93 trs
+integer*4   UNT$AssignedTarget$I,UNT$AttackIndx$I # 7/14/93 trs
+integer*4   UNT2$Pointer, UNT2$Type$i  # jb $Type$i  10/17/95
+real*4      bear, brng                          # 7/14/93 trs
+real*4      beta, gamma, gabs                   # 7/14/93 trs
+real*4      head                                # 7/14/93 trs
+real*4      ordcrs                              # 7/14/93 trs
+real*4      radius, range                       # 7/14/93 trs
+real*4      sine                                # 7/14/93 trs
+real*4      spdmax, spdint, spdmin, spdnow,speed  # 7/14/93 trs
+real*4      tgtcrs, tgtlat, tgtlon, tgtspd      # 7/14/93 trs
+integer*4   ACC$Pointer,SHC$Pointer             # 7/14/93 trs
+Integer*4   ACC$VectorSpeed$I       # jb E2145  5/11/00
+Integer*4   ACC$MaxSpeed$I          # jb E2145  5/11/00
+Integer*4   ACC$SeaMaxSpeed$I       # jb E2145  5/11/00
+integer*4   icallerr                            # 7/14/93 trs
+integer*4   ican                                # 7/14/93 trs
+ 
+real*4      angleA,sinA
+ 
+UNT$TRUELATITUDE$F  = XUNT$TRUELATITUDE$F       #get unit latitude
+UNT$TRUELONGITUDE$F = XUNT$TRUELONGITUDE$F      #get unit longitude
+UNT$COSTRUELAT$F    = XUNT$COSTRUELAT$F         #get cosine of unit latitude
+ 
+call RLL2RB(_                                  #get range and bearing to ref
+      TGTLAT,                                   #pass reference lat
+      TGTLON,                                   #pass reference lon
+      COS(TGTLAT),                              #pass cos of ref. lat
+      UNT$TRUELATITUDE$F,                       #pass unit lat
+      UNT$TRUELONGITUDE$F,                      #pass unit lon
+      UNT$COSTRUELAT$F,                         #pass cosine of unit lat
+      RANGE,                                    #receive range
+      BRNG)                                     #receive bearing
+$ANG2PI (BRNG)          # N.B.-BRNG is used below       ..2/7/85
+ 
+UNT$TYPE$I       = XUNT$TYPE$I                 #get unit type
+UNT$STATUS$I     = XUNT$STATUS$I               #get unit status
+UNT$TRUECOURSE$F = XUNT$TRUECOURSE$F
+ 
+##############################################################################
+if (UNT$TYPE$I == $CRUISEMISSILE$CODE |         # if cruise missile or
+    UNT$Type$I == $SAMissile$Code |        # or SAM  1/94 SMM
+    UNT$STATUS$I == $LayingBarrier$Code |  # laying barrier jb   7/28/87
+   (UNT$Type$I == $Air$Code  &  xUNT$UseOrdSpeed$I == $yes))   # clk 4/92
+    UNT$USEORDSPEED$I = $YES            #want to use ordered speed
+#$% 4/92 - If an aircraft and UseOrdSpeed = $yes then the aircraft
+#$%        has been PAIRed and the appropriate intercept speed computed.
+#$%        Intercept speed depends upon the targets speed, so vcru is not use.
+else                                    #otherwise
+    UNT$USEORDSPEED$I = $NO             #let intrcpt algrm compute it
+ 
+PUTUNT$USEORDSPEED$I
+##############################################################################
+ 
+if (UNT$USEORDSPEED$I == $NO)    #if intcpt spd to be computed        6/18/89
+    {
+    if (UNT$TYPE$I == $AIR$CODE)        #if aircraft
+        {
+        ACC$POINTER = XUNT$ACCPNTR$I            #get characteristics pointer
+ 
+        if(unt$Status$I !=$ACRefuel$Code & Xunt$AttackIndx$I !=$NO)  #4/9/86
+                SPDMIN = FLOAT(XACC$VECTORspeed$I) #max spd eventually 4/9/86
+        else    SPDMIN = FLOAT(XACC$CRUISESPEED$I)      #min speed eventually
+ 
+        #$% CLK 3/92:  If Level$Air$Engagement >= 1, use SeaMaxSpeed and
+        #$%            the aircraft's altitude to scale SPDMAX
+        ACC$VectorSpeed$I = xACC$VectorSpeed$I
+        if (Level$Air$Engagement < 1)   # use vector speed for SPDMAX
+          SPDMAX = FLOAT(ACC$VECTORspeed$I) #max spd eventually 4/24/84
+        else  # Level$Air$Engagement >= 1       # clk 3/92
+          {
+           UNT$TrueAltDepth$I = xUNT$TrueAltDepth$I
+           if (UNT$TrueAltDepth$I < 35000)
+             {
+              ACC$MaxSpeed$I = xACC$MaxSpeed$I
+              ACC$SeaMaxSpeed$I = xACC$SeaMaxSpeed$I
+              SPDMAX = Float (ACC$SeaMaxSpeed$I) +
+                       ( (Float (UNT$TrueAltDepth$I) / 35000.0) *
+                         (Float (ACC$MaxSpeed$I - ACC$SeaMaxSpeed$I)) )
+              SPDMAX = AMIN1 (Float (ACC$VectorSpeed$I), SPDMAX)
+             }
+           else
+             SPDMAX = Float (ACC$VectorSpeed$I)
+          }
+ 
+        SPDNOW      = SPDMAX                    #max speed this minute
+        }
+    else if (UNT$TYPE$I == $SURFACE$CODE       |
+             UNT$TYPE$I == $SUB$CODE            )
+        {
+        UNT$AttackIndx$I = xUNT$AttackIndx$I            ## get target
+        if (UNT$AttackIndx$I != 0)   # the attack index will be zero
+          {                          # when the unit is intercepting a guide
+           UNT2$Pointer$To  UNT$AttackIndx$I
+           UNT2$Type$I = xUNT2$Type$I
+          }
+        else
+           UNT2$Type$I = $null$code
+ 
+        SPDMAX      = xUNT$SPEED$I              #max speed eventually
+ 
+        UNT2$Pointer$To  UNT$AttackIndx$I
+ 
+        if (xUNT2$Type$I == $SUB$Code)                  ## if target is a sub
+            {
+            UNT$AssignedTarget$I = xUNT$AssignedTarget$I
+ 
+            if (UNT$AssignedTarget$I > 0 & UNT$AttackIndx$I > 0) ##if engaging
+                {
+                SPDMAX = 15                             ## max speed
+                }
+            }
+         else if (xUNT$SuperType$i == $SmallBoat$SuperCode & # DEW 5/1/90
+                  unt$status$i     == $towing$code )    # we are towing...
+            {
+            unt2$pointer$to xunt$guideindx$i
+            if (xUNT2$SuperType$i != $SmallBoat$SuperCode)      # DEW 5/1/90
+                {
+                SHC$Pointer = Xunt$ShcPntr$i      # jb If YES,           5/12/89
+                SPDMAX = Xshc$CruiseSpeed$i * 0.8 # jb   revise SPDMAX   5/12/89
+                }
+            }
+        SPDMIN = SPDMAX                                 #min speed eventually
+        SPDNOW = AMIN1(XUNT$TRUESPEED$F+5.0,SPDMAX)     #max speed this minute
+        }
+    }
+else # Use ORDEREDspeed
+    {
+    UNT$OrderedSpeed$F = xUNT$OrderedSpeed$F
+ 
+    call SPDCHG (UNT$Pointer, UNT$OrderedSpeed$F, elapsed_time)
+ 
+    SPDMAX = xUNT$OrderedSpeed$F - xUNT$SpeedError$F
+    SPDMIN = SPDMAX                            #use adjusted speed order
+    SPDNOW = xUNT$TrueSpeed$F                  #use current speed
+    } # end Use ORDEREDspeed
+ 
+ican = $NO                      # initl'z can't-reach-tgt-now flag      8/14/85
+if (TGTSPD >= 60.)              # indubitably airborne!?        #       3/26/86
+  {
+  RADIUS = 1.0                  # Need to be within 1.+ mile    8/15/85
+  call RMIN_TO_TARGET(_                                  #       8/14/85
+            RADIUS,             # Desig. intercept distance = 1.0 mile
+            TGTCRS,             # (radians) course of TARGET        real
+            TGTSPD,             # (knots)   speed  of TARGET        real
+            SPDNOW,             # (knots)   speed  of INTERCEPTOR   real
+            RANGE,              # (n.mi.) Initial rng between units real
+            BRNG,               # (radians) init. brg FROM tgt TO INTERCEPTOR
+            real_minutes_to_target)    # RETURNED value (min.) elapsed time to reach RADIUS
+ 
+  if (real_minutes_to_target == -3 |
+      real_minutes_to_target == 0  )    # already within range
+    ican = $YES
+  else if (real_minutes_to_target > 0.0 )
+    {
+     if (real_minutes_to_target <= elapsed_time)  # can it make it this time
+       ican = $yes
+    }
+  }
+else
+  {
+ 
+   # if mission is reconn and you are below 60 sec cycle time
+   # then status will remain proceeding instead of onguide
+   # orecon is called before motman so no recon will be ordered
+   # since the recon order is deleted before onguide code gets to orecon
+   if (xunt$mission$i == $reconn$code) # orders on minute boundary so see if can - JFR 7/15/94
+      travel_distance = (SPDNOW * $Hours$Per$Minute) # get there in 1 minute - JFR 7/15/94
+   else # use elapsed time to see if intercept during cycle - JFR 7/15/94
+     travel_distance = (SPDNOW * $Hours$Per$Minute)  * elapsed_time
+   if (travel_distance >= RANGE) # can make it this recurrance
+     ican = $YES
+ 
+  }
+ 
+if (ican == $YES)        # flag now says CAN reach this minute   8/14/85
+    {
+    iCALLerr = $YES                    # flag do call ERRPOS   3/25/86
+    call MOVTRU(iCALLerr,              #place at desired spot  3/25/86
+                UNT$POINTER,
+                TGTLAT,
+                TGTLON,
+                elapsed_time)
+ 
+    if (UNT$Type$I == $SAMissile$Code) # advanced SAM, SMM 1/94
+        {
+         PUTUNT$STATUS$I ($ONGUIDE$code)
+         return
+        }
+ 
+    if (UNT$TYPE$I == $CRUISEMISSILE$CODE)     #if cruise missile
+        {
+        PUTUNT$STATUS$I ($ONGUIDE$code)         #       8/15/85
+ 
+        # clk 3/7/94 - Rather than setting the 3 course variables,
+        # call the routine CRSCHG.
+        call CrsChg (UNT$Pointer, tgtcrs, elapsed_time)
+ 
+        # note: routine SpdChg does not handle cruise missiles
+        putUNT$ORDEREDSPEED$F   (TGTSPD)        #       8/15/85
+        putUNT$trueSPEED$F      (TGTSPD)        #       8/15/85
+        putUNT$assumedSPEED$F   (TGTSPD)        #       8/15/85
+ 
+        RETURN          # COURSE/SPEED set in CMHIT     8/15/85
+        }
+    else if (UNT$STATUS$I == $ReturningToBase$Code)   # if boat/aircraft recovery
+        {
+        if (Xunt$Supertype$i == $Surface$Supercode)    # joa 2/96 (E1467)
+            {                                          # ships can proceed to
+            putUNT$STATUS$I ($InPort$Code)             # a port for refueling.
+            putUNT$TimePortArrival$F (Game$Time)
+            putUNT$LastManeuverOrderCode$I (NO$order)  # Remove maneuver restrictions - joa 12/97 (E1832)
+            }
+        else
+            putUNT$STATUS$I ($ReadyToRecover$Code)    # set ready to do so status
+        }
+    else       # otherwise, this is not one of the above
+        {
+        UNT$SpeedError$F   = xUNT$SpeedError$F
+        call SPDCHG (UNT$Pointer, TGTSPD+UNT$SpeedError$F, elapsed_time)
+ 
+        HEAD = HEAD + xUNT$HeadingError$F
+        $ang2PI(HEAD)
+        call CRSCHG (UNT$Pointer, HEAD, elapsed_time)
+ 
+        if(UNT$STATUS$I == $PROCEEDING$CODE)    #if proceeding
+            PUTUNT$STATUS$I ($ONGUIDE$code)      #indicate on guide
+        } # end NOT recovery
+    } # end if arriving on guide now
+else # intercept needed
+    {
+ 
+    GAMMA = BRNG - TGTCRS                      #  AOB !
+    $angPI(GAMMA)
+    Gabs = abs(GAMMA)                          #       9/21/83
+ 
+    SPDINT = 2. * SIN(ABS(GAMMA*.5)) * TGTSPD #desired interception speed
+    SPDINT = AMAX1(SPDINT,TGTSPD )
+ 
+    SPEED = AMIN1(SPDINT,SPDMAX)                #can't exceed max speed
+    SPEED = AMAX1(SPDMIN,SPEED)                 #go at least min speed
+ 
+    radius = 1.0
+    call RMIN_TO_TARGET(_                                  #       8/14/85
+            RADIUS,             # Desig. intercept distance = 1.0 mile
+            TGTCRS,             # (radians) course of TARGET        real
+            TGTSPD,             # (knots)   speed  of TARGET        real
+            SPEED,              # (knots)   speed  of INTERCEPTOR   real
+            RANGE,              # (n.mi.) Initial rng between units real
+            BRNG,               # (radians) init. brg FROM tgt TO INTERCEPTOR
+            real_minutes_to_target)    # RETURNED value (min.) elapsed time to reach RADIUS
+ 
+ 
+    if (real_minutes_to_target == -3) real_minutes_to_target = 0.0
+    if (real_minutes_to_target >= 0.0 )
+    {
+ 
+        unt$RangeToNext$f = speed * real_minutes_to_target * $Hours$Per$Minute
+ 
+        sinA = sin(gabs) * tgtspd / max(speed, 0.01)
+        if (ABS(sinA) <= 1.0)           #if can intercept ABS  JHM 1/2003 aai03
+         {
+ 
+          angleA = asin(sinA)
+ 
+          beta = 1.0
+          if (tgtcrs >= 90 * $deg2rad & tgtcrs <= 270 * $deg2rad)
+            beta = -1.0
+          bear = brng + $PI + sign(angleA, beta)
+          $ang2pi(bear)
+         }
+        else
+         {
+          UNT$RANGETONEXT$F = 9999
+          bear = brng + $PI                   # staspd joa 2/05 head to target
+         }
+ 
+    }
+    else        # unable to intercept targe in reasonable time
+    {           # Head to target
+        unt$RangeToNext$f = 9999.0
+        bear = brng + $PI                   # staspd joa 2/05
+    }
+ 
+    ORDCRS = BEAR + XUNT$HEADINGERROR$F        #assumed course required
+    $ang2PI(ORDCRS)
+ 
+    PUTUNT$RANGETONEXT$F                       #save range to go
+ 
+    if(XUNT$STATUS$I == $ONGUIDE$CODE)         #if was on guide
+        PUTUNT$STATUS$I ($PROCEEDING$CODE)      #status proceeding
+ 
+    if(Xunt$Type$i == $Air$Code &                      #<<<>>> 10/8/86
+       Xunt$MarshallStatus$i == $Recovering$Code)      #<<<>>> 10/7/86
+        PUTunt$MarshallStatus$i ($inflight$code)     #<<<>>> 10/7/86
+ 
+    call CRSCHG (UNT$Pointer, ORDCRS, elapsed_time)
+ 
+    UNT$SpeedError$F = xUNT$SpeedError$F
+    call SPDCHG (UNT$Pointer, SPEED+UNT$SpeedError$F, elapsed_time)
+ 
+    call MOTION (UNT$Pointer, elapsed_time)
+    }                                           #end else
+ 
+return
+end
+
+ 
+Subroutine CRSCHG(_
+            UNT$POINTER,           # in: unit pointer
+            UNT$ORDEREDCOURSE$F,   # in: ordered course
+            elapsed_time)          # in: amount of time (minutes)
+#######################################################
+#$%
+#$% Purpose:   CRSCHG processes course change for
+#$%            platform and stores computed data.
+#$%
+#$% Called By: INTCPT          MANUVR, _flt, _pim, _LL
+#$%
+#$% Calls:     ABS        ANG2PI
+#$%
+#$% Tables:    UNT
+#$%
+#$% Date:      DEC 80
+#$%
+#$% Author:    Gary Thoma
+#$%
+#$%            Carol Kropp - 10/93
+#$%            Added turn rate for air, missiles, torps and boats.
+#$%
+#######################################################
+BBcommon
+ 
+real elapsed_time
+real      max_allowable_turn   # clk 10/93
+ 
+## jb E2145     (Add for IMPLICIT NONE):        # 5/11/00; 7/17/00
+real*4      UNT$AssumedCourse$F                 # 7/14/93 trs
+real*4      UNT$OrderedCourse$F                 # 7/14/93 trs
+real*4      UNT$TrueCourse$F                    # 7/14/93 trs
+real*4      diff                                # 7/14/93 trs
+real*4      turn                                # 8/93 trs
+integer*4   UNT$Pointer, UNT$Type$I             # 7/14/93 trs
+integer*4   UNT$SuperType$i                     # 8/93 trs
+integer*4   UNT$RTEindx$i       # jb E2145  5/11/00
+integer*4   icourse, ncourse                    # 7/14/93 trs
+ 
+UNT$ASSUMEDCOURSE$F = XUNT$ASSUMEDCOURSE$F      # get course
+if(UNT$ASSUMEDCOURSE$F == UNT$ORDEREDCOURSE$F)  # if no change required
+    return                                      #   get out of here
+ 
+unt$type$i = Xunt$type$i
+ 
+if (unt$type$i == $PIM$code)
+    {
+    UNT$ASSUMEDCOURSE$F = UNT$ORDEREDCOURSE$F   # set course
+    }
+else
+    {
+    DIFF = UNT$ORDEREDCOURSE$F - UNT$ASSUMEDCOURSE$F    #compute how big a turn
+    $angPIxx(DIFF)                                        #E2351 JHM to prevent loop on large DIFF
+ 
+    UNT$SuperType$i = xUNT$SuperType$i
+    if (unt$type$i == $AIR$CODE |                   # if aircraft or missile
+        unt$type$i == $cruisemissile$code |
+        UNT$Type$I == $SAMissile$Code |         # advanced SAM, SMM 1/94
+        UNT$SuperType$i == $SmallBoat$SuperCode |          # DEW 5/1/90
+        UNT$SuperType$i == $Torpedo$SuperCode)             # reh 5/2/90
+       {
+        UNT$RteIndx$I = xUNT$RteIndx$I # Get route index -    JFR 5/6/94
+        if (UNT$RteIndx$I != $No)   # if using a Route then complete full turn
+           max_allowable_turn = $NonShip$TurnRate$PerMinute # JFR 5/6/94
+        else # allow variable cycle time to modulate turn -   JFR 5/6/94
+           max_allowable_turn = $NonShip$TurnRate$PerMinute * elapsed_time # JFR 5/6/94
+       }
+    else   # ships and subs
+      max_allowable_turn = $Ship$TurnRate$PerMinute * elapsed_time # JFR for VTS
+ 
+    if (ABS(DIFF) <= max_allowable_turn)           # if turn can be completed
+        UNT$ASSUMEDCOURSE$F = UNT$ORDEREDCOURSE$F  # make entire turn
+    else
+       {
+        TURN = SIGN (max_allowable_turn, DIFF)           # turn far as possible
+        UNT$ASSUMEDCOURSE$F = UNT$ASSUMEDCOURSE$F + TURN #   in appropriate
+        $ang2PI(UNT$ASSUMEDCOURSE$F)                     #        direction
+        }
+    }
+ 
+PUTUNT$ASSUMEDCOURSE$F                          # save assumed course
+PUTUNT$OrderedCourse$F
+ 
+UNT$TRUECOURSE$F = UNT$ASSUMEDCOURSE$F - XUNT$HEADINGERROR$F    # compute true
+$ang2PI(UNT$TRUECOURSE$F)
+ 
+ncourse =  UNT$truecourse$f * 180/$pi + .5      # new course
+icourse = XUNT$truecourse$f * 180/$pi + .5      # old course
+ 
+if (icourse != ncourse)
+    {
+    PUTUNT$LastCourse$i (icourse)
+    PUTunt$TimeCourseChange$f (game$time)
+    }
+ 
+if (ABS(UNT$TrueCourse$F - xUNT$TrueCourse$F) < 0.001)
+  {                               # clk 3/10/94 - radian course changes don't
+   putUNT$TrueCourse$F            # reflect in integer degrees, so added check
+   putUNT$CourseModified$I ($no)  # to reduce the round off problem for ALSP.
+  }                               # ALSP deals with integer degree values for course.
+else
+  PUTUNT$truecourse$f                           # save new true course
+ 
+return
+end
+ 
+
+ 
+Subroutine SPDCHG(_
+            UNT$POINTER,                        #receive unit pointer
+            UNT$ORDEREDSPEED$F,
+            elapsed_time)         # in: amt of time passed (minutes)
+#######################################################
+#$%
+#$% Purpose:   SPDCHG processes aircraft and ship
+#$%            speed changes and stores computed
+#$%            data.
+#$%
+#$% Called By: MANUVR, _flt,_LL,_pim   MOVASS  INTCPT
+#$%
+#$% Calls:     ABS        AMIN1      FLOAT
+#$%
+#$% Tables:    UNT
+#$%            ACC
+#$%
+#$% Date:      DEC 80
+#$%
+#$% Author:    Gary Thoma
+#$%
+#$% Modified:  Carol L. Kropp  3/92
+#$%            Added scaling of SPDMAX for aircraft
+#$%            below 35,000 ft. when
+#$%            Level$Air$Engagement = 1
+#$%
+#$%            Carol Kropp - 10/93
+#$%
+#$%            Susan Miller PER E1375 5/95 If unit is an aircraft and it
+#$%            is a DIS$game, send a warning message when the aircraft speed
+#$%            goes to zero.
+#$%
+#$%            Susan Miller 5/97 (E1633)
+#$%            Stored the orderedspeed for use in
+#$%            routine manuvr_flt
+#$%
+#######################################################
+BBcommon
+ 
+literal     cstrip8  # jb E2145     5/11/00
+real elapsed_time
+Real    ACCEL    # Selected acceleration (Ship or Boat)
+ 
+# jb E2145 (IMPLICIT NONE) declarations:        5/11/00
+real*4      delta, spdmax                       # 7/14/93 trs
+real*4      UNT$AssumedSpeed$F                  # 7/14/93 trs
+real*4      UNT$OrderedSpeed$F                  # 7/14/93 trs
+real*4      UNT$SpeedError$F                    # 7/14/93 trs
+real*4      UNT$TrueSpeed$F                     # 7/14/93 trs
+integer*4   UNT$Pointer, UNT$Type$I             # 7/14/93 trs
+integer*4   UNT$AttackIndx$I                    # 7/14/93 trs
+integer*4   UNT$TrueAltDepth$I      # jb E2145  5/11/00
+integer*4   UNT2$Pointer                        # 8/93 trs
+integer*4   ACC$Pointer, SHC$Pointer            # 7/14/93 trs
+Integer     ACC$MaxSpeed$I          # jb E2145  5/11/00
+Integer     ACC$SeaMaxSpeed$I       # jb E2145  5/11/00
+integer*4   PIM$Pointer             # jb E2145  5/11/00
+ 
+integer   kk, send_warning_msg
+character msg[ARB]
+ 
+send_warning_msg = $no
+ 
+unt$type$i = Xunt$type$i
+if ((unt$type$i == $CruiseMissile$code) |          #speed constant for cr miss
+    (UNT$Type$I == $SAMissile$Code))        # advanced SAM, SMM 1/94
+    return
+ 
+if (UNT$OrderedSpeed$f < 0.0) UNT$OrderedSpeed$f = 0.0  #       10/28/85
+ 
+UNT$TRUESPEED$F = xUNT$TRUESPEED$F
+ 
+UNT$ASSUMEDSPEED$F = XUNT$ASSUMEDSPEED$F        #get assumed speed
+SPDMAX      = XUNT$SPEED$I                      #max speed eventually
+ 
+if (UNT$TYPE$I == $AIR$CODE)                    #if aircraft
+    {
+    ACC$POINTER = XUNT$ACCPNTR$I                #get characteristic pointer
+ 
+    ACC$MaxSpeed$I = xACC$MaxSpeed$I
+    if (Level$Air$Engagement < 1)      # SPDMAX = Aircraft's VMAX
+      SPDMAX = Float (ACC$MaxSpeed$I)
+    else # Level$Air$Engagement >= 1   # SeaMaxSpeed & the aircraft's
+      {                                # altitude scale the SPDMAX     clk 3/92
+       UNT$TrueAltDepth$I = xUNT$TrueAltDepth$I
+       if (UNT$TrueAltDepth$I < 35000)
+         {
+          ACC$SeaMaxSpeed$I = xACC$SeaMaxSpeed$I
+          SPDMAX = Float (ACC$SeaMaxSpeed$I) +
+                   ( (Float(UNT$TrueAltDepth$I) / 35000.0) *
+                     (Float(ACC$MaxSpeed$I - ACC$SeaMaxSpeed$I)) )
+         }
+       else
+         SPDMAX = Float (ACC$MaxSpeed$I)
+      }
+ 
+    UNT$ORDEREDSPEED$F = _                      #can't exceed max speed
+        AMIN1(UNT$ORDEREDSPEED$F,SPDMAX)
+ 
+    if (UNT$OrderedSpeed$F == UNT$AssumedSpeed$F) # if no change in speed,
+      return                                      # return - clk 3/7/94
+ 
+    UNT$ASSUMEDSPEED$F = UNT$ORDEREDSPEED$F
+    }                                           #end if aircraft
+else if (UNT$TYPE$I == $Pim$CODE)
+    {
+    UNT$ASSUMEDSPEED$F = UNT$ORDEREDSPEED$F
+    }                                           #end if aircraft
+else                    #if Ship or Boat
+    {
+    UNT$AttackIndx$I = xUNT$AttackIndx$I                ## get target
+    UNT2$Pointer$To  UNT$AttackIndx$I
+ 
+    if (xUNT2$Type$I == $SUB$Code)                      ## if target is a sub
+        {
+        if (xUNT$AssignedTarget$I > 0 & UNT$AttackIndx$I > 0)   ## if engaging
+            {
+            SPDMAX = amin1(SPDMAX,15.0)                     ## max speed
+            }
+        }
+    else if(xUNT$SuperType$i == $SmallBoat$SuperCode &           # DEW 5/1/90
+            Xunt$STATUS$I  == $Towing$Code)
+        {
+        unt2$Pointer$TO (xUNT$GuideIndx$i)  # are we inbound        6/2/89
+        if (xUNT2$SuperType$i != $SmallBoat$SuperCode)           # DEW 5/1/90
+            {
+            SHC$Pointer = Xunt$ShcPntr$i        # jb If YES,         5/12/89
+            SPDMAX = AMIN1(SPDMAX,Xshc$CruiseSpeed$i * 0.8)   # jb   5/12/89
+            UNT$OrderedSpeed$F = SPDMAX                       # jb   5/13/89
+            }
+        }
+ 
+    UNT$ORDEREDSPEED$F = _                      #can't exceed max speed
+        AMIN1(UNT$ORDEREDSPEED$F,SPDMAX)
+ 
+    DELTA = UNT$OrderedSpeed$F - UNT$AssumedSpeed$F  #get speed difference
+ 
+    if (delta == 0.0)   # if there is to be no change in speed,
+      {                 # return from this routine - clk 3/7/94
+       # put orderedspeed before returning when unit is engaging
+       # in flight ops - SMM 5/97 (E1633)
+       if (xUNT$Status$I == $FltOps$Code)
+         putUNT$OrderedSpeed$F
+       return
+      }
+ 
+    if(Xunt$SuperType$i == $SmallBoat$SuperCode)           # DEW 5/1/90
+        {
+        ACCEL = $Boat$AccelRate$PerMinute
+ 
+        SHC$Pointer = Xunt$ShcPntr$i
+        ACCEL = MAX(ACCEL, $Boat$AccelRate$Percent * Xshc$MaxSpeed$i)
+ 
+        if (delta < 0.0)                     # if decelerating
+            ACCEL = ACCEL * 2                # do it twice as fast
+        }
+    else
+        {
+        ACCEL = $Ship$AccelRate$PerMinute
+        }
+ 
+    ACCEL = ACCEL * elapsed_time   # accel per  interval
+ 
+    if(ABS(DELTA) <= ACCEL)             #if in this cycle  jb    4/25/89
+        UNT$ASSUMEDSPEED$F = UNT$ORDEREDSPEED$F #set speed to ordered
+    else
+        UNT$ASSUMEDSPEED$F = XUNT$ASSUMEDSPEED$F + _  #change speed by rate
+            SIGN(ACCEL,DELTA)                   # jb              4/25/89
+   }                                            #end if ship/boat
+ 
+if (UNT$AssumedSpeed$f < 0.0)
+    UNT$AssumedSpeed$f = 0.0
+ 
+# if this is a DIS game, this is an aircraft, and the original true speed   5/95
+# is not equal to the assumed speed which is zero, then send a warning msg. SMM
+# This is done so that the warning message is only sent once for a particular
+# unit.
+# if the status is on guide and the guide index equals the recover index
+# this a/c is bingoing and we don't want to send a message.  SMM #E1408
+if ((DIS$Game == $YES) & (xUNT$Type$I == $Air$code))
+    {
+     if (xUNT$Status$I == $OnGuide$Code &
+         xUNT$GuideIndx$I == xUNT$RecoverIndx$I)
+       send_warning_msg = $no
+     else if ((UNT$TRUESPEED$F != UNT$AssumedSpeed$f) &
+              (UNT$AssumedSpeed$f == 0.0))
+        send_warning_msg = $yes
+ 
+     # if unit is following a pim and that pim has gone to speed 0, send a
+     # warning message.
+     if ((xUNT$PimIndx$I != 0) & (send_warning_msg != $yes))
+        {
+         PIM$Pointer$To xUNT$PimIndx$I
+         if (xPIM$LegNumber$I > xPIM$Nlegs$I)
+            {
+             UNT$Pointer$To xPIM$UNTindx$I
+             if (xUNT$TrueSpeed$F == 0.0)
+                send_warning_msg = $yes
+            }
+        }
+    }
+ 
+PUTUNT$AssumedSpeed$f                           #store assumed speed
+PUTUNT$OrderedSpeed$F
+ 
+UNT$SPEEDERROR$F = XUNT$SPEEDERROR$F            #                  10/7/83
+UNT$TRUESPEED$F = max(0.01,UNT$ASSUMEDSPEED$F-UNT$SPEEDERROR$F) # true speed
+ 
+ if (abs(UNT$AssumedSpeed$f) <= .001) UNT$TrueSpeed$f=0.0 # 10/11/83
+ 
+ PUTUNT$TRUESPEED$F
+ 
+ # if unit is an aircraft, it's speed has gone to zero and this is a
+ # DIS game then send a warning message.  SMM E1375 5/95
+ if ((send_warning_msg == $yes) &
+     (xUNT$TrueSpeed$F == 0.0))
+    {
+     kk = 0
+     call smovv (" ***** ",msg,kk)
+     call smovhn(xUNT$Name$C,$$MaxLit,msg,kk)
+     call smovv (" HAS SLOWED TO SPEED ZERO.  ***** ",msg,kk)
+     call smov  ($bell,msg,kk)
+     call send_  (xUNT$View$I,0,kk,msg)
+    }
+ 
+ return
+ end        # routine SPDCHG
+ 
+
+ 
+ Subroutine ERRPOS(_
+            UNT$POINTER,     # in: unit pointer
+            DELAT,           # in: delta latitude
+            DELON,           # in: delta longitude
+            elapsed_time)    # in: amt of time in minutes
+ #######################################################
+ #$%
+ #$% Purpose:   ERRPOS incorporates navigation errors
+ #$%            into position data.
+ #$%
+ #$% Called By: MOTION     MOVTRU
+ #$%
+ #$% Calls:     NONDR      DRNAV
+ #$%            ANGPI      QSQRT
+ #$%
+ #$% Tables:    UNT
+ #$%
+ #$% Date:      DEC 80
+ #$%
+ #$% Author:    Gary Thoma
+ #$%
+ #$% Modified:  Carol Kropp - 10/93
+ #$%            Variable Cycle Time - compute true speed
+ #$%            based on number of minutes elapsed.
+ #$%
+ #######################################################
+ BBcommon
+ 
+ real     elapsed_time
+ real     delat, delon, x, y
+ integer  itrans, sub_unit_flag, at_periscope_depth, sub_wire_flag
+ 
+# jb E2145 (IMPLICIT NONE) declarations:        5/11/00
+real*4      UNT$AssumedLatitude$F               # 7/14/93 trs
+real*4      UNT$AssumedLongitude$F              # 7/14/93 trs
+real*4      UNT$DRLatitudeError$F               # 7/14/93 trs
+real*4      UNT$DRLongitudeError$F              # 7/14/93 trs
+real*4      UNT$HeadingError$F                  # 7/14/93 trs
+real*4      UNT$OmegaLatitudeError$F            # 7/14/93 trs
+real*4      UNT$OmegaLongitudeError$F           # 7/14/93 trs
+real*4      UNT$SpeedError$F                    # 7/14/93 trs
+real*4      UNT$TransLatitudeError$F            # 7/14/93 trs
+real*4      UNT$TransLongitudeError$F           # 7/14/93 trs
+real*4      factor                              # 8/93 trs
+real*4      truspd                              # 7/14/93 trs
+integer*4   UNT$Pointer, UNT$Type$I             # 7/14/93 trs
+integer*4   UNT$SuperType$I         # jb    E2145   5/11/00
+integer*4   UNT$TrueAltDepth$I      # jb    E2145   5/11/00
+integer*4   SHC$Pointer             # jb    E2145   5/11/00
+integer*4   SHC$ScopeDepth$I        # jb    E2145   5/11/00
+ 
+ ITRANS = $FALSE
+ 
+ UNT$Type$I = xUNT$Type$I
+ if (UNT$Type$I == $Pim$code)   # no error in position for PIMs
+  {
+   putUNT$AssumedLatitude$F   (xUNT$TrueLatitude$F)
+   putUNT$AssumedLongitude$F  (xUNT$TrueLongitude$F)
+   return
+  }
+ 
+ #$% Per Dan Bacon (10/20/93) Transit Navigation Systems are
+ #$% integrated into a submarine periscope, no longer the mast.
+ at_periscope_depth = $no         # clk 10/20/93
+ sub_wire_flag = $no
+ if (UNT$Type$I == $Sub$Code)
+   {
+    UNT$SuperType$I = xUNT$SuperType$I
+    if (UNT$SuperType$I == $Submarine$SuperCode)
+     {
+      SHC$Pointer = xUNT$SHCpntr$I
+      SHC$ScopeDepth$I = xSHC$ScopeDepth$I
+      UNT$TrueAltDepth$I = xUNT$TrueAltDepth$I
+      if (UNT$TrueAltDepth$I <= SHC$ScopeDepth$I)
+        at_periscope_depth = $yes
+ 
+      if (xUNT$DeployWire$I == $yes)
+        {
+         if (xunt$TimeWire$f <= Game$Time &
+             UNT$TrueAltDepth$I <= Wire$Depth$Max)
+           sub_wire_flag = $yes
+        }
+     }
+    sub_unit_flag = $yes
+   }
+ else
+    sub_unit_flag = $no
+ 
+ if (xUNT$TransitIndx$I != 0 &
+    (sub_unit_flag == $no | at_periscope_depth == $yes))
+   itrans = $true    # clk 10/20/93 - previously called dummy routine SATTST,
+                     #                which only set the return variable to $true
+ 
+ if (ITRANS == $TRUE)
+   {
+    UNT$TransLatitudeError$F  = xUNT$TransLatitudeError$F
+    UNT$TransLongitudeError$F = xUNT$TransLongitudeError$F
+    call NONDR(_                               # do transit navigation
+               UNT$POINTER,                    # pass position pointer
+               UNT$TransLatitudeError$F,       # pass latitude error
+               UNT$TransLongitudeError$F)      # pass longitude error
+   }
+ else if (xUNT$OmegaIndx$I != 0 &              # if platform has omega
+         (sub_unit_flag == $no | sub_wire_flag == $yes))
+   {
+    UNT$OmegaLatitudeError$F  = xUNT$OmegaLatitudeError$F
+    UNT$omegaLongitudeError$F = xUNT$omegaLongitudeError$F
+    call NONDR(_                               # do omega navigation
+               UNT$POINTER,                    # pass position pointer
+               UNT$OmegaLatitudeError$F,       # pass latitude error
+               UNT$omegaLongitudeError$F)      # pass longitude error
+   }
+ else if (xUNT$DRindx$I != 0)                  # if platform has DR device
+   {
+    UNT$DrLatitudeError$F  = xUNT$DrLatitudeError$F
+    UNT$DrLongitudeError$F = xUNT$DrLongitudeError$F
+    call DRNAV(_                               # do dead reckoning navigation
+               UNT$POINTER,                    # pass position pointer
+               UNT$DrLatitudeError$F,          # pass latitude error rate
+               UNT$DrLongitudeError$F,         # pass longitude error rate
+               DELAT,                          # pass delta latitude
+               DELON)                          # pass delta longitude
+   }
+ else                                          # if only hdg, speed sensors
+   {
+    UNT$SpeedError$F = xUNT$SpeedError$F       # get speed error
+    UNT$HeadingError$F = xUNT$HeadingError$F   # get heading error
+ 
+    X = DELON * xUNT$CosTrueLat$F    # get longitude change
+    Y = DELAT                        # get latitude change
+ 
+    #dist (rads/min) * (180 (degress) / $pi (rads)) * 60 (nmi/degree) /
+    # elapsed_time(min) * 1/60 (hr/min)
+ 
+    if(elapsed_time > 0.0) #E2351 JHM 7/03 no divide by zero
+      TRUSPD = SQRT(X*X+Y*Y) * ((180.0/$pi) * 60) / (elapsed_time*$Hours$Per$Minute)
+ 
+    #$% if there is platform motion (cannot divide by zero)
+    if (TRUSPD > .01)
+       {
+        #$% compute error factor for determining position
+        FACTOR = 1. + UNT$SPEEDERROR$F / TRUSPD
+ 
+        #$% compute assumed latitude given speed & heading error factors
+        UNT$ASSUMEDLATITUDE$F = XUNT$ASSUMEDLATITUDE$F + _
+                                  FACTOR * Y - UNT$HEADINGERROR$F * X
+ 
+        #$% compute assumed longitude given speed & heading error factors
+        UNT$ASSUMEDLONGITUDE$F = XUNT$ASSUMEDLONGITUDE$F + _
+            (FACTOR * X + UNT$HEADINGERROR$F * Y) / XUNT$COSTRUELAT$F
+        $angPI(UNT$ASSUMEDLONGITUDE$F)
+ 
+        #$% store computed assumed latitude
+        PUTUNT$ASSUMEDLATITUDE$F
+ 
+        #$% store computed assumed longitude
+        PUTUNT$ASSUMEDLONGITUDE$F
+       }
+   }
+ 
+return
+end
+ 
+
+ 
+ Subroutine NONDR(_
+            UNT$POINTER,                        #receive position pointer
+            ERRLAT,                             #receive lat error
+            ERRLON)                             #receive lon error
+ 
+ #######################################################
+ #$%
+ #$% Purpose:   NONDR processes errors for non-dead
+ #$%            reckoning navigation.
+ #$%
+ #$% Called By: ERRPOS
+ #$%
+ #$% Calls:     ANGPI
+ #$%
+ #$% Tables:    UNT
+ #$%
+ #$% Date:      DEC 80
+ #$%
+ #$% Author:    Gary Thoma
+ #$%
+ #######################################################
+ BBcommon
+ 
+# jb E2145 (IMPLICIT NONE) declarations:        5/11/00
+real*4      UNT$AssumedLatitude$F               # 7/14/93 trs
+real*4      UNT$AssumedLongitude$F              # 7/14/93 trs
+real*4      errlat, errlon                      # 7/14/93 trs
+integer*4   UNT$Pointer                         # 7/14/93 trs
+integer*4   UNT$InDR$I                          # 7/14/93 trs
+ 
+ UNT$ASSUMEDLATITUDE$F = XUNT$TRUELATITUDE$F + ERRLAT * $DEGMILE
+ 
+ PUTUNT$ASSUMEDLATITUDE$F
+ 
+ UNT$ASSUMEDLONGITUDE$F = XUNT$TRUELONGITUDE$F +
+                          ERRLON / XUNT$COSTRUELAT$F * $DEGMILE
+ $angPI(UNT$ASSUMEDLONGITUDE$F)             #insure proper crossing of dl
+ PUTUNT$ASSUMEDLONGITUDE$F
+ 
+ UNT$INDR$I = $NO                               #indicate not in DR mode
+ PUTUNT$INDR$I
+ 
+ return
+ end
+ 
+
+ 
+ Subroutine DRNAV(_
+            UNT$POINTER,                        #receive UNT pointer
+            RATLAT,                             #receive lat error rate
+            RATLON,                             #receive lon error rate
+            DELAT,                              #receive delta lat
+            DELON)                              #receive delta lon
+ 
+ #######################################################
+ #$%
+ #$% Purpose:   DRNAV processes dead reckoning
+ #$%            navigation events.
+ #$%
+ #$% Called By: ERRPOS
+ #$%
+ #$% Calls:     RANDN      ANGPI
+ #$%
+ #$% Tables:    UNT
+ #$%
+ #$% Date:      DEC 80
+ #$%
+ #$% Author:    Gary Thoma
+ #$%
+ #######################################################
+ BBcommon
+ 
+# jb E2145 (IMPLICIT NONE) declarations:        5/11/00
+real*4      UNT$AssumedLatitude$F               # 7/14/93 trs
+real*4      UNT$AssumedLongitude$F              # 7/14/93 trs
+real*4      delat, delon                        # 7/14/93 trs
+real*4      hlnerr, hlterr                      # 7/14/93 trs
+real*4      randn                               # 7/14/93 trs
+real*4      ratlat, ratlon                      # 7/14/93 trs
+real*4      ratla2, ratlo2                      # 7/14/93 trs
+real*4      tdelat, tdelon                      # 7/14/93 trs
+integer*4   NAV$Pointer                         # 7/14/93 trs
+integer*4   UNT$Pointer                         # 7/14/93 trs
+integer*4   UNT$InDR$I                          # 7/14/93 trs
+ 
+ if(XUNT$INDR$I == $NO)                         #if just starting DR
+   {
+    UNT$INDR$I = $YES                           #indicate in DR mode
+    PUTUNT$INDR$I
+ 
+    NAV$POINTER$TO XUNT$DRINDX$I               #set nav pointer for DR device
+ 
+    HLTERR = RANDN(_                            #determine human lat error
+                   XNAV$LATHUMANFIXED$F,        #     in nautical miles
+                   XNAV$LATHUMANRANDOM$F)
+ 
+    HLTERR = HLTERR * $DEGMILE                  #convert to radians of lat
+ 
+    HLNERR = RANDN(_                            #determine human lon error
+                   XNAV$LONHUMANFIXED$F,        #     in nautical miles
+                   XNAV$LONHUMANRANDOM$F)
+ 
+    HLNERR = HLNERR * $DEGMILE / XUNT$COSTRUELAT$F  #convert to radians of lon
+ 
+    UNT$ASSUMEDLATITUDE$F = XUNT$ASSUMEDLATITUDE$F + HLTERR
+ 
+    UNT$ASSUMEDLONGITUDE$F = XUNT$ASSUMEDLONGITUDE$F + HLNERR
+    $angPI(UNT$assumedLONGITUDE$F)              # ANGPI call inserted   4/6/82
+   }
+ 
+ else                                           #otherwise
+   {
+    UNT$ASSUMEDLATITUDE$F = XUNT$ASSUMEDLATITUDE$F   #get last assumed lat
+ 
+    UNT$ASSUMEDLONGITUDE$F = XUNT$ASSUMEDLONGITUDE$F #get last assumed lon
+   }
+ 
+ RATLA2 = RATLAT * Model$interval * $DEGMILE     #convert error rate to radians
+ 
+ RATLO2 = RATLON * Model$interval / XUNT$COSTRUELAT$F * $DEGMILE
+ 
+ TDELAT = DELAT + (RATLA2 * XUNT$TRUESPEED$F)   #compute assumed lat change
+ 
+ UNT$ASSUMEDLATITUDE$F = UNT$ASSUMEDLATITUDE$F + TDELAT #compute assumed lat
+ PUTUNT$ASSUMEDLATITUDE$F
+ 
+ TDELON = DELON + (RATLO2 * XUNT$TRUESPEED$F)   #compute assumed lon change
+ 
+ UNT$ASSUMEDLONGITUDE$F = UNT$ASSUMEDLONGITUDE$F + TDELON #compute assumed lon
+ $angPI(UNT$ASSUMEDLONGITUDE$F)
+ PUTUNT$ASSUMEDLONGITUDE$F
+ 
+ return
+ end                    # end Subroutine DRNAV
+
+ 
+Subroutine SURSPD( UNT$POINTER ) # single parameter 3/89
+ 
+########################################################
+#$%
+#$% Purpose:   SURSPD processes damage to mast, wire,
+#$%            or buoy due to excess submarine speed.
+#$%
+#$% Called By: MOTMAN
+#$%
+#$% Calls:     SEND       DECEQ
+#$%
+#$% Tables:    UNT
+#$%
+#$% Date:      DEC 80
+#$%
+#$% Author:    Gary Thoma
+#$%
+#$% Modified:  Carol Kropp - 10/93
+#$%
+########################################################
+BBcommon
+ 
+# jb E2145 (IMPLICIT NONE) declarations:        5/11/00
+literal     cstrip8                             # 7/14/93 trs
+real UNT$TrueSpeed$F    # jb E2145 - REAL vice INTEGER  5/11/00
+integer*4   UNT$Pointer, UNT$View$I             # 7/14/93 trs
+integer*4   UNT$TimeMast$F                  # jb E2145  5/15/00
+integer*4   UNT$TimeWire$F                  # jb E2145  5/15/00
+integer*4   UNT$TimeBuoy$F                  # jb E2145  5/15/00
+integer*4   UNT$DeployBuoy$I                    # 7/14/93 trs
+integer*4   UNT$DeployMast$I                    # 7/14/93 trs
+integer*4   UNT$DeployWire$I                    # 7/14/93 trs
+integer*4   UNT$MastDestroyed$I                 # 7/14/93 trs
+integer*4   jj, iflg                            # 7/14/93 trs
+ 
+logical eqout
+Character msg[ARB]
+ 
+Real time   # jb E2145 (declared for this Statement Function):  5/11/00
+eqout (iflg,time) = [ iflg == $Yes | (iflg == $no & time > Game$time) ]
+ 
+UNT$VIEW$I = XUNT$VIEW$I                        #get view of player
+ 
+jj = 0
+call smovhn(XUNT$NAME$C,$$MaxLit,msg,jj)                #get name of unit
+Call SMOVV(" : Speed exceeded -- ",msg,jj)
+ 
+unt$TrueSpeed$f = Xunt$TrueSpeed$f + 0.5
+ 
+if (unt$TrueSpeed$f    > Mast$Survival$Speed &  #if speed too great and
+    Xunt$TrueAltDepth$i > (Mast$Depth$Max/2) &  #depth below communications &
+    eqout(Xunt$DeployMast$i,Xunt$TimeMast$f)  ) #Mast deployed
+   {
+    UNT$MASTDESTROYED$I = $YES                  #destroy the mast
+    PUTUNT$MASTDESTROYED$I
+ 
+    UNT$DEPLOYMAST$I = $NO                      #remove the mast deployed
+    PUTUNT$DEPLOYMAST$I
+ 
+    unt$TimeMast$f = Game$Time
+    PUTunt$TimeMast$f
+ 
+    call smovV(" MAST lost",msg,jj)
+    call send_(UNT$VIEW$I,0,jj,MSG)               #send mast lost message
+   }
+ 
+if (unt$TrueSpeed$f > Wire$Survival$Speed   &   #if speed too great and
+    eqout(Xunt$DeployWire$i,Xunt$TimeWire$f) )  #Wire deployed
+   {
+    UNT$DEPLOYWIRE$I = $NO                      #remove the wire deployed
+    PUTUNT$DEPLOYWIRE$I
+ 
+    unt$TimeWire$f = Game$Time
+    PUTunt$TimeWire$f
+ 
+    call deceq (unt$pointer,$Wire$code)         #decrement wire qty
+ 
+    call smovV(" wire lost",msg,jj)
+    call send_(UNT$VIEW$I,0,jj,MSG)               #send wire lost message
+   }
+ 
+if (unt$TrueSpeed$f > Buoy$Survival$Speed   &   #if speed too great and
+    eqout(Xunt$DeployBuoy$i,Xunt$TimeBuoy$f) )  #Buoy deployed
+   {
+    UNT$DEPLOYBUOY$I = $NO                      #remove the buoy deployed
+    PUTUNT$DEPLOYBUOY$I
+ 
+    unt$TimeBuoy$f = Game$Time
+    PUTunt$TimeBuoy$f
+ 
+    call deceq (unt$pointer,$WBuoy$code)        #decrement wbuoy qty
+ 
+    call smovV(" BUOY lost",msg,jj)
+    call send_(UNT$VIEW$I,0,jj,MSG)               #send buoy lost message
+   }
+ 
+return
+end
+ 
+
+ 
+Subroutine deceq (unt$pointer,icode)            # decrement wire/wbuoy qty
+## NOTE:  icode arrives as a CONSTANT:  so DONT't TRY TO CHANGE ICODE!!
+###################################################### ..(VMS Version 4.1
+#$%
+#$% Purpose:   DECEQ decrements number of wires
+#$%            or buoys remaining on submarine.
+#$%
+#$% Called By: SURSPD
+#$%
+#$% Calls:     None
+#$%
+#$% Tables:    UNT        SHD
+#$%
+#$% Date:      DEC 80
+#$%
+#$% Author:    Gary Thoma
+#$%
+########################################################
+BBcommon                                        # called when speed exceeded
+ 
+# jb E2145 (IMPLICIT NONE) declarations:        5/11/00
+integer*4   DEQ$Pointer, DEQ$Remaining$I        # 7/14/93 trs
+integer*4   UNT$Pointer                         # 7/14/93 trs
+integer*4   icode                               # 7/14/93 trs
+ 
+#$% search equipment list
+FOR_DEQ_CHAIN
+   {
+    #$% if wrong one, get next entry
+    if (Xdeq$Ident$i != icode) next
+ 
+    #$% get number remaining
+    deq$remaining$i =Xdeq$remaining$i
+    #$% if none, get next entry
+    if (deq$remaining$i < 1) next
+ 
+    #$% decrement counter and store
+    deq$remaining$i = deq$remaining$i - 1
+    PUTdeq$remaining$i
+ 
+    break
+   }
+ 
+return
+end
+ 
+
+ 
+Subroutine DOISEE(unt$pointer,itargt,time,isee,isaw,lcl$pointer)       #smn002
+########################################################
+#$%
+#$% Purpose:   DOISEE checks detection data to
+#$%            determine if target was visible,
+#$%            and is still visible to observer.
+#$%
+#$% Called By: GUIMAN
+#$%
+#$% Calls:     None
+#$%
+#$% Tables:    UNT        LCL
+#$%
+#$% Date:      FEB 81
+#$%
+#$% Author:    Ron Williams
+#$%
+#$% Modified:  Carol Kropp - 10/93
+#$%
+########################################################
+BBcommon
+ 
+# jb E2145 (IMPLICIT NONE) declarations:        5/11/00
+Real*4      time        # jb E2145  (REAL argument, per doc.all) 5/11/00
+integer*4   LCL$Pointer                         # 7/14/93 trs
+integer*4   LCL$DetectionType$I                 # 7/14/93 trs
+integer*4   LCL$NextIndx$I                      # 7/14/93 trs
+integer*4   LCL$TMAFlag$I                       # 7/14/93 trs
+integer*4   UNT$Pointer                         # 7/14/93 trs
+integer*4   isaw, isee                          # 7/14/93 trs
+integer*4   itargt                              # 7/14/93 trs
+integer*4   mtma_lclpnt                         # 7/14/93 trs
+ 
+#$% initialize flags
+isee = $no
+isaw = $no
+ 
+#$% set LCL index
+lcl$NextIndx$i = xunt$FirstLclIndx$i
+ 
+#$% while list not empty
+while (lcl$NextIndx$i != 0)
+   {
+    lcl$pointer$to lcl$NextIndx$i       # set pointer to next entry
+    lcl$NextIndx$i = xlcl$NextIndx$i    # save following index
+ 
+    if (xlcl$Detectee$i != itargt)      # if not target entry, next
+      next
+ 
+    #$% get detection type
+    lcl$DetectionType$i = xlcl$DetectionType$i
+    LCL$TMAFlag$I       = xLCL$TMAFlag$I
+ 
+    if (lcl$TMAflag$i == YES)                           ## 5/22/84
+        mtma_lclpnt = LCL$Pointer
+ 
+    #$% if not active detection, get next entry         ## 5/22/84
+    if (lcl$DetectionType$i != $ActiveVisual$code    &
+        lcl$DetectionType$i != $ActiveNonVisual$code )
+      next
+ 
+    isaw = $yes                                         ## 5/22/84
+ 
+    #$% if detection recent, set ISEE to YES
+    if (xlcl$LastDetTime$f >= time)
+      isee = $yes
+ 
+    return   # there is an active detection held on the target
+   }
+ 
+if (mtma_lclpnt != 0)   # if a TMA solution held on the target
+   {
+    LCL$Pointer = mtma_lclpnt
+ 
+    isaw = $yes
+    if (xlcl$LastDetTime$f >= time)    # if detection recent
+      isee = $yes
+   }
+ 
+return
+end
+
+Subroutine BOATfuel( UNT$POINTER,   # in: unit pointer
+                     elapsed_time)  # in: time in minutes since last processed
+ #######################################################
+ #$% Purpose:   BOATfuel computes fuel comsumption for
+ #$%            boat units, updates BOATfuelremaining,
+ #$%            and sets the Ordered/True Speeds, if necessary.
+ #$%
+ #$% Called By: MOTMAN
+ #$%
+ #$% Calls:     FLOAT      AMAX1      INT
+ #$%            SEND
+ #$%
+ #$% Tables:    UNT        SHC
+ #$%
+ #$% Date:      April 1989
+ #$%
+ #$% Author:    Joe Bryant        4/89
+ #$%
+ #######################################################
+BBcommon
+ 
+real     elapsed_time
+real       GalsPerMin, fuel_expended   # clk 10/93 - to compute fuel in per seconds
+# jb E2145 (IMPLICIT NONE) declarations:        5/11/00
+literal     cstrip8                             # 7/14/93 trs
+literal     UNT$Name$C                          # 7/14/93 trs
+real*4      SHC$OnePCTFuel$F                    # 7/14/93 trs
+real*4      UNT$BoatFuelRemaining$F             # 7/14/93 trs
+real*4      UNT$TrueSpeed$F                     # 7/14/93 trs
+real*4      fuleft                              # 7/14/93 trs
+integer*4   SHC$Pointer                         # 7/14/93 trs
+integer*4   SHC$CruiseSpeed$I                   # 7/14/93 trs
+integer*4   UNT$Pointer, UNT$View$I             # 7/14/93 trs
+integer*4   jj                                  # 7/14/93 trs
+logical*1   nosend, nosend25, nosend50          # 7/14/93 trs
+ 
+Character msg[ARB]
+ 
+UNT$TrueSpeed$F = xUNT$TrueSpeed$F
+Unt$BOATfuelRemaining$F = xUnt$BOATfuelRemaining$F         # jb 6/12/89
+ 
+SHC$Pointer  =  xUNT$SHCpntr$I              # moved up 1/30/91, reh
+SHC$ONEpctFUEL$F = xSHC$ONEpctFUEL$F        # jb moved up  6/12/89
+ 
+nosend  = (Unt$BOATfuelRemaining$F < 0.1 )                   # jb 6/12/89
+nosend25 =(Unt$BOATfuelRemaining$F<25.0 * SHC$ONEpctFUEL$F) # jb 6/13/89
+nosend50 =(Unt$BOATfuelRemaining$F<50.0 * SHC$ONEpctFUEL$F) # jb 6/13/89
+ 
+SHC$CruiseSpeed$i = MAX( 2, xSHC$CruiseSpeed$i)
+ 
+GalsPerMin = FLOAT(SHC$CruiseSpeed$i)
+GalsPerMin = xSHC$FuelRate$F * UNT$TrueSpeed$F / GalsPerMin
+ 
+fuel_expended = GalsPerMin * elapsed_time
+ 
+FULEFT = MAX(0.0,(Unt$BOATfuelRemaining$F - fuel_expended))
+PUTunt$BOATfuelRemaining$F (FULEFT)        # jb               6/12/89
+ 
+UNT$NAME$C = xUNT$NAME$C
+UNT$VIEW$I = xUNT$VIEW$I
+ 
+if(FULEFT < 0.1)    # OUT of FUEL??
+  {
+   PUTunt$TrueSpeed$F       (0.0)
+   PUTunt$OrderedSpeed$F    (0.0)
+   PUTunt$AssumedSpeed$F    (0.0)
+   PUTunt$Status$I    ($DeadInWater$CODE)        # jb        5/30/89
+ 
+   if (!NOsend)                                    # jb        6/12/89
+       {             # Notify Owner - boat out of fuel
+        jj = 0
+        call smovhn(UNT$NAME$C,$$MaxLit,msg,jj)  #enter Boat's name
+        call SMOVV (" speed zero (NO FUEL)",msg,jj)
+        call send_  (UNT$VIEW$I, 0, jj, msg)
+       }
+  }
+ 
+else    # Percent FuelRemaining may be under 25 or 50...?
+  {
+   if (!NOsend25 & UNT$TrueSpeed$F != 0.0 & FULEFT < 25.0 * SHC$ONEpctFUEL$F)
+     {       # Notify Owner - under 25% fuel      # jb    6/12/89
+      jj = 0
+      call smovhn(UNT$NAME$C,$$MaxLit,msg,jj)        #enter Boat's name
+      Call smovv (" FUEL under 25% ",msg,jj)
+      call send_  (UNT$VIEW$I, 0, jj, msg)
+     }
+   else if(!NOsend50 & UNT$TrueSpeed$F != 0.0 & FULEFT <50.0*SHC$ONEpctFUEL$F)
+     {         # Notify Owner - under 50% fuel    # jb        6/12/89
+      jj = 0
+      call smovhn(UNT$NAME$C,$$MaxLit,msg,jj)        #enter Boat's name
+      call smovv (" FUEL under 50% ",msg,jj)
+      call send_  (UNT$VIEW$I, 0, jj, msg)
+     }
+  }
+ 
+return
+end
+
+ 
+ Subroutine Check_Battery_Charge (UNT$Pointer,  # in: unit pointer
+                                  elapsed_time) # in: elapsed game minutes
+#######################################################
+#$%
+#$% Purpose:   For Diesel Submarines, Check_Battery_Charge
+#$%            computes battery charge and discharge.
+#$%
+#$% Called By: Motman
+#$%
+#$% Calls:     (none)
+#$%
+#$% Tables:    UNT  SHC
+#$%
+#$% Date:      December 1991
+#$%
+#$% Author:    Susan Miller
+#$%
+#######################################################
+BBcommon
+ 
+Literal CSTRIP8         # jb E2145  5/11/00
+real     elapsed_time
+real*4    amount_of_charge
+real*4    discharge_per_minute, amount_of_discharge
+real*4   charge_per_minute # jb E2145  5/11/00
+real*4    UNT$TrueSpeed$F, UNT$BatteryCharge$F
+integer  UNT$Pointer, UNT$PropulsionMode$I
+integer  SHC$Pointer    # jb E2145  5/11/00
+integer*4 SHC$MaxSpeed$I, UNT$FuelWarning$I
+integer*4 msg_len
+character msg[80]
+ 
+ UNT$PropulsionMode$I = xUNT$PropulsionMode$I
+ UNT$TrueSpeed$F = xUNT$TrueSpeed$F
+ UNT$BatteryCharge$F = xUNT$BatteryCharge$F
+ UNT$FuelWarning$I = xUNT$FuelWarning$I
+ 
+ If (UNT$PropulsionMode$I == $Diesel$Code) # charge the battery
+    {
+    if (UNT$TrueSpeed$F >= 20.0) return # no charging for speeds above 20 knots
+ 
+    charge_per_minute = 0.4 * ((20.0 - UNT$TrueSpeed$F) / 30.0)
+    amount_of_charge  = charge_per_minute * elapsed_time
+    UNT$BatteryCharge$F = UNT$BatteryCharge$F + amount_of_charge
+ 
+    If (UNT$BatteryCharge$F > 0.0)   # if charge greater than 0%
+        {
+        SHC$Pointer = XUNT$SHCPntr$i # get characteristics pointer
+        SHC$MaxSpeed$I = xSHC$MaxSpeed$I
+        putUNT$Speed$i (SHC$MaxSpeed$i) # reset the speed
+        }
+ 
+    If (UNT$BatteryCharge$F >= 100.0) # if charge greater than 100%
+      UNT$BatteryCharge$F = 100.0 # set to 100%
+ 
+    putUNT$BatteryCharge$F
+    } # end if propulsion mode is set to diesel
+ 
+ Else If (UNT$PropulsionMode$I == $Electric$Code)  # discharge the battery
+    {
+    If (UNT$TrueSpeed$F == 0.0) return # if electric & speed zero, no discharge
+    Else   # speed > 0, decrement the charge on the battery
+        {
+#       changed discharge rate equiv. to a Romeo submarine 3/12/93 SMM
+        discharge_per_minute = 0.8 * ((10.0 ** (0.15 * UNT$TrueSpeed$F))/60.0)
+        amount_of_discharge  = discharge_per_minute * elapsed_time
+        UNT$BatteryCharge$F = UNT$BatteryCharge$F - amount_of_discharge
+ 
+        If ((UNT$BatteryCharge$F <= 25.0) & (UNT$FuelWarning$I != $yes))
+            {   # if battery is low and sub has not been notified
+            msg_len = 0
+            call smovhn(xUNT$Name$C, $$MaxLit, msg, msg_len)  # submarine name
+            call smovv(" :  Battery capacity is low (25%). ", msg, msg_len)
+            call send_(xUNT$View$I, 0, msg_len, msg)
+            putUNT$FuelWarning$I ($yes)  # sub has been notified
+            }
+        }
+ 
+    If (UNT$BatteryCharge$F <= 0.0)   # if charge less than 0%
+        {
+        UNT$BatteryCharge$F = 0.0       # set to 0%
+        putUNT$TrueSpeed$F (0.0)        # stop sub in the water
+        putUNT$Speed$I (0)              # set speed to 0
+        } # end if battery charge less than 0
+ 
+    putUNT$BatteryCharge$F
+    } # end if propulsion mode is set to electric
+ 
+ If ((UNT$BatteryCharge$F >= 25.0) &   # if charge greater than 25%
+     (UNT$FuelWarning$I != $no))       # and warning flag not reset
+     {
+      putUNT$FuelWarning$I ($no) # reset the warning flag for low battery
+     }
+ 
+ if (Itrace$motion  != $no)
+    {
+    call echor
+    call echohn(xunt$Name$c,$$MaxLit)
+    call echov(" has the following battery capacity: ")
+    call echof(UNT$BatteryCharge$f,6)
+    }
+ 
+return
+end    # end of Subroutine Check_Battery_Charge
+
+ 
+Subroutine Move_NRTs (elapsed_time)
+########################################################################
+#$%
+#$%  Purpose:   Move_NRTs calculates the new lat/long using its course
+#$%             and speed for each used slot in the NRT table. (E1101)
+#$%
+#$% Called By:  MOTMAN
+#$%
+#$% Calls:      RRB2LL
+#$%
+#$% Tables:     NRT
+#$%
+#$% Date:       December 1992
+#$%
+#$% Author:     Susan Miller
+#$%
+########################################################################
+BBcommon
+ 
+real    elapsed_time
+real    cos_lat               # jb  E2145   02/5/01
+real    range, course
+real    NRT$Course$F, NRT$Latitude$F, NRT$Longitude$F
+integer NRT$Pointer, NRT$Speed$I
+ 
+ for (NRT$Pointer$First; NRT$Pointer$Valid; NRT$Pointer$Next)
+    {
+     # if the slot is not in use, check the next slot
+     if (xNRT$InUse$I == $no)
+        next
+ 
+     NRT$Speed$I = xNRT$Speed$I
+     # if the NRT has zero speed, skip it
+     if (NRT$Speed$I == 0)
+        next
+ 
+     # extract the current course of the NRT
+     NRT$Course$F = xNRT$Course$F
+     course = NRT$Course$F * ($PI/180.)
+ 
+     # calculate the range the NRT can travel
+     range = NRT$Speed$I * $Hours$Per$Minute * elapsed_time
+ 
+     # get the current latitude and longitude
+     NRT$Latitude$F = xNRT$Latitude$F
+     NRT$Longitude$F = xNRT$Longitude$F
+     cos_lat = COS(NRT$latitude$F)      # jb  2/5/01
+     call RRB2LL(_
+            NRT$Latitude$F,      # pass current, receive new
+            NRT$Longitude$F,     # pass current, receive new
+            range,               # pass range
+            course,              # pass course
+            0.0,       # pass dummy
+            cos_lat)   # pass cosine of latitude    # jb  02/5/01
+ 
+     # store new latitude and longitude
+     putNRT$Latitude$F
+     putNRT$Longitude$F
+    }
+ 
+return
+end
+
+subroutine COMPUTE_ALTITUDE (unt$pointer, elapsed_time)
+ 
+########################################################################
+#$%
+#$%  Purpose:   Compute altitude of ballistic missile.
+#$%
+#$% Called By:  ALTDEP
+#$%
+#$% Calls:      INT     FLOAT
+#$%
+#$% Tables:     CMC     UNT
+#$%
+#$% Date:       June 1993
+#$%
+#$% Author:     Alex Vagus
+#$%
+########################################################################
+BBcommon
+ 
+integer    UNT$Pointer
+real       elapsed_time
+ 
+integer    CMC$Pointer
+real       unt$TimeMissileFired$f, unt$TimeTerm$f
+integer    UNT$MissileRange$I, UNT$MissileAltitude$I, CMC$AVGSPEED$I
+integer    UNT$TrueAltDepth$I, UNT$OrderedAltDepth$I
+real       UNT$TrueSPEED$F, unt$ASSUMEDSPEED$f,  unt$ORDEREDSPEED$F
+real       falt
+real       time
+integer*4  ialt
+ 
+  CMC$POINTER = xUNT$CMCPNTR$I     #get missile characteristics pointer
+ 
+  unt$TimeMissileFired$f = xunt$TimeMissileFired$f
+  unt$TimeTerm$f = xunt$TimeTerm$f
+  UNT$MissileRange$I = xUNT$MissileRange$I
+  UNT$MissileAltitude$I = xUNT$MissileAltitude$I
+  UNT$TrueSPEED$F = xUNT$trueSPEED$F
+  CMC$AVGSPEED$I = xCMC$AVGSPEED$I
+ 
+  time =  game$time - unt$TimeMissileFired$f
+ 
+  if (time < Model$interval) return    # not yet
+ 
+  if (unt$trueSPEED$F == 0.0)         # new requirements, missile should move at full speed
+    {                                 # after 1 game cycle  Alex V. 8/93
+      unt$TRUESPEED$F = float (CMC$AVGSPEED$I)
+      PUTunt$TRUESPEED$F
+ 
+      unt$ASSUMEDSPEED$F =  unt$TRUESPEED$F
+      PUTunt$ASSUMEDSPEED$F
+ 
+      unt$ORDEREDSPEED$F =  unt$TRUESPEED$F
+      PUTunt$ORDEREDSPEED$F
+    }
+ 
+  time = time + elapsed_time
+ 
+  falt   = ((-4. * UNT$MissileAltitude$I * cmc$avgspeed$i * time *
+           $Hours$Per$Minute)/float(unt$missileRange$i)) *
+           (((cmc$avgspeed$i * time *
+              $Hours$Per$Minute)/float(unt$MissileRange$i)) - 1.)
+  ialt   = max (0, int(falt+0.5))
+ 
+  #$% set true altitude
+  UNT$TRUEALTDEPTH$I = xUNT$ORDEREDALTDEPTH$I
+  putUNT$TRUEALTDEPTH$I
+ 
+  #$% set ordered altitude
+  UNT$ORDEREDALTDEPTH$I = ialt
+  putUNT$ORDEREDALTDEPTH$I
+ 
+return
+end
+
+ 
+ 
+define ($UpPeriscopeInterval, 6.)       # Time (min) between periscope up times
+subroutine TimeUpPeriscope(_            # Manage periscope position
+                           unt$pointer) # Unt pointer to sub: integer: in
+BBcommon
+ 
+integer kpoint_unt
+integer f_unt_TimeUpPeriscope
+ 
+# Periscope up evey six minutes from start of simulation
+ 
+unt$TimeUpPeriscope$f = Xunt$TimeUpPeriscope$f
+if ((game$time - unt$TimeUpPeriscope$f) >= $UpPeriscopeInterval)
+{
+    unt$TimeUpPeriscope$f = int((game$time - unt$TimeUpPeriscope$f)_
+                            / $UpPeriscopeInterval) * $UpPeriscopeInterval +
+                            unt$TimeUpPeriscope$f
+    PUTunt$TimeUpPeriscope$f
+}
+ 
+return
+end
+
+ 
+subroutine Update_Unit_Elevation (elapsed_time) # Time since last move:in:real:min
+########################################################################
+#$%
+#$%  Purpose:   Update_Unit_Elevation will update the elevation of
+#$%             non-ghosted units, except for surface platforms which
+#$%             are moving (they are not on land).  (E1422)
+#$%
+#$% Called By:  Motman
+#$%
+#$% Calls:      the_elevation
+#$%             prior_position
+#$%             $ang2pi
+#$%             smov..
+#$%             send
+#$%             max
+#$%
+#$% Tables:     UNT     SHC
+#$%
+#$% Date:       November 1995
+#$%
+#$% Author:     Jim Allen
+#$%
+#$% Modified:   Susan Miller 5/96 (E1568)
+#$%             If a unit is a torpedo and it has reached the shore,
+#$%             set it's termination time to current time so it will
+#$%             be deleted.
+#$%
+#$%             James Allen - 12/97 (E1370)
+#$%             Updated the calls to clear_maneuver_all with the order
+#$%             data arguments.
+#$%
+########################################################################
+BBcommon
+ElevationCommon
+ 
+literal   cstrip8            # function for BB name extraction
+real      elapsed_time
+real      UNT$TrueCourse$F, UNT$TimeTerm$F
+integer   the_elevation    # function to compute elevation
+integer   UNT$Pointer, UNT$Status$I, UNT$Type$I, UNT$TrueAltDepth$I
+integer   SHC$Pointer
+integer   sub_elevation
+integer   msg_len
+character msg[ARB]
+ 
+  if (n_elev_regions == 0)   # if no terrain loaded
+    return
+ 
+  for (UNT$Pointer$First; still_ok(UNT); UNT$Pointer$Next)
+    {
+     if (xUNT$InUse$I != $no)
+       {
+        UNT$Status$I = xUNT$Status$I
+        if (UNT$Status$I == $BeingDeleted$Code |
+            UNT$Status$I == $DeadInWater$Code  |
+            UNT$Status$I == $Sinking$Code      )
+          next
+ 
+        if (xUNT$GhostedUnit$I != $yes)   # if not a ghosted unit
+          {
+           UNT$Type$I = xUNT$Type$I
+           if ((UNT$Type$I == $Surface$Code | UNT$Type$I == $SurfaceWithAC$Code) &
+               (xUNT$TrueSpeed$F > 0.0))
+             {
+              UNT$TrueAltDepth$I = the_elevation (xUNT$TrueLatitude$F*$rad2deg,
+                                                  xUNT$TrueLongitude$F*$rad2deg)
+              SHC$Pointer = xUNT$ShcPntr$I
+              if (shoreline_crossing_flag == $ON)
+                {
+                 if (xSHC$Domain$I == $LandOp$code & UNT$TrueAltDepth$I == 0)
+                   {
+                    msg_len = 0
+                    call smovhn (xUNT$Name$c, $$MaxLit, msg, msg_len)
+                    call smovv  (": entered ocean. Speed set to zero.", msg, msg_len)
+                    call smov   ($bell, msg, msg_len)
+                    call send_   (xUNT$View$I, 0, msg_len, msg)
+ 
+                    call prior_position (UNT$Pointer, elapsed_time)
+ 
+                    # Circumvent time required to reciprocal change course
+                    UNT$TrueCourse$F = xUNT$TrueCourse$F + $pi
+                    $ang2pi (UNT$TrueCourse$F)
+                    putUNT$TrueCourse$F
+                    putUNT$OrderedCourse$F  (UNT$TrueCourse$F)
+ 
+                    call clear_maneuver_all (NO$Order, -1, xUNT$View$I, UNT$Pointer)
+                    putUNT$TrueSpeed$F  (0)
+                    putUNT$OrderedSpeed$F  (0)
+                    putUNT$AssumedSpeed$F  (0)
+                   }   # end of if a land operations unit entered the water
+                 else if (xSHC$Domain$I == $WaterOp$code &
+                          UNT$TrueAltDepth$I > 0)
+                   {
+                    msg_len = 0
+                    call smovhn (xUNT$Name$c, $$MaxLit, msg, msg_len)
+                    call smovv  (": ran aground. Speed set to zero.", msg, msg_len)
+                    call smov   ($bell, msg, msg_len)
+                    call send_   (xUNT$View$I, 0, msg_len, msg)
+ 
+                    call prior_position (UNT$Pointer, elapsed_time)
+ 
+                    # Circumvent time required to reciprocal change course
+                    UNT$TrueCourse$F = xUNT$TrueCourse$F + $pi
+                    $ang2pi (UNT$TrueCourse$F)
+                    putUNT$TrueCourse$F
+                    putUNT$OrderedCourse$F  (UNT$TrueCourse$F)
+ 
+                    call clear_maneuver_all (NO$Order, -1, xUNT$View$I, UNT$Pointer)
+                    UNT$TrueAltDepth$I = 0
+                    putUNT$TrueSpeed$F  (0)
+                    putUNT$OrderedSpeed$F  (0)
+                    putUNT$AssumedSpeed$F  (0)
+                   }   # end of if a water operations unit ran aground
+                }   # end of if a shoreline was crossed
+ 
+              # Horizon formula does not handle bases below sea level
+              UNT$TrueAltDepth$I = max (0, UNT$TrueAltDepth$I)
+              putUNT$TrueAltDepth$I
+             }   # end of if a moving surface platform
+           else if (UNT$Type$I == $Sub$code)
+             {
+              sub_elevation = the_elevation (xUNT$TrueLatitude$F*$rad2deg,
+                                             xUNT$TrueLongitude$F*$rad2deg)
+              if (shoreline_crossing_flag == $ON)
+                {
+                 if (sub_elevation > 0 & Xunt$TrueSpeed$f > 0)  # Sub gone aground
+                   {
+                    # if sub is actually a torpedo, terminate it    SMM (E1568)
+                    if (xUNT$SuperType$i == $Torpedo$SuperCode)   # 5/96
+                       {
+                        UNT$TimeTerm$F = Game$Time - Time$Step # JOA UFL04
+                        putUNT$TimeTerm$F
+ 
+                        msg_len = 0
+                        call smovhn (xUNT$Name$c, $$MaxLit, msg, msg_len)
+                        call smovv  (": ran aground.  ", msg, msg_len)
+                        call smov   ($bell, msg, msg_len)
+                        call send_   (xUNT$View$I, 0, msg_len, msg)
+ 
+                        next
+                       }
+ 
+                    call prior_position (UNT$Pointer, elapsed_time)
+ 
+                    # Circumvent time required to change to reciprocal course
+                    UNT$TrueCourse$F = xUNT$TrueCourse$F + $pi
+                    $ang2pi (UNT$TrueCourse$F)
+                    putUNT$TrueCourse$F
+                    putUNT$OrderedCourse$F (UNT$TrueCourse$F)
+ 
+                    call clear_maneuver_all (NO$Order, -1, xUNT$View$I, UNT$Pointer)
+                    putUNT$TrueSpeed$F  (0)
+                    putUNT$OrderedSpeed$F  (0)
+                    putUNT$AssumedSpeed$F  (0)
+ 
+                    msg_len = 0
+                    call smovhn (xUNT$Name$C, $$MaxLit, msg, msg_len)
+                    call smovv  (": ran aground. Speed set to zero.", msg, msg_len)
+                    call smov   ($bell, msg, msg_len)
+                    call send_   (xUNT$View$I, 0, msg_len, msg)
+                   }   # end of if the sub ran aground
+                }   # end of if the shoreline was crossed
+             }   # end of if the unit is a sub
+          }   # end of if unit is not a ghost
+       }   # end of if unt slot is in use
+    }   # end of loop through the unt table
+ 
+return
+end
+ 
+
+subroutine prior_position (UNT$Pointer,
+                           elapsed_time)
+########################################################################
+#$%
+#$%  Purpose:   Prior_Position will move the unit back to its previous
+#$%             location.  Used when units cross the shoreline, but were
+#$%             not supposed to.  (E1422)
+#$%
+#$% Called By:  update_unit_elevation
+#$%
+#$% Calls:      $ang2pi
+#$%             motion
+#$%
+#$% Tables:     UNT
+#$%
+#$% Date:       November 1995
+#$%
+#$% Author:     Jim Allen
+#$%
+########################################################################
+BBcommon
+ 
+integer   UNT$Pointer
+real      elapsed_time
+ 
+real      UNT$TrueCourse$F, TrueCourse
+ 
+  UNT$TrueCourse$F = xUNT$TrueCourse$F
+  TrueCourse = UNT$TrueCourse$F + $pi         # Move to prior position
+  $ang2PI (TrueCourse)
+  putUNT$TrueCourse$F  (TrueCourse)
+  call motion (UNT$Pointer, elapsed_time)
+  putUNT$TrueCourse$F                         # Restore the original course
+ 
+return
+end
+
+ 
+Integer Function GuideLevel (UNT$Pointer)
+########################################################################
+#$%
+#$% Purpose:    Determine if the unit has a guide and if there is a
+#$%             circular loop being formed.
+#$%
+#$% Called By:
+#$%
+#$% Calls:      None
+#$%
+#$% Tables:     UNT
+#$%
+#$% Date:       March 1996 (E1564)
+#$%
+#$% Author:     James Allen
+#$%
+########################################################################
+BBcommon
+ 
+integer  UNT$Pointer
+ 
+integer  FirstGuide
+integer  NextGuide
+integer  nguide
+integer  UNT2$Pointer
+ 
+  nguide = 0
+  FirstGuide = UNT$Pointer$Index
+  NextGuide = xUNT$GuideIndx$I
+ 
+  while (NextGuide != 0)
+    {
+     if (NextGuide == FirstGuide | nguide > unt$slots)
+       {
+        nguide = $CircularGuideDefinition
+        break
+       }
+     nguide = nguide + 1
+     UNT2$Pointer$To  (NextGuide)
+     NextGuide = xUNT2$GuideIndx$I
+    }
+ 
+return (nguide)
+end

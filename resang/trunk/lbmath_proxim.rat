@@ -1,0 +1,964 @@
+# LBMATH_PROXIM.RAT   --   Routines for computing range/bearing
+ 
+define (trace$proxim, ibb[3])
+ 
+include "bbctl.inc"
+include "bbcode.inc"
+include "bbunt.inc"
+include "bburb.inc"
+include "ascii.inc"
+include "parallel.inc"
+ 
+define($NOurb,#)                # This disables the URB processing
+ 
+define(trace$proxim$count, istrip(trace$proxim,0,M1bits)) # trace
+define(trace$proxim$urb, istrip(trace$proxim,1,M1bits)) # trace
+ 
+define($angpi,
+    {
+    WHILE (@1 >   $pi)
+        @1 = @1 - $twopi
+ 
+ 
+    WHILE (@1 <= -$pi)
+        @1 = @1 + $twopi
+    })
+ 
+define($ang2pi,
+    {
+    WHILE (@1 >= $twopi)
+        @1 = @1 - $twopi
+    WHILE (@1 <      0.)
+        @1 = @1 + $twopi
+    })
+ 
+define (Proxim$common,
+ 
+    real*4  REFLAT,     # Reference Latitude (from PREPRX)
+            REFLON,     # Reference Longitude (from PREPRX)
+            REFCOS,     # Cosine of Reference Latitude (from PREPRX)
+            REFRNG,     # Reference Maximum Range (from PREPRX)
+            DLTMAX,     # Maximum delta Latitude
+            RSQMAX,     # Maximum delta Latitude Squared
+            DLNMAX      # Maximum delta Longitude
+ 
+    integer Unt_Reference   # Unit index for origin point
+ 
+    real*4  Sav_REFLAT,
+            Sav_REFLON,
+            Sav_REFCOS,
+            Sav_REFRNG,
+            Sav_DLTMAX,
+            Sav_RSQMAX,
+            Sav_DLNMAX
+    integer Sav_Unt_Reference
+ 
+    common / Proxim_com / REFLAT, REFLON, REFCOS, RSQMAX, DLTMAX,
+                          DLNMAX, REFRNG, Unt_Reference
+ 
+    common / Sav_Proxim_com / Sav_REFLAT, Sav_REFLON, Sav_REFCOS,
+                              Sav_RSQMAX, Sav_DLTMAX, Sav_DLNMAX, Sav_REFRNG,
+                              Sav_Unt_Reference
+ 
+    $par$private / Proxim_com /
+    $par$private / Sav_Proxim_com /
+)
+ 
+define (Slant$Common,
+    common /slant_com/ reflat, reflon, irefal,  #common area for data passed
+                       refcos, dltmax, dlnmax,  #       to pslant
+                       dalmax, rsqmax
+ 
+    $par$private / Slant_com /
+    )
+ 
+ 
+ 
+define ($debug_freq,#)       # trace the frequency PROXIM/PREPRX are called
+define ($debug_urb,)         # trace the URB processing
+ 
+define ($$PREPRX$code,1)
+define ($$PROXIM$code,2)
+define ($$SAVPRX$code,3)
+define ($$RESPRX$code,4)
+define ($$GETRB$code,5)
+define ($$RLL2RB$code,6)
+define ($$PREPRX_M$code,7)
+define ($$PROXIM_M$code,8)
+define ($$GETRB_M$code,9)
+define ($$Found_RB$code,10)
+ 
+define (Proxim$Trace$common,
+    integer     Last_Minute, Counters[10]
+    common / Trace_Proxim_com / Last_minute, Counters
+    )
+ 
+define (BBImplicit, Implicit none)
+
+ 
+ Subroutine PREPRX( _                      #PREpare PRoXimity routine
+                   FLAT,                   #detector latitude (input)
+                   FLON,                   #detector longitude (input)
+                   COSLAT,                 #cosine of detr latitude (input)
+                   RMAX)                   #maximum range (input)
+ 
+ #####################################################
+ #$%
+ #$% Purpose:   PREPRX computes maximum change in longitude/
+ #$%            latitude and computes range in radians for
+ #$%            input to subroutine PROXIM.
+ #$%
+ #$% Called By: ACNOIS     ACTSON     AIRTGT
+ #$%            CHFLST     CMFIND     COMCON
+ #$%            ESMTGT     GNDTRK     HFDDET
+ #$%            JAMLST     LPSTGT     SURTGT
+ #$%
+ #$% Calls:     None
+ #$%
+ #$% Tables:    None
+ #$%
+ #$% Date:      OCT 80
+ #$%
+ #$% Author:    Ron Williams
+ #$%
+ #####################################################
+ implicit none
+ Proxim$common
+ 
+ real FLAT, FLON, COSLAT, RMAX
+ 
+ $debug_freq   Call Trace_Proxim ($$PREPRX$code)
+ 
+ REFLAT = FLAT                             #make data
+ REFLON = FLON                             #    available to
+ REFCOS = COSLAT                           #        PROXIM
+ REFCOS = MAX(REFCOS, 0.0001)              # Avoid divide by zero
+ REFRNG = RMAX
+ 
+ DLTMAX = RMAX * ($PI / (180. * 60.))      #compute maximum delta latitude
+ RSQMAX = DLTMAX * DLTMAX                  #compute max rng squared (radians)
+ DLNMAX = DLTMAX / REFCOS                  #compute maximum delta longitude
+ Unt_Reference = 0                         #Unit index for origin point
+ 
+ return
+ end
+ 
+
+ 
+ Subroutine PROXIM( _                   #PROXIMity determination
+                   FLAT,                #target latitude (input)
+                   FLON,                #target longitude (input)
+                   COSLAT,              #cosine of target latitude (input)
+                   RANGE,               #range (output) (-1 if out of range)
+                   BEAR)                #bearing (output)
+ 
+ ##########################################################
+ #$%
+ #$% Purpose:   PROXIM determines whether the distance
+ #$%            described below has been exceeded.*
+ #$%            *Many computations in WES need only to
+ #$%             be done if the distance involved in
+ #$%             the calculation is less than a certain
+ #$%             value (RMAX passed to the subroutine
+ #$%             PREPRX).
+ #$%
+ #$% Called By: ACNOIS     ACTSON     AIRTGT
+ #$%            BOYRCV     CHFLST     CHKLNK
+ #$%            CMFIND     DNLINK     ESMTGT
+ #$%            HFDFP1     JAMLST     LPSNON
+ #$%            LPSTGT     SATTGT     SURTGT
+ #$%            UPLINK
+ #$%
+ #$% Invokes:   ANGPI      ABS        ATAN2
+ #$%            SQRT
+ #$%
+ #$% Tables:    None
+ #$%
+ #$% Date:      OCT 80
+ #$%
+ #$% Auhtor:    Ron Williams
+ #$%
+ ##########################################################
+implicit none
+Proxim$common
+ 
+real RANGE, DELLAT, FLAT, DELLON, FLON
+real HORIZ, COSLAT, RSQ, BEAR
+ 
+$debug_freq   Call Trace_Proxim ($$PROXIM$code)
+ 
+RANGE = -1.0                                    # set to indicate out of range
+ 
+DELLAT = FLAT - REFLAT                          #compute lat difference
+ 
+IF (ABS(DELLAT) <= DLTMAX)                      #if latitude difference ok
+    {
+    DELLON = FLON - REFLON                      #compute lon difference
+    $angPI(DELLON)                              #make sure short way around
+ 
+    IF (ABS(DELLON) <= DLNMAX)                  # if longitude difference ok
+        {
+        HORIZ = .5*(REFCOS+COSLAT)*DELLON       #approx horiz dist (radians)
+        RSQ = DELLAT*DELLAT + HORIZ*HORIZ       #calc square of range (rads)
+ 
+        if (RSQ <= RSQMAX)                      #if range squared ok
+            {
+            IF (DELLAT==0.0 & HORIZ==0.0)
+                {
+                RANGE = 0.0
+                BEAR  = 0.0
+                }
+            ELSE
+                {
+                RANGE = sqrt(RSQ)*(180.*60./$PI)  #calc range in naut miles
+                BEAR  = atan2(HORIZ,DELLAT)
+ 
+                IF (BEAR < 0.) BEAR = BEAR + $twoPI
+                }
+            }
+        }
+    }
+ 
+ return
+ end
+ 
+
+ 
+ Subroutine SAVPRX              #saves PRX data
+ 
+ #####################################################
+ #$%
+ #$% Purpose:   SAVPRX saves all the proximity
+ #$%            determination data that has
+ #$%            been computed.
+ #$%
+ #$% Called By: ACNOIS
+ #$%
+ #$% Calls:     None
+ #$%
+ #$% Tables:    None
+ #$%
+ #$% Date:      OCT 80
+ #$%
+ #$% Author:    Ron Williams
+ #$%
+ #####################################################
+ implicit none
+ Proxim$common
+ 
+ $debug_freq   Call Trace_Proxim ($$SAVPRX$code)
+ 
+ Sav_REFLAT = REFLAT
+ Sav_REFLON = REFLON
+ Sav_REFCOS = REFCOS
+ Sav_REFRNG = REFRNG
+ Sav_RSQMAX = RSQMAX
+ Sav_DLTMAX = DLTMAX
+ Sav_DLNMAX = DLNMAX
+ Sav_Unt_Reference = Unt_Reference
+ 
+ return
+ end
+ 
+
+ 
+ Subroutine RESPRX              #restores PRX data
+ 
+#####################################################
+ #$%
+ #$% Purpose:   RESPRX restores all the proximity
+ #$%            determination data.
+ #$%
+ #$% Called By: ACNOIS
+ #$%
+ #$% Calls:     None
+ #$%
+ #$% Tables:    None
+ #$%
+ #$% Date:      OCT 80
+ #$%
+ #$% Author:    Ron Williams
+ #$%
+ #####################################################
+ implicit none
+ Proxim$common
+ 
+ $debug_freq   Call Trace_Proxim ($$RESPRX$code)
+ 
+ REFLAT = Sav_REFLAT
+ REFLON = Sav_REFLON
+ REFCOS = Sav_REFCOS
+ REFRNG = Sav_REFRNG
+ RSQMAX = Sav_RSQMAX
+ DLTMAX = Sav_DLTMAX
+ DLNMAX = Sav_DLNMAX
+ Unt_Reference = Sav_Unt_Reference
+ 
+ return
+ end
+ 
+
+ 
+Subroutine Trace_Proxim (icode)
+BBcommon
+Proxim$Trace$common
+ 
+integer   n
+integer   icode
+vmschar*8 t_names_v[10]
+literal   t_names[10]
+equivalence (t_names_v, t_names)
+ 
+data      t_names_v[$$PREPRX$code     ] / "PREPRX  " /
+data      t_names_v[$$PROXIM$code     ] / "PROXIM  " /
+data      t_names_v[$$SAVPRX$code     ] / "SAVPRX  " /
+data      t_names_v[$$RESPRX$code     ] / "RESPRX  " /
+data      t_names_v[$$GETRB$code      ] / "GETRB   " /
+data      t_names_v[$$RLL2RB$code     ] / "RLL2RB  " /
+data      t_names_v[$$PREPRX_M$code   ] / "PREPRX_M" /
+data      t_names_v[$$PROXIM_M$code   ] / "PROXIM_M" /
+data      t_names_v[$$GETRB_M$code    ] / "GETRB_M " /
+data      t_names_v[$$Found_RB$code   ] / "Found!  " /
+ 
+if (trace$proxim$count == $yes)
+    {
+    if (game$minute != Last_minute)
+        {
+        call echor
+        call echov ("* Proxim @ ")
+        call echoi(Last_Minute)
+ 
+        for ( n = 1; n <= 10; n=n+1)
+            {
+            if ( counters[n] != 0 )
+                {
+                call echov  ("  ")
+                call echohn (t_names[n],8)
+                call echov  ("=")
+                call echoi(counters[n])
+                counters[ n ] = 0
+                }
+            }
+        Last_minute = game$minute
+        }
+ 
+    counters[icode] = counters[icode] + 1
+    }
+ 
+end
+
+Subroutine pslant (flat,                #this routine sets up the dimensions
+                   flon,                #of a box centered on a platform;
+                   ifalt,               #a companion routine to slrang;
+                   coslat,              #flat = input latitude (radians)
+                   rmax)                #flon = input longitude (radians)
+                                        #ifalt = input altitude (feet)
+                                        #coslat = cosine of input latitude
+                                        #rmax = 1/2 lngth of side of box(n mi)
+ 
+########################################################
+#$%
+#$% Purpose:   PSLANT sets up the dimensions of a
+#$%            box centered on a platform to be
+#$%            used when calculating slant range
+#$%            between detector-target (SLRANG).
+#$%
+#$% Called By: VISMOD
+#$%
+#$% Calls:     None
+#$%
+#$% Tables:    None
+#$%
+#$% Date:      JAN 81
+#$%
+#$% Author:    Ron Williams
+#$%
+########################################################
+implicit none
+Slant$Common
+ 
+real     DLTMAX, RMAX, DLNMAX, COSLAT, DALMAX
+real     RSQMAX, REFLAT, FLAT, REFLON, FLON, REFCOS
+integer  IREFAL, IFALT
+ 
+REFCOS = COSLAT
+REFCOS = MAX(REFCOS, 0.0001)              # Avoid divide by zero
+dltmax = rmax * $deg2rad / 60.          #compute max delta latitude (radians)
+dlnmax = dltmax / refcos                #compute max delta longitude (radians)
+dalmax = rmax * 6076.1                  #compute max delta altitude (feet)
+rsqmax = rmax * rmax
+reflat = flat                           #make data
+reflon = flon                           #     available
+irefal = ifalt                          #     to subroutine
+ 
+return
+end
+
+Subroutine slrang (flat,                #this routine computes the range
+                   flon,                #from the platform with coords
+                   ifalt,               #in /slant/ if within range;
+                   coslat,              #a companion routine to pslant;
+                   hrange,              #flat =input latitude  (radians)
+                   range,               #flon =input longitude (radians)
+                   bear)                #ifalt =input altitude (feet)
+                                        #coslat = cos. of input latitude
+                                        #hrange = horzntl range (output)
+                                     #range (output): -1 if out of range
+                                     #bear = bearing (output)
+ 
+########################################################
+#$%
+#$% Purpose:   SLRANG calculates the range from the
+#$%            platform (detector) to the target
+#$%            with coordinates in slant.
+#$%
+#$% Called By: VISMOD
+#$%
+#$% Calls:     ANGPI
+#$%
+#$% Tables:    None
+#$%
+#$% Date:      JAN 81
+#$%
+#$% Author:    Ron Williams
+#$%
+########################################################
+implicit none
+Slant$Common
+ 
+real RANGE, DELLAT, FLAT, REFLAT, DLTMAX, DELLON
+real FLON, REFLON, DLNMAX, DELALT, DALMAX, REFCOS
+real X, Y, Z, W, U, COSLAT, RSQMAX, HRANGE, BEAR
+integer IFALT, IREFAL
+ 
+range = -1.
+dellat = flat - reflat                  #compute latitude difference
+ 
+if (abs(dellat) <= dltmax)              #if latitude difference ok
+    {
+    dellon = flon - reflon              #compute longitude difference
+    $angpi(dellon)
+    if (abs(dellon) <= dlnmax)          #if longitude difference ok
+        {
+        delalt = ifalt - irefal         #$% calculate altitude diff
+        if (abs(delalt) <= dalmax)      #$% if altitude diff is OK,
+            {                           #$% calculate slant range
+            x = (refcos+coslat)*dellon*(.5*60.*$rad2deg)
+            y = dellat * (60. *$rad2deg)
+            z = delalt * (1./6076.1)
+            w = x*x + y*y
+            u = w + z*z
+            if ( u <= rsqmax )
+                {
+                range = SQRT(u)
+                hrange = SQRT(w)
+ 
+                if(x==0.0 & y==0.0)
+                    {
+                    bear = 0.0
+                    }
+                else
+                    {
+                    bear = atan2(x,y)
+                    if (bear < 0.) bear = bear + $twoPI
+                    }
+                }
+            }
+        }
+    }
+ 
+return
+end
+
+ 
+ 
+define (URB$Common,
+    Logical     URB_First_Time / .TRUE. /
+    Integer     URB_Units
+    Integer     URB_Time
+    Integer     URB_Entry[UNT$slots]
+ 
+    common /URB_Common/ URB_First_Time, URB_Units, URB_Time, URB_Entry
+ 
+    $par$shared / URB_Common /
+ 
+    Logical     URB_Mem
+    Logical     URB_Angle
+    Integer     URB1, URB2
+    common /URB_Common_2/ URB_Mem, URB_Angle, URB1, URB2
+ 
+    $par$private / URB_Common_2 /
+    )
+ 
+# Calculate range/bearing from lat/lon/coslat
+# syntax $calc_rb (LAT1,LON1,CSLAT1,LAT2,LON2,CSLAT2,RANGE,BEARING)
+#                   @1   @2    @3    @4   @5    @6    @7     @8
+define ($calc_rb,
+    {
+%C  Compute Range & Bearing
+    Y = @4 - @1                         # compute latitude difference
+    DELLON = @5 - @2                    # compute longitude difference
+    $angPI(DELLON)                      # insure short way around earth
+    X = DELLON * .5 * (@3 + @6)         # scale horizontal distance
+ 
+    if (x==0.0 & y==0.0)
+        {
+        @8 = 0.0
+        @7 = 0.0
+        }
+    else
+        {
+        @7 = SQRT(X*X + Y*Y) _          # approximate rhumbline distance
+                    * (180.*60./$PI)    # in nautical miles
+        @8 = atan2(x,y)
+ 
+        if (@8 < 0.0)
+            {
+            @8 = @8 + $twoPI
+            }
+        }
+    }
+    )
+ 
+define ($Check_URB_Age,
+    IF (URB_Time < game$minute)
+        {
+        $par$lockon par_lock_URB
+ 
+        IF (URB_Time < game$minute)
+            {
+            call bbzapt ($$URB)
+            URB_Time = game$minute
+ 
+            $debug_urb IF (trace$proxim$urb != 0)
+            $debug_urb     {
+            $debug_urb     call echov (" (clear)")
+            $debug_urb     }
+            }
+ 
+        $par$lockoff par_lock_URB
+        }
+    )
+ 
+# Store range/bearing in URB
+# syntax: $record_rb (RANGE,BEARING)
+#                      @1    @2
+define ($record_rb,
+    {
+%C  Record Range & Bearing
+    IF (URB_mem)
+        {
+        PUTurb$Range$f (@1)
+        urb$bearing$f = @2
+        IF ( URB_angle )
+            {
+            urb$bearing$f = urb$bearing$f + $pi
+            $ang2pi (urb$bearing$f)
+            }
+        PUTurb$bearing$f
+ 
+        $debug_urb IF (trace$proxim$urb != 0)
+        $debug_urb     {
+        $debug_urb     call echov (" recorded (")
+        $debug_urb     call echoi (urb$pointer$index)
+        $debug_urb     call echov ("): ")
+        $debug_urb     call echof (Xurb$Range$f,2)
+        $debug_urb     call echov ("/")
+        $debug_urb     call echoi (int(Xurb$bearing$f*180.0/$pi))
+        $debug_urb     }
+ 
+        }
+    }
+    )
+ 
+
+Subroutine Init_URB
+BBCommon
+ 
+$NOurb URB$Common
+$NOurb parallel$common
+$NOurb
+$NOurb $par$lockon par_lock_URB
+$NOurb
+$NOurb IF ( URB_First_Time )
+$NOurb     {
+$NOurb     URB_First_Time = .false.
+$NOurb     URB_Units      = Max$Range$Bearing
+$NOurb     URB_Time       = Time$Range$Bearing
+$NOurb
+$NOurb     call bbzapt ($$URB)
+$NOurb
+$NOurb     URB_Entry [1] = 0
+$NOurb
+$NOurb     FOR (k = 2; k <= URB_Units; k=k+1)
+$NOurb         {
+$NOurb         URB_Entry[K] = URB_Entry[k-1] + k - 2               # DEW 4/4/90
+$NOurb         }
+$NOurb     }
+$NOurb
+$NOurb $par$lockoff par_lock_URB
+ 
+end
+ 
+
+ Subroutine PREPRX_M(Indx1,                  #PREpare PRoXimity routine
+                     FLAT,                   #detector latitude (input)
+                     FLON,                   #detector longitude (input)
+                     COSLAT,                 #cosine of detr latitude (input)
+                     RMAX)                   #maximum range (input)
+ 
+ #####################################################
+ #$%
+ #$% Purpose:   PREPRX computes maximum change in longitude/
+ #$%            latitude and computes range in radians for
+ #$%            input to subroutine PROXIM.
+ #$%
+ #$% Called By: ACNOIS     ACTSON     AIRTGT
+ #$%            CHFLST     CMFIND     COMCON
+ #$%            ESMTGT     GNDTRK     HFDDET
+ #$%            JAMLST     LPSTGT     SURTGT
+ #$%
+ #$% Calls:     None
+ #$%
+ #$% Tables:    None
+ #$%
+ #$% Date:      AUG 89
+ #$%
+ #$% Author:    Dane Wills
+ #$%
+ #####################################################
+ implicit none
+ Proxim$common
+ $NOurb URB$Common
+ $NOurb  Parallel$Common
+ real    FLAT, FLON, COSLAT, RMAX
+ integer INDX1
+ 
+ $debug_freq   Call Trace_Proxim ($$PREPRX_M$code)
+ 
+ $NOurb IF ( URB_First_Time ) call Init_URB
+ 
+ REFLAT = FLAT                             #make data
+ REFLON = FLON                             #    available to
+ REFCOS = COSLAT                           #        PROXIM
+ REFCOS = MAX(REFCOS, 0.0001)              # Avoid divide by zero
+ REFRNG = RMAX
+ 
+ DLTMAX = RMAX * ($PI / (180. * 60.))      #compute maximum delta latitude
+ RSQMAX = DLTMAX * DLTMAX                  #compute max rng squared (radians)
+ DLNMAX = DLTMAX / REFCOS                  #compute maximum delta longitude
+ Unt_Reference = Indx1                     #Unit index for origin point
+ 
+ $NOurb IF ( Unt_reference > URB_Units ) Unt_Reference = 0
+ 
+ return
+ end
+ 
+
+ Subroutine PROXIM_M(indx2,               #PROXIMity determination
+                     FLAT,                #target latitude (input)
+                     FLON,                #target longitude (input)
+                     COSLAT,              #cosine of target latitude (input)
+                     RANGE,               #range (output) (-1 if out of range)
+                     BEARING)                #bearing (output)
+ 
+ ##########################################################
+ #$%
+ #$% Purpose:   PROXIM determines whether the distance
+ #$%            described below has been exceeded.*
+ #$%            *Many computations in WES need only to
+ #$%             be done if the distance involved in
+ #$%             the calculation is less than a certain
+ #$%             value (RMAX passed to the subroutine
+ #$%             PREPRX).
+ #$%
+ #$% Called By: ACNOIS     ACTSON     AIRTGT
+ #$%            BOYRCV     CHFLST     CHKLNK
+ #$%            CMFIND     DNLINK     ESMTGT
+ #$%            HFDFP1     JAMLST     LPSNON
+ #$%            LPSTGT     SATTGT     SURTGT
+ #$%            UPLINK
+ #$%
+ #$% Invokes:   ANGPI      ABS        ATAN2
+ #$%            SQRT
+ #$%
+ #$% Tables:    None
+ #$%
+ #$% Date:      AUG 89
+ #$%
+ #$% Author:    Dane Wills
+ #$%
+ ##########################################################
+ 
+BBcommon
+Proxim$common
+$NOurb URB$Common
+$NOurb Parallel$Common
+integer INDX2
+real    RANGE, DELLAT, FLAT, DELLON
+real    FLON, HORIZ, RSQ, BEARING, COSLAT
+ 
+$debug_freq   Call Trace_Proxim ($$PROXIM_M$code)
+ 
+ 
+RANGE = -1.0 + (INDX2 * 0)                       # set to indicate out of range
+ 
+$NOurb URB_mem = .false.
+$NOurb
+$NOurb IF (VM$Range$Bearing != $NO)              # is URB enabled ?
+$NOurb     {
+$NOurb     $debug_urb IF (trace$proxim$urb != 0)
+$NOurb     $debug_urb     {
+$NOurb     $debug_urb     call echor
+$NOurb     $debug_urb     call echov (" URB/proxim")
+$NOurb     $debug_urb     }
+$NOurb
+$NOurb     $Check_URB_Age
+$NOurb
+$NOurb     IF ( Unt_reference == 0 | indx2 == 0 | indx2 > URB_Units )
+$NOurb         {
+$NOurb         $debug_urb IF (trace$proxim$urb != 0)
+$NOurb         $debug_urb     {
+$NOurb         $debug_urb     call echov  (" (n/a) ")
+$NOurb         $debug_urb     call echoib (Unt_Reference, 4)
+$NOurb         $debug_urb     call echov  (" to ")
+$NOurb         $debug_urb     call echoib (indx2, 4)
+$NOurb         $debug_urb     call echoh  (Unt_Reference,4)
+$NOurb         $debug_urb     call echov  ($ESC)        # Reverse Index
+$NOurb         $debug_urb     call echov  ("M")
+$NOurb         $debug_urb     call echov  ($return)
+$NOurb         $debug_urb     }
+$NOurb
+$NOurb         continue
+$NOurb         }
+$NOurb     ELSE IF ( Unt_reference == indx2 )       # range from A to A
+$NOurb         {
+$NOurb         $debug_urb IF (trace$proxim$urb != 0)
+$NOurb         $debug_urb     {
+$NOurb         $debug_urb     call echov (" (self)")
+$NOurb         $debug_urb     }
+$NOurb
+$NOurb         RANGE    = 0.0
+$NOurb         BEARING  = 0.0
+$NOurb         return
+$NOurb         }
+$NOurb     ELSE                                                # got a live one to
+$NOurb         {
+$NOurb         URB_mem = .true.                                # remember in future
+$NOurb         IF (Unt_reference < indx2)
+$NOurb             {
+$NOurb             URB1  = Unt_reference                       # request for A -> B
+$NOurb             URB2  = indx2
+$NOurb             URB_angle = .false.
+$NOurb             }
+$NOurb         ELSE
+$NOurb             {
+$NOurb             URB1 = indx2                                # request for B -> A
+$NOurb             URB2 = Unt_reference
+$NOurb             URB_angle = .true.                          # (must flip 180)
+$NOurb             }
+$NOurb
+$NOurb         URB$pointer$to (URB_Entry[URB2] + URB1)         # DEW 4/4/90
+$NOurb
+$NOurb         $debug_urb IF (trace$proxim$urb != 0)
+$NOurb         $debug_urb     {
+$NOurb         $debug_urb     call echov (" from ")
+$NOurb         $debug_urb     call echoi (urb1)
+$NOurb         $debug_urb     call echov (" to ")
+$NOurb         $debug_urb     call echoi (urb2)
+$NOurb         $debug_urb     if (URB_Angle) call echov (" (flipped)")
+$NOurb         $debug_urb     call echov (" indx=")
+$NOurb         $debug_urb     call echoi (urb$pointer$index)
+$NOurb         $debug_urb     }
+$NOurb
+$NOurb         IF (Xurb$BeenSet$i != $NO)
+$NOurb             {
+$NOurb             RANGE    = Xurb$Range$f
+$NOurb             BEARING  = Xurb$Bearing$f
+$NOurb             IF (URB_angle )                 # need to flip 180 ?
+$NOurb                 {
+$NOurb                 BEARING = BEARING + $pi     #   yes
+$NOurb                 $ang2pi (BEARING)
+$NOurb                 }
+$NOurb
+$NOurb             $debug_freq   Call Trace_Proxim ($$Found_RB$code)
+$NOurb
+$NOurb             $debug_urb IF (trace$proxim$urb != 0)
+$NOurb             $debug_urb     {
+$NOurb             $debug_urb     call echov (" re-use ")
+$NOurb             $debug_urb     call echof (RANGE,2)
+$NOurb             $debug_urb     call echov ("/")
+$NOurb             $debug_urb     call echoi (int(BEARING*180.0/$pi))
+$NOurb             $debug_urb     }
+$NOurb
+$NOurb             IF (RANGE > refrng ) RANGE = -1        # outside MAX range
+$NOurb
+$NOurb             return
+$NOurb             }
+$NOurb          }
+$NOurb      }
+ 
+DELLAT = FLAT - REFLAT                          #compute lat difference
+ 
+IF (ABS(DELLAT) <= DLTMAX)                      #if latitude difference ok
+    {
+    DELLON = FLON - REFLON                      #compute lon difference
+    $angPI(DELLON)                              #make sure short way around
+ 
+    IF (ABS(DELLON) <= DLNMAX)                  # if longitude difference ok
+        {
+        HORIZ = .5*(REFCOS+COSLAT)*DELLON       #approx horiz dist (radians)
+        RSQ = DELLAT*DELLAT + HORIZ*HORIZ       #calc square of range (rads)
+ 
+        if (RSQ <= RSQMAX)                      #if range squared ok
+            {
+            IF (DELLAT==0.0 & HORIZ==0.0)
+                {
+                RANGE = 0.0
+                BEARING  = 0.0
+                }
+            ELSE
+                {
+                RANGE = sqrt(RSQ)*(180.*60./$PI)  #calc range in naut miles
+                BEARING  = atan2(HORIZ,DELLAT)
+                IF (BEARING < 0.0) BEARING = BEARING + $twoPI
+                }
+ 
+            $NOurb  $record_rb (RANGE,BEARING)  # update the URB entry
+            }
+        }
+    }
+ 
+ return
+ end
+ 
+ 
+
+ 
+Subroutine GETRB_M (UNT$POINTER,                  #receive posit of orgin
+                    UNT2$POINTER,                 #receive posit of dest
+                    RANGE,                        #return range
+                    BEARING)                          #return bearing
+ 
+ #######################################################
+ #$%
+ #$% Purpose:   GETRB_M computes range and bearing to
+ #$%            the target from the present aircraft
+ #$%            position.
+ #$%
+ #$% Called By: AIRTOR     ATOAIR     ATOSUR    AIRASM
+ #$%            AIRBOMB    BLDCM      SURTOR    Find_Match
+ #$%            NWFUEL     REFUEL     OFTOR1    Get_Skunks
+ #$%                                  BINGO
+ #$% Calls:     RLL2RB
+ #$%
+ #$% Tables:    UNT
+ #$%
+ #$% Date:      AUG 89
+ #$%
+ #$% Author:    Dane Wills
+ #$%
+ #######################################################
+ 
+ BBcommon
+$NOurb  URB$common
+$NOurb  Parallel$Common
+real    Y, DELLON, X, BEARING, RANGE
+BBDeclare(UNT2$Pointer, UNT$Pointer)
+ 
+$debug_freq   Call Trace_Proxim ($$GETRB_M$code)
+ 
+$NOurb IF ( URB_First_Time ) call Init_URB
+ 
+$NOurb IF (VM$Range$Bearing != $NO)
+$NOurb     {
+$NOurb     $debug_urb IF (trace$proxim$urb != 0)
+$NOurb     $debug_urb     {
+$NOurb     $debug_urb     call echor
+$NOurb     $debug_urb     call echov (" URB/getrb")
+$NOurb     $debug_urb     }
+$NOurb
+$NOurb     $Check_URB_Age
+$NOurb
+$NOurb     indx1 = unt$pointer$index
+$NOurb     indx2 = unt2$pointer$index
+$NOurb
+$NOurb     IF ( indx1 == 0        | indx2 == 0       |
+$NOurb          indx1 > URB_Units | indx2 > URB_Units )
+$NOurb         URB_mem = .false.
+$NOurb     ELSE IF ( indx1 == indx2 )
+$NOurb         {
+$NOurb         Range    = 0.0
+$NOurb         BEARING  = 0.0
+$NOurb         $debug_urb IF (trace$proxim$urb != 0)
+$NOurb         $debug_urb     {
+$NOurb         $debug_urb     call echov (" (self)")
+$NOurb         $debug_urb     }
+$NOurb         return
+$NOurb         }
+$NOurb     ELSE
+$NOurb         {
+$NOurb         URB_mem = .true.
+$NOurb         IF (Indx1 < indx2)
+$NOurb             {
+$NOurb             URB1  = indx1
+$NOurb             URB2  = indx2
+$NOurb             URB_angle = .false.
+$NOurb             }
+$NOurb         ELSE
+$NOurb             {
+$NOurb             URB1 = indx2
+$NOurb             URB2 = indx1
+$NOurb             URB_angle = .true.
+$NOurb             }
+$NOurb
+$NOurb         URB$pointer$to (URB_Entry[URB2] + URB1)         # DEW 4/4/90
+$NOurb
+$NOurb         $debug_urb IF (trace$proxim$urb != 0)
+$NOurb         $debug_urb     {
+$NOurb         $debug_urb     call echov (" from ")
+$NOurb         $debug_urb     call echoi (urb1)
+$NOurb         $debug_urb     call echov (" to ")
+$NOurb         $debug_urb     call echoi (urb2)
+$NOurb         $debug_urb     if (URB_Angle) call echov (" (flipped)")
+$NOurb         $debug_urb     call echov (" indx=")
+$NOurb         $debug_urb     call echoi (urb$pointer$index)
+$NOurb         $debug_urb     }
+$NOurb
+$NOurb         IF (Xurb$BeenSet$i != $NO)
+$NOurb             {
+$NOurb             Range = Xurb$Range$f
+$NOurb             BEARING  = Xurb$Bearing$f
+$NOurb             IF (URB_angle )
+$NOurb                 {
+$NOurb                 BEARING = BEARING + $pi
+$NOurb                 $ang2pi (BEARING)
+$NOurb                 }
+$NOurb
+$NOurb             $debug_freq     Call Trace_Proxim ($$Found_RB$code)
+$NOurb             $debug_urb     IF (trace$proxim$urb != 0)
+$NOurb             $debug_urb          {
+$NOurb             $debug_urb          call echov (" re-use")
+$NOurb             $debug_urb          call echof (RANGE,2)
+$NOurb             $debug_urb          call echov ("/")
+$NOurb             $debug_urb          call echoi (int(BEARING*180.0/$pi))
+$NOurb             $debug_urb          }
+$NOurb
+$NOurb             return
+$NOurb             }
+$NOurb         }
+$NOurb     }
+ 
+$calc_rb (xUNT$TRUELATITUDE$F,
+          xUNT$TRUELONGITUDE$F,
+          xUNT$COSTRUELAT$F,
+          xUNT2$TRUELATITUDE$F,
+          xUNT2$TRUELONGITUDE$F,
+          xUNT2$COSTRUELAT$F,
+          RANGE,
+          BEARING)
+ 
+$NOurb $record_rb (RANGE,BEARING)
+ 
+return
+end

@@ -1,0 +1,1998 @@
+### file: lbecho.rat
+###
+###
+### mod to version 3.1          dated 10-Nov-81
+###
+### smn prog    module  comments
+### === ====    ======  =================================================
+### VAX dew     ALL     Modified as required for VAX 11/780
+###
+ 
+#####   version 3.1  dated-  7apr81
+ 
+###
+### mod to version 3.0          dated 30-dec-1980
+###
+### smn prog    module  comments
+### === ====    ======  =================================================
+### 004 dew     getfch  Expanded "?" response for Control-E function.
+###                     Allowed control-E to quote all control characters.
+###                     Added "Klose typescript" to Control-E function.
+###
+ 
+#####   version 3.0  dated- 22dec80
+ 
+# 
+ 
+ 
+#$%      MODULE                       UTILITY                     DATA
+#$%    SUBROUTINES                  SUBROUTINES                  TABLES
+#$%    ===========                  ===========                  ======
+ 
+#$%      GETLNH                       SMOV                        NONE
+#$%      GET_CH                       TTY
+#$%      GETFCH                       TTYIN
+#$%      ECHOH                        TTYOUT
+#$%      ECHOHP                       DELAY
+#$%      ECHOHN                       FCLOSF
+#$%      ECHOV                        FOPENF
+#$%      ECHOF                        FGTJFN
+#$%      ECHOI                        FBIN
+#$%      ECHOIZ                       TYPERR
+#$%      ECHOIB                       FBOUT
+#$%      ECHOO                        IDRESS
+#$%      ECHOLN
+#$%      ECHOST
+#$%      ECHOR
+#$%      ECHO
+#$%      ECHOP
+#$%      IGBYTE
+#$%      IPBYTE
+#$%
+#$%
+#$%
+#$%    NOTES
+#$%    =====
+#$%
+#$%    1.  EACH SUBROUTINE IN THIS FILE IS CALLED BY, AND USED
+#$%        BY, MANY OTHER SUBROUTINES IN DIFFERENT FILES.
+#$%
+#$%    2.  UTILITY SUBROUTINES NOT SHOWN ON FLOWCHART.
+#$%
+#$%    3.  * INDICATES NO OTHER SUBROUTINES CALLED.
+#$%
+#$%
+#$%
+#$%    FLOWCHART FOR FILE ECHO
+#$%    =======================
+#$%
+#$%    GETLNH - GET_CH  - GETFCH - ECHOH  - ECHO   - ECHOP*
+#$%                                      - IGBYTE*
+#$%                             - ECHOR  - ECHO   - ECHOP*
+#$%    ECHOHP - ECHO   - ECHOP*
+#$%           - IGBYTE*
+#$%    ECHOHN - ECHO   - ECHOP*
+#$%           - IGBYTE*
+#$%    ECHOF  - ECHOH  - ECHO   - ECHOP*
+#$%                    - IGBYTE*
+#$%           - ECHOI  - ECHO   - ECHOP*
+#$%                    - ECHOST - ECHO   - ECHOP*
+#$%                    - ECHOIB*
+#$%                    - ECHOIZ - ECHO   - ECHOP*
+#$%    ECHOO  - ECHO   - ECHOP*
+#$%    ECHOLN - ECHOST - ECHO   - ECHOP*
+#$%           - ECHOR  - ECHO   - ECHOP*
+ 
+
+ 
+define($DEBUG,#)
+define($YES,1)
+define($NO,0)
+include "macros.inc"
+include "ascii.inc"
+ 
+ 
+subroutine getlnh (iline,mlen)          # get a line of mlen bytes, 5/word.
+                                        # return on <cr> or <lf>
+                                        # cancel on ^C or ^K (iline[1] == -1)
+                                        # retype on ^R
+                                        # char del on ^H or ^A or DEL
+                                        # line del on ^X or ^U
+ 
+#######################################################
+#$%
+#$% Purpose:   GETLNH gets a new line from a file.
+#$%
+#$% Calls:     SMOV       IGBYTE     GET_CH
+#$%            ECHOR      ECHOH      ECHO
+#$%            IPBYTE     ECHOV
+#$%
+#$% Tables:    None
+#$%
+#$% Date:      OCT 80
+#$%
+#$% Author:    Dana Wills
+#$%
+#######################################################
+IMPLICIT NONE           # jb    7/7/98
+ 
+Integer n,mlen,ilen     # jb    7/7/98
+character iline[ARB],work[ARB]
+character ichar,lchar   # jb lchar??? 7/7/98
+ 
+define (delete$char, {call echo($cntlH);    # 02/24/1986 <SCC>
+                      call echo($space);    # ditto
+                      call echo($cntlH) })  # ditto
+ 
+#$% inititlize character count to zero
+ilen = 0                                # set length to zero
+ 
+while (.true.)
+   {
+    #$% if count indicates no characters present
+    if (ilen <= 0)
+       {
+        #$% set character count and character to zero
+        ilen = 0
+        lchar = 0
+       }
+    #$% otherwise begin character processing
+    else
+       {
+        #$% set last character from work array
+        lchar = work[ilen]
+       }
+    #$% set last character plus one as end of string
+    work[ilen+1] = EOS
+ 
+    #$% call to get characters for input
+    call get_ch (ichar,0)
+ 
+    #if (ichar >= $lita & ichar <= $litz) ichar = ichar - $space  # uppercase
+ 
+    #$% if character is control C or K
+    if (ichar == $cntlC | ichar == $cntlK)                        # cancels
+       {
+        #$% cancel line and return
+        iline[1] = -1
+        return
+       }
+    #$% else if character is a return or linefeed
+    else if (ichar == $return  |                 # if carriage return or lf
+             ichar == $linefeed )
+       {
+        #$% execute a carriage return
+        call echor
+        break
+       }
+    #$% else if character is a control R
+    else if (ichar == $cntlR)                    # retypes the line
+       {
+        #$% execute carriage return and re-display the line
+        call echor
+        call echoh (work,ilen)
+        next
+       }
+    #$% else if character is control X or U
+    else if (ichar == $cntlX |                   # deletes a line
+             ichar == $cntlU )
+       {
+        while (ilen >= 0) {delete$char; ilen = ilen -1} # 02/24/1986 <SCC>
+ 
+        #$% set character count to zero thereby deleting the line
+        ilen = 0
+        next
+       }
+    #$% else if character is a control W
+    else if (ichar == $cntlW )                   # deletes a word
+       {
+        #$% if there are no characters to delete
+        if (ilen <= 0)
+           {
+            #$% ring the warning bell
+            call echo ($bell)
+            next
+           }
+ 
+        while (.true.)
+           {
+            #$% indicate end of string
+            work[ilen] = EOS
+            delete$char               # 02/24/1986 <SCC>
+            #$% move back one character
+            ilen = ilen - 1
+ 
+            #$% if there are no characters to delete, break out of loop
+            if (ilen <= 0) break
+ 
+            #$% if character in array is a space break out of loop
+            if (work[ilen] == $space) break
+           }
+ 
+        next
+       }
+    #$% else if the character is a control A, H or DELETE
+    else if (ichar == $cntlA |                   # character delete
+             ichar == $cntlH |
+             ichar == $del    )
+       {
+        #$% if there are no characters to delete
+        if (ilen <= 0)
+           {
+            #$% ring warning bell
+            call echo ($bell)
+            next
+           }
+ 
+        #$% back_space and display a blank
+        delete$char           # 2/24/1986 <SCC>
+        #call echo (lchar)    # ditto
+        #call echo ($slash)   # ditto
+ 
+        #$% indicate end of string
+        work[ilen] = EOS
+ 
+        #$% move back one character
+        ilen = ilen - 1
+ 
+        next
+       }
+    #$% else if it is any other control character, ring warning bell
+    else if (ichar < $space)
+       {
+        call echo ($bell)
+        next
+       }
+    else
+       {
+        #$% if count equals or exceeds line length
+        if (ilen >= mlen)
+           {
+            #$% send message to user
+            call echoV (" Confirm with carriage return")     # jb  V   12/2/93
+            #$% execute a carriage return and display the line
+            call echor
+            call echoh (work,ilen)
+           }
+        #$% else if character count is zero and character is a space
+        #$% go to the next character
+        else if (ilen == 0 & ichar == $space)
+           {
+            # call echo ($bell)
+            next
+           }
+        #$% otherwise increment character count and display the character
+        else
+           {
+            ilen = ilen + 1
+            work[ilen] = ichar
+            call echo (ichar)
+           }
+       }
+   }
+ 
+ #$% for each character in the line
+ for (n=1; n<=mlen; n=n+1)
+   {
+    #$% if n is less than or equal to count set character from array
+    if (n<=ilen) ichar = work[n]
+    #$% otherwise character is a space
+    else         ichar = $space
+ 
+    iline[n] = ichar
+   }
+ 
+#$% put null at end of line
+iline[mlen+1] = $null
+ 
+return
+end
+ 
+ 
+ 
+subroutine getlnh_r (Handle,iline,mlen) # get a line of mlen bytes, 5/word.
+                                        # return on <cr> or <lf>
+                                        # cancel on ^C or ^K (iline[1] == -1)
+                                        # retype on ^R
+                                        # char del on ^H or ^A or DEL
+                                        # line del on ^X or ^U
+ 
+#######################################################
+#$%
+#$% Purpose:   GETLNH_R gets a new line from a file.
+#$%            with command recall
+#$%
+#$% Calls:     SMOV       IGBYTE     GET_CH
+#$%            ECHOR      ECHOH      ECHO
+#$%            IPBYTE     ECHOV
+#$%
+#$% Tables:    None
+#$%
+#$% Date:      OCT 80
+#$%
+#$% Author:    Dana Wills
+#$%
+#######################################################
+IMPLICIT NONE           # jb    7/7/98
+ 
+Integer n,ilen,mlen     # jb    7/7/98
+integer   handle
+integer*4       nulls
+character iline[ARB],work[ARB]
+character ichar2, ichar3,
+          ichar,  lchar  # jb lchar??? 7/7/98
+ 
+define (delete$char, {call echo($cntlH);    # 02/24/1986 <SCC>
+                      call echo($space);    # ditto
+                      call echo($cntlH) })  # ditto
+ 
+#$% inititlize character count to zero
+ilen = 0                                # set length to zero
+ 
+while (.true.)
+   {
+    #$% if count indicates no characters present
+    if (ilen <= 0)
+       {
+        #$% set character count and character to zero
+        ilen = 0
+        lchar = 0
+       }
+    #$% otherwise begin character processing
+    else
+       {
+        #$% set last character from work array
+        lchar = work[ilen]
+       }
+    #$% set last character plus one as end of string
+    work[ilen+1] = EOS
+ 
+    #$% call to get characters for input
+    call get_ch (ichar,0)
+ 
+    #if (ichar >= $lita & ichar <= $litz) ichar = ichar - $space  # uppercase
+ 
+    if (ichar != 0) nulls = 0
+    else
+        {
+        nulls = nulls + 1
+        if (nulls > 1000)               # Major problem here...
+            {
+            for (n=1; n<=mlen; n=n+1)   # Clear to Nulls, and get out
+                {
+                iline[n] = EOS
+                }
+            iline[1] = -1
+            return
+            }
+        }
+ 
+    #$% if character is control C or K
+    if (ichar == $cntlC | ichar == $cntlK)                        # cancels
+       {
+        #$% cancel line and return
+        iline[1] = -1
+        return
+       }
+    #$% else if character is a return or linefeed
+    else if (ichar == $return  |                 # if carriage return or lf
+             ichar == $linefeed )
+       {
+        #$% execute a carriage return
+        call echor
+        break
+       }
+    #$% else if character is a control R
+    else if (ichar == $cntlR)                    # retypes the line
+       {
+        #$% execute carriage return and re-display the line
+        call echor
+        call echoh (work,ilen)
+        next
+       }
+    #$% else if character is control X or U
+    else if (ichar == $cntlX |                   # deletes a line
+             ichar == $cntlU )
+       {
+        while (ilen >= 0) {delete$char; ilen = ilen -1} # 02/24/1986 <SCC>
+ 
+        #$% set character count to zero thereby deleting the line
+        ilen = 0
+        next
+       }
+    #$% else if character is a control W
+    else if (ichar == $cntlW )                   # deletes a word
+       {
+        #$% if there are no characters to delete
+        if (ilen <= 0)
+           {
+            #$% ring the warning bell
+            call echo ($bell)
+            next
+           }
+ 
+        while (.true.)
+           {
+            #$% indicate end of string
+            work[ilen] = EOS
+            delete$char               # 02/24/1986 <SCC>
+            #$% move back one character
+            ilen = ilen - 1
+ 
+            #$% if there are no characters to delete, break out of loop
+            if (ilen <= 0) break
+ 
+            #$% if character in array is a space break out of loop
+            if (work[ilen] == $space) break
+           }
+ 
+        next
+       }
+    #$% else if the character is a control A, H or DELETE
+    else if (ichar == $cntlA |                   # character delete
+             ichar == $cntlH |
+             ichar == $del    )
+       {
+        #$% if there are no characters to delete
+        if (ilen <= 0)
+           {
+            #$% ring warning bell
+            call echo ($bell)
+            next
+           }
+ 
+        #$% back_space and display a blank
+        delete$char           # 2/24/1986 <SCC>
+        #call echo (lchar)    # ditto
+        #call echo ($slash)   # ditto
+ 
+        #$% indicate end of string
+        work[ilen] = EOS
+ 
+        #$% move back one character
+        ilen = ilen - 1
+ 
+        next
+       }
+    #$% else if it is any other control character, ring warning bell
+    else if (handle != 0 & ichar == $ESC)
+       {
+        call get_ch (ichar2,0)
+        call get_ch (ichar3,0)
+ 
+        if (ichar2 == $LBRACK  & ichar3 == $LETA )
+            {
+            call echor
+            call ttyout_flush
+            call Recall_Line (Handle, -1, work, ilen, 0, 0)
+            call echo($return)
+            call echoh(work,ilen)  # do this for typescripts
+            call echor
+ 
+            break
+            }
+        else
+            {
+            call echo ($bell)
+            }
+        next
+       }
+    #$% else if it is any other control character, ring warning bell
+    else if (ichar < $space)
+       {
+        call echo ($bell)
+        next
+       }
+    else
+       {
+        #$% if count equals or exceeds line length
+        if (ilen >= mlen)
+           {
+            #$% send message to user
+            call echoV (" Confirm with carriage return")    # jb  V   12/2/93
+            #$% execute a carriage return and display the line
+            call echor
+            call echoh (work,ilen)
+           }
+        #$% else if character count is zero and character is a space
+        #$% go to the next character
+        else if (ilen == 0 & ichar == $space)
+           {
+            # call echo ($bell)
+            next
+           }
+        #$% otherwise increment character count and display the character
+        else
+           {
+            ilen = ilen + 1
+            work[ilen] = ichar
+            call echo (ichar)
+           }
+       }
+   }
+ 
+ #$% for each character in the line
+ for (n=1; n<=mlen; n=n+1)
+   {
+    #$% if n is less than or equal to count set character from array
+    if (n<=ilen) ichar = work[n]
+    #$% otherwise character is a space
+    else         ichar = $space
+ 
+    iline[n] = ichar
+   }
+ 
+#$% put null at end of line
+iline[mlen+1] = $null
+ 
+return
+end
+ 
+ 
+ 
+
+ 
+subroutine getfch (char,idly,iarg)  # This routine calls tty for input
+    # WARNING:  idly & iarg may be CONSTANTS: NO CHANGE THEM!
+###########################################################
+#$%
+#$% Purpose:   GETFCH gets input from a command file.
+#$%
+#$% Calls:     ECHOP      ECHOV      TTY
+#$%            DELAY      TTYIN      ECHOR
+#$%            ECHO       FCLOSF     FGTJFN
+#$%            FOPENF     FBIN       TYPERR
+#$%
+#$% Tables:    None
+#$%
+#$% Date:      OCT 80
+#$%
+#$% Author:    Dana Wills
+#$%
+#$% Modified   Sep 99 - Dane Wills
+#$%            Added get_getfch_source entry point
+#$%            This can provide info to outside modules (Parser)
+#$%
+###########################################################
+IMPLICIT NONE           # jb    7/7/98
+ 
+Integer idly,iarg,ibrk  # jb    7/7/98
+integer xjfn,xsourc[2],xoldin,x7read
+integer zstat
+integer xjfn2,xnew,x7writ
+integer commnt
+integer xstat
+integer xerr
+integer nskip
+character char, lchar
+ 
+common /Cgetch/ Xjfn,Xstat
+data xstat /'TTY'/              # tty input (DSK,TTYB(interupted dsk),or END)
+data xjfn /STDIN/               # input jfn
+data xsourc/STDIN,STDOUT/       # tty jfs for FGTJFN call
+data xerr  /'TTY'/              # error code from macro routines
+data xoldin/3/                  # get jfn for old file (name from user)
+data x7read/5/                  # open in 7-bit, read-only
+data xjfn2 /STDOUT/             # output jfn
+data xnew/1/                    # get jfn for new file (name from user)
+data x7writ/6/                  # open in 7-bit, write-only
+data nskip/0/
+ 
+SAVE    lchar     # jb   11/22/94
+ 
+call echop ("CLR ")             # reset flowout line count
+ 
+#$% if status is end
+if (xstat == 'END')
+   {
+    #$% set status to TTY
+    xstat = 'TTY'
+ 
+    #$% send command file input completed message to user
+    call echoV ("  [Input from file completed]")    # jb  V   12/2/93
+ 
+    #$% set character to control R - re-display last line
+    char = $cntlR
+   }
+#$% else if status is TTY or TTYB
+else if (xstat == 'TTY' | xstat == 'TTYB')
+   {
+    #$% if delay is YES
+    if (idly == $yes)           # Delay till Input.... (Wait for Character)
+        {
+        #$% inputs a character
+        call ttyin (char,iarg)
+        }
+    else
+       {
+        call ttydly (char,iarg) # delay iarg milli-seconds....
+                                # (return with whatever)
+ 
+#       isave = iarg
+#       repeat
+#          {
+#            call ttynow (char,iarg)    # No delay.... (return with whatever)
+#
+#           if (isave <= 0 | char != $null) break
+#           call delay (250)
+#           isave = isave - 250
+#          }
+       }
+ 
+    #$% if character is control E
+    if (char == $CNTLE)                                 # ^E "Control mode"
+       {
+ 
+        #$% go to 1230 statements return here
+        1230                                                          #smn004
+ 
+        #$% display message to user
+        call echoV ("^e [Control: ")     # jb  V   12/2/93
+ 
+        #$% inputs a character
+        call ttyin (char,0)
+ 
+        #$% if the character is a upper or lower case "N"
+        if (char == $Litn | char == $LETN)              # No
+           {
+            #$% display message to user
+            call echoV ("No ")    # jb  V   12/2/93
+ 
+            while (.true.)                        # get another char
+               {
+                #$% input another character
+                call ttyin (char,0)
+                #$% if the character is not a null break out of loop
+                if (char != $null) break
+                #else               call delay (750)
+               }
+ 
+            #$% if the character is an upper or lower case "P"
+            #$% note: "N" for no... has already been inputed
+            if (char == $Litp | char == $LETP)          # "No Page mode"
+               {
+                #$% display message to user preceeded by "No"
+                call echoV ("Page mode")   # jb  V   12/2/93
+                #$% turn output flow off
+                call echop ("FOFF")
+               }
+            #$% else the character is an upper or lower case "T"
+            else if (char == $Litt | char == $LETT)     # "No Typescript"
+               {
+                #$% display message to user preceeded by "No"
+                call echoV ("Typescript")    # jb  V   12/2/93
+                #$% turn transcript on
+                call echop ("NTEE")
+               }
+            #$% if character is a question mark
+            else if (char == $QUEST)                    # No ?
+               {
+                #$% display message to user preceeded by "No"
+                call echoV ("?  one of these:")    # jb  V   12/2/93
+                call echoV (" Pagemode, Typescript")    # jb  V   12/2/93
+                call echor                                            #smn004
+ 
+                #$% input next character
+                goto 1230                                             #smn004
+ 
+                81230 continue # this is to remove the FORTRAN
+                               # warning error caused by the GOTO
+               }
+            #$% else if character is not a "P", "T" or ?
+            else
+               {
+                #$% display character to user and word "invalid"
+                call echo  (char)
+                call echoV (" invalid")   # jb  V   12/2/93
+               }
+           }
+        #$% if the character is a "C"
+        else if (char == $Litc | char == $LETC)         # "Continue typescript"
+           {
+            #$% display message to user
+            call echoV ("Continue typescript")    # jb  V   12/2/93
+            #$% continue transcript
+            call echop ("CTEE")
+           }
+        #$% if the character is a "T"
+        else if (char == $Litt | char == $LETT)         # "Typescript to file"
+           {
+            #$% display message to user
+            call echoV ("Typescript to file ")    # jb  V   12/2/93
+ 
+            #$% close the old type script file
+            call FCLOSF (xjfn2,0,xerr)
+ 
+            #$% check if new type script file exists
+            call FGTJFN (xjfn2,xsourc,xnew,xerr,*9000)
+ 
+            #$% open new typescript file for output
+            call FOPENF (xjfn2,x7writ,xerr,*9000)
+ 
+            #$% turn off transcript
+            call echop_tee (xjfn2)
+            char = $RETURN
+            return
+           }
+        #$% if character is an upper or lower case "P"
+        else if (char == $Litp | char == $LETP)         # "Page mode"
+           {
+            #$% display message to user
+            call echoV ("Page mode")    # jb  V   12/2/93
+            #$% turn flowout on
+            call echop ("FON ")
+           }
+        #$% else if character is upper or lower case "K"
+        else if (char == $Litk | char == $LETK)         # "Klose typescript"
+           {
+            #$% display message to user
+            call echoV ("Klose typescript")    # jb  12/2/93
+            #$% execute no typescript
+            call echop ("NTEE")
+            #$% close the old type script file
+            call FCLOSF (xjfn2,0,xerr)                                #smn004
+           }
+        #$% else if character is a "2"
+        else if (char == $DIG2)                         # "22 lines/page"
+           {
+            #$% display message to user
+            call echoV ("22 lines/page")    # jb   V    12/2/93
+            #$% set page to 22 lines
+            call echop ("P22 ")
+           }
+        #$% else if character is a "3"
+        else if (char == $DIG3)                         # "38 lines/page"
+           {
+            #$% display message to user
+            call echoV ("38 lines/page")    # jb  V   12/2/93
+            #$% set page to 38 lines
+            call echop ("P38 ")
+           }
+        #$% else is character is a "?"
+        else if (char == $QUEST)
+           {
+            #$% display message to user
+            call echoV ("?  one of these:")             # jb  V   12/2/93
+            call echor; call echoV ("  Typescript")     # jb  V   12/2/93
+            call echor; call echoV ("  No Typescript")  # jb  V   12/2/93
+            call echor; call echoV ("  Continue typescript") # jb  V  12/2/93
+            call echor; call echoV ("  Klose typescript") # jb  V   12/2/93
+            call echor; call echoV ("  Pagemode")       # jb  V   12/2/93
+            call echor; call echoV ("  No Pagemode")    # jb  V   12/2/93
+            call echor; call echoV ("  22 lines/page")  # jb  V   12/2/93
+            call echor; call echoV ("  33 lines/page")  # jb  V   12/2/93
+            call echor
+ 
+            #$% input next character
+            goto 1230
+ 
+            91230 continue # this is to remove the FORTRAN
+                           # warning error caused by the GOTO
+           }
+ 
+        #$% else if character is a control sign and a letter
+        else if (char <= $CNTLZ)                        # quote control char
+           {
+            #$% display upper case of letter in octal and right bracket
+            call echo ($uparrow)                                      #smn004
+            call echo (char+$LeTa-1)                                  #smn004
+            call echo ($RBRACK)                                       #smn004
+            return                                                    #smn004
+           }
+        #$% else if character is not a control sign and a letter
+        else
+           {
+            #$% display the character and the word "invalid"
+            call echo  (char)
+            call echoV (" invalid")   # jb  V   12/2/93
+           }
+ 
+        #$% display a right bracket
+        call echo  ($RBRACK)
+        #$% set character to control R - re-display last line
+        char = $cntlR
+       }
+    #$% else if character is control F
+    else if (char == $CNTLF)                            # ^F "Input from file:"
+       {
+        #$% display user message for control F
+        call echoV ("^f  [Input from file: ")   # jb  V   12/2/93
+ 
+        #$% close old command file
+        call FCLOSF (xjfn,0,xerr)
+ 
+        #$% check if new command file exists
+        call FGTJFN (xjfn,xsourc,xoldin,xerr,*8000)
+ 
+        #$% open new command file for output
+        call FOPENF (xjfn,x7read,xerr,*8000)
+ 
+        #$% send verification to user
+        call echoV (" ok]")   # jb  V   12/2/93
+ 
+        #$% set status to disk
+        xstat = 'DSK'
+ 
+        #$% set character to control R - re-display last line
+        char = $cntlR
+        lchar = $SPACE      # joa - 12/97 (E1835)
+       }
+    #$% else if character is control G
+    else if (char == $CNTLG)
+       {
+        #$% send control G message to user
+        call echoV ("^g  [")    # jb   V   12/2/93
+ 
+        #$% if status is not TTYB
+        if (xstat != 'TTYB')
+           {
+            #$% display error message to user
+            call echoV ("Input from command file cannot be continued]") #12/93
+           }
+        else
+           {
+            #$% display user message; set status to DSK
+            call echoV ("Continuing input from command file]") # jb  V  12/2/93
+            #$% set status to disk
+            xstat = 'DSK'
+           }
+ 
+        #$% set character to control R - re-display last line
+        char = $cntlR
+       }
+   }
+#$% else status must be DSK
+else
+   {
+    #$% set break to NO
+    ibrk = $no
+	nskip = nskip + 1
+	if (nskip >= 100)
+	{
+		nskip = 0
+	    repeat
+	       {
+	        #$% introduce delay
+			# While reading file ttydly changes to blocking read
+			# Temporary: do not allow break or termination of command file
+			# Closing command file returns ttydly to non-blocking read
+    	    #call ttydly (char,0)
+			char = $null
+ 
+    	    #$% if control B, set break YES
+    	    if (char == $cntlB) ibrk = $yes
+ 
+    	    #$% if control K, go to 8020 - file termination
+    	    if (char == $cntlK)
+    	        {
+    	        goto 8020
+    	        88020 continue # this is to remove the FORTRAN
+    	                       # warning error caused by the GOTO
+    	        }
+ 
+    	   #$% repeat until the character is a null
+    	   } until (char == $null)
+	}
+    #$% if break is YES
+    if (ibrk == $yes)
+       {
+        #$% display command file hold message and set status to TTYB
+        call echoV ("^b  [Command file hold, ^g to go]")   # jb  V   12/2/93
+        xstat = 'TTYB'         # set to continue-able
+ 
+        #$% set charcter to control R - re-display last line
+        char = $cntlR
+        return
+       }
+ 
+    char = lchar
+    commnt = $no
+    while (.true.)
+       {
+        lchar = char
+        call fbin (xjfn,char,xerr,*8010)
+ 
+        #$% if the character is a null
+        if (char == $null)
+            {
+            goto 8010            #end of file input
+            88010 continue # this is to remove the FORTRAN
+                           # warning error caused by the GOTO
+            }
+        else if (char == $linefeed) commnt = $no
+        #else if (char == $return  ) commnt = $no
+        else if (char == $pound   ) commnt = $yes
+        else if (char == $exclaim ) commnt = $yes+$yes
+        else if (char == $tab     ) char = $space
+        if (commnt == $yes+$yes) call echo (char)
+        if (commnt != $no      ) char = $space
+        if (lchar != $space | char != $space)
+           {
+            #$% if character is a linefeed last character is a space
+            if (char == $linefeed) lchar = $space
+            #$% else last character is a character
+            else                   lchar = char
+            break
+           }
+       }
+ 
+    #$% if character is a control B
+    if (char == $CNTLB)                 # file input requests break
+       {
+        #$% display message to user
+        call echoV ("^b  [Command file pause, ^g to go]")    # jb  V   12/2/93
+        xstat = 'TTYB'         # set to continue-able
+        #$% set character to control R - re-display last line
+        char = $cntlR
+       }
+    #$% else if character is a lower case letter
+    #else if (char >= $lita & char <= $litz)
+    #    #$% set character to upper case
+    #    char = char - $space
+   }
+return
+ 
+8000 call typerr (xerr)                 # open error
+ 
+     #$% send error message to user
+     call echoV ("   Input from that file is impossible]")   # jb  V   12/2/93
+ 
+     #$% set character to control R - re-display last line
+     char = $RETURN
+ 
+     #$% set status to TTY
+     xstat = 'TTY'
+ 
+     #$% close the old type script file
+     go to 8999
+ 
+     #$% set character to return
+8010 char = $return             # end of file error
+     #$% go to end status
+     go to 8998
+ 
+     #$% set character to control K
+8020 char = $cntlK              # file termination request (^K)
+ 
+     #$% set status to END
+8998 xstat = 'END'            # set up for 'end' message
+ 
+     #$% close the old type script file
+     8999 call FCLOSF (xjfn,0,xerr)
+     xjfn = -1
+ 
+     return
+ 
+9000 call typerr (xerr)                 # open error
+     #$% set to no transcript
+     call echop ("NTEE")
+ 
+     #$% send error message to user
+     call echoV ("   Output to that file is impossible]")   # jb  V   12/2/93
+ 
+     #$% set character to control R - re-display last line
+     char = $cntlR
+ 
+     #$% close the old type script file
+     call FCLOSF (xjfn2,0,xerr)
+ 
+     return
+ 
+entry get_getfch_source (zstat)
+ 
+    zStat = xStat
+    return
+ 
+end # getfch
+
+ 
+Subroutine echoH (hstrng,len)
+    # WARNING:  arguments may be CONSTANTS: NO CHANGE THEM!
+##############################################################
+#$%
+#$% Purpose:   ECHOH displays a hollerith string
+#$%            until a null is encountered.
+#$%
+#$% Calls:     ECHO
+#$%
+#$% Tables:    None
+#$%
+#$% Date:      OCT 80
+#$%
+#$% Author:    Dana Wills
+#$%
+##############################################################
+IMPLICIT NONE               # jb    7/7/98
+ 
+Integer i,len,jlen,LENGTH   # jb    7/7/98
+character char
+character hstrng[ARB]
+ 
+#$% if len is passed as a specific number
+if (len != 0) jlen = len
+#$% otherwise string length is counted automatically
+else          jlen = length(hstrng)
+ 
+ #$% for each character entry in the string
+ for (i=1; i <= jlen; i=i+1)
+   {
+    #$% set character to string value
+    char = hstrng[i]
+ 
+    #$% if character is a null, break loop
+    if (char == $null) break
+ 
+    #$% display the character
+    call echo(char)
+   }
+ 
+ return
+ end
+ 
+
+ 
+Subroutine echovt (vaxchar)
+    # WARNING:  arguments may be CONSTANTS: NO CHANGE THEM!
+##############################################################
+#$%
+#$% Purpose:   ECHOVT displays a VaxCharacter string
+#$%            until a null is encountered, or trailing blanks.
+#$%
+#$% Calls:     ECHOVT
+#$%
+#$% Tables:    None
+#$%
+#$% Date:      Sep 2000
+#$%
+#$% Author:    Dane Wills
+#$%
+##############################################################
+IMPLICIT NONE           # jb    7/7/98
+ 
+VMSChar*(*) vaxchar
+integer     KK
+ 
+KK = len(vaxchar)
+while (kk > 1 & vaxchar[kk:kk] == "")
+    {
+    kk = kk - 1
+    }
+ 
+call echov (vaxchar[1:kk])
+ 
+return
+end
+ 
+
+ 
+Subroutine echov (vaxchar)
+    # WARNING:  arguments may be CONSTANTS: NO CHANGE THEM!
+##############################################################
+#$%
+#$% Purpose:   ECHOV displays a VaxCharacter string
+#$%            until a null is encountered.
+#$%
+#$% Calls:     ECHO
+#$%
+#$% Tables:    None
+#$%
+#$% Date:      July 90
+#$%
+#$% Author:    Dane Wills
+#$%
+##############################################################
+IMPLICIT NONE           # jb    7/7/98
+ 
+Integer i,jlen,LEN      # jb    7/7/98
+character char, term1, term2
+VaxCharacter*(*) vaxchar
+ 
+term1 = $null               # Standard Entry terminates on NULL only
+term2 = $null
+ 
+goto 6001
+    {
+    Entry echovn (vaxchar)      # Terminate on NULL or SPACE
+ 
+    term1 = $null
+    term2 = $space
+    }
+6001
+ 
+jlen = len(vaxchar)
+ 
+#$% for each character entry in the string
+for (i=1; i <= jlen; i=i+1)
+    {
+    char = ichar(vaxchar[i:i])
+ 
+    #$% if character is a null, break loop
+    if (char == term1 | char == term2) break
+ 
+    #$% display the character
+    call echo(char)
+    }
+ 
+ return
+ end
+ 
+
+ 
+ 
+Subroutine echoHp (hstrng,len)
+    # WARNING:  arguments may be CONSTANTS: NO CHANGE THEM!
+######################################################
+#$%
+#$% Purpose:   ECHOHP displays a hollerith string
+#$%            replacing nulls with spaces.
+#$%
+#$% Calls:     ECHO
+#$%
+#$% Tables:    None
+#$%
+#$% Date:      OCT 80
+#$%
+#$% Author:    Dana Wills
+#$%
+######################################################
+IMPLICIT NONE           # jb    7/7/98
+ 
+Integer i,len           # jb    7/7/98
+character char
+character hstrng[ARB]
+ 
+ #$% for each character entry in the string
+ for (i=1; i <= len; i=i+1)
+   {
+    #$% set character to string value
+    char = hstrng[i]
+ 
+    #$% if character is null, set space, else if character is less than space,
+    #$% continue
+    if      (char == $null ) char = $space
+    else if (char <  $space) continue
+ 
+    #$% display space
+    call echo(char)
+   }
+ 
+ return
+ end
+ 
+ 
+ 
+Subroutine echoHn (hstrng,len)
+    # WARNING:  arguments may be CONSTANTS: NO CHANGE THEM!
+##############################################################
+#$%
+#$% Purpose:   ECHOHN displays a hollerith string
+#$%            a space or null is encountered.
+#$%
+#$% Calls:     ECHO
+#$%
+#$% Tables:    None
+#$%
+#$% Date:      OCT 80
+#$%
+#$% Author:    Dana Wills
+#$%
+##############################################################
+IMPLICIT NONE           # jb    7/7/98
+ 
+Integer i,len           # jb    7/7/98
+character char
+character hstrng[ARB]
+ 
+ #$% for each character entry in the string
+ for (i=1; i <= len; i=i+1)
+   {
+    #$% set character to string value
+    char = hstrng[i]
+ 
+    #$% if character is space or null, break loop
+    if (char == $space) break
+    if (char == $null) break
+ 
+    #$% displays characters
+    call echo(char)
+   }
+ 
+ return
+ end
+
+ 
+ 
+subroutine echof (fval,idec)            # display contents in floating point
+ 
+##########################################################
+#$%
+#$% Purpose:   ECHOF displays a floating point value.
+#$%            IDEC is an integer in the form WWDD
+#$%            where DD is the number of decimal places
+#$%            and WW is the total width of the field.
+#$%
+#$% Calls:     ECHOH      ECHOI      ECHOIB
+#$%            ECHO       ECHOIZ
+#$%
+#$% Tables:    None
+#$%
+#$% Date:      OCT 80
+#$%
+#$% Author:    Dana Wills
+#$%
+##########################################################
+IMPLICIT NONE               # jb 7/7/98
+ 
+REAL*4  fval
+Integer idec,idp,len        # jb 7/7/98  8/20/98 NO req..
+ 
+real fract, wval
+integer req, ipad, fint, kk, k, ilen
+integer itoc, length
+character cwval[ARB]
+character cfint[ARB]
+character result[ARB]
+string blanks "        "
+string zeroes "00000000"
+ 
+len = idec/100                          # ilen == WW
+idp = idec - len*100                    # idp  == DD
+ 
+if (idp > 8      ) idp = 8              # Only 8 digits max precision.
+ 
+ 
+if (abs(fval) < 1.0)
+    {
+    req = 1                             # allow for 0.
+    if (fval < 0.0) req = req + 1       # (add 1 more if negative).
+    }
+else
+    {
+    req = log10(abs(aint(fval))) + 1    # determine number of digits in whole
+    if (fval < 0.0) req = req + 1       # number portion (add 1 if negative).
+    }
+ 
+ 
+if (len < idp+req) len = idp + req  # Make sure width includes decimal
+                                        # point as well as all of whole number.
+goto 6001
+    {
+    10
+    len = len + 1
+    }
+6001
+ 
+#write(unit=result_v,fmt=9001,%err%=10)fval  # convert it to text ==> result
+#9001 format % (F<len>.<idp>) %         # using 'Variable Format Expression'
+# Equivalent to above internal write
+wval = abs(aint(fval))                  # Whole number
+fract = fval - wval                     # Fraction
+fint = fract * 10**idp + 0.5            # Convert fraction to integer
+
+#Fix long-standing bug that present quantities like X.9999619 as X.0
+#when it should be (X+1).0 -- Jay Braun, 11/2015
+if (fint==10**idp)
+{
+   if (fval>=0.0)
+   {
+      wval=wval+1
+   }
+   else
+   {
+      wval=wval-1
+   }
+}
+
+ipad = len - req - idp - 1              # Leading blanks
+ilen = itoc(int(wval), cwval, req+1)    # Whole number to string
+ilen = itoc(fint, cfint, idp+1)         # Fraction to string
+kk = 0
+if (ipad > 0) call smovh(blanks , ipad, result, kk) # Create output string
+if (fval < 0.0) call smov($MINUS, result, kk)
+call smovh (cwval, req, result, kk)
+call smov  ($PERIOD, result, kk)
+call smovh (cfint, idp, result, kk)
+if (length(cfint) < idp) call smovh(zeroes, idp - length(cfint), result, kk)
+ 
+call echoh (result,len)                 # output it to the terminal
+ 
+return                                  # that's all, folks !
+end
+
+ 
+Subroutine echoi(i)
+    # WARNING:  argument may be CONSTANT: DON'T CHANGE!
+##############################################################
+#$%
+#$% Purpose:   ECHOI displays an integer value.
+#$%
+#$% Calls:     ECHO       ECHOST
+#$%
+#$% Tables:    None
+#$%
+#$% Date:      OCT 80
+#$%
+#$% Author:    Dana Wills
+#$%
+##############################################################
+IMPLICIT NONE           # jb    7/7/98
+ 
+Integer i,j,k           # jb    7/7/98
+character strng[21]
+ 
+#$% set mid position in string to NULL
+strng[11] = $NULL
+ 
+#$% set k to absolute value of the integer input
+k = iabs(i)
+ 
+#$% for decreasing string counter values from 20 to 0
+for (j = 20; j>0; j = j - 1)
+    {
+     strng[j] = mod(k,10) + $DIG0
+     k = k/10
+    }
+ #$% for increasing string counter values from 1 to 20
+ for (j=1; j < 20; j=j+1)
+    {
+     #$% strip zeros preceeding the number
+     if (strng[j]!=$DIG0) break
+    }
+ 
+ #$% if the number is less than zero, display a minus sign before the number
+ if (i < 0) call echo ($minus)
+ #$% display the number
+ call echost_h(strng[j])
+ 
+ return
+ end
+ 
+ 
+ 
+Subroutine echoiz(i,n)
+    # WARNING:  arguments may be CONSTANTS: NO CHANGE THEM!
+##########################################################
+#$%
+#$% Purpose:   ECHOIZ displays an integer of a fixed
+#$%            length with preceeding zeros.
+#$%
+#$% Calls:     ECHOIB     ECHO
+#$%
+#$% Tables:    None
+#$%
+#$% Date:      OCT 80
+#$%
+#$% Author:    Dana Wills
+#$%
+##########################################################
+IMPLICIT NONE               # jb    7/7/98
+ 
+Integer i,j,k,n,isign,ifill # jb    7/7/98
+character strng[11]
+ 
+#$% set ifill with zeros
+ifill = $dig0
+go to 100
+ 
+entry echoib(i,n)
+ifill = $space
+ 
+100  strng[11] = $NULL
+#$% set k to absolute value of input
+k = iabs(i)
+ 
+for (j = 1; j<= 10; j = j+1)
+   {
+    strng[j] = mod(k,10) + $DIG0
+    k = k/10
+   }
+ 
+for (j=10; j > 1; j = j-1)
+    if (strng[j]!=$DIG0) break
+ 
+#$% if input is less than zero set isign to minus
+if (i < 0)  isign = $minus
+#$% else set isign with zeros
+else        isign = ifill
+ 
+for (k=n; k>= 1; k=k-1)
+   {
+    if (ifill == $dig0 & isign == $minus)
+       {
+        call echo(isign)
+        isign = ifill
+        next
+       }
+ 
+    if      (k-1== j) call echo(isign)
+    else if (k  >  j) call echo(ifill)
+    else              call echo(strng[k])
+   }
+ 
+return
+end
+ 
+ 
+ 
+subroutine echoo (ival,ilen)        # display contents in octal
+ 
+#####################################################
+#$%
+#$% Purpose:   ECHOO displays an octal value.
+#$%
+#$% Calls:     ECHO
+#$%
+#$% Tables:    None
+#$%
+#$% Date:      OCT 80
+#$%
+#$% Author:    Dana Wills
+#$%
+#####################################################
+IMPLICIT NONE           # jb    7/7/98
+ 
+Integer i,j,k,ival,ilen # jb    7/7/98
+ 
+i = ival
+ 
+for (k=(ilen-1)*3; k>=0; k=k-3)
+   {
+    j = istrip (i,k,M3Bits)
+ 
+    call echo (j+$dig0)
+   }
+ 
+return
+end
+ 
+ 
+ 
+ 
+subroutine echox (ival,ilen)        # display contents in Hex
+ 
+#####################################################
+#$%
+#$% Purpose:   ECHOX displays an hex value.
+#$%
+#$% Calls:     ECHO
+#$%
+#$% Tables:    None
+#$%
+#$% Date:      OCT 80
+#$%
+#$% Author:    Dana Wills
+#$%
+#####################################################
+IMPLICIT NONE           # jb    7/7/98
+ 
+Integer i,j,k,ival,ilen # jb    7/7/98
+ 
+i = ival
+ 
+for (k=(ilen-1)*4; k>=0; k=k-4)
+   {
+    j = istrip (i,k,M4Bits)
+ 
+    if (j <= 9) call echo (j+$dig0)
+    else        call echo (BIGA-10+j)
+   }
+ 
+return
+end
+ 
+ 
+ 
+subroutine echob (ival,ilen)        # display contents in Binary
+ 
+#####################################################
+#$%
+#$% Purpose:   ECHOB displays a binary value.
+#$%
+#$% Calls:     ECHO
+#$%
+#$% Tables:    None
+#$%
+#$% Date:      MAY 95
+#$%
+#$% Author:    Dane Wills
+#$%
+#####################################################
+IMPLICIT NONE           # jb    7/7/98
+ 
+Integer i,j,k,ival,ilen # jb    7/7/98
+ 
+i = ival
+ 
+for (k=(ilen-1); k>=0; k=k-1)
+   {
+    j = istrip (i,k,M1Bits)
+ 
+    call echo (j+$dig0)
+   }
+ 
+return
+end
+ 
+ 
+ 
+subroutine echobn (ival,ilen)        # display in Binary (no preceeding zeros)
+ 
+#####################################################
+#$%
+#$% Purpose:   ECHOBN displays a binary value, without the preceeding zeros.
+#$%
+#$% Calls:     ECHO
+#$%
+#$% Tables:    None
+#$%
+#$% Date:      MAY 95
+#$%
+#$% Author:    Dane Wills
+#$%
+#####################################################
+IMPLICIT NONE                   # jb    7/7/98
+ 
+Integer i,j,k,ival,ibits,ilen   # jb    7/7/98
+ 
+i = ival
+ibits = $no
+ 
+for (k=(ilen-1); k>=0; k=k-1)
+   {
+    j = istrip (i,k,M1Bits)
+    ibits = ibits + j
+ 
+    if (ibits != 0 | k == 0)
+        call echo (j+$dig0)
+   }
+ 
+return
+end
+ 
+ 
+ 
+Subroutine echoLN(strng)
+ 
+###############################################################
+#$%
+#$% Purpose:   ECHOLN passes a string of data to ECHOST and
+#$%            puts a carriage return after the string.
+#$%
+#$% Calls:     ECHOST     ECHOR
+#$%
+#$% Tables:    None
+#$%
+#$% Date:      OCT 80
+#$%
+#$% Author:    Dana Wills
+#$%
+###############################################################
+IMPLICIT NONE           # jb    7/7/98
+ 
+character strng[100]
+ 
+call echost_h(strng)
+call echoR
+ 
+return
+end
+
+ 
+Subroutine echoST(vstr)
+ 
+##########################################################
+#$%
+#$% Purpose:   ECHOST takes the string of data from
+#$%            ECHOLN and checks for nulls.
+#$%
+#$% Calls:     ECHO
+#$%
+#$% Tables:    None
+#$%
+#$% Date:      OCT 80
+#$%
+#$% Author:    Dana Wills
+#$%
+#$% Modifications:
+#$%     12/93   Tom Smith   Added ECHOST_H entry point.  Most programs
+#$%                         call this routine using literal string.
+##########################################################
+IMPLICIT NONE           # jb  1/20/99
+ 
+integer vlen
+Integer i               # jb  1/20/99
+vaxcharacter*(*) vstr
+character hstr[ARB]
+ 
+vlen = len(vstr)
+for (i=1;i <= vlen;i=i+1)
+  {
+   call echo(ichar(vstr[i:i]))
+  }
+ 
+return
+ 
+    {
+    entry echost_h (hstr)
+ 
+    for (i=1;hstr[i]!=$null;i=i+1)
+      {
+       call echo(hstr[i])
+      }
+    }
+ 
+ 
+return
+end
+ 
+ 
+ 
+subroutine echoR
+ 
+################################################################
+#$%
+#$% Purpose:   ECHOR returns the cursor to the beginning
+#$%            of the next line.  Used like a carriage
+#$%            return.
+#$%
+#$% Calls:     ECHO
+#$%
+#$% Tables:    None
+#$%
+#$% Date:      OCT 80
+#$%
+#$% Author:    Dana Wills
+#$%
+################################################################
+IMPLICIT NONE           # jb    7/7/98
+ 
+call echo ($Return)
+call echo ($NULL)
+call echo ($NULL)
+call echo ($LineFeed)
+call echo ($NULL)
+call echo ($NULL)
+ 
+return
+end
+ 
+ 
+ 
+ 
+Subroutine echop(vchars)                # output character w/flowout & tee
+ 
+#######################################################
+#$%
+#$% Purpose:   ECHOP controls routine for character
+#$%            output without typescript files.
+#$%
+#$% Calls:     FCLOSF     FBOUT      TTYOUT
+#$%            TTYIN      DELAY
+#$%
+#$% Tables:    None
+#$%
+#$% Date:      OCT 80
+#$%
+#$% Author:    Dana Wills
+#$%
+#$% Modifications:
+#$%     1/94    Tom Smith   Modified call to fbout to use ichar() instead of
+#$%                         quoted character.  Modified references to ichar to
+#$%                         be icharx.
+#######################################################
+IMPLICIT NONE           # jb    7/7/98
+ 
+Integer         ierr    # jb    7/7/98
+integer         ichar                       # 1/94 trs
+## integer         ichars[1]  # jb (The 2 uses deleted below)  1/20/99
+integer         hold,lcount,flow,plines,tee,xjfn, njfn
+vaxcharacter*4  vchars                  # jb  Removed  xchars  1/20/99
+data            hold/$no/,lcount/0/,flow/$no/,plines/22/,tee/$no/,xjfn/STDOUT/
+character       char,icharx,achar # jb (The only use deleted below)  1/20/99
+ 
+# #$% set control characters to i
+# i = ichars[1]
+ 
+if      (vchars == "FON")  flow = $yes  # turn flowout on
+else if (vchars == "FOFF")
+   {
+    flow = $no                      # turn flowout off
+    lcount=0
+    }
+else if (vchars == "TEE")               # turn Typescript on
+    {
+    }
+else if (vchars == "XTEE")               # Close Typescript file
+    {
+    tee = $no
+    call FCLOSF (xjfn,0,ierr)
+    xjfn = STDOUT
+    }
+else if (vchars == "CTEE")  tee = $yes   # Continue typescript
+else if (vchars == "NTEE")  tee = $no    # No typescript
+else if (vchars == "RELS")  hold = $no   # turn tty output on
+else if (vchars == "HOLD")  hold = $yes  # turn tty output off
+else if (vchars == "EOFF")  call echoff  # turn echo off
+else if (vchars == "CLR")  lcount = 0   # clear line count
+else if (vchars == "P22")  plines = 22  # set 22-line page
+else if (vchars == "P38")  plines = 38  # set 38-line page
+else
+    {
+    }
+ 
+return
+#    char = igbyte(ichars,1)
+ 
+    {
+    entry echop_b(achar)        # output character w/flowout & tee
+    char = achar
+ 
+    if (hold == $no) call ttyout (char) # hold ? (detached)
+ 
+    if (tee == $yes)
+       {
+        if (char == $return) char = $null       # suppress extra returns
+ 
+        # if (char < $space)  ### put ^c (control character)
+ 
+        if (char == $ESC)
+            {
+            call fbout (xjfn,ichar('<'),ierr,*8010)     # 1/94 trs
+            call fbout (xjfn,ichar('E'),ierr,*8010)     # 1/94 trs
+            call fbout (xjfn,ichar('s'),ierr,*8010)     # 1/94 trs
+            call fbout (xjfn,ichar('c'),ierr,*8010)     # 1/94 trs
+            call fbout (xjfn,ichar('>'),ierr,*8010)     # 1/94 trs
+            }
+        else if (char != $null)
+            {
+            call fbout (xjfn,char,ierr,*8010)
+            }
+       }
+ 
+    if (flow == $no) return                 # Flowout ?
+ 
+    if      (char == $FormFeed) lcount=plines  # formfeed ?
+    else if (char != $LineFeed) return         # newline ?
+ 
+    lcount = lcount + 1                     #    Yes
+ 
+    if (lcount < plines) return
+ 
+    call ttyout ($bell)                     # put a bell
+ 
+    while (.true.)
+        {
+        call ttydly (icharx,8000)
+ 
+        #$% if character is a contol "P"
+        if (icharx == $CNTLP)
+            {
+            #$% turn off page mode
+            flow = $no
+            lcount = 0
+            break
+            }
+        #$% if character is a control "Q"
+        if (icharx == $CNTLQ | icharx == $SPACE)
+            {
+            #$% continue output
+            lcount = 0
+            break
+            }
+        #$% else if character is null
+        else if (icharx == $null )
+            {
+            #call delay (1000)
+            }
+        #$% else if any other character
+        else
+            {
+            call ttyout ($bell)
+            }
+        }
+    }
+ 
+return
+ 
+#------------------------------
+entry echop_tee (njfn)      # output character w/flowout & tee
+ 
+if (njfn == 0)   xjfn = STDOUT
+else             xjfn = njfn
+ 
+tee = $yes
+return
+ 
+#------------------------------
+ 
+8010 call FCLOSF (xjfn,0,ierr)          # error on fbout....
+     xjfn = STDOUT
+     #tee = $no                         # could set tee to $NO
+ 
+return
+end
+ 
+
+ 
+function igbyte (it,ipos)
+ 
+################################################################
+#$%
+#$% Purpose:   IGBYTE gets a seven bit byte from an array.
+#$%
+#$% Calls:     None
+#$%
+#$% Tables:    None
+#$%
+#$% Date:      OCT 80
+#$%
+#$% Author:    Dana Wills
+#$%
+################################################################
+IMPLICIT NONE           # jb    7/7/98
+ 
+Integer     ipos        # jb    7/7/98
+character   IGBYTE # jb (This function) 7/7/98
+character it[ARB]
+ 
+#$% set array to byte
+igbyte = it[ipos]
+ 
+return
+end
+
+ 
+subroutine ipbyte (it,ipos,ibyte)
+ 
+################################################################
+#$%
+#$% Purpose:   IPBYTE inserts a seven-bit byte into
+#$%            an array.
+#$%
+#$% Calls:     IDRESS
+#$%
+#$% Tables:    None
+#$%
+#$% Date:      OCT 80
+#$%
+#$% Author:    Dana Wills
+#$%
+################################################################
+IMPLICIT NONE               # jb  1/20/99
+ 
+Integer   ipos              # jb 1/20/99
+character it[ARB], ibyte
+ 
+#$% set array to byte
+it[ipos] = ibyte
+ 
+return
+end
+ 
+ 
+
+Literal Function cstrip(chars,pos,nbrchars)
+ 
+#####################################################################
+#$%
+#$% Purpose:   Cstrip replaces designated characters with a blanks
+#$%            in a string
+#$%
+#$% Calls:
+#$%
+#$% Tables:    None
+#$%
+#$% Date:      OCT 80
+#$%
+#$% Author:    Dana Wills
+#$%
+######################################################################
+IMPLICIT NONE           # jb    7/7/98
+ 
+literal     name
+integer   i,nbrchars, pos   # jb 7/7/98
+character   chars[ARB],dest[8]
+equivalence (name,dest)
+
+if (chars[pos] == 0)				# Character field initialized to zero
+{
+	cstrip = 0
+	return
+} 
+name = $BLANKLIT
+ 
+for (i=0; i<nbrchars; i=i+1)
+    {
+    dest[i+1] = chars[i+pos]
+    }
+ 
+cstrip = name
+ 
+return
+end
+ 
+
+Subroutine cdress(word,chars,pos,nbrchars)
+ 
+#####################################################################
+#$%
+#$% Purpose:   Cdress adds designated characters to a string.
+#$%
+#$% Calls:
+#$%
+#$% Tables:    None
+#$%
+#$% Date:      OCT 80
+#$%
+#$% Author:    Dana Wills
+#$%
+######################################################################
+IMPLICIT NONE                       # jb 7/7/98
+ 
+integer       i,nbrchars, pos       # jb 7/7/98
+character       word[8],chars[ARB]
+ 
+#$% for each character up to the one chosen
+for (i=0; i<nbrchars; i=i+1)
+    {
+     #$% set word input to string in desired position
+     chars[i+pos] = word[i+1]
+    }
+ 
+return
+end
+ 
+
+ 
+ 
+Literal Function cstrip8(source)
+ 
+#####################################################################
+#$%
+#$% Purpose:   Cstrip8 returns the 8 characters in a literal format
+#$%            It works the same as CSTRIP except it assumes the
+#$%            second and third arguments are Position=1 and Length=8
+#$%
+#$% Calls:
+#$%
+#$% Tables:    None
+#$%
+#$% Date:      10 OCT 89
+#$%
+#$% Author:    Dane Wills
+#$%
+######################################################################
+IMPLICIT NONE           # jb    7/7/98
+ 
+literal     source
+ 
+cstrip8 = source
+ 
+return
+end
+ 
+ 
+Subroutine cdress8(source,dest)
+ 
+#####################################################################
+#$%
+#$% Purpose:   Cdress8 plugs in a literal
+#$%            It works the same as CDRESS except it assumes the
+#$%            third and fourth arguments are Position=1 and Length=8
+#$%
+#$% Calls:
+#$%
+#$% Tables:    None
+#$%
+#$% Date:      OCT 89
+#$%
+#$% Author:    Dane Wills
+#$%
+######################################################################
+IMPLICIT NONE           # jb    7/7/98
+ 
+literal  source, dest
+ 
+dest = source
+ 
+end

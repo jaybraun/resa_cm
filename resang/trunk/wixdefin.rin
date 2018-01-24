@@ -1,0 +1,1474 @@
+#####   FILE:   WIXDEFIN.rin
+
+#############################################################################
+#  This code checks the values entered in the initialization DEFINE command.#
+#############################################################################
+
+ifnotdef(SOP$Pointer,include "bbsop.inc") # clk 12/93
+ifnotdef(acc$pointer,include "bbacc.inc") # clk 12/95 (E1469)
+ifnotdef(aml$pointer,include "bbaml.inc") # clk 12/95 (E1469)
+
+
+subroutine xdefin(nargs,                        # number of arguments
+                  args,                         # array of arguments
+                  ierror)                       # status;1=bad value,2=unknown
+BBcommon
+Integer LCOMP                               # jb  AAI01, E2145   2/12/01
+integer ierror,nargs
+literal args[nargs]         # contains the arguments entered in the define command
+literal pword,pword2,cstrip8
+integer Parg, imode
+integer month, day, year, leap_year
+character msg[80]
+
+
+$no$wet real*4  WET$WaveDirection$F,WET$WindDirection$F          # jb E2145 5/00
+$no$wet Integer WET$Pointer,WET$WaveHeight$I,WET$WindSpeed$I,WET$Category$I # jb 5/00
+$no$wet Integer WET$Ceiling$I,WET$CloudDepth$I,WET$Visibility$I    # jb E2145 5/24/00
+$no$wet Integer WET$CloudCover$I
+real*4  duct_factors[0:5] / 1.0, 1.35, 1.2, 1.11, 1.05, 1.0 /
+integer k, I_switch_1, indx, jj, iregionside, ipos, ilen, iview, ii, lcomp_v
+real    pcrash, pmayday, pdisappear, precover, dms2rad,
+        f_old_glimpse_interval, f_new_glimpse_interval, f_pd_adjustment
+BBdeclare(sop$pointer, sop$cls$index, sop$cls$spd$index, 
+          sop$cls$spd$DeepOld$f, sop$cls$spd$DeepNew$f, 
+          sop$cls$spd$ShallowOld$f, sop$cls$spd$ShallowNew$f)
+BBdeclare(swb$pointer, swb$ver$index, SWB$nbrvertices$i, 
+          SWB$ver$Latitude$f, SWB$ver$Longitude$f)
+BBdeclare(UNT$pointer, unt$jtidsreportingnbr$i, unt$amlIndx$i,
+          unt$cecparticipating$i)
+BBdeclare(ACC$pointer, shc$pointer)
+BBdeclare(AML$pointer, aml$jtidsreportingnbr$i, aml$cecparticipating$i)
+
+pword2 = $BLANKLIT        # SMM 3/95 initilize
+
+ierror = $no                                # DEFINE .....
+
+###########################################################################
+
+if (args[2] == $lex$SAVE$)                              # SAVE (interval)
+   {
+    if      (args[3] < 10 ) ierror = $yes
+    else if (args[4] < 1  ) ierror = $yes
+    else if (args[4] > 6  ) ierror = $yes
+    else
+       {
+        Save$Interval = args[3]
+        Save$Versions = args[4]
+       }
+   }
+
+else if (args[2] == $lex$LIDAR$)           # LIDAR file name define
+   {
+    if (game$time == 0.)                # can set during NEW game initialization
+      {
+       LIDAR$File$Name = args[3]        # name of LIDAR probability file
+
+       if (lcomp_v(LIDAR$File$Name,"NONE") == 0)   # provide means to erase it...
+         LIDAR$File$Name = 0
+      }
+    else
+       ierror = $yes
+   }
+
+else if (args[2] == $lex$RECORD$)                       # RECORD (interval)
+   {
+    Time$Between$Records = args[3]
+   }
+else if (args[2] == $lex$LOCAL$)                        # LOCAL tracks 
+   {
+    if (args[3] == $lex$ON$) imode = $Yes    
+    else                     imode = $No
+
+    for (Parg = 4; Parg <= Nargs; Parg = Parg + 1)
+        {
+        if      (args[Parg] == $lex$CRUISE$   ) Record$LCL$Cruise   = imode
+        else if (args[Parg] == $lex$AIRCRAFT$ ) Record$LCL$Aircraft = imode
+        else if (args[Parg] == $lex$SMALL$    ) Record$LCL$Small    = imode
+        else if (args[Parg] == $lex$SHIPS$    ) Record$LCL$Ships    = imode
+        else if (args[Parg] == $lex$GROUND$   ) Record$LCL$Ground   = imode
+        else if (args[Parg] == $lex$FRIENDLY$ ) Record$LCL$Friendly = imode
+        else                                    ierror = $yes + $yes
+        }
+   }
+else if (args[2] == $lex$TIME$)                         # TIME (tags)
+   {
+    if (args[3] == $lex$OFF$) time$tags = $no           #        .... OFF
+    else                      time$tags = $yes          #        .... ON
+   }
+else if (args[2] == $lex$SIMULTANEOUS$)                 # SIMULTANEOUS 
+   {
+    if      (args[4] < 1   ) ierror = $yes
+    else if (args[4] > 4000) ierror = $yes
+    else if (args[3] == $lex$AIRCRAFT$) Simultaneous$flights = args[4]
+    else if (args[3] == $lex$CRUISE$  ) Simultaneous$cruise  = args[4]
+    else if (args[3] == $lex$GROUND$  ) Simultaneous$ground  = args[4]
+    else if (args[3] == $lex$SMALL$   ) Simultaneous$boats   = args[4]
+    else if (args[3] == $lex$GHOST$   ) Simultaneous$ghosts  = args[4]
+   }
+else if (args[2] == $lex$COUNTERMEASURE$)               # PH Factor
+   {
+    CounterMeasure$Factor = args[3] * 0.01
+   }
+
+###########################################################################
+#               DEFINE CORRELATION (of) [ ESM | SONAR ] [ ON | OFF ]
+
+else if (args[2] == $lex$CORRELATION$)                  # Correlation
+   {
+    if (args[3] == $lex$ESM$) 
+        {
+        if (args[4] == $lex$OFF$) Correlate$esm = $no   # .... OFF
+        else                      Correlate$esm = $yes  # .... ON
+        }
+    else # if (args[3] == $lex$Sonar$) 
+        {
+        if (args[4] == $lex$OFF$) Correlate$sonar = $no         # .... OFF
+        else                      Correlate$sonar = $yes        # .... ON
+        }
+    }
+
+###########################################################################
+#               DEFINE LEVEL (of) <model> (as) <number>
+
+else if (args[2] == $lex$LEVEL$)                        # Level
+    {
+    k = args[3]
+    SWITCH (k)                          # jb (Use a switch)     1/22/87
+        {
+        Case $lex$Visual$:  level$Visual = args[4] 
+
+        Case $lex$Radar$:   level$RADAR  = args[4] 
+
+        Case $lex$ACTIVE$:  level$ActiveSonar = args[4] 
+
+        Case $lex$ESM$:     level$ESM = args[4] # khc 10/92 
+
+        Case $lex$IR$:      level$IR = args[4] # clf 11/17/92 
+
+        Case $lex$Bistatic$:                    # 7/5/91
+          {
+           if (args[4] < 0 & args[4] > 2)
+             call echov (" Invalid level of Bistatic operations.")
+           else
+             {
+              Bistatic$Ops$Level = args[4]
+              if (Bistatic$Ops$Level != 0 & level$ActiveSonar == 0)
+                {
+                 call echov (" WARNING - The level of Sonar operations is set")
+                 call echov (" to 0.")
+                 call echor
+                 call echov ("           For Bistatic operations to be")
+                 call echov (" enabled, the defined level of Sonar")
+                 call echor
+                 call echov ("           operations must be set to 1.")
+                 call echor
+                }
+             }
+          }
+
+        Case $lex$Antenna$: level$Antenna = args[4] 
+
+        Case $lex$FLIGHT$:  level$FltOps = args[4] 
+
+        Case $lex$AIR$:     level$AA     = args[4]
+        # jb - Add SAM intercept logic (IF level$AA > 0 ))      1/22/87
+
+        Case $lex$REJ$:     level$REJ = args[4]         # 11/13/90
+
+        Case $lex$IFF$:     level$IFF = args[4]         # cml 3/12/91
+        if (level$IFF != 0) level$IFF = 0      # temporary default
+
+        Case $lex$Engagement$:           # clk 3/29
+          {
+           if (args[4] == $lex$Air$)
+            level$Air$Engagement = args[5]
+          }
+
+        DEFAULT:        ierror = $yes + $yes
+        }                 # End Switch
+    }   # End ELSE $lex$LEVEL$
+
+###########################################################################
+# ROTHR commands:
+# DEFINE ROTHR RANGE (limit) <nautical-miles>
+# DEFINE ROTHR DOPPLER (minimum speed for) AIR | SURFACE ] (targets as) <knots>
+# DEFINE ROTHR RADICAL maneuver percent) <percent>
+
+###########################################################################
+
+else if (args[2] == $Lex$ENVIRONMENT$)          
+{                                            
+    if (args[3] == $lex$DIRECTORY$)
+    {
+        Environment$SubDir = args[4]
+		call litlower(Environment$SubDir)
+    }
+    else if (args[3] == $lex$FILE$)
+    {
+		call litlower(args[4])
+        if      (args[5] == $lex$GOOD$) EnvironmentGood$Name = args[4]
+        else if (args[5] == $lex$FAIR$) EnvironmentFair$Name = args[4]
+        else if (args[5] == $lex$POOR$) EnvironmentPoor$Name = args[4]
+    }
+}
+else if (args[2] == $Lex$SONAR$)                        # max passive sonar
+   {                                                    # range tpa 10/24/83
+    Passive$MaxRange = args[3] 
+   }
+else if (args[2] == $lex$NIGHT$)                        # NIGHT (factor)
+   {
+    Night$Factor = args[3] * .01
+   }
+else if (args[2] == $lex$SEASTATE$)                     # SEASTATE (factor)
+   {
+    SeaState$Factor = args[3] * .01
+   }
+else if (args[2] == $lex$WIND$)                         # WIND (speeds)
+   {
+    if      (args[3] < 10 ) ierror = $yes               #    (max helo)
+    else if (args[3] > 200) ierror = $yes
+    else if (args[4] < 10 ) ierror = $yes               #    (max fixed)
+    else if (args[4] > 200) ierror = $yes
+    else if (args[5] < 10 ) ierror = $yes               #    (min fixed)
+    else if (args[5] > 200) ierror = $yes
+    else
+       {
+        Wind$Max$Helo  = args[3]
+        Wind$Max$Fixed = args[4]
+        Wind$Min$Fixed = args[5]
+       }
+   }
+else if (args[2] == $lex$LAUNCH$)                       # LAUNCH (factors)
+   {
+    Launch$Wind$Factor$Helo  = args[3] * .01            #    (helo)
+    Launch$Wind$Factor$Fixed = args[4] * .01            #    (fixed)
+   }
+else if (args[2] == $lex$FATIGUE$)                      # FATIGUE (factor)
+   {
+    Launch$Fatigue$Factor = args[3] * .01
+   }
+else if (args[2] == $lex$ENGAGE$)                       # ENGAGE (factor)
+   {
+    Recover$Engage$Factor = args[3] * .01
+   }
+else if (args[2] == $lex$AIR$)                          # AIR (failure PB)
+   {
+    if (args[3] + args[4] + args[5] > 100) ierror = $yes
+    else
+       {
+        PCrash     = args[3] * .01
+        PMayday    = args[4] * .01
+        PDisappear = args[5] * .01
+        PRecover   = 1.0 - Pcrash - PMayday - PDisappear
+
+        BingoRcvr$CumProb     = PRecover 
+        BingoCrash$CumProb    = PRecover + Pcrash 
+        BingoMayday$CumProb   = PRecover + Pcrash + PMayday 
+        BingoNoMayday$CumProb = PRecover + Pcrash + PMayday + PDisappear
+       }
+   }
+
+###########################################################################
+else if (args[2] == $lex$FALSE$)                      # FATIGUE (factor)
+   {
+    FALSE$STRENGTH = args[3]        # jb TS (abeam) for FLS subs 2/20/91 
+   }
+
+else if (args[2] == $lex$TMA$)                          # TMA
+   {
+    if      (args[3] < 1  ) ierror = $yes
+    else if (args[3] > 100) ierror = $yes
+    else                    $TMA$Criteria = args[3]
+   }
+else if (args[2] == $lex$ESM$)  # clk - 5/26/93
+   {                            # DEFINE ESM (default max detection range)
+    ESM$DefaultMaxRange = args[3]
+   }
+else if (args[2] == $lex$DUCTING$)                      # DUCTING
+   {
+    if (args[3] == $lex$FACTOR$)                        # FACTOR (vs Strength)
+        {
+        ducting$factor = args[4]
+        ducting$strength = 2                            #    9/18/89
+        }
+    else 
+        {
+        if      (args[3] < 0 ) ierror = $yes
+        else if (args[3] > 5 ) ierror = $yes
+        else                   
+            {
+            ducting$strength = args[3]
+            ducting$factor = duct_factors[ducting$strength]
+            }
+        }
+   }
+###########################################################################
+# DEFINE TRACK commands:
+# DEFINE TRACK [ FADE | LOSS ] (time) <number>;
+# DEFINE TRACK HISTORY [ ON | OFF ];
+# DEFINE TRACK TIME (tags) [ OFF | ON | RANDOM ];
+
+else if (args[2] == $lex$TRACK$)
+   {
+    if (args[3] == $lex$FADE$)                          # TRACK FADE
+       {
+        if      (args[4] < 2 ) ierror = $yes
+        else if (args[4] > 15) ierror = $yes
+        else  Minutes$to$Yellow = args[4]
+       }
+    else if (args[3] == $lex$LOSS$)                     # TRACK LOSS
+       {
+        if      (args[4] < Minutes$to$Yellow) ierror = $yes
+        else if (args[4] > 25               ) ierror = $yes
+        else                                  Minutes$to$Old = args[4]
+       }
+    else if (args[3] == $lex$HISTORY$)                  # TRACK HISTORY
+       {
+        if    (args[4] == $lex$on$) Maintain$Track$History = $YES
+        else                        Maintain$Track$History = $NO
+       }
+    # DEFINE TRACK TIME (tags) [ OFF | ON | RANDOM ];
+    else if (args[3] == $lex$TIME$)                     # TRACK TIME TAG
+       {
+        if      (args[4] == $lex$OFF$) Track$Time$Tag = $Off    # no time tag 
+        else if (args[4] == $lex$ON$)  Track$Time$Tag = $On     # last det time
+        else                           Track$Time$Tag = 2       # random
+       }
+
+    else
+       {
+        ierror = $yes + $yes
+       }
+   }
+
+###########################################################################
+
+else if (args[2] == $lex$MAST$)                         # MAST ....
+   {
+    if (args[3] == $lex$DEPLOY$  )                      # MAST DEPLOY
+       {
+        if (args[4] > 20) ierror = $yes
+        else              Mast$Deploy$Time = args[4]
+       }
+    else if (args[3] == $lex$RETRIEVE$)                 # MAST RETRIEVE
+       {
+        if (args[4] > 20) ierror = $yes
+        else              Mast$Retreive$Time = args[4]
+       }
+    else if (args[3] == $lex$SURVIVAL$)                 # MAST SURVIVAL
+       {
+        if (args[4] > 50) ierror = $yes
+        else              Mast$Survival$Speed = args[4]
+       }
+    else if (args[3] == $lex$COMM$    )                 # MAST COMM
+       {
+        if (args[4] > 100) ierror = $yes
+        else               Mast$Depth$Max = args[4]
+       }
+    else
+       {
+        ierror = $yes + $yes
+       }
+   }
+
+###########################################################################
+
+else if (args[2] == $lex$WIRE$)                         # WIRE ....
+   {
+    if (args[3] == $lex$DEPLOY$  )                      # WIRE DEPLOY
+       {
+        if (args[4] > 20) ierror = $yes
+        else              Wire$Deploy$Time = args[4]
+       }
+    else if (args[3] == $lex$RETRIEVE$)                 # WIRE RETRIEVE
+       {
+        if (args[4] > 20) ierror = $yes
+        else              Wire$Retreive$Time = args[4]
+       }
+    else if (args[3] == $lex$SURVIVAL$)                 # WIRE SURVIVAL
+       {
+        if (args[4] > 50) ierror = $yes
+        else              Wire$Survival$Speed = args[4]
+       }
+    else if (args[3] == $lex$COMM$    )                 # WIRE COMM
+       {
+        if (args[4] > 500) ierror = $yes
+        else               Wire$Depth$Max = args[4]
+       }
+    else
+       {
+        ierror = $yes + $yes
+       }
+   }
+
+###########################################################################
+
+else if (args[2] == $lex$BUOY$)                         # BUOY ....
+   {
+    if (args[3] == $lex$DEPLOY$  )                      # BUOY DEPLOY
+       {
+        if (args[4] > 20) ierror = $yes
+        else              Buoy$Deploy$Time = args[4]
+       }
+    else if (args[3] == $lex$RETRIEVE$)                 # BUOY RETRIEVE
+       {
+        if (args[4] > 20) ierror = $yes
+        else              Buoy$Retreive$Time = args[4]
+       }
+    else if (args[3] == $lex$SURVIVAL$)                 # BUOY SURVIVAL
+       {
+        if (args[4] > 50) ierror = $yes
+        else              Buoy$Survival$Speed = args[4]
+       }
+    else if (args[3] == $lex$COMM$    )                 # BUOY COMM
+       {
+        if (args[4] > 500) ierror = $yes
+        else               Buoy$Depth$Max = args[4]
+       }
+    else
+       {
+        ierror = $yes + $yes
+       }
+   }
+
+###########################################################################
+
+else if (args[2] == $lex$SOSUS$)                        # SOSUS  ...
+   {
+    if (args[3] == $lex$TIME$)
+       {
+        if      (args[4] < 2) ierror = $yes             #     (old track)
+        else if (args[5] < 2) ierror = $yes             #     (old ellipse)
+        else if (args[6] < 1) ierror = $yes             #     (glimpse interv)
+        else
+           {                       # If not gameinit/sinit, but a control
+            if (Game$time > time$step)   # command and glimpse interval is changing,
+              {                    # then the pd's need to be updated.   clk 12/93
+               if ((args[6]) != SOSUS$Glimpse$Interval)
+                 {
+                  f_old_glimpse_interval = SOSUS$Glimpse$Interval
+                  f_new_glimpse_interval = args[6]
+                  f_pd_adjustment = f_old_glimpse_interval / f_new_glimpse_interval
+
+                  for (SOP$Pointer$First; SOP$Pointer$Ok; SOP$Pointer$Next)
+                    {
+                     for (SOP$CLS$Index = 1; SOP$CLS$Index <= SOP$CLS$Slots;
+                                             SOP$CLS$Index = SOP$CLS$Index + 1)
+                       {
+                        for (SOP$CLS$SPD$Index = 1; SOP$CLS$SPD$Index <= SOP$CLS$SPD$Slots;
+                                                    SOP$CLS$SPD$Index = SOP$CLS$SPD$Index + 1)
+                          {
+                           SOP$Cls$Spd$DeepOld$F = xSOP$Cls$Spd$DeepOld$F * f_pd_adjustment
+                           putSOP$Cls$Spd$DeepOld$F
+
+                           SOP$Cls$Spd$DeepNew$F = xSOP$Cls$Spd$DeepNew$F * f_pd_adjustment
+                           putSOP$Cls$Spd$DeepNew$F
+
+                           SOP$Cls$Spd$ShallowOld$F = xSOP$Cls$Spd$ShallowOld$F * f_pd_adjustment
+                           putSOP$Cls$Spd$ShallowOld$F
+
+                           SOP$Cls$Spd$ShallowNew$F = xSOP$Cls$Spd$ShallowNew$F * f_pd_adjustment
+                           putSOP$Cls$Spd$ShallowNew$F
+                          }   # end of loop through pd's for the sub class
+                       }      # end of loop through the sub class entries for the region
+                    }         # end of loop through Sosus Regions
+                 }            # end of if the Glimpse Interval is changing
+              }               # end of if not at gameinit/sinit
+
+            SOSUS$Time$Track       = args[4]
+            SOSUS$Time$Ellipse     = args[5]
+            SOSUS$Glimpse$Interval = args[6]
+           }
+       }
+    else if (args[3] == $lex$VIEW$)                                   #smn002
+       {                                                              #smn002
+        indx = args[4] + $FirstBlue$View - 1                          #smn002
+                                                                      #smn002
+        if      (indx < $FirstBlue$View) ierror = $yes                #smn002
+        else if (indx > $LastBlue$View ) ierror = $yes                #smn002
+        else                                                          #smn002
+           {                                                          #smn002
+            SOSUS$View = indx                                         #smn002
+           }                                                          #smn002
+       }                                                              #smn002
+    else ierror = $yes + $yes
+   }
+else if (args[2] == $lex$BISTATIC$)                     # Bistatic Range
+   {                                                    # 7/3/91
+    Max$Bistatic$Range = args[4]
+   }
+else if (args[2] == $lex$HFDF$)                         # HFDF ...
+   {
+    if (args[3] == $lex$TIME$)                          #  ... TIME ...
+       {
+        if      (args[4] < 2) ierror = $yes             #   (old track)
+        else if (args[5] < 2) ierror = $yes             #   (old ship ellipse)
+        else if (args[6] < 2) ierror = $yes             #   (old air ellipse)
+        else
+           {
+            HFDF$Time$Track        = args[4]
+            HFDF$Time$Ellipse$Ship = args[5]
+            HFDF$Time$Ellipse$Air  = args[6]
+           }
+       }
+    else if (args[3] == $lex$RANGE$)                    # ... RANGE ...
+       {
+        HFDF$MobileDetectRange = args[4]                #      (range)
+        HFDF$MobileDetectProb  = args[5] * .01          #      (prob)
+       }
+    else if (args[3] == $lex$BEAM$)                     # ... BEAM (width)...
+       {
+        HFDF$BWidth$Orange$Fixed  = args[4] * $pi/180   # (orange fixed)
+        HFDF$BWidth$Orange$Mobile = args[5] * $pi/180   # (orange mobile)
+        HFDF$BWidth$Blue$Fixed    = args[6] * $pi/180   # (blue fixed)
+        HFDF$BWidth$Blue$Mobile   = args[7] * $pi/180   # (blue mobile)
+       }
+    else ierror = $yes + $yes
+   }
+
+else if (args[2] == $lex$SWABS$)                        # SWABS  2/27/91
+   {
+    if (args[3] == $lex$VIEW$)                             
+       {
+        if (args[4] ==$lex$blue$)
+          {
+           indx = args[5] + $FirstBlue$View - 1                         
+           if      (indx < $FirstBlue$View) ierror = $yes               
+           else if (indx > $LastBlue$View ) ierror = $yes                
+           else  SWABS$B_View = indx
+          }
+        else if (args[4] ==$lex$orange$)
+          {
+           indx = args[5] + $FirstOrange$View - 1                         
+           if      (indx < $FirstOrange$View) ierror = $yes               
+           else if (indx > $LastOrange$View ) ierror = $yes                
+           else  SWABS$O_View = indx
+          }
+       }
+    else if (args[3] == $lex$FOR$)
+      {
+       jj = 0
+       if (args[4] == $lex$blue$)
+         {
+          call smovv ("Blue ", msg, jj)
+          iregionside = $blue$code
+         }
+       else 
+         {
+          call smovv ("Orange ", msg, jj)
+          iregionside = $orange$code
+         }
+       call smovv ("SWABS Region #", msg, jj)
+       call smovi (int(args[5]), msg, jj)
+
+       for (swb$pointer$first; swb$pointer$ok; swb$pointer$next)
+         {
+          if (xswb$RegionNumber$I == args[5] & xswb$Side$I == iregionside)
+            break
+         }
+
+       if (! swb$pointer$ok)
+         {
+          call smovv (" not found, unable to relocate.", msg, jj)
+          call send_ (0, 0, jj, msg)  # send msg to control
+          return
+         }
+
+       swb$NbrVertices$I = int ((nargs - 5) * 0.5)
+       putswb$NbrVertices$I
+
+       ipos = 6
+       for (swb$ver$index = 1; swb$ver$index <= swb$ver$slots;
+                               swb$ver$index = swb$ver$index + 1)
+         {
+          if (ipos > nargs)
+            {
+             putswb$ver$latitude$F (0.0)
+             putswb$ver$longitude$F (0.0)
+            }
+          else
+            {
+             swb$ver$latitude$F = DMS2rad(args[ipos])
+             putswb$ver$latitude$F
+             swb$ver$longitude$F = DMS2rad(args[ipos+1])
+             putswb$ver$longitude$F
+            }
+          ipos = ipos + 2
+         }
+       call smovv (" has been relocated", msg, jj)
+       call send_ (0, 0, jj, msg)  # send msg to control
+      }
+    else ierror = $yes + $yes
+   }
+
+###########################################################################
+
+else if (args[2] == $lex$POSITION$)                     # POSITION (lat/lon)
+   {
+    if (args[5] == $lex$HFDF$)                          #     HFDF
+       {
+        HFDF$BaseLatitude  = DMS2rad(args[3])
+        HFDF$BaseLongitude = DMS2rad(args[4])
+       }
+    else if (args[5] == $lex$WEATHER$)                  #     WEATHER
+       {
+        Weather$BaseLatitude  = DMS2rad(args[3])
+        Weather$BaseLongitude = DMS2rad(args[4])
+       }
+    else ierror = $yes + $yes
+   }
+
+###########################################################################
+
+else if (args[2] == $lex$ZULU$)                         # ZULU (time)
+   {
+    if      (args[3] < 0    ) ierror = $yes             #     hours
+    else if (args[3] > 23   ) ierror = $yes
+    else if (args[4] < 0    ) ierror = $yes             #     minutes
+    else if (args[4] > 59   ) ierror = $yes
+    else
+       {
+        # store time in minutes
+        zulu$StartTime = (args[3]*$Minutes$Per$Hour + args[4])
+        Start$Hour = args[3]
+        Start$Minute = args[4]
+        if (execution$mode == Continue$Mode |   # cpa 7/14/92  (H1024)
+            execution$mode == Restart$Mode)     # update sunrise/set times if zulu
+          call suntim                           # start is modified during a re-sinit
+       }
+   }
+else if (args[2] == $lex$YEAR$)                       # Start year
+   {
+    if      (args[3] < 1900 ) ierror = $yes     # No century assumed 
+    else if (args[3] > 2199 ) ierror = $yes     # limit to 2100's....
+    else
+        {
+        start$year = args[3]
+
+        call monday(_           # Given julian date, calculate month & day
+             int(Start$year),   # year like 1999
+             Julian$Day,        # Julian day
+             month,             # Month(out)
+             day)               # Day(out)
+
+        Start$Month = month
+        Start$Day   = day
+        }
+   }
+
+else if (args[2] == $lex$JULIAN$)                       # JULIAN (day)
+   {
+    year = start$year    
+    # function Leap_year will return YES/NO (numeric 1/0)
+    
+    if      (args[3] < 1                     ) ierror = $yes
+    else if (args[3] > 365 + leap_year(year) ) ierror = $yes
+    else
+        {
+        julian$day = args[3]
+
+        call monday(_           # Given julian date, calculate month and day
+             year,              # year (like 1982)
+             Julian$Day,        # Julian day
+             month,             # Month(out)
+             day)               # Day(out)
+
+        Start$Month = month
+        Start$Day   = day
+
+        sun$latitude = (-23.45*$pi/180.) * _
+                       cos((2.*$pi/365.25) * _
+                       (Julian$Day+9))
+        }
+    }
+
+$no$wet else if (args[2] == $lex$WEATHER$)              # WEATHER ....
+$no$wet    {
+$no$wet     wet$pointer$to (args[3] + 1)
+$no$wet     if (! wet$pointer$valid)
+$no$wet        {
+$no$wet         ierror = $yes
+$no$wet         return
+$no$wet        }
+$no$wet
+$no$wet     if (args[4] == $lex$WAVE$)                  # ... WAVE ...
+$no$wet        {
+$no$wet         wet$WaveHeight$i       = args[5]
+$no$wet         PUTwet$WaveHeight$i
+$no$wet         wet$WaveDirection$f    = args[6] * $pi / 180.
+$no$wet         PUTwet$WaveDirection$f
+$no$wet        }
+$no$wet     else if (args[4] == $lex$WIND$)             # ... WIND ...
+$no$wet        {
+$no$wet         wet$WindSpeed$i        = args[5]
+$no$wet         PUTwet$WindSpeed$i
+$no$wet         wet$WindDirection$f    = args[6] * $pi / 180.
+$no$wet         PUTwet$WindDirection$f
+$no$wet        }
+$no$wet     else if (args[4] == $lex$CLOUD$)            # ... CLOUD ...
+$no$wet        {
+$no$wet         wet$CloudCover$i       = args[5]
+$no$wet         PUTwet$CloudCover$i
+$no$wet         wet$Ceiling$i          = args[6]
+$no$wet         PUTwet$Ceiling$i
+$no$wet         wet$CloudDepth$i       = args[7]
+$no$wet         PUTwet$CloudDepth$i
+$no$wet        }
+$no$wet     else if (args[4] == $lex$RANGE$)            # ... RANGE ...
+$no$wet        {
+$no$wet         wet$Visibility$i       = args[5]
+$no$wet         PUTwet$Visibility$i
+$no$wet        }
+$no$wet     else if (args[4] == $lex$CATEGORY$)         # ... CATEGORY ...
+$no$wet        {
+$no$wet         wet$category$i = Xwet$category$i
+$no$wet         if      (args[5] == $lex$CLEAR$) wet$category$i = $Clear$code
+$no$wet         else if (args[5] == $lex$HAZE$ ) wet$category$i = $Haze$code
+$no$wet         else if (args[5] == $lex$FOG$  ) wet$category$i = $Fog$code
+$no$wet         else if (args[5] == $lex$RAIN$ ) wet$category$i = $Rain$code
+$no$wet         else  ierror = $yes + $yes
+$no$wet         PUTwet$category$i
+$no$wet        }
+$no$wet     else  ierror = $yes + $yes
+$no$wet    }
+
+###########################################################################
+
+###########################################################################
+# DEFINE CHAFF (life of) <minutes>
+#              (width) <nautical-miles>
+#              (depth) <feet>
+#              (LOWfreq) [ | <megahertz> ]
+
+else if (args[2] == $lex$CHAFF$)                        # CHAFF
+   {
+    if      (args[3] < 5    ) ierror = $yes             #     LIFE
+    else if (args[3] > 60   ) ierror = $yes
+    else if (args[4] < 1    ) ierror = $yes             #     WIDTH
+    else if (args[4] > 10   ) ierror = $yes
+    else if (args[5] < 100  ) ierror = $yes             #     THICKNESS
+    else if (args[5] > 20000) ierror = $yes
+    else
+       {
+        chaff$life      = args[3]     # store chaff life in minutes
+        chaff$width     = args[4]
+        chaff$thickness = args[5]
+        if (nargs >= 6) chaff$lowfreq = args[6]
+       }
+   }
+
+###########################################################################
+#       DEFINE NUCLEAR (capability) [ ON | OFF ]
+
+else if (args[2] == $lex$NUCLEAR$)                        # NUCLEAR
+   {
+    if (args[3] == $lex$ON$) Nuclear$Capable = $YES
+    else                     Nuclear$Capable = $NO
+   }                                                    #       4/23/85
+
+###########################################################################
+#       DEFINE ALSP GAME (join at gamestart?) [ | YES | NO | OFF ]
+#       DEFINE ALSP VIEW (for ghosts as) <view> (for) [ BLUE | ORANGE ]
+#       DEFINE ALSP AIRSUPPORT (ghosts chop) BLUE VIEW <view>
+else if (args[2] == $lex$ALSP$)         # clk 6/92
+   {
+    if (args[3] == $lex$GAME$)
+      {
+       if (nargs > 3 & args[4] == $lex$OFF$) 
+            {
+            ALSP$Game = $NonALSPGame$Code
+            ALSP$Active = $No
+            }
+       else
+            {
+            ALSP$Game = $NeverJoined$Code
+            if (nargs > 3 & args[4] == $lex$YES$) ALSP$Active = $yes
+            else                                  ALSP$Active = $No
+            }
+      }     # end of DEFINE ALSP GAME
+    else if (args[3] == $lex$VIEW$)
+      {
+       if (ALSP$Game == $NonALSPGame$Code)
+         {
+          ilen = 0
+          call smovv ("Game is not identified to ", msg, ilen)
+          call smovv ("participate in an ALSP confederation.", msg, ilen)
+          call send_  (iview, 0, ilen, msg)
+          ierror = $yes                
+         }
+        else
+         {
+          if (args[5] == $lex$BLUE$)
+            {
+             indx = args[4] + $FirstBlue$View - 1
+             if (indx < $FirstBlue$View | 
+                 indx > $LastBlue$View  )
+               ierror = $yes                
+             else
+              {
+               ALSP$BlueGhost$View = indx
+               if (ALSP$BlueAirSupportGhost$view == 0)  # JOA 12/02 (E2320)
+                  ALSP$BlueAirSupportGhost$view = ALSP$BlueGhost$View
+              }
+            }
+          else  # args[5] == $lex$ORANGE$
+            {
+             indx = args[4] + $FirstOrange$View - 1
+             if (indx < $FirstOrange$View | 
+                 indx > $LastOrange$View  )
+               ierror = $yes                
+             else
+               ALSP$OrangeGhost$View = indx
+            }
+         }
+      }     # end of DEFINE ALSP VIEW
+    else if (args[3] == $lex$AIRSUPPORT$) # JOA 9/02 (E2304)
+      {
+        indx = args[6] + $FirstBlue$View - 1
+        if (indx < $FirstBlue$View | 
+            indx > $LastBlue$View  )
+               ierror = $yes                
+        else
+            ALSP$BlueAirSupportGhost$View = indx
+      }
+    else if (args[3] == $lex$REVIEW$)
+      {
+       if (nargs > 3 & args[4] == $lex$YES$) ALSP$Review = $yes
+       else                                  ALSP$Review = $No
+      }
+    else if (args[3] == $lex$LOGGING$)          # JOA UFL05
+      {
+       if (args[4] == $lex$ON$) ALSP$LOGGING = $ON
+       else                     ALSP$LOGGING = $OFF
+      }
+    else if (args[3] == $lex$FEDERATION$)
+      {
+       ALSPConfederation$Number = args[4]
+      }
+    else if (args[3] == $lex$FEDERATE$)
+      {
+       ALSPActor$Number = args[4]
+      }
+    else if (args[3] == $lex$FEDNAME$)
+      {
+       SIMULATOR$NAME = args[4]
+      }
+   }        # end of DEFINE ALSP ...
+
+###########################################################################
+#       DEFINE DIS GAME [ | ON | OFF ]
+#       DEFINE DIS VIEW (for ghosts as) <view> (for) [ BLUE | ORANGE ] 
+
+else if (args[2] == $lex$DIS$)        # DEFINE SERCES VIEW changed to
+    {                                   # DEFINE DIS VIEW - clk 11/97 (E1824)
+    if (args[3] == $lex$GAME$)
+        {
+        if      (nargs   == 3        ) DIS$Game = $yes
+        else if (args[4] == $lex$ON$ ) DIS$Game = $yes
+        else if (args[4] == $lex$OFF$) DIS$Game = $No
+        else                           ierror = $yes
+        }
+    else if (args[3] == $lex$VIEW$)
+        {
+        if (args[5] == $lex$BLUE$)
+            {
+            indx = args[4] + $FirstBlue$View - 1
+            if (indx < $FirstBlue$View | 
+                indx > $LastBlue$View  ) ierror = $yes                
+            else                         DIS$Blue$View = indx
+            }
+        else if (args[5] == $lex$ORANGE$)
+            {
+            indx = args[4] + $FirstOrange$View - 1
+            if (indx < $FirstOrange$View | 
+                indx > $LastOrange$View  ) ierror = $yes                
+            else                           DIS$Orange$View = indx
+            }
+        else ierror = $yes
+        } # end of DEFINE DIS VIEW ...
+    } # end of DEFINE DIS order
+
+else if (args[2] == $lex$GAME$)     # clk 12/95 (E1469)
+  {
+  }
+
+###########################################################################
+# DEFINE PARALLEL (processing) [ ON (replay off, number cpus) <number> | OFF ]
+# DEFINE REPLAY (capability) [ ON (parallel off) | OFF ]
+
+else if (args[2] == $lex$PARALLEL$)
+    {
+    if (args[3] == $lex$ON$) Utilize$Parallel = Max(int(args(4)), $YES )
+    else                     Utilize$Parallel = $NO
+
+    if (Utilize$Parallel != $NO) Provide$Replay = $NO
+    }
+else if (args[2] == $lex$REPLAY$)
+    {
+    if (args[3] == $lex$ON$) Provide$Replay = $YES
+    else                     Provide$Replay = $NO
+
+    if (Provide$Replay == $YES) Utilize$Parallel = $NO
+    }
+
+###########################################################################
+# DEFINE NUMBER (of) RADAR (detections impacted by emi) <number> 
+# DEFINE NUMBER (of) COMM (transmissions impacted by emi) <number> 
+
+else if (args[2] == $lex$NUMBER$)
+    {
+    if (args[3] == $lex$RADAR$)
+        {
+        Number$Radar$Detections = args[4]
+        }
+    else if (args[3] == $lex$COMM$)
+        {
+        Number$Comm$Transmitted = args[4]
+        }
+    else if (args[3] == $lex$LOCAL$)
+        {
+        Number$LCL$Record = args[4]
+        }
+    else if (args[3] == $lex$TRACK$)
+        {
+        Number$Track$Alloc = args[4]
+
+        if (Number$Track$Alloc < $lo_VUE$TK$NextNumber$I) 
+            Number$Track$Alloc = 999
+        else if (Number$Track$Alloc > $Hi_VUE$TK$NextNumber$I) 
+            Number$Track$Alloc = $Hi_VUE$TK$NextNumber$I 
+        }
+    else if (args[3] == $lex$STATION$)
+        {
+        if ((Default$Stations + args[4]) <= STA$Slots)
+            Extra$Stations = args[4]
+        else
+            ierror = $yes
+        }
+    else
+        {
+        ierror = $yes + $yes
+        }
+    }
+
+###########################################################################
+#   For infrared satellite detection level     Alex V. July 1993
+
+    else if (args[2] == $lex$THRESHOLD$)
+        {
+         IR$Threshold = args[3]
+        }
+
+###########################################################################
+# DEFINE UAV (engagement ceiling) <feet>
+# DEFINE EOIR SWATH (angle) <degrees>
+# DEFINE EOIR RANGE (maximum) <nautical-miles>
+# DEFINE EOIR DAMAGE (recognition for destroyed) <percent>
+#       (severe) <percent> ( moderate) <percent> ( minor) <percent>
+# DEFINE ISAR RANGE (maximum for classification) <nautical-miles>;
+# DEFINE ISAR PROBABILITY (of classification) <percent>;
+
+else if (args[2] == $lex$UAV$)
+    {
+    UAV$Engagement$Ceiling  = args[3]
+    }
+else if (args[2] == $lex$EOIR$)
+    {
+    if (args[3] == $lex$SWATH$)
+        {
+        EOIR$Swath$Angle = args[4]
+        }
+    else if (args[3] == $lex$RANGE$)
+        {
+        EOIR$Range$Max = args[4]
+        }
+    else if (args[3] == $lex$DAMAGE$)
+        {
+        if (args[4] >= args[5] |        # values must be increasing
+            args[5] >= args[6] |
+            args[6] >= args[7]  )
+            {
+            ierror = $yes
+            }
+        else
+            {
+            EOIR$Damage$Destroyed   = args[4]   # 25%
+            EOIR$Damage$Severe      = args[5]   # 50%
+            EOIR$Damage$Moderate    = args[6]   # 75%
+            EOIR$Damage$Minor       = args[7]   # 90%
+            }
+        }
+    else
+        {
+        ierror = $yes + $yes
+        }
+    }
+  else if (args[2] == $lex$ISAR$)       # clk 4/28/92
+    {
+    if (args[3] == $lex$RANGE$)
+        ISAR$ID$MaxRange = args[4]
+    else   # args[3] == $lex$PROBABILITY$
+        ISAR$ID$Probability = args[4] * 0.01
+    }
+
+##########################################################################
+# Variable time step
+# define CYCLE
+# define CYCLE RECURRENCE (for) MOTION | .......
+#
+
+else if (args[2] == $lex$CYCLE$)
+{
+      if (args[3] == $lex$RECURRENCE$)
+      {
+          if      (args[4] == $lex$MOTION$)     motion$recurrence = args[5]
+          else if (args[4] == $lex$FLIGHT$)     flight$recurrence = args[5]
+          else if (args[4] == $lex$REJ$)        rej$recurrence    = args[5]
+          else if (args[4] == $lex$ACTIVE$)     ActiveSonar$recurrence  = args[5]
+          else if (args[4] == $lex$EOIR$)       eoir$recurrence   = args[5]
+          else if (args[4] == $lex$VISUAL$)     visual$recurrence = args[5]
+          else if (args[4] == $lex$ENGAGEMENT$) engage$recurrence = args[5]
+          else if (args[4] == $lex$SOSUS$)      sosus$recurrence   = args[5]
+          else if (args[4] == $lex$SWABS$)      swabs$recurrence  = args[5]
+          else if (args[4] == $lex$SURVSAT$)    survsat$recurrence= args[5]
+          else if (args[4] == $lex$ROTHR$)      rothr$recurrence  = args[5]
+          else if (args[4] == $lex$COMMS$)      comms$recurrence  = args[5]
+          else if (args[4] == $lex$MESSAGE$)    message$recurrence= args[5]
+          else if (args[4] == $lex$PASSIVE$)    PassiveSon$recurrence = args[5]
+          else if (args[4] == $lex$IR$)         Ir$recurrence = args[5]
+
+      } 
+   
+    if (args[3] == $lex$TIME$)
+    {
+        # Time step must be a multiple of sixty or a factor of 60
+        if (args[4] <= 60.)
+        {
+            if (mod(60,int(args[4])) != 0)
+                ierror = $yes
+        }
+        else
+        {
+            if (mod(int(args[4]), 60) != 0)
+                ierror = $yes
+        }
+        if (ierror == $no)
+        {
+            #*** get time step in integer seconds ***
+            cycle$time = args[4]
+
+            #*** convert it to floating point minute format ***
+            time$step = args[4] * $Minutes$Per$Second
+ 
+            time$spec = time$step * $Seconds$Per$Minute / game$rate
+
+            # Make sure recording occurs in last cycle minute
+            #  so can compare vts runs with non vts runs.
+            Last$time$between$records = int(game$time) - time$step
+        }
+
+    }
+}
+ else if (args[2] == $lex$TIME$)                         # TIME (tags)
+   {
+      if (args[4] == $lex$OFF$) time$tags = $no           #        .... OFF
+      else                      time$tags = $yes          #        .... ON
+   }
+
+      
+###########################################################################
+# DEFINE MAD RANGE (maximum) <yards>
+# DEFINE MAD FACTOR <percent>
+
+else if (args[2] == $lex$MAD$)                      # 1/14/91 Sue & Carol
+    {
+    if (args[3] == $lex$RANGE$)
+        {
+        if (args[4] <= MAD$Max$Detection$Range)
+            MAD$Detection$Range = args[4]
+        else
+            MAD$Detection$Range = MAD$Max$Detection$Range
+        }
+    else if (args[3] == $lex$FACTOR$)
+        {
+        MAD$Performance$Factor = (args[4]/100.0)
+        }
+    else 
+        {
+        ierror = $yes + $yes
+        }
+    }
+
+###########################################################################
+# DEFINE MINEFIELD (check to be every) <minutes> (minutes);
+else if (args[2] == $lex$MINEFIELD$)      # clk 3/93 - E1023
+    {
+     args[3] = args[3]
+     if (args[3] > 180)      # 180 minutes
+       {
+        call echov ("Setting mine field check ")
+        call echov ("to max of once every 3 hours.")
+        call echor
+        args[3] = 180
+       }
+     MineField$CheckFrequency = args[3]
+    }
+######################################################################
+# Air-to-air upgrade algorithm variables                      clk 3/92
+
+#  DEFINE INTERCEPT [
+#      [ RATIO (probability of success as) <percent>                |
+#        MINIMUM (probability of success as) <percent>              |
+#        LOW (altitude/low aem probability of success as) <percent> |
+#        LPD (low altitude/high aem probability of success as) <percent> |
+#        NIGHT (with low aem probability of success as) <percent>   |
+#        NPD (night/high aem probability of success as) <percent>   |
+#        HOLD (minutes from time of intercept) <number>             ] ];
+else if (args[2] == $lex$INTERCEPT$)
+  {
+   if      (args[3] == $lex$RATIO$)    PSI$Ratio  =  args[4] * .01
+   else if (args[3] == $lex$MINIMUM$)  PSI$Min    =  args[4] * .01
+   else if (args[3] == $lex$LOW$)      PSI$Low    =  args[4] * .01
+   else if (args[3] == $lex$LPD$)      PSI$LowPD  =  args[4] * .01
+   else if (args[3] == $lex$NIGHT$)    PSI$Nite   =  args[4] * .01
+   else if (args[3] == $lex$NPD$)      PSI$NitePD =  args[4] * .01
+   else if (args[3] == $lex$HOLD$)     PSI$Hold   =  args[4]
+  }
+
+# DEFINE CONTINUE [ [ DAY | NIGHT] 
+#           (probability of continuing engagement) <percent> (for)
+#           [ BLUE (firing at orange view) | ORANGE (firing at blue view) ] ];
+else if (args[2] == $lex$CONTINUE$)
+  {
+   if (args[3] == $lex$DAY$) 
+     {
+      if (args[5] == $LEX$BLUE$)
+        DayContEngage$Prob$blue = args[4] * .01
+      else
+        DayContEngage$Prob$orange = args[4] * .01
+     }
+
+   else
+     {
+      if (args[5] == $LEX$BLUE$)
+        NightContEngage$Prob$blue = args[4] * .01
+      else
+        NightContEngage$Prob$orange = args[4] * .01
+     }
+  }
+
+# DEFINE TAILCHASE (minutes) <minutes>;
+else if (args[2] == $LEX$TAILCHASE$)
+  {
+   Tail$Chase = args[3]
+  }
+
+# DEFINE REACTION (to attack probability of) <percent>;
+else if (args[2] == $lex$REACTION$)
+  {
+   ReactToAttack$Prob = args[3] 
+  }
+
+# max speed threshold above which air-to-air engagements of cruise missiles
+# will not be permitted     SMM 4/3/92
+# DEFINE CRUISE (missile) SPEED (max for air-to-air engagement) <knots>;
+else if (args[2] == $LEX$CRUISE$)
+  {
+   MaxCruiseMissile$Speed = args[4]
+  }
+
+else if (args[2] == $LEX$JECEWSI$) # jecewsi switch - JFR 8/2/94
+  {
+   if (args[3] == $LEX$YES$)
+      Jecewsi$game = $yes
+   else if (args[3] == $LEX$NO$)
+      Jecewsi$game = $no
+  }
+
+# clk 7/95 (E1419) - To indicate if TMS is participating
+else if (args[2] == $lex$TMS$)
+  {
+   if (args[3] == $lex$On$)
+      TMS$Recording = $yes
+   else if (args[3] == $Lex$Off$)
+      TMS$Recording = $no
+  }
+
+# DEFINE SCALE values for air-to-air enhancements 4/7/92 SMM
+# DEFINE SCALE (probability scalar for) NIGHT <percent>
+# DEFINE SCALE (probability scalar for) SPEED <number> 
+# DEFINE SCALE (probability scalar for) ALTITUDE <number> 
+# DEFINE SCALE (probability scalar for) TARGET (target difficulty multiplier 
+# scalar, overall) <percent> (for) ORANGE (firing at blue view) 
+# DEFINE SCALE (probability scalar for) TARGET (target difficulty 
+# multiplier scalar, overall) <percent> (for) BLUE (firing at orange view) 
+# DEFINE SCALE (probability scalar for) AIR (Firing Opportunity For 
+# Air-To-Air) <percent> (for) ORANGE (firing at blue view) 
+# DEFINE SCALE (probability scalar for) AIR (Firing Opportunity For 
+# Air-To-Air) <percent> (for) BLUE (firing at orange view) 
+else if (args[2] == $LEX$SCALE$)
+  {
+   if (args[3] == $LEX$NIGHT$)
+        {
+         Night$Scale = args[4] * .01
+        }
+   else if (args[3] == $LEX$SPEED$)
+        {
+         Speed$Scale = args[4]
+        }
+   else if (args[3] == $LEX$ALTITUDE$)
+        {
+         Altitude$Scale = args[4]
+        }
+   else if (args[3] == $LEX$TARGET$)
+        {
+         if (args[5] == $LEX$ORANGE$)
+            {
+             Target$Scale$Orange = args[4] * .01
+            }
+         else if (args[5] == $LEX$BLUE$)
+            {
+             Target$Scale$Blue = args[4] * .01
+            }
+        } # end else if args[3] == $LEX$TARGET$
+   else if (args[3] == $LEX$AIR$)
+        {
+         if (args[5] == $LEX$ORANGE$)
+            {
+             AirToAir$Prob$Launch$Orange = args[4] * .01
+            }
+         else if (args[5] == $LEX$BLUE$)
+            {
+             AirToAir$Prob$Launch$Blue = args[4] * .01
+            }
+        } # end else if args[3] == $LEX$AIR$
+  } # end if args[2] == $LEX$SCALE$
+######################################################################
+
+###########################################################################
+# added to integrate RESA data collection into develop -- thegreat 1/88
+# DEFINE DATA (collection) [ ON | OFF ]  -- RJS 6/12/86
+
+else if (args[2] == $lex$DATA$)
+  {
+   if (args[3] == $lex$ON$) 
+     {
+      Skip$DataCollect = NO
+#     trace$engage = YES
+     }
+   else
+     {
+      Skip$DataCollect = YES
+#     trace$engage = NO
+     }
+  }
+
+# added to integrate RESA data collection into develop -- thegreat 1/88
+###  DEFINE ANALYTICAL (run) [ ON | OFF]  -- RJS 6/19/86
+
+else if (args[2] == $lex$ANALYTICAL$)
+  {
+   if (args[3] == $lex$ON$) 
+     analytical$run = YES     
+   else
+     analytical$run = NO
+  }
+
+# added to integrate RESA data collection into develop -- thegreat 1/88
+###########################################################################
+# Random table entry and minute to random setting  -- RJS 6/11/86
+
+else if (args[2] == $lex$MINUTE$)
+  {
+   if (args[3] == $lex$RANDOMIZE$) 
+     if (args[4] < 0) 
+       ierror = $yes
+     else
+       Minute$to$Randomize = args[4]
+   else
+     ierror = $yes + $yes
+  }
+else if (args[2] == $lex$NEXT$)
+  {
+   if (args[3] == $lex$RANDOM$)
+     if ((args[4] < 1) | (random$tbl$entry >= random$tbl$slots))
+       {
+        call echor 
+        call echov ("Random Table full, last value lost!!!") # jb E2144 5/22/00
+        call echor
+       }
+     else 
+       {
+        random$tbl$entry = random$tbl$entry + 1
+        random$tbl$seed(random$tbl$entry) = args[4]
+       }
+   else
+     ierror = $yes + $yes
+  }
+else if (args[2] == $lex$PASSWORD$) 
+  {                # DEFINE PASSWORD [ORANGE|BLUE|CONTROL|TECH] [ | <name> ]
+
+   if (nargs > 3) pword = args[4] # user defined password
+   else           pword = pword2  # this sets it to binary 0
+
+   if      (args[3] == $lex$CONTROL$)  control$password = pword
+   else if (args[3] == $lex$TECH$   )  TechControl$password = pword   # joa - 11/97 (E1825)
+   else if (args[3] == $lex$BLUE$   )  blue$password    = pword
+   else                                orange$password  = pword
+  }
+###########################################################################
+else if (args[2] == $lex$TEST$) # DEFINE TEST (mode) [ON | OFF]
+  {
+   if   (args[3] == $lex$ON$)  Test$Mode = $ON
+   else                        Test$Mode = $OFF
+  }
+###########################################################################
+else if (args[2] == $lex$RANDOM$) # DEFINE RANDOM (fixed) <random>
+  {
+   fixed$RandomValue = args[3]
+   fixed$RandomValue = min(fixed$RandomValue,.99999)  # Do not allow 1.0
+  }
+###########################################################################
+
+# per #H1011 gun effectiveness vs cruise missiles too great
+# define a multiplying factor to reduce guns effectiveness SMM 6/94
+else if ((args[2] == $lex$GUN$) & (args[3] == $lex$CRUISE$))
+  {
+   GunvsCM$Factor = args[4] * .01
+  }
+
+# DTED Terrain DEFINE commands - routines called are in lbelevation.rat
+else if (args[2] == $lex$TERRAIN$)     # joa 11/95 (E1422)
+  {
+   if (args[3] == $lex$MASKING$)   # Set terrain masking on/off
+     call odefine_terrain_masking_state (nargs, args, ierror)
+   else if (args[3] == $lex$WORLDWIDE$) # Set whether RESA Worldwide Elev used
+      call odefine_terrain_worldwide (nargs, args, ierror) 
+   else if (args[3] == $lex$ELEVATION$) # Set constant elevation
+     call odefine_terrain_elevation (nargs, args, ierror)  # joa 8/98 (E2016)
+   else                            # Process define elevation command
+     call odefine_terrain (nargs, args, ierror)
+  }
+else if (args[2] == $lex$SHORELINE$)
+  {
+   if (args[3] == $lex$CROSSING$)  # Set shoreline crossing check on/off
+     call odefine_shoreline_crossing (nargs, args, ierror)
+  }
+###########################################################################
+else if (args[2] == $lex$FUEL$)           # joa 2/96 (E1467)
+  {                                       # routines are in wgopfuel.rat
+   if (args[3] == $lex$FACTOR$)           # DEFINE FUEL FACTOR (for) [ WAVE | HEADING ]
+     {
+      if (args[4] == $lex$WAVE$)          # Set fuel consumption wave height factors
+        call odefine_wave_factor (nargs, args, ierror)
+      else if (args[4] == $lex$HEADING$)  # Set fuel consumption heading factors
+        call odefine_heading_factor (nargs, args, ierror)
+     }
+   else                                   # Set fuel consumption on/of by unit type
+      call odefine_fuel (nargs, args, ierror)
+  }
+###########################################################################
+else if (args[2] == $lex$MAINTENANCE$)      # JOA 9/02 (E2306)
+  {
+    Parg = 3
+    if (args[3] != $lex$ON$ & args[3] != $lex$OFF$) Parg = 4    
+
+    if (args[Parg] == $lex$ON$) 
+        AircraftMaintenance$Flag = YES
+    else if (args[Parg] == $lex$OFF$) 
+        AircraftMaintenance$Flag = NO
+  }
+
+###########################################################################
+else if (args[2] == $lex$DETACH$)
+  {
+    Parg = 3
+
+    if (args[Parg] == $lex$YES$) 
+        Detached$Mode = YES
+    else if (args[Parg] == $lex$NO$) 
+        Detached$Mode = NO
+  }
+###########################################################################
+else if (args[2] == $lex$BASEPORT$)
+  {
+    Parg = 3
+    BASE$PORT = int(args[Parg]) * 1000
+  }
+###########################################################################
+else if (args[2] == $lex$SYSTEM$ & args[3] == $lex$FAILURE$) # JOA 9/02 (E2306)
+  {
+    Parg = 4
+    if (args[4] != $lex$ON$ & args[4] != $lex$OFF$) Parg = 5    
+
+    if (args[Parg] == $lex$ON$)
+       {
+        if (Parg == 4)
+           { 
+            AircraftSystemFailure$Flag = $ON
+            BoatSystemFailure$Flag = $ON
+           }
+        else if (args[4] == $lex$AIRCRAFT$)
+           {
+            AircraftSystemFailure$Flag = $ON
+           }
+        else if (args[4] == $lex$BOAT$)
+           {
+            BoatSystemFailure$Flag = $ON
+           }
+       }
+    else if (args[Parg] == $lex$OFF$)
+       {
+        if (Parg == 4)
+           { 
+            AircraftSystemFailure$Flag = $OFF
+            BoatSystemFailure$Flag = $OFF
+           }
+        else if (args[4] == $lex$AIRCRAFT$)
+           {
+            AircraftSystemFailure$Flag = $OFF
+           }
+        else if (args[4] == $lex$BOAT$)
+           {
+            BoatSystemFailure$Flag = $OFF
+           }
+       }
+  }
+###########################################################################
+
+
+
+
+###########################################################################
+#   1     2       3            4                                5    5
+# DEFINE AUTO ENGAGEMENT (of) TBM (as target for ship or air) [ ON | OFF ];
+
+#   1     2       3              4                      5     5      6
+# DEFINE AUTO ENGAGEMENT (of) AIRCRAFT (if over land) [ ON |  OFF <number> ];
+
+# AutoEngageTBM$Flag           = $NO    # Default is restrict auto SAM engage of TBM - joa 6/03
+# AutoEngageAircraft$Rng       = 99999  # Default allows auto SAM engage of all aircrft - JOA 6/02
+
+
+else if (args[2] == $lex$AUTO$ & args[3] == $lex$ENGAGEMENT$)
+    {
+    if (args[4] == $lex$TBM$)
+        {
+        if (args[5] == $lex$ON$) AutoEngageTBM$Flag = $ON
+        else                     AutoEngageTBM$Flag = $OFF
+        }
+    else if (args[4] == $lex$AIRCRAFT$)
+        {
+        if (args[5] == $lex$ON$) AutoEngageAircraft$Rng = 99999
+        else                     AutoEngageAircraft$Rng = args[6]
+        }                      
+    else
+        ierror = $yes + $yes
+    }
+
+else
+    ierror = $yes + $yes
+
+end
+

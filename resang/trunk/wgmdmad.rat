@@ -1,0 +1,355 @@
+ 
+              #        File wgmdMAD.rat    (MAD Sensor Model)
+ 
+define (MAD$Max$Detection$Altitude, 2200)    # Maximum aircraft altitude (ft)
+                                             # for possible submarine detection
+define (Max$Detectable$Sub$Depth, 1000)      # Max sub depth (ft) for detection
+define (MAD$Search$Range, 5)                 # Five nautical mile search range
+ 
+define(BBImplicit,Implicit None)
+define ($debug,)
+ 
+include "bbcode.inc"
+include "bbctl.inc"
+include "bbacc.inc"
+include "bbdeq.inc"
+include "bbrmt.inc"
+include "bbunt.inc"
+include "bbvue.inc"
+include "macros.inc"
+define (BBImplicit, Implicit None)                  # MJC 7/13/2K (E2145)
+
+Subroutine MADMOD
+##################################################################
+#
+#    Purpose:  The MAD non-acoustic sensor model is called to
+#    determine whether any aircraft with activated MAD sensors
+#    detect submarine targets.
+#
+#    Called By: WARCYC  (wgmain.rat)
+#
+#    Calls:     compute_sr
+#               report_MAD_detection
+#
+#    Tables:    UNT
+#
+#    Date:      January 1991
+#
+#    Author:    Susan Miller and Carol Kropp
+#
+##################################################################
+BBcommon
+BBDeclare  (DEQ$Pointer,
+            UNT$View$I,
+            UNT2$Status$I)                              # MJC 7/11/2K (E2145)
+literal CSTRIP8                                         # MJC 7/13/2K (E2145)
+integer    unt$Pointer, unt2$Pointer
+integer    ac_altitude, sub_depth, MAD_on, unt_status
+integer*4  ACC$Pointer
+real*4     Range, Bearing
+real*4     ac_latitude, ac_longitude
+real*4     sub_heading, sub_latitude, sub_longitude
+real*4     slant_range
+ 
+#---------------------------------------------------------------------
+#   First, determine whether the unit is a flying aircraft equipped
+#   with MAD and MAD has been turned ON.  If so, is the aircraft
+#   flying at an altitude at or below the maximum detection altitude
+#   (2200 feet)?  If the above conditions are met, determine if any
+#   submarines not in the plane view are within a five mile range
+#   and are at a depth above 1000 feet.  If there are any submarines
+#   which meet these conditions, compute the slant range and adjust
+#   it according to the submarine heading.  If the adjusted slant
+#   range is less than or equal to the currently defined value for
+#   the MAD range, then a detection will occur.
+#---------------------------------------------------------------------
+ 
+For (UNT$Pointer$FIRST; UNT$Pointer$OK; UNT$Pointer$NEXT)
+   {
+    if (Xunt$Type$i != $AIR$Code)    # if not an aircraft
+       NEXT
+ 
+    if (xUNT$GhostedUnit$I == $YES)  # skip ghosted aircraft SMM 5/18/92
+       NEXT
+ 
+    unt_status = Xunt$status$i
+    if (unt_status == $AwaitingLaunch$code |  # if awaiting launch,
+        unt_status == $beingdeleted$code)     # or being deleted
+       NEXT
+ 
+    ACC$Pointer = Xunt$AccPntr$i
+    if (xACC$MADcapable$i == $NO)    # if not equipped with MAD
+       NEXT
+ 
+    MAD_on = $NO
+    FOR_DEQ_CHAIN
+       {
+        if (Xdeq$IDENT$i != $MAD$code)
+           NEXT
+        if ((Xdeq$ON$i == $YES) & (Xdeq$TimeWhenUse$f <= game$time))
+           MAD_on = $YES
+        BREAK
+       }
+    if (MAD_on == $NO)
+       NEXT
+ 
+    ac_altitude = Xunt$TrueAltDepth$i     # Altitude of aircraft
+    if (ac_altitude > MAD$Max$Detection$Altitude)  # if flying above max detection altitude
+       NEXT
+ 
+    ac_latitude  = xUNT$TrueLatitude$F
+    ac_longitude = xUNT$TrueLongitude$F
+ 
+    if (trace$MAD != $No)
+       {
+        call echor
+        call echov (" Mad defined detection range (yrds) =")
+        call echoi (MAD$Detection$Range)
+        call echov (" Mad defined performance factor =")
+        call echof (MAD$Performance$Factor, 3)
+        call echor
+        call echov ("  Game-Minute=")
+        call echoi (Game$Minute)
+        call echor
+        call echov (" Aircraft : ")
+        call echohn (xUNT$name$c,$$MaxLit)
+        call echov ("    altitude (ft) = ")
+        call echoi (ac_altitude)
+        call echov ("    true latitude = ")
+        call echof (ac_latitude,3)
+        call echov ("    true longitude = ")
+        call echof (ac_longitude,3)
+        call echov ("    heading error = ")
+        call echof (xUNT$HeadingError$f,3)
+       }
+ 
+#*************************************************************************
+ 
+#------------------------------------------------------------------
+#   The detector aircraft status is ok, it is equipped with a
+#   MAD sensor, the MAD sensor has been activated, and the
+#   aircraft is flying at an altitude below the maximum detection
+#   altitude (2200 feet).  Now determine if there are any target
+#   submarines within a five mile range at a depth above 1000
+#   feet.  Targets are screened as to unit type, view, status,
+#   depth, and latitude and longitude difference.
+#
+#   If there are any qualified targets, compute the slant range
+#   and adjust the slant range for the submarine heading.
+#   If the adjusted slant range is not greater than the defined
+#   MAD range a MAD detection occurs.
+#------------------------------------------------------------------
+ 
+    unt$View$i = Xunt$View$i    # Save for comparison with targets
+ 
+    For(unt2$Pointer$FIRST;unt2$Pointer$OK;unt2$Pointer$NEXT)
+       {
+        if (Xunt2$SuperType$i != $Submarine$SuperCode)    # if not a submarine
+           NEXT
+ 
+        if (Xunt2$View$i == unt$View$i)     # if in the same view
+           NEXT
+ 
+        unt2$status$i = Xunt2$status$i
+        if (unt2$status$i == $beingdeleted$code)   #$% if being deleted
+           NEXT
+ 
+        if (Xunt2$NeverDetect$i == YES) next        # joa 3/05 per_never
+ 
+        sub_depth = Xunt2$TrueAltDepth$i
+        if (sub_depth > Max$Detectable$Sub$Depth) # sub is below 1000 feet
+           NEXT
+ 
+        sub_latitude = (Xunt2$TrueLatitude$F)
+        sub_longitude = (Xunt2$TrueLongitude$F)
+ 
+        Call RLL2RB(_           #Rhumb line Lat/Lon to Range/Bearing
+            ac_latitude,        #latitude of 1st pt (input)
+            ac_longitude,       #longitude of 1st pt (input)
+            COS(ac_latitude),   #cos of lat of 1st pt (input)
+            sub_latitude,       #latitude of 2nd pt (input
+            sub_longitude,      #longitude of 2nd pt (input)
+            COS(sub_latitude),  #cos of lat of 2nd pt (input)
+            Range,              #range in nmi (output)
+            Bearing)            #bearing in radians (output)
+ 
+    if (trace$MAD != $No)
+       {
+        call echor
+        call echov (" Possible sub target : ")
+        call echohn (xUNT2$name$c,$$MaxLit)
+        call echor
+        call echov ("    depth (ft) = ")
+        call echoi (sub_depth)
+        call echov ("    course (radians) = ")
+        call echof (Xunt2$TrueCourse$F, 3)
+        call echor
+        call echov ("    true latitude = ")
+        call echof (sub_latitude, 3)
+        call echov ("    true longitude = ")
+        call echof (sub_longitude, 3)
+        call echor
+        call echov ("    range (nmi) = ")
+        call echof (range, 3)
+        call echov ("    true bearing (radians) = ")
+        call echof (bearing, 3)
+       }
+ 
+        if (range > MAD$Search$Range)   # if out of range
+           NEXT
+ 
+        sub_heading = (Xunt2$TrueCourse$F)
+        Call compute_sr (_               # Compute the adjusted slant range
+            ac_altitude,     # feet
+            sub_depth,       # feet
+            sub_heading,     # radians
+            range,           # nautical miles
+            slant_range)     # feet (output)
+ 
+        if (slant_range > (MAD$Detection$Range * 3))    # slant_range (feet)
+            NEXT                                        # MAD$Detect. (yards)
+ 
+        if (trace$MAD != $No)
+           {
+            call echor
+            call echov (" Detected sub target : ")
+            call echohn (xUNT2$name$c,$$MaxLit)
+            call echor
+           }
+ 
+        Call report_MAD_detection (_  # Report the MAD detection
+             unt$Pointer,
+             unt2$Pointer,
+             range,
+             bearing)
+       }
+   }
+Return
+END
+
+ 
+Subroutine compute_sr (ac_altitude,      # aircraft altitude (feet)
+                       sub_depth,        # submarine depth (feet)
+                       sub_heading,      # submarine heading (radians)
+                       range,            # range between aircraft and sub (nmi)
+                       adj_slant_range)  # the adjusted slant range (feet)
+ 
+#--------------------------------------------------------------------
+#   Purpose:   compute_sr computes the slant range between the
+#              aircraft and the submarine.  The slant range is then
+#              adjusted to account for MAD performance as the
+#              submarine heading approaches east-west.
+#
+#   Called By: MAD_MOD
+#
+#   Calls:     ABS    SQRT
+#
+#   Tables:    None
+#--------------------------------------------------------------------
+BBcommon
+ 
+integer*4  ac_altitude, sub_depth, acute_angle
+real*4     sub_heading, range, slant_range, adj_slant_range
+real*4     temp1, temp2
+ 
+# Calculate the slant range
+    temp1 = (ac_altitude + sub_depth) ** 2
+    temp2 = (range * 6000) ** 2
+    slant_range = SQRT (temp1 + temp2)
+ 
+    sub_heading = sub_heading * (180./$pi) + .5  # convert sub_heading to degs
+ 
+# Calculate the acute angle between the submarine heading and north-south
+    if (sub_heading < 90)            # 0 <= heading < 90
+       acute_angle = sub_heading
+    else if (sub_heading < 270)      # 90 <= heading < 270
+       acute_angle = ABS (sub_heading - 180)
+    else                             # 270 <= sub_heading < 360
+       acute_angle = ABS (sub_heading - 360)
+ 
+# Adjust the slant range to account for potential reduction in
+# MAD performance as the submarine course approaches east-west
+    adj_slant_range = slant_range * (1 + MAD$Performance$Factor * acute_angle)
+ 
+    if (trace$MAD != $No)
+        {
+         call echor
+         call echov (" Slant range to target (ft) = ")
+         call echof (slant_range,3)
+         call echor
+         call echov (" Acute angle between sub heading & N/S (degrees) =")
+         call echoi (acute_angle)
+         call echor
+         call echov (" Adjusted slant range to target (ft) = ")
+         call echof (adj_slant_range, 3)
+       }
+ 
+Return
+END
+
+ 
+Subroutine report_MAD_detection (unt$pointer,
+                                 unt2$pointer,
+                                 range,
+                                 bearing)
+ 
+#--------------------------------------------------------------------
+#   Purpose:   report_MAD_detection loads the detection data into
+#              the detection table.
+#
+#   Called By: MAD_MOD
+#
+#   Calls:     LCLRAS  APPLL
+#
+#   Tables:    UNT
+#--------------------------------------------------------------------
+ 
+BBcommon
+ 
+Integer*4       unt$Pointer, unt2$Pointer
+Real*4          app_sub_lat, app_sub_long
+Real*4          range, bearing, app_bearing
+Integer*4       rounded_bearing, rounded_range
+ 
+    app_bearing = bearing + xunt$headingerror$f  # compute target app bearing
+                                                 # in radians
+    $ang2pi (app_bearing)                        # insure between 0 and 2*pi
+ 
+ 
+    call appll(_                          # get apparent lat/long of target
+               xUNT$assumedlatitude$f,    # assumed lat of a/c
+               xUNT$assumedlongitude$f,   # assumed long of a/c
+               range,                     # range to target (nmi)
+               app_bearing,               # apparent bearing to target (radians)
+               app_sub_lat,               # returned apparent target lat
+               app_sub_long)              # returned apparent target long
+ 
+    rounded_range = range + .5                   # round & store range
+    rounded_bearing = app_bearing * (180./$pi) + .5 # convert bearing to degs
+    if (rounded_bearing >= 360)                  # adjust bearing to be between
+       rounded_bearing = rounded_bearing - 360   # 0 - 359 degrees
+ 
+    if (trace$MAD != $No)
+        {
+         call echor
+         call echov (" rounded range = ")
+         call echoi (rounded_range)
+         call echov ("     apparent bearing = ")
+         call echof (app_bearing, 3)
+         call echor
+         call echov (" apparent sub lat =  ")
+         call echof (app_sub_lat, 3)
+         call echor
+         call echov (" apparent sub long =  ")
+         call echof (app_sub_long, 3)
+       }
+ 
+# enter active radar detection data into local detection table
+    Call LCLRAS (unt$pointer, unt2$pointer,
+                 rounded_bearing,
+                 app_sub_lat, app_sub_long,
+                 rounded_range,
+                 $Sub$Code, $MAD$code)
+ 
+Return
+END

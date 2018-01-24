@@ -1,0 +1,953 @@
+#$% Reused/modified from LANL's AWSIM translator
+
+include "alsp.inc"               
+include "alsp_resa.inc"         
+
+define (BBImplicit, Implicit None) # SMM 3/00
+
+Subroutine ALSP_Init (starttime, refresh_needed_flag)
+########################################################################
+#                                                                      #
+#   ALSP_INIT - this subroutine sends the messges required for RESA    #
+#               to join the confederation, register filter classes and #
+#               attributes, and other necessary messages prior to the  #
+#               start of the simulation.                               #
+#                                                                      #
+#   Modified:   Carol Kropp - 9/94                                     #
+#               Removed time regulation/contraint info (ALSP Protocol  #
+#               for the JOIN() message changed.                        #
+#                                                                      #
+#               Carol Kropp - 9/95 (E1457)                             #
+#               After filter criteria is sent, wait for the ACM to     #
+#               send the SIGNAL(REGISTER_OBJECTS) message.  (This will #
+#               limit the amount of refreshing required when joining   #
+#               the confederation for the first time.)  After the      #
+#               signal is received, send unit data.  The reply to the  #
+#               id request is sent before the signal, so removed the   #
+#               advance request call.  A message is sent to control    #
+#               stations to inform them of join/signal.                #
+#                                                                      #
+#               Carol Kropp - 9/95 (E1456)                             #
+#               Added refresh_request calls for ground.maneuver...     #
+#                                                                      #
+#               Carol Kropp - 12/95 (E1524)                            #
+#               Made asking for refresh requests optional.             #
+#                                                                      #
+#               Carol Kropp - 12/96 (E1693)                            #
+#               Maximum ALSP message length increased to 20000 (msg).  #
+#                                                                      #
+#               Carol Kropp - 9/97 (E1892)                             #
+#               Added call to register the game rate at join.          #
+#                                                                      #
+########################################################################
+BBCommon
+
+include "alsp_io_rat.inc"         
+
+integer  refresh_needed_flag
+
+#$% 'JOIN' declarations
+  integer         confed
+  real            lookahead, starttime, gm, newgametime
+      
+  integer         msg_len, err
+%      character*20000   msg
+  character       vmsg[80]
+  logical         msg_wait
+
+#$% Other declarations
+ integer   entry_point_flag
+integer	   err_val
+integer    user_msg_len
+real       game_rate
+character  user_msg[80]
+
+entry_point_flag = $no
+
+
+repeat        # done so that this code will ONLY be executed if the   # E2143
+  {           # subroutine entry point is called rather than the subroutine
+   break                                                        # E2143 DEW 9/99
+   entry Join_ALSP_Confed (starttime, refresh_needed_flag)
+   entry_point_flag = $yes
+  }
+
+  if (entry_point_flag == $no)     # only want this code to be done once
+    {
+	 call alsp_open_read(err_val)
+	 call alsp_open_write(err_val)
+     if (Game$Time > Time$Step &                # if not the start of the game
+         ALSP$Game == $CurrentlyJoined$Code)    # and went down while joined
+       {   # If this is not the start of the game, then send a warning
+           # as the game was previously joined to an ACM.  If the ACM connection
+           # went down as well, there are two options:  1) In bbtest,
+           # set the variable ALSP$Active = 0 before starting swar and JOIN 
+           # once the game is up, or 2) RESIGN and then JOIN.
+        call echov ("ALSP IS ACTIVE:  ALSP confederation #")
+        call echoi (confederation)
+        call echov (" as actor #")
+        call echoi (actor)
+        call echor
+        call echov ("   -- IF RESIGNED AT THE ACM LEVEL RESIGN ")
+        call echov ("AND THEN JOIN AT A CONTROL STATION")
+        call echor
+
+        msg_len = 0 
+        call smovv ("ALSP IS ACTIVE:  ALSP confederation #", vmsg, msg_len)
+        call smovi (confederation, vmsg, msg_len)
+        call smovv (" as actor #", vmsg, msg_len)
+        call smovi (actor, vmsg, msg_len)
+        call send_  ($Neutral$View, 0, msg_len, vmsg)
+        msg_len = 0 
+        call smovv ("  IF RESIGNED AT THE ACM LEVEL,", vmsg, msg_len)
+	call smovv (" RESIGN AND THEN JOIN", vmsg, msg_len) # SMM 3/00
+        call send_  ($Neutral$View, 0, msg_len, vmsg)
+        return
+       }
+    }
+
+
+#$% JOIN the confederation
+    confed     = confederation
+    lookahead = TIME$STEP / 60.0 #send fraction of hour
+
+    call alsp_join (lookahead, node_len, name_len, alsp_actor_name)
+
+  msg_wait = .true. 
+
+  msg(1:8) = ""
+  while (msg(1:8) .ne. 'JOIN_ACK')
+    {
+     call alsp_read_mbx(msg,msg_len,msg_wait,err)
+     if (err .ne. 0)
+       {
+        call echov ("ALSP_INIT: error trying")
+		call echov (" to read join acknowledge") # SMM 3/00
+        call echor
+        call echov ("error = ")
+        call echoi (err)
+        call echor
+        return
+       }
+    }
+    read(msg(10:msg_len-1),'(f7.0)') gm  #read real variable from string
+	gm = gm * 60. # hours to minutes
+	if (gm < game$time)
+	{
+ 	 user_msg_len = 0
+  	 call smovv ("Federation game time ", user_msg, user_msg_len)
+     call smovi (int(gm), user_msg, user_msg_len)
+  	 call smovv (" less than RESA game time ", user_msg, user_msg_len)
+ 	 call smovi (int(game$time), user_msg, user_msg_len)
+ 	 call smovv (". Join order aborted.  Restart RESA from time before federation time.", user_msg, user_msg_len)
+ 	 call send_  ($Neutral$View, 0, user_msg_len, user_msg)
+	 return
+	}
+
+    game$time=gm				# Set resa game time to federation game time
+
+  if (Game$Pause == $yes)       # register the current game rate
+    game_rate = 0.0             # clk 9/97 (E1892)
+  else
+    game_rate = game$rate
+  call alsp_register_rate (game_rate)
+
+  # register class attributes and filters
+  call ALSP_Register_Classes ()
+
+  # Send the filter interaction allow msgs
+  call ALSP_Filter_Interactions () 
+
+  # ask the acm for id's (Note:  This is so that the ATV will not
+  # complain, RESA creates ids based on a counter and the actor number.
+  # The routine which handles the incoming id message is a may update
+  # the id counter.)   # clk 2/28/94
+  call ALSP_Gen_Unique_ID (30000)    # 30,000 sounds big enough
+
+  if (refresh_needed_flag == $yes)
+    {
+     # ask for refresh requests on classes of objects RESA will ghost - clk 2/94
+     call alsp_send_refresh ($dispatch_message, -2, $air_ballistic_missile, 0)
+     call alsp_send_refresh ($dispatch_message, -2, $air_cruise_missile, 0)
+     call alsp_send_refresh ($dispatch_message, -2, $air_fixedwing, 0)
+     call alsp_send_refresh ($dispatch_message, -2, $air_helicopter, 0)
+     call alsp_send_refresh ($dispatch_message, -2, $air_helicopter_airlift, 0)
+     call alsp_send_refresh ($dispatch_message, -2, $ground_base, 0)
+     call alsp_send_refresh ($dispatch_message, -2, $sea_subsurface, 0)
+     call alsp_send_refresh ($dispatch_message, -2, $sea_torpedo, 0)
+     call alsp_send_refresh ($dispatch_message, -2, $sea_countermeasure, 0)
+     call alsp_send_refresh ($dispatch_message, -2, $sea_sonobuoy, 0)
+     call alsp_send_refresh ($dispatch_message, -2, $sea_mine, 0)
+     call alsp_send_refresh ($dispatch_message, -2, $sea_surface_boat, 0)
+     call alsp_send_refresh ($dispatch_message, -2, $sea_surface_ship, 0)
+     call alsp_send_refresh ($dispatch_message, -2, $alsp_class_ground_maneuver_himad, 0)
+     call alsp_send_refresh ($dispatch_message, -2, $alsp_class_ground_maneuver_allrad, 0)
+     call alsp_send_refresh ($dispatch_message, -2, $alsp_class_ground_maneuver_radar, 0)
+    call alsp_send_refresh ($dispatch_message, -2, 
+                             $alsp_class_ground_maneuver_tel, 0)
+     call alsp_send_refresh ($dispatch_message, -2, 
+                             $alsp_class_ground_maneuver_combat, 0)
+     call alsp_send_refresh ($dispatch_message, -2, 
+                             $alsp_class_ground_maneuver_support_convoy, 0)
+     call alsp_send_refresh ($dispatch_message, -2, 
+                             $alsp_class_ground_maneuver_support_unit, 0)
+     call alsp_send_refresh ($dispatch_message, -2, 
+                             $alsp_class_ground_maneuver_support_unit_tcu, 0)
+    }
+
+  if (ALSP$BlueGhost$View == 0)       # if not defined in sinit/gameinit
+    ALSP$BlueGhost$View = $FirstBlue$View
+  if (ALSP$BlueAirSupportGhost$View == 0)    # JOA 12/02 (E2320)
+    ALSP$BlueAirSupportGhost$View = ALSP$BlueGhost$View
+  if (ALSP$OrangeGhost$View == 0)     # if not defined in sinit/gameinit
+    ALSP$OrangeGhost$View = $FirstOrange$View
+
+  ALSP$Active = $yes
+  ALSP$Game   = $CurrentlyJoined$Code
+
+  user_msg_len = 0
+  call smovv ("Game has joined ALSP confed #", user_msg, user_msg_len)
+  call smovi (confederation, user_msg, user_msg_len)
+  call smovv (" as actor #", user_msg, user_msg_len)
+  call smovi (actor, user_msg, user_msg_len)
+  call smovv (" - Awaiting SIGNAL from ACM.", user_msg, user_msg_len)
+  call send_  ($Neutral$View, 0, user_msg_len, user_msg)
+
+  msg_wait = .true. 
+  call alsp_read_mbx (msg, msg_len, msg_wait, err)    # clk - 9/95 (E1457)
+  while (msg(1:24) .ne. 'SIGNAL(REGISTER_OBJECTS)')
+    {
+     if (err != 0)
+       {
+        call echov ("ALSP_INIT:  Error trying to read ")
+        call echov ("while waiting for SIGNAL")
+        call echor
+        call echov ("error = ")
+        call echoi (err)
+        call echor
+       }
+     else if (msg_len > 0)
+       call alsp_invoke_parser (msg, msg_len)
+     call alsp_read_mbx (msg, msg_len, msg_wait, err)
+    }
+ALSP$Game = $JoinInProgress$code
+call ALSP_Send_Unit_Updates
+ALSP$Game =$CurrentlyJoined$Code
+
+return
+end
+
+
+#
+#  Subroutine that is called to quit from ALSP confederation
+#
+Subroutine alsp_quit
+BBCommon
+
+  call alsp_resign ($alsp_resign_no_param)
+  ALSP$Active = $no
+  ALSP$Game   = $PreviouslyJoined$Code
+
+return
+end
+
+
+%      integer function char_length (str)
+%      implicit none
+%      character*(*) str
+%      character*511 str_tmp
+%          integer i
+%      str_tmp = str
+%      i = 511
+%      do while (i .gt. 0 .and. str_tmp(i:i) .eq. ' ')
+%      i = i -1
+%      end do
+%      char_length = i
+%      return
+%      end
+
+
+subroutine Get_ALSP_Logicals
+##################################################################
+#$%
+#$% Purpose:    Get_ALSP_Logicals reads from the logicals table
+#$%             the confederation number, actor number, actor
+#$%             name and the computer node name.
+#$%
+#$% Called By:  WARCYC     (in the initialization phase)
+#$%
+#$% Calls:      sys$trnlog
+#$%             char_length
+#$%
+#$% Tables:     None
+#$%
+#$% Date:       July 1992
+#$%
+#$% Author:     Moved from ALSP_INIT
+#$%
+##################################################################
+BBcommon
+include "alsp_io_rat.inc"         
+
+  VMScharacter    alsp_actor_number*6, alsp_confed_number*6, node_name*100
+  integer         actor_num_len, confed_len
+  integer         len_trim
+
+     print *,"ALSP Configuration Information:"
+
+     #$% get ALSP actor's name from bb
+     alsp_actor_name = ""
+     name_len = 0
+     call vmovHn(Simulator$name,8,alsp_actor_name, name_len)
+     name_len = len_trim(alsp_actor_name)
+     alsp_actor_name[name_len+1:name_len+1] = char(EOS)
+     print *,"    ALSP_Actor_Name    = '" // alsp_actor_name[1:name_len] // "'"
+
+     #$% get ALSP actor's number from logical
+     alsp_actor_number = ""
+     actor = ALSPActor$Number
+     actor_num_len = 0
+     call vmoviz (actor, 2, alsp_actor_number, actor_num_len)
+
+     print *,"    ALSP_Actor_Number  = '" // alsp_actor_number[1:actor_num_len] // "'", actor
+
+     #$% get ALSP confederation number from logical
+     alsp_confed_number = ""
+     confederation = ALSPConfederation$Number
+     confed_len = 0
+     call vmoviz (confederation, 2, alsp_confed_number, confed_len)
+
+     print *,"    ALSP_Confed_Number = '" // alsp_confed_number[1:confed_len] // "'",confederation
+
+     #$% get ALSP node name from logical
+     node_name = ""
+     call hostname (node_name)
+     node_len = len_trim(node_name)
+     node_len = min(29, node_len)
+     alsp_node_name = node_name(1:node_len)
+     alsp_node_name[node_len+1:node_len+1] = char(EOS)
+     print *,"    ALSP_Node_Name     = '" // alsp_node_name[1:node_len] // "'"
+
+     #$% and print baseport
+     print *,"    Baseport for hubs  = ", BASE$PORT
+
+return
+end
+
+
+subroutine ALSP_Register_Classes ()
+#########################################################################
+#$%
+#$% Purpose:    ALSP_Register_Classes send out the register attribute
+#$%             and class filter messages for all classes RESA is intending
+#$%             to send and receive information on.
+#$%
+#$% Called By:  ALSP_Init
+#$%
+#$% Calls:      ALSP_Reg_Attr       <transifsend.c>
+#$%             ALSP_Filter_Class   <transifsend.c>
+#$%             print
+#$%
+#$% Tables:     None
+#$%
+#$% Date:       Feb. 28, 1994
+#$%
+#$% Author:     Code moved from ALSP_Init
+#$%
+#$% Modified:   Carol Kropp 9/94
+#$%             Added update attributes for the REGISTER_ATTRS message.
+#$%             ALSP Protocol was changed so that the ACM may do more
+#$%             message control.
+#$%
+#$%             Susan Miller 3/95  CT 95
+#$%             Changed boats back to same as surface ships now that MTWS
+#$%             is sending boat info.
+#$%
+#$%             Susan Miller - 9/95 (E1460)
+#$%             Added $emitter to cruise missile interest and update
+#$%             attribute set.
+#$%
+#$%             Carol Kropp - 9/95 (E1456)
+#$%             Added information for ground air defense units (displaying).
+#$%             Removed debug statements, which printed out the attribute
+#$%             codes and information about when a call was made and returned.
+#$%
+#$%             Carol Kropp - 12/96 (E1724)
+#$%             Added status and mission attributes to the list of attributes
+#$%             that RESA will update for ships (for the AMP interface).
+#$%
+#$%             Susan Miller - 1/97 (E1694) 
+#$%             Increased number of zeros in attribute, interest and update 
+#$%             arrays by 1 in data statements because of increase in MAX_PARAM.
+#$%
+#$%             Stephanie Paden - 2/98 (E1907)
+#$%             Added IFF related attributes to the create, interest and
+#$%             update sets.  Total number of new attributes = 9. 
+#$%
+################################################################################
+BBCommon
+
+#$% REGISTER_ATTR declarations
+#$% MAX_PARAM is defined in alsp.inc (the max number of create/update attributes)
+#$% MAX_PARAM is currently 74
+
+  integer         class, num_interest_attr, num_create_attr, num_update_attr
+
+  integer         aircraft_create_attributes[MAX_PARAM], 
+                  aircraft_interest_attributes[MAX_PARAM],
+                  aircraft_update_attributes[MAX_PARAM]
+
+  integer         cruise_create_attributes[MAX_PARAM], 
+                  cruise_interest_attributes[MAX_PARAM],
+                  cruise_update_attributes[MAX_PARAM]
+
+  integer         tbm_create_attributes[MAX_PARAM], 
+                  tbm_interest_attributes[MAX_PARAM],
+                  tbm_update_attributes[MAX_PARAM]
+
+  integer         surface_create_attributes[MAX_PARAM], 
+                  surface_interest_attributes[MAX_PARAM],
+                  surface_update_attributes[MAX_PARAM]
+
+  integer         subsurface_create_attributes[MAX_PARAM], 
+                  subsurface_interest_attributes[MAX_PARAM],
+                  subsurface_update_attributes[MAX_PARAM]
+
+  integer         torpedo_create_attributes[MAX_PARAM], 
+                  torpedo_interest_attributes[MAX_PARAM],
+                  torpedo_update_attributes[MAX_PARAM]
+
+  integer         countermeasure_create_attributes[MAX_PARAM], 
+                  countermeasure_interest_attributes[MAX_PARAM],
+                  countermeasure_update_attributes[MAX_PARAM]
+
+  integer         sonobuoy_create_attributes[MAX_PARAM], 
+                  sonobuoy_interest_attributes[MAX_PARAM],
+                  sonobuoy_update_attributes[MAX_PARAM]
+
+  integer         minefield_create_attributes[MAX_PARAM], 
+                  minefield_interest_attributes[MAX_PARAM],
+                  minefield_update_attributes[MAX_PARAM]
+
+  integer         sweeparea_create_attributes[MAX_PARAM], 
+                  sweeparea_interest_attributes[MAX_PARAM],
+                  sweeparea_update_attributes[MAX_PARAM]
+
+  integer         base_create_attributes[MAX_PARAM], 
+                  base_interest_attributes[MAX_PARAM],
+                  base_update_attributes[MAX_PARAM]
+
+  integer         ground_create_attributes[MAX_PARAM], 
+                  ground_interest_attributes[MAX_PARAM],
+                  ground_update_attributes[MAX_PARAM]
+
+#$% FILTER_CLASS declarations
+  integer         condition
+
+
+#$% REGISTER_ATTR data statements
+  data aircraft_create_attributes     /$id,        $class,      $latitude,    
+                                       $longitude, $altitude,   $unit_type,
+                                       $heading,   $name,       $call_sign, 
+                                       $side,      $size_attr,  $speed,
+                                       $status,    61*0/
+  data aircraft_interest_attributes   /$mission,   $emitter,    $alsp_target_loc,
+                                       $alsp_orbit_points,      $alsp_attr_cw2_factors,
+                                       $iff,       68*0/
+  data aircraft_update_attributes     /$id,        $class,      $latitude,    
+                                       $longitude, $altitude,   $unit_type,  
+                                       $heading,   $name,       $call_sign, 
+                                       $side,      $size_attr,  $speed,
+                                       $status,    $mission,    $emitter,     
+                                       $alsp_target_loc,        $alsp_orbit_points,
+                                       $iff,       $ato_id,     55*0/
+
+  data cruise_create_attributes       /$id,        $class,      $latitude,    
+                                       $longitude, $altitude,   $unit_type,  
+                                       $heading,   $name,       $side,
+                                       $speed,     64*0/
+  data cruise_interest_attributes     /$status,    $alsp_target_loc,
+                                       $size_attr, $emitter,    
+                                       $alsp_attr_cw2_factors,  69*0/
+  data cruise_update_attributes       /$id,        $class,      $latitude,    
+                                       $longitude, $altitude,   $unit_type,  
+                                       $heading,   $name,       $side,
+                                       $speed,     $status,     $alsp_target_loc,
+                                       $size_attr, $emitter,    60*0/
+
+  data tbm_create_attributes          /$id,        $class,      $latitude,    
+                                       $longitude, $altitude,   $unit_type,  
+                                       $heading,   $name,       $side,      
+                                       $speed,     64*0/
+  data tbm_interest_attributes        /$status,    $alsp_target_loc,          
+                                       $size_attr, 71*0/
+                                     
+  data tbm_update_attributes          /$id,        $class,      $latitude,    
+                                       $longitude, $altitude,   $unit_type,  
+                                       $heading,   $name,       $side,
+                                       $speed,     $status,     $alsp_target_loc,
+                                       $size_attr, 61*0/
+
+  data surface_create_attributes      /$id,        $class,      $latitude,    
+                                       $longitude, $unit_type,  $heading,    
+                                       $name,      $side,       $speed,
+                                       $strength,  64*0/
+  data surface_interest_attributes    /$emitter,   $alsp_attr_cw2_factors,    
+                                       $iff,       71*0/
+  data surface_update_attributes      /$id,        $class,      $latitude,    
+                                       $longitude, $unit_type,  $heading,    
+                                       $name,      $side,       $speed,     
+                                       $strength,  $emitter,    $iff,        
+                                       $mission,   $status,     $sonar,      
+                                       59*0/
+
+  data subsurface_create_attributes   /$id,        $class,      $latitude,    
+                                       $longitude, $unit_type,  $heading,    
+                                       $name,      $side,       $speed,     
+                                       $depth,     $propulsion_mode, $strength,
+                                       62*0/
+  data subsurface_interest_attributes /$emitter,   $sonar,      72*0/
+                                       
+  data subsurface_update_attributes   /$id,        $class,      $latitude,    
+                                       $longitude, $unit_type,  $heading,    
+                                       $name,      $side,       $speed,
+                                       $depth,     $emitter,    $propulsion_mode,
+                                       $sonar,     $strength,   60*0/
+
+  data torpedo_create_attributes      /$id,        $class,      $latitude,    
+                                       $longitude, $unit_type,  $heading,    
+                                       $name,      $side,       $speed,     
+                                       $depth,      64*0/
+  data torpedo_interest_attributes    /$sonar,      73*0/
+                                       
+  data torpedo_update_attributes      /$id,        $class,      $latitude,    
+                                       $longitude, $unit_type,  $heading,    
+                                       $name,      $side,       $speed,
+                                       $depth,     
+                                       $sonar,     63*0/
+
+data countermeasure_create_attributes /$id,        $class,      $latitude,    
+                                       $longitude, $unit_type,  $heading,    
+                                       $name,      $side,       $speed,     
+                                       $depth,      64*0/
+data countermeasure_interest_attributes /$depth,    73*0/
+                                       
+data countermeasure_update_attributes /$id,        $class,      $latitude,    
+                                       $longitude, $unit_type,  $heading,    
+                                       $name,      $side,       $speed,
+                                       $depth,     
+                                       64*0/
+
+data sonobuoy_create_attributes       /$id,        $class,      $latitude,    
+                                       $longitude, $unit_type,  $heading,    
+                                       $name,      $side,       $speed,     
+                                       $depth,      64*0/
+data sonobuoy_interest_attributes     /$depth,    73*0/
+                                       
+data sonobuoy_update_attributes       /$id,        $class,      $latitude,    
+                                       $longitude, $unit_type,  $heading,    
+                                       $name,      $side,       $speed,
+                                       $depth,     
+                                       64*0/
+
+data minefield_create_attributes      /$id,         $class,     $side, 
+                                       $position,   $depth,     $name,
+                                       $unit_type,  67*0/
+
+data minefield_interest_attributes    /$depth,    73*0/
+                                       
+data minefield_update_attributes      /$id,         $class,     $side, 
+                                       $position,   $depth,     $name,
+                                       $unit_type,  67*0/
+
+
+data sweeparea_create_attributes      /$id,         $class,     $side, 
+                                       $sweeparea_location,     $name,
+                                       $sweeparea_status,       68*0/
+
+data sweeparea_interest_attributes    /$sweeparea_status,       73*0/
+                                       
+data sweeparea_update_attributes      /$id,         $class,     $side, 
+                                       $sweeparea_location,     $name,
+                                       $sweeparea_status,       68*0/
+
+
+  data base_create_attributes         /$id,        $class,      $latitude,   
+                                       $longitude, $name,       $side,
+                                       68*0/
+  data base_interest_attributes       /$alsp_attr_flight_ops,   73*0/
+
+  data base_update_attributes         /$id,        $class,      $latitude,   
+                                       $longitude, $name,       $side,
+                                       $alsp_attr_flight_ops,   67*0/
+
+  data ground_create_attributes       /$id,        $class,      $latitude,   
+                                       $longitude, $name,       $side,
+                                       $size_attr, $unit_type,  66*0/
+  data ground_interest_attributes     /$speed,     $heading,    $size_attr,
+                                       71*0/
+  data ground_update_attributes       /74*0/
+
+  condition = $cond_allow     # allow the class when sending fliter_class messages
+
+#$% Register attributes for aircraft and send class allow filter
+    for (class = $aircraft_begin; class <= $aircraft_end; class = class + 1)
+      {
+        num_create_attr = 13
+        num_interest_attr = 6
+        num_update_attr = 19
+
+        call alsp_reg_attr (class, num_create_attr, aircraft_create_attributes,
+                                   num_interest_attr, aircraft_interest_attributes,
+                                   num_update_attr, aircraft_update_attributes)
+        call alsp_filter_class (class, condition, $send_dr_true)
+      }
+
+#$% Register attributes for cruise missiles and send class allow filter
+    class = $air_cruise_missile
+    num_create_attr = 10
+    num_interest_attr = 5
+    num_update_attr = 14
+
+    call alsp_reg_attr (class, num_create_attr, cruise_create_attributes,
+                               num_interest_attr, cruise_interest_attributes,
+                               num_update_attr, cruise_update_attributes)
+    call alsp_filter_class (class, condition, $send_dr_true)
+
+#$% Register attributes for ballistic missiles and send class allow filter
+    class = $air_ballistic_missile
+    num_create_attr = 10
+    num_interest_attr = 3
+    num_update_attr = 13
+
+    call alsp_reg_attr (class, num_create_attr, tbm_create_attributes,
+                               num_interest_attr, tbm_interest_attributes,
+                               num_update_attr, tbm_update_attributes)
+    call alsp_filter_class (class, condition, $send_dr_true)
+
+
+#$%  Surface units - ships
+    class = $sea_surface_ship
+    num_create_attr = 10
+    num_interest_attr = 3
+    num_update_attr = 15
+
+    call alsp_reg_attr (class, num_create_attr, surface_create_attributes,
+                               num_interest_attr, surface_interest_attributes,
+                               num_update_attr, surface_update_attributes)
+    call alsp_filter_class (class, condition, $send_dr_true)
+
+
+#$%  Surface units - boats
+    class = $sea_surface_boat
+    num_create_attr = 10     # Increased from 0 since CH create boat msg not received.
+    num_interest_attr = 3
+    num_update_attr = 10    # boats don't need $mission and $status, but if other
+                            # attributes are added to the list update this number
+
+    call alsp_reg_attr (class, num_create_attr, surface_create_attributes,
+                               num_interest_attr, surface_interest_attributes,
+                               num_update_attr, surface_update_attributes)
+    call alsp_filter_class (class, condition, $send_dr_true)
+
+
+#$%  Surface units - aav
+    class = $alsp_class_sea_surface_aav
+    num_create_attr = 10
+    num_interest_attr = 0
+    num_update_attr = 10     # aav don't need $emitter, $mission and $status, but if
+                            # other attributes are added to the list update this number
+
+    call alsp_reg_attr (class, num_create_attr, surface_create_attributes,
+                               num_interest_attr, surface_interest_attributes,
+                               num_update_attr, surface_update_attributes)
+    call alsp_filter_class (class, condition, $send_dr_true)
+
+
+#$%  Surface units - landing craft
+    class = $alsp_class_sea_surface_landing_craft
+    num_create_attr = 10
+    num_interest_attr = 0
+    num_update_attr = 10    # l/c don't need $emitter, $mission and $status, but if
+                            # other attributes are added to the list update this number
+
+    call alsp_reg_attr (class, num_create_attr, surface_create_attributes,
+                               num_interest_attr, surface_interest_attributes,
+                               num_update_attr, surface_update_attributes)
+    call alsp_filter_class (class, condition, $send_dr_true)
+
+
+#$%  Subsurface units
+    class = $sea_subsurface
+    num_create_attr = 12
+    num_interest_attr = 2
+    num_update_attr = 14
+
+    call alsp_reg_attr (class, num_create_attr, subsurface_create_attributes,
+                               num_interest_attr, subsurface_interest_attributes,
+                               num_update_attr, subsurface_update_attributes)
+    call alsp_filter_class (class, condition, $send_dr_true)
+
+
+#$%  Torpedo units
+    class = $sea_torpedo
+    num_create_attr = 10
+    num_interest_attr = 1
+    num_update_attr = 11
+
+    call alsp_reg_attr (class, num_create_attr, torpedo_create_attributes,
+                               num_interest_attr, torpedo_interest_attributes,
+                               num_update_attr, torpedo_update_attributes)
+    call alsp_filter_class (class, condition, $send_dr_false)
+
+#$%  Countermeasure units
+    class = $sea_countermeasure
+    num_create_attr = 10
+    num_interest_attr = 1
+    num_update_attr = 10
+
+    call alsp_reg_attr (class, num_create_attr, countermeasure_create_attributes,
+                               num_interest_attr, countermeasure_interest_attributes,
+                               num_update_attr, countermeasure_update_attributes)
+    call alsp_filter_class (class, condition, $send_dr_false)
+
+#$%  Sonobuoy units
+    class = $sea_sonobuoy
+    num_create_attr = 10
+    num_interest_attr = 1
+    num_update_attr = 10
+
+    call alsp_reg_attr (class, num_create_attr, sonobuoy_create_attributes,
+                               num_interest_attr, sonobuoy_interest_attributes,
+                               num_update_attr, sonobuoy_update_attributes)
+    call alsp_filter_class (class, condition, $send_dr_false)
+
+#$%  Minefield units
+    class = $sea_mine
+    num_create_attr = 7
+    num_interest_attr = 1
+    num_update_attr = 7
+
+    call alsp_reg_attr (class, num_create_attr, minefield_create_attributes,
+                               num_interest_attr, minefield_interest_attributes,
+                               num_update_attr, minefield_update_attributes)
+    call alsp_filter_class (class, condition, $send_dr_false)
+
+
+#$%  Sweep Areas
+    class = $sea_sweeparea
+    num_create_attr = 6
+    num_interest_attr = 1
+    num_update_attr = 6
+
+    call alsp_reg_attr (class, num_create_attr, sweeparea_create_attributes,
+                               num_interest_attr, sweeparea_interest_attributes,
+                               num_update_attr, sweeparea_update_attributes)
+    call alsp_filter_class (class, condition, $send_dr_false)
+
+
+#$%  Base units
+    class = $shore_base
+    num_create_attr = 6
+    num_interest_attr = 1
+    num_update_attr = 7
+
+    call alsp_reg_attr (class, num_create_attr, base_create_attributes,
+                               num_interest_attr, base_interest_attributes,
+                               num_update_attr, base_update_attributes)
+    call alsp_filter_class (class, condition, $send_dr_true)
+
+#$%  Ground units - HIMAD, ALLRAD and RADAR, Comat, support (ghosting is for display only).
+    num_create_attr = 8
+    num_interest_attr = 3
+    num_update_attr = 0
+
+    class = $alsp_class_ground_maneuver_himad
+    call alsp_reg_attr (class, num_create_attr, ground_create_attributes,
+                               num_interest_attr, ground_interest_attributes,
+                               num_update_attr, ground_update_attributes)
+    call alsp_filter_class (class, condition, $send_dr_true)
+
+    class = $alsp_class_ground_maneuver_allrad
+    call alsp_reg_attr (class, num_create_attr, ground_create_attributes,
+                               num_interest_attr, ground_interest_attributes,
+                               num_update_attr, ground_update_attributes)
+    call alsp_filter_class (class, condition, $send_dr_true)
+
+    class = $alsp_class_ground_maneuver_radar
+    call alsp_reg_attr (class, num_create_attr, ground_create_attributes,
+                               num_interest_attr, ground_interest_attributes,
+                               num_update_attr, ground_update_attributes)
+    call alsp_filter_class (class, condition, $send_dr_true)
+
+   class = $alsp_class_ground_maneuver_tel
+    call alsp_reg_attr (class, num_create_attr, ground_create_attributes,
+                               num_interest_attr, ground_interest_attributes,
+                               num_update_attr, ground_update_attributes)
+    call alsp_filter_class (class, condition, $send_dr_true)
+
+    num_create_attr = 7                 # No unit_type P2P 11/11
+    num_interest_attr = 3
+    num_update_attr = 0
+
+    class = $alsp_class_ground_maneuver_support_unit
+    call alsp_reg_attr (class, num_create_attr, ground_create_attributes,
+                               num_interest_attr, ground_interest_attributes,
+                               num_update_attr, ground_update_attributes)
+    call alsp_filter_class (class, condition, $send_dr_true)
+
+    class = $alsp_class_ground_maneuver_combat
+    call alsp_reg_attr (class, num_create_attr, ground_create_attributes,
+                               num_interest_attr, ground_interest_attributes,
+                               num_update_attr, ground_update_attributes)
+    call alsp_filter_class (class, condition, $send_dr_true)
+
+    num_create_attr = 6                 # No unit_type & size
+    num_interest_attr = 2
+    num_update_attr = 0
+
+    class = $alsp_class_ground_maneuver_support_convoy
+    call alsp_reg_attr (class, num_create_attr, ground_create_attributes,
+                               num_interest_attr, ground_interest_attributes,
+                               num_update_attr, ground_update_attributes)
+    call alsp_filter_class (class, condition, $send_dr_true)
+
+return
+end
+
+
+subroutine ALSP_Filter_Interactions ()
+#########################################################################
+#$%
+#$% Purpose:    ALSP_Filter_Interactions send out the FILTER_INTERACTION
+#$%             messages, to let the ACM know which interactions to send.
+#$%
+#$% Called By:  ALSP_Init
+#$%
+#$% Calls:      ALSP_Filter_Interaction   <transifsend.c>
+#$%
+#$% Tables:     None
+#$%
+#$% Date:       Feb. 28, 1994
+#$%
+#$% Author:     Code moved from ALSP_Init
+#$%
+#$% Modified:   Susan Miller 10/95 - E1453
+#$%             Added 4 new types of interaction filters
+#$%             
+#$%             Susan Miller 9/96 (E1691)
+#$%             Added increased interaction filtering, to receive only
+#$%             interactions against units RESA owns or positions.
+#$%             
+################################################################################
+implicit none
+
+#                         1         2         3         4         5         6         7
+#                1234567890123456789012345678901234567890123456789012345678901234567890
+VMSchar*59 msgH /"FILTER_ATTR(CLASS(AIR.HELICOPTER)STATUS(FLY,ORBIT,DELAY))"/
+VMSchar*58 msgF /"FILTER_ATTR(CLASS(AIR.FIXEDWING)STATUS(FLY,ORBIT,DELAY))"/
+integer msg_len
+logical wait_flag
+integer err_val
+integer len
+
+  call alsp_filter_interaction ($air_to_air, $cond_allow)
+  call alsp_filter_interaction ($air_to_ground, $cond_allow)
+  call alsp_filter_interaction ($air_to_ship, $cond_allow)
+  call alsp_filter_interaction ($ship_to_air, $cond_allow)
+  call alsp_filter_interaction ($ship_to_ship, $cond_allow)
+  call alsp_filter_interaction ($ground_to_air, $cond_allow)
+  call alsp_filter_interaction ($ground_to_ship, $cond_allow)
+  call alsp_filter_interaction ($report_air_to_air, $cond_allow)
+  call alsp_filter_interaction ($report_air_to_ground, $cond_allow)  # clk 2/94 - conflicts with CSSTSS
+  call alsp_filter_interaction ($report_air_to_ship, $cond_allow)
+  call alsp_filter_interaction ($report_ship_to_air, $cond_allow)
+  call alsp_filter_interaction ($report_ship_to_ship, $cond_allow)
+  call alsp_filter_interaction ($report_ship_to_ground, $cond_allow)
+  call alsp_filter_interaction ($report_ground_to_air, $cond_allow)
+  call alsp_filter_interaction ($report_ground_to_ship, $cond_allow)
+
+  call alsp_filter_interaction ($supporting_units_request,$cond_allow) # SMM 10/95
+  call alsp_filter_interaction ($pol_request,$cond_allow)
+  call alsp_filter_interaction ($supporting_units_issue,$cond_allow)
+  call alsp_filter_interaction ($pol_issue,$cond_allow)
+
+  # place calls to send additional interaction filtering messages - smm 9/96 (E1691)
+                             # kind,                      to,                 from
+  call alsp_filter_parameters ($air_to_air,               $alsp_filter_owned, $alsp_filter_none) 
+  call alsp_filter_parameters ($air_to_ground,            $alsp_filter_owned, $alsp_filter_none)
+  call alsp_filter_parameters ($air_to_ship,              $alsp_filter_owned, $alsp_filter_none)
+  call alsp_filter_parameters ($ship_to_air,              $alsp_filter_owned, $alsp_filter_none)
+  call alsp_filter_parameters ($ship_to_ship,             $alsp_filter_owned, $alsp_filter_none)
+  call alsp_filter_parameters ($ground_to_air,            $alsp_filter_owned, $alsp_filter_none)
+  call alsp_filter_parameters ($ground_to_ship,           $alsp_filter_owned, $alsp_filter_none)
+  call alsp_filter_parameters ($report_air_to_air,        $alsp_filter_owned, $alsp_filter_none)
+  call alsp_filter_interaction ($report_air_to_ground,    $alsp_filter_owned, $alsp_filter_none)  
+  call alsp_filter_parameters ($report_air_to_ship,       $alsp_filter_owned, $alsp_filter_none)
+  call alsp_filter_parameters ($report_ship_to_air,       $alsp_filter_owned, $alsp_filter_none)
+  call alsp_filter_parameters ($report_ship_to_ship,      $alsp_filter_owned, $alsp_filter_none)
+  call alsp_filter_parameters ($report_ground_to_air,     $alsp_filter_owned, $alsp_filter_none)
+  call alsp_filter_parameters ($report_ground_to_ship,    $alsp_filter_owned, $alsp_filter_none)
+  call alsp_filter_parameters ($supporting_units_request, $alsp_filter_owned, $alsp_filter_none)
+  call alsp_filter_parameters ($pol_request,              $alsp_filter_owned, $alsp_filter_none)
+  call alsp_filter_parameters ($supporting_units_issue,   $alsp_filter_owned, $alsp_filter_none)
+  call alsp_filter_parameters ($pol_issue,                $alsp_filter_owned, $alsp_filter_none)
+
+# Filter out parked helos in warsim
+msg_len = len(msgH)
+wait_flag = .false.
+call alsp_write_mbx(msgH,msg_len,wait_flag,err_val)
+if (err_val != 0)
+{
+    print *, "error writing parked helo filter"
+}
+
+# Filter out parked fixedwing in warsim
+msg_len = len(msgF)
+wait_flag = .false.
+call alsp_write_mbx(msgF,msg_len,wait_flag,err_val)
+if (err_val != 0)
+{
+    print *, "error writing parked aircraft filter"
+}
+
+
+return
+end
+
+
+subroutine alsp_receive_new_ids (num_ids, id_array)
+#########################################################################
+#$%
+#$% Purpose:    ALSP_Receive_New_Ids sets the ALSP$ID$Count to the
+#$%             start id.  10,000 ids are asked for at JOIN time (so
+#$%             a sequential range is returned).  This is so that the
+#$%             ACM and ATV will not complain about no Object Id Request
+#$%             being made.
+#$%
+#$% Called By:  Handle_AT_New_ID   <at_mess_handler.c>
+#$%
+#$% Calls:      None
+#$%
+#$% Tables:     None
+#$%
+#$% Date:       Feb. 28, 1994
+#$%
+#$% Author:     Carol L. Kropp
+#$%
+################################################################################
+BBCommon
+include "alsp_io_rat.inc"             # contains the actor number (actor)
+
+integer  num_ids, id_array(100)
+
+integer  start_id
+
+#  During re-join count starts from bb value
+#  start_id = id_array(1)
+#  start_id = start_id - (actor * 100000)
+# ALSP$ID$Count = start_id
+
+return
+end
+

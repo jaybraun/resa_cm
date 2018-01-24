@@ -1,0 +1,3182 @@
+ 
+##############################################################################
+#                                                                            #
+#  File:     ALSP_RECEIVE_INTERACT.RAT                                       #
+#                                                                            #
+#  Created:  May 18, 1992                                                    #
+#                                                                            #
+#  Author:   Carol L. Kropp                                                  #
+#                                                                            #
+#  Purpose:  This file contains the routines for processing incoming ALSP    #
+#            interaction messages for various types of engagements.          #
+#                                                                            #
+##############################################################################
+ 
+include "alsp.inc"
+include "alsp_resa.inc"
+include "bbbom.inc"
+include "bbmfd.inc"
+include "wgmdeng.inc"
+ 
+define (BBImplicit, Implicit None) # SMM 3/00
+ 
+define(trace$engage$exe, istrip(trace$engage,0,M1bits)) # trace general exec
+
+ 
+subroutine ALSP_Receive_Interact (_
+      n_args,         # int   - number of attributes
+      param_flag,     # array - indicates presence of attributes (0=No & 1=Yes)
+      int_params,     # array - contains integer values of integer attributes
+      f_params,       # array - contains real values of floating pt attributes
+      strlens,        # array - contains lengths of string values passed in
+      string_params,  # array - contains the character strings of string attributes
+      num_targets,    # int   - number of targets
+      target_list)    # array - contains the ALSP ids of targets
+#########################################################################
+#$%
+#$% Purpose:    ALSP_Receive_Interact process incoming ALSP interaction
+#$%             messages.
+#$%
+#$% Called By:  Handle_AT_Interaction   <at_mess_handler.c>
+#$%
+#$% Calls:      ALSP_Locate_Interaction_Units
+#$%             ALSP_Map_Incoming_Weapon       <alsp_mapping.rat>
+#$%             ALSP_Interaction_Error
+#$%             ALSP_Process_Report
+#$%             ALSP_Receive_AAM_Engage
+#$%             ALSP_Receive_ASM_Engage
+#$%             ALSP_Receive_Bomb_Engage
+#$%             ALSP_Receive_CM_Engage
+#$%             ALSP_Receive_Gun_Engage
+#$%             ALSP_Receive_SAM_Engage
+#$%             ALSP_Receive_Refuel_Interaction
+#$%
+#$% Tables:     UNT     CMC
+#$%
+#$% Date:       May 18, 1992
+#$%
+#$% Author:     Carol L. Kropp
+#$%
+#$% Modified:   Carol Kropp - 9/93 - 12/93
+#$%             Added additional interaction above AAMs.
+#$%
+#$%             Susan Miller - 10/95 (E1453)
+#$%             Added handling of refuel interaction messages by
+#$%             incorporating call to ALSP_Receive_Refuel_Interaction
+#$%
+#$%             Susan Miller - 3/97 (E1795)
+#$%             Added check to ensure that the weapon enumeration
+#$%             is valid - invalid enumerations attempted to use the
+#$%             generic, which doesn't work for all engagement types.
+#$%
+#$%             Jay Braun - 4/2015
+#$%             Add correlation id as a pass-through from an incoming
+#$%             engagement to an outgoing report-attrition
+#$%
+#########################################################################
+BBCommon
+ 
+integer  n_args, param_flag [MAX_INTERACT_PARAM]
+integer  int_params [MAX_INTERACT_PARAM], strlens[MAX_INTERACT_PARAM]
+integer  num_targets, target_list [MAX_INTERACT_PARAM]
+real     f_params[MAX_INTERACT_PARAM]
+vaxcharacter*MAX_STR_LEN string_params[MAX_INTERACT_PARAM]
+ 
+integer  units_successfully_located   # flag returned from ALSP_Locate_Interaction_Units
+integer  weapon_category, weapon_found
+integer  TBL$Pointer                  # generic weapon table ptr  (BOM / CMC / MC / TOR)
+ 
+BBDeclare (mfd$pointer,unt2$SuperType$i)
+integer  UNT$Pointer, UNT2$Pointer, UNT2$Type$I, CMC$Pointer # SMM 3/00
+integer  unt2$SubType$i
+ 
+call ALSP_Locate_Interaction_Units (int_params [$int_victim],
+                                    int_params [$int_firing],
+                                    int_params [$int_kind],
+                                    int_params [$weapon_type],
+                                    int_params [$int_salvo_num],
+                                    int_params [$int_targets_engaged],
+                                    UNT$Pointer, UNT2$Pointer,
+                                    units_successfully_located)
+if (units_successfully_located == $no)
+{
+    unt2$pointer = 0
+    call ALSP_Locate_Minefield (int_params[$int_firing], mfd$pointer)
+    if (mfd$pointer == 0) return    # Not a minefield
+}
+ 
+if (UNT2$Pointer$Ok)        # Determine the type of the attacking unit
+{
+    UNT2$Type$I = xUNT2$Type$I
+    UNT2$SuperType$I = xUNT2$SuperType$I
+}
+else
+{
+    UNT2$Type$I = $Null$Code
+    UNT2$SuperType$I = $Null$Code
+}
+ 
+  if (UNT2$Type$I == $CruiseMissile$Code &               # if a cruise missile and not
+     (int_params [$int_kind] < $low_alsp_report_type |   # and interaction report
+      int_params [$int_kind] > $high_alsp_report_type))
+    {                                         # Since the weapon is the unit
+     TBL$Pointer = xUNT2$CMCPntr$I            # extract the characteristic pointer
+     weapon_category = $CruiseMissile$Code    # from the UNT table.
+    }
+  else if (UNT2$SuperType$I == $Torpedo$SuperCode &
+     (int_params [$int_kind] < $low_alsp_report_type |   # and interaction report
+      int_params [$int_kind] > $high_alsp_report_type))
+    {                                         # Since the weapon is the unit
+     TBL$Pointer = xUNT2$TRPPntr$I            # extract the characteristic pointer
+     weapon_category = $Torpedo$Code          # from the UNT table.
+    }
+  else if ((UNT2$Type$I == $Air$Code) & (xUNT$Type$I == $Air$Code) &
+           ((int_params [$int_kind] >= $supporting_units_request) &
+            (int_params [$int_kind] <= $pol_issue)))
+    {
+     call ALSP_Receive_Refuel_Interaction(UNT$Pointer,
+                                          UNT2$Pointer,
+                                          int_params [$int_kind],
+                                          int_params [$int_supply_type],
+                                          int_params [$int_supply_qty],
+                                          int_params [$int_supply_reason])
+     return
+    }
+  else
+    {
+     # if non enumerated weapon name received, log the error and toss
+     # the message - smm 3/97 (E1795)
+     if (int_params[$weapon_type] == 0)
+        {
+         call ALSP_Interaction_Error (int_params [$int_firing],
+                                      int_params [$int_victim],
+                                      $no_weapon_enumeration)
+         return
+        }
+ 
+     call ALSP_Map_Incoming_Weapon (int_params [$int_firing],
+                                    int_params [$int_victim],
+                                    int_params [$weapon_type],
+                                    int_params [$int_kind],
+                                    TBL$Pointer, weapon_category, weapon_found)
+     if (weapon_found == $No)
+       return
+    }
+ 
+  if (int_params [$int_kind] == $ground_to_ground |
+      int_params [$int_kind] == $ship_to_ground   )
+    call ALSP_Interaction_Error (int_params [$int_firing], int_params [$int_victim],
+                                 $interaction_not_handled)
+  else if (int_params [$int_kind] >= $low_alsp_report_type &
+           int_params [$int_kind] <= $high_alsp_report_type)
+    call ALSP_Process_Report (UNT2$Pointer, UNT$Pointer, TBL$Pointer,
+                              weapon_category,
+#                              int_params [$weapon_type],
+                              int_params [$int_salvo_num],
+                              int_params [$int_targets_engaged],
+                              int_params [$int_hits], int_params [$int_kills])
+  else if (weapon_category == $AAM$Code)
+     call ALSP_Receive_AAM_Engage (UNT$Pointer, UNT2$Pointer, TBL$Pointer,
+                                   int_params [$int_salvo_num],
+                                   int_params [$int_targets_engaged],
+                                   int_params [$weapon_type], trim(string_params[$int_correlation_id]))
+  else if (weapon_category == $ASM$Code)
+     call ALSP_Receive_ASM_Engage (UNT$Pointer, UNT2$Pointer, int_params [$int_firing],
+                                   TBL$Pointer, int_params [$int_salvo_num],
+                                   int_params [$weapon_type], trim(string_params[$int_correlation_id]))
+  else if (weapon_category == $Bomb$Code)
+    call ALSP_Receive_Bomb_Engage (UNT$Pointer, UNT2$Pointer, int_params [$int_firing],
+                                   TBL$Pointer, int_params [$int_salvo_num],
+                                   int_params [$weapon_type], trim(string_params[$int_correlation_id]))
+  else if (weapon_category == $CruiseMissile$Code)
+    {
+     CMC$Pointer = TBL$Pointer
+     if (xCMC$Cat$I == $Ball$Code)
+       call ALSP_Receive_TBM_Engage (UNT2$Pointer, int_params [$int_firing],
+                                     CMC$Pointer, f_params [$int_lat],
+                                     f_params [$int_long],
+                                     int_params [$weapon_type],
+                                     int_params [$int_kind], trim(string_params[$int_correlation_id]))
+     else
+       call ALSP_Receive_CM_Engage  (UNT$Pointer, UNT2$Pointer, int_params [$int_firing],
+                                     CMC$Pointer, int_params [$weapon_type],
+                                     int_params [$int_kind], trim(string_params[$int_correlation_id]))
+    }
+  else if (weapon_category == $Torpedo$Code)
+    {
+       call ALSP_Receive_Torpedo_Engage (UNT$Pointer, UNT2$Pointer,
+                                         int_params [$int_firing],
+                                         TBL$Pointer, int_params [$weapon_type],
+                                         int_params [$int_kind], 
+                                         trim(string_params[$int_correlation_id]))
+    }
+  else if (weapon_category == $Mine$Code)
+    {
+       call ALSP_Receive_Minefield_Engage(UNT$Pointer, MFD$Pointer,
+                                         int_params [$int_firing],
+                                         TBL$Pointer, int_params [$weapon_type],
+                                         int_params [$int_kind],
+                                         trim(string_params[$int_correlation_id]))
+    }
+  else if (weapon_category == $Gun$Code)
+    call ALSP_Receive_Gun_Engage (UNT$Pointer, UNT2$Pointer, int_params [$int_firing],
+                                  TBL$Pointer, int_params [$int_salvo_num],
+                                  int_params [$weapon_type], int_params [$int_kind],
+                                  f_params [$int_firer_lat], f_params [$int_firer_long],
+                                  trim(string_params[$int_correlation_id]))
+  else if (weapon_category == $SAM$Code)
+    call ALSP_Receive_SAM_Engage (int_params [$int_kind], UNT$Pointer, UNT2$Pointer,
+                                  int_params [$int_firing], TBL$Pointer,
+                                  int_params [$int_salvo_num],
+                                  int_params [$int_targets_engaged],
+                                  int_params [$weapon_type],
+                                  trim(string_params[$int_correlation_id]))
+  else
+    call ALSP_Interaction_Error (int_params [$int_firing], int_params [$int_victim],
+                                 $interaction_not_handled)
+ 
+return
+end
+
+ 
+subroutine ALSP_Receive_AAM_Engage (_
+                    UNT$Pointer,       # unit pointer of target flight leader
+                    UNT2$Pointer,      # unit pointer of attacker (a ghost)
+                    MC$Pointer,        # characteristic pointer of AAM
+                    number_fired,      # number of missiles fired
+                    number_targeted,   # number of a/c which were shot at in the flight
+                    weapon_code,       # alsp weapon code number from alsp.inc
+                    correlation_id)    # to pass along to report-attrition
+#########################################################################
+#$%
+#$% Purpose:    ALSP_Receive_AAM_Engage processes interactions against RESA
+#$%             owned aircraft when attacked by an ALSP ghost.  The
+#$%             PK/PH must be calculated to determine how many a/c in the
+#$%             flight were hit.  The destroyed a/c are updated in the DAC
+#$%             table and engagement log.  The results of the engagement
+#$%             are sent out and either an update or delete message is sent.
+#$%
+#$% Called By:  ALSP_Receive_Interact
+#$%
+#$% Calls:      RLL2RB              MBURange
+#$%             SMOV                        <lbsmov.rat>
+#$%             Write_Eng_Rec               <wgmdrec.rat>
+#$%             Update_Destroyed_Aircraft   <lbcommn.rat>
+#$%             Generate_eng_rec            <wgmdrec.rat>
+#$%             Echo..                      <lbecho.rat>
+#$%             ALSP_Interaction_Error
+#$%             ALSP_Send_Interaction_Msg   <alsp_interact.rat>
+#$%             ALSP_Send_Del               <transifsend.c>
+#$%             ALSP_Update_Aircraft_Flight <alsp_send_updates.rat>
+#$%             Proc_React                  <wgmdeng_air.rin>
+#$%             Get_AAM_Probability_of_Kill <wgmdeng.rat>
+#$%             RANDOM                      <lbmath.rat>
+#$%             Process_AAM_Hit             <wgmdeng.rat>
+#$%
+#$% Tables:     UNT         ACC         CMC
+#$%
+#$% Date:       May 18, 1992
+#$%
+#$% Author:     Carol L. Kropp
+#$%
+#$%             Jay Braun - 4/2015
+#$%             Add correlation id as a pass-through from an incoming 
+#$%             engagement to an outgoing report-attrition
+#########################################################################
+BBCommon
+ENCommon
+ 
+integer  UNT$Pointer, UNT2$Pointer, MC$Pointer
+integer  number_fired, number_targeted, weapon_code
+ 
+real      mburange    # function to obtain main battle unit range
+ 
+integer  i,           idummy
+integer  range_to_target, range_to_mbu
+ 
+real      range,              bearing
+literal   attacker_name,      target_name,       weapon_name
+integer   aams_found,         aam_eqlist_index,  eqlist [5,30]
+integer   altitude_diff
+integer   ac_target_flag,     target_max_alt,    target_eph_index
+integer   number_of_targets,  number_to_fire,    number_killed,     totals[2]
+real      probability_of_kill
+ 
+literal  cstrip8						    # SMM 3/00
+integer  UNT$NbrAC$I, ACC$Pointer, AML$NextIndx$I, leader_aml_index # SMM 3/00
+integer  CMC$Pointer, UNT$TrueAltDepth$I, UNT2$TrueAltDepth$I, hit_flag  # SMM 3/00
+integer  AML$Pointer, UNT$ALSPID$I, UNT2$ALSPID$I, UNT$NbrACTot$I   # SMM 3/00
+real     Rannum, X, Random                                          # SMM 3/00
+integer  missiles_fired /1/  # jb E2208 - mismatch # of args  12/7/00
+integer  UNT2$Hits$I    # JHM 4/02 E2340 tested by damage model to call damair
+real     pcent          # JHM 4/03 e2340 need to decrement equipment
+vaxcharacter*MAX_STR_LEN correlation_id
+
+data x/0.0/
+ 
+  target_name   = xUNT$Name$C
+  attacker_name = xUNT2$Name$C
+  weapon_name   = xMC$Name$C
+ 
+  if (trace$engage$exe != $no)
+    {
+     call echor
+     call echov  ("*** ERROR IN ALSP MESSAGE - Air to Air.....")
+     call echohn (attacker_name, $$MaxLit)
+     call echov  (" (ghosted unit) is attacking ")
+     call echohn (target_name, $$MaxLit)
+     call echov  (" - targeting ")
+     call echoi  (number_targeted)
+     call echov  (", with ")
+     call echoi  (number_fired)
+     call echov  (" ")
+     call echohn (weapon_name, $$MaxLit)
+     call echov  (" AAMs.")
+     call echor
+    }
+ 
+  if (xUNT$Type$I == $Air$Code)     # if target is an a/c
+    {
+     UNT$NbrAC$I   = xUNT$NbrAC$I
+     number_fired = MAX0(1,number_fired) #JHM CT02 (E2254)
+     number_targeted   = MAX0(1,number_targeted) # JHM CT02 1/02 must be > 0
+     number_of_targets = number_targeted
+     if (number_of_targets > UNT$NbrAC$I)  # If the interaction msg indicates more
+        number_of_targets = MAX0(1,UNT$NbrAC$I) # attacked than exist, attack the whole flight
+                                               # JHM CT02 (E2254) 1/02 added max test when size=0
+     ac_target_flag = $yes
+     ACC$pointer = xUNT$AccPntr$I
+     target_max_alt = xACC$MaxAlt$I
+     target_eph_index = xACC$TargetIndex$I
+ 
+     AML$NextIndx$I   = xUNT$AMLIndx$I        # target's AML pointers
+     leader_aml_index = AML$NextIndx$I        # Retain target's leader callsign after attrition
+    }
+  else  # target is a cruise missile
+    {
+     number_of_targets = 1
+     ac_target_flag = $no
+     CMC$Pointer = xUNT$CMCPntr$I
+     target_eph_index = xCMC$TargetIndex$I
+    }
+ 
+  #$% set up the first entry of the eqlist array for the type of
+  #$% AAM indicated in the interaction message
+  aams_found = 1
+  aam_eqlist_index = 1
+  eqlist [1,1] = 0                # there is no DEQ slot
+  eqlist [2,1] = MC$Pointer
+  eqlist [3,1] = number_fired     # make enough available
+  eqlist [4,1] = xMC$MaxRange$I
+  eqlist [5,1] = 0                # n/a for AAM - MC$NbrSimEngages$I
+ 
+  call RLL2RB (xUNT2$TrueLatitude$F, xUNT2$TrueLongitude$F, xUNT2$CosTrueLat$F,   # attacker
+               xUNT$TrueLatitude$F,  xUNT$TrueLongitude$F,  xUNT$CosTrueLat$F,    # target
+               range,                bearing)                                     # range and bearing from attacker to target
+ 
+  range_to_mbu = MBURange (UNT$Pointer)
+ 
+  # if altitude_diff is positive or 0, then the target is
+  # at an altitude above or equal to the attacker
+  UNT$TrueAltDepth$I = xUNT$TrueAltDepth$I     # target's altitude
+  UNT2$TrueAltDepth$I = xUNT2$TrueAltDepth$I   # attacker's altitude
+  altitude_diff = UNT$TrueAltDepth$I - UNT2$TrueAltDepth$I
+ 
+  range_to_target = INT (range + 0.5)
+ 
+  call Get_AAM_Probability_of_Kill (UNT2$Pointer,      MC$Pointer,
+                                    altitude_diff,     range_to_target,
+                                    target_eph_index,  probability_of_kill)
+  totals[1] = 0
+  totals[2] = 0
+  rannum = random(x)  # get random number
+  call Scale_PK_Value (UNT2$Pointer,           UNT$Pointer,       MC$Pointer,
+                       eqlist,                 aam_eqlist_index,  rannum,
+                       probability_of_kill,    hit_flag,          totals)
+ 
+  putUNT$UnderAttack$I ($yes)           # set the target's under attack flag
+ 
+  number_to_fire = MIN0 (number_fired, number_of_targets)
+ 
+  number_killed = 0
+ 
+  for (i = 1; i <= number_to_fire; i = i + 1)
+    {
+     if (ac_target_flag == $yes)
+       {
+        AML$Pointer$To    AML$NextIndx$I   # update target AML pointers
+        AML$NextIndx$I = xAML$NextIndx$I
+       }
+ 
+     if (log$engage != $no)                # if engagement log is desired
+       {
+        call engdata (unt2$pointer, unt$pointer)        # E2224
+        putENG$Weapon$C (weapon_name)
+        putENG$Range$F (range_to_target)
+        putENG$Mburange$F (range_to_mbu)
+       }
+ 
+     rannum = random(x)  # get random number
+     if (probability_of_kill < rannum)
+       {
+        if (log$engage != $no)              # if engagement log is desired
+           {                                # setup miss entry
+            putENG$Time$F (Game$Time)
+            putENG$Result$I (ENG$Miss$Code)
+            putENG$ResultPh$F (probability_of_kill * 100.)
+            call write_eng_rec
+           }
+       }
+     else      # a hit
+       {
+        idummy = 0
+        call Process_AAM_Hit (UNT2$Pointer,   UNT$Pointer,        ac_target_flag,
+                              AML$Pointer,    leader_aml_index,   CMC$Pointer,
+                              MC$Pointer,     idummy,             number_killed,
+                              missiles_fired ) # jb E2208 - srg mismatch 12/7/00
+ 
+        putUNT$Hits$I (0)       # JHM E2260 5/08/2002  target flight leader should not be reprocessed by damair!
+       }
+    }    # end of loop through number fired
+ 
+  UNT$ALSPid$I = xUNT$ALSPid$I
+  UNT2$ALSPid$I = xUNT2$ALSPid$I
+  call ALSP_Send_Interaction_Msg (UNT$ALSPid$I, UNT2$ALSPid$I, 0,
+                                  $event_message, $report, $air_to_air, weapon_code,
+                                  number_fired, number_targeted, number_killed, number_killed,
+                                  0.0, 0.0, 0, correlation_id)
+  UNT$NbrAC$I = xUNT$NbrAC$I - number_killed
+  UNT$NbrAC$I = MAX (0, UNT$NbrAC$I)
+  putUNT$NbrAC$I
+  if(UNT$NbrAC$I > 0)  #JHM UFL03
+    pcent = FLOAT(UNT$NbrAC$I) / FLOAT(UNT$NbrAC$I + number_killed) #JHM E2340
+ 
+  UNT$NbrACTot$I = xUNT$NbrACTot$I - number_killed
+  UNT$NbrACTot$I = MAX (0, UNT$NbrACTot$I)
+  putUNT$NbrAcTot$I
+ 
+  if (UNT$NbrAC$I == 0)    # if the whole flight was destroyed
+                           # JHM CT02 (e2254) 1/02  no check for nbractot needed
+    {
+     putUNT$Status$I    ($BeingDeleted$Code)
+ 
+     call alsp_send_del ($event_message, UNT$ALSPid$I)
+ 
+     putUNT$ALSPid$I    (0)   # wipe out ALSP id - so two delete messages won't go out.
+    }
+  else                        # there is at least one a/c left in flight
+    {                         # so send out an update & decrease expendables
+     if (ac_target_flag == $yes)
+       {
+         call movexp(UNT$Pointer, -1, pcent)  # JHM 4/03 E2340 decrease expendables
+                                           #\/ jb E2208 12/11/00 add $NO
+         call ALSP_Update_Aircraft_Flight (UNT$Pointer,$event_message,$NO)
+         call proc_react (UNT2$Pointer, UNT$Pointer, idummy, idummy)
+       }
+    }
+ 
+return
+end
+
+ 
+subroutine ALSP_Get_Weapon_Pointer (_
+                TBL$Pointer,        # out - generic table pointer name
+                weapon_name,        # in  - name of the weapon
+                weapon_category,    # in  - weapon category code
+                weapon_found)       # out - flag for is weapon entry found
+#########################################################################
+#$%
+#$% Purpose:    ALSP_Get_Weapon_Pointer locates the weapon in the
+#$%             appropriate table, based of the category of the
+#$%             weapon.  (AAM / ASM / BOMB / CIWS / CM / GUN / SAM / TORP)
+#$%
+#$% Called by:  ALSP_Map_Incoming_Weapon     <alsp_mapping.rat>
+#$%
+#$% Calls:      None
+#$%
+#$% Tables:     BOM     CMC     MC      TOR
+#$%
+#$% Date:       May 19, 1992
+#$%
+#$% Author:     Carol L. Kropp
+#$%
+#########################################################################
+BBCommon
+ 
+ALSP$Weapon_Common                          # E2151 DEW 9/99
+ 
+integer  weapon_category, weapon_found, litcmp
+literal  weapon_name
+literal  cstrip8					    	 # SMM 3/00
+integer  MC$Pointer, ktbl, CMC$Pointer, BOM$Pointer, TOR$Pointer # SMM 3/00
+ 
+  weapon_found = $no            # initialize found flag to no
+ 
+  if (weapon_category == $AAM$Code   |
+      weapon_category == $ASM$Code   |
+      weapon_category == $CIWS$Code  |
+      weapon_category == $SAM$Code   )
+    {
+     for (MC$Pointer$First; MC$Pointer$Valid; MC$Pointer$Next)
+       {
+        if (litcmp(xMC$Name$C, weapon_name) == 0)
+          {
+           TBL$Pointer = MC$Pointer
+           weapon_found = $yes
+           break
+          }
+       }
+ 
+     if (weapon_found == $no)   # clk 6/16/93 - if mapping is not in database
+       {                        #               use the AAM or SAM defaults
+        if (weapon_category == $AAM$Code)
+          {
+           TBL$Pointer = default_aam_mc_ptr
+           weapon_found = $yes
+          }
+        else if (weapon_category == $SAM$Code)
+          {
+           TBL$Pointer = default_sam_mc_ptr
+           weapon_found = $yes
+          }
+ 
+        MC$Pointer = TBL$Pointer
+        if (!(MC$Pointer$Valid))  # if the default was no good
+          weapon_found = $no
+       }
+    }
+  else if (weapon_category == $CruiseMissile$Code)
+    {
+     for (CMC$Pointer$First; CMC$Pointer$Valid; CMC$Pointer$Next)
+       {
+        if (litcmp(xCMC$Type$C, weapon_name) == 0)
+          {
+           TBL$Pointer = CMC$Pointer
+           weapon_found = $yes
+           break
+          }
+       }
+    }
+  else if (weapon_category == $Bomb$Code |
+           weapon_category == $Mine$Code)
+    {
+     for (BOM$Pointer$First; BOM$Pointer$Valid; BOM$Pointer$Next)
+       {
+        if (litcmp(xBOM$Name$C, weapon_name) == 0)
+          {
+           TBL$Pointer = BOM$Pointer
+           weapon_found = $yes
+           break
+          }
+       }
+    }
+  else if (weapon_category == $GUN$Code     |
+           weapon_category == $Torpedo$Code )
+    {
+     for (TOR$Pointer$First; TOR$Pointer$Valid; TOR$Pointer$Next)
+       {
+        if (litcmp(xTOR$Type$C, weapon_name) == 0)
+          {
+           TBL$Pointer = TOR$Pointer
+           weapon_found = $yes
+           break
+          }
+       }
+ 
+     if (weapon_found == $no)   # jhm il01 11/00
+        {
+        TBL$Pointer = default_gun_tor_ptr
+        TOR$Pointer = TBL$Pointer
+        if (TOR$Pointer$Valid)      # if the default is good
+            weapon_found = $yes
+        }
+ 
+    }
+ 
+return
+end
+
+ 
+subroutine ALSP_Process_Report (_
+                    UNT$Pointer,       # unit pointer of target (a ghost)
+                    UNT2$Pointer,      # unit pointer of attacker
+                    TBL$Pointer,       # weapon characteristic pointer
+                    weapon_category,   # DEQ$Ident code
+#                    weapon_code,       # weapon code from alsp.inc
+                    number_fired,      # number of missiles fired
+                    number_targeted,   # number of objects which were shot at
+                    number_of_hits,    # number of hits
+                    number_killed)     # number of kills
+#########################################################################
+#$%
+#$% Purpose:    ALSP_Process_report processes interaction report
+#$%             messages received on destoryed or reduced size
+#$%             ghosted units.  This is mostly for postgame purposes.
+#$%
+#$% Called By:  ALSP_Receive_Interact
+#$%
+#$% Calls:      Read            Write
+#$%             Write_eng_rec           <wgmdrec.rat>
+#$%             Echo..
+#$%             CTOI            ITOC
+#$%
+#$% Tables:     UNT
+#$%
+#$% Date:       May 22, 1992
+#$%
+#$% Author:     Carol L. Kropp
+#$%
+#$% Modified:   Carol L. Kropp - 2/94
+#$%             Added number of hits into the report messages.
+#$%
+#$%             Carol Kropp - 2/96 (E1554)
+#$%             When the report is for a gun engagement don't log
+#$%             each hit/miss in the log (i.e. 800 rounds w/ 240
+#$%             hits was overwhelming the log).  Need weapon DEQ$Ident$I.
+#$%
+#########################################################################
+BBCommon
+ENCommon
+ 
+integer  UNT$Pointer, UNT2$Pointer, TBL$Pointer
+integer  weapon_category
+#integer  weapon_code
+integer  number_fired
+integer  number_targeted, number_of_hits, number_killed
+ 
+bbdeclare (UNT$Name$C, UNT2$Name$C, unt$name$v)
+integer  UNT$Type$I
+integer  UNT2$Type$I, unt2$SubType$i
+ 
+integer   msg_len
+character  msg[ARB]
+ 
+integer    number_of_misses
+integer    i, number_left, i_flight_number, ctoi, ipos, ilen, itoc
+literal    kill_type, method, weapon_name
+literal    literal_side_number
+integer    TOR$Pointer, pounds_tnt      # clk 2/96 (E1554)
+vaxcharacter  v_air_name*$$MaxName,  v_flight_number*3
+character     c_air_name[$$MaxName], c_flight_number[4]
+literal    cstrip8	# SMM 3/00
+VMSchar    vstrip*(ARB)
+integer    UNT$NbrAC$I	# SMM 3/00
+ 
+equivalence   (v_air_name, c_air_name)
+equivalence   (v_flight_number, c_flight_number)
+ 
+ 
+  UNT2$Name$C = xUNT2$Name$C     # attacker name
+  weapon_name = xTBL$Name$C      # will extract the name form the first
+                                 # two words of the table entry
+  if (UNT$Pointer$Ok)     # the target could have been deleted before this msg
+    {
+     UNT$Name$C  = xUNT$Name$C      # target name
+     UNT$Type$I = xUNT$Type$I       # extact target's unit type
+    }
+  else   # the unit is no longer in RESA's database
+    {
+     UNT$Name$C  = 'UNKN'
+     UNT$Type$I = $Null$Code
+    }
+ 
+  if (number_targeted <= 0)   # if the number of objects targeted wasn't sent back
+    {                         # figure a best guess
+     if (UNT$Type$I == $Air$Code)
+       {
+        UNT$NbrAC$I = xUNT$NbrAC$I     # number of aircraft in the target flight
+        number_targeted = MAX (number_fired, number_of_hits)
+        number_targeted = MAX (number_targeted, number_killed)
+        number_targeted = MIN (number_targeted, UNT$NbrAC$I)
+       }
+     else
+       number_targeted = 1    # all other units in RESA are single entities
+    }
+ 
+  if (number_fired <=  0)   # if the number of weapons fired wasn't sent back,
+    {                       # figure a best quess
+      number_fired = MAX (number_targeted, number_of_hits)
+      number_fired = MAX (number_fired, number_killed)
+      number_fired = MAX (number_fired, 1)      #E2340 JOA UFL03
+    }
+ 
+  if (number_of_hits <= 0)
+    number_of_hits = number_killed
+ 
+  number_of_misses = number_fired - number_of_hits
+ 
+  # Handle torpedo miss or hit.
+  unt2$Type$i = Xunt2$Type$i
+  unt2$SubType$i = Xunt2$SubType$i
+  if (unt2$Type$i == $SubSurface$code &
+      unt2$SubType$i == $Torpedo$SubCode)
+  {
+    if (number_of_hits > 0)
+    {
+        PUTunt2$Status$i($beingdeleted$code)
+        # Send Explosion Message to view of owner of torpedo
+        msg_len = 0
+        Call SMOVV("Torpedo ",msg,msg_len)
+        Call SMOVHN(xUNT2$name$c,$$MaxLit,msg,msg_len)   # torpedo name
+        call SMOVV(" exploded.", msg, msg_len)
+        call send_   (xUNT2$View$I, 0, msg_len, msg)
+    }
+    else
+    {
+        PUTunt2$TimeSeek$f(game$time)   # Turn Seeker on now
+    }
+  }
+  # Handle explicit SAM miss or hit
+  unt2$type$i = Xunt2$type$i
+  if (unt2$type$i == $SAMissile$code)
+  {
+	if (number_of_hits > 0)
+	{
+		PUTunt2$Status$i($BeingDeleted$code)
+	}
+  }
+  # first log the misses and hits
+  if (weapon_category == $Gun$Code)    # clk 2/96 (E1554)
+    {
+     if (log$engage != $no)
+       {
+        TOR$Pointer = TBL$Pointer
+        pounds_tnt = INT (xTOR$Weight$I * number_of_hits)
+ 
+        call engdata (UNT2$Pointer, UNT$Pointer)    # E2224
+        putENG$Weapon$C (weapon_name)
+        putENG$Range$F (-1.)
+        putENG$MbuRange$F (-1.)
+        putENG$Result$I (ENG$Gun$Code)
+        putENG$ResultPh$f ( FLOAT ((number_of_hits * 100)/number_fired) )
+        putENG$GunEpu$I (pounds_tnt)
+        call write_eng_rec
+       }
+    }   # end of if the weapon is a gun
+  else
+    {
+     for (i = 1; i <= number_of_misses; i = i + 1)
+       {
+        if (log$engage != $no)                     # if engagement log is desired
+          {
+           call engdata (UNT2$Pointer, UNT$Pointer)     #E2224
+           putENG$Weapon$C (weapon_name)
+           putENG$Range$F (-1.)
+           putENG$MbuRange$F (-1.)
+           putENG$Result$I (ENG$Miss$Code)
+           putENG$ResultPh$F (-1.)                # unknown what the ph/pk was
+ 
+           call write_eng_rec
+          }
+       }
+ 
+     if (number_of_hits <= 0)       # if there were no hits,
+       return                       # nothing to do
+ 
+     for (i = 1; i <= number_of_hits; i = i + 1)
+       {
+        if (log$engage != $no)                # if engagement log is desired
+          {
+           call engdata (UNT2$Pointer, UNT$Pointer)     #E2224
+           putENG$Weapon$C (weapon_name)
+           putENG$Range$F (-1.)
+           putENG$MbuRange$F (-1.)
+           putENG$Result$I (ENG$Hit$Code)
+           putENG$ResultPh$F (-1.)                # unknown what the ph/pk was
+ 
+           call write_eng_rec
+          }
+       }   # end of number of hits loop
+    }   # end of if the weapon was not a gun
+ 
+  if (number_killed == 0)     # if no kills,
+    return                    # nothing to do
+ 
+  if (UNT$Type$I == $Air$Code)    # if an aircraft flight was the target
+    {
+     UNT$NbrAC$I = xUNT$NbrAC$I    # get the number of  aircraft in the flight
+     if (number_killed >= UNT$NbrAC$I)
+       number_killed = UNT$NbrAC$I
+ 
+     number_left   = UNT$NbrAC$I - number_killed  # number of a/c left in flight
+ 
+     #$% convert the literal unit name to a character string
+     v_air_name = xUNT$Name$V
+ 
+     #$% convert the flight number to an integer
+     ipos = 3
+     i_flight_number = ctoi (c_air_name, ipos)
+ 
+     i_flight_number = i_flight_number + number_left - 1
+ 
+     kill_type = 'SPLASH'
+     method    = 'ENGAGE'
+ 
+     for (i = 1; i <= number_killed; i = i + 1)
+      {
+       i_flight_number = i_flight_number + 1
+       #$% convert the integer number to a character string.
+       ilen = itoc (i_flight_number, c_flight_number, 4)
+ 
+       #$% concatenate the name
+       if (ilen == 3)       # the flight number >= 100
+         v_air_name = v_air_name[1:2]//v_flight_number
+       else if (ilen == 2)  # the flight number >= 10, but < 100
+         v_air_name = v_air_name[1:2]//"0"//v_flight_number
+       else                 # the flight number >= 0 , but < 10
+         v_air_name = v_air_name[1:2]//"00"//v_flight_number
+ 
+       #$% convert back to literal
+       call move_str_lit (v_air_name, literal_side_number)
+ 
+       if (log$engage != $no)             # if an engagement log is desired
+         {
+          call engdata(UNT2$Pointer,UNT$Pointer) # JHM 7/03
+          putENG$Time$F (Game$Time)
+          putENG$Platform$C (kill_type)
+          putENG$Weapon$C (method)
+          putENG$Track$C ("GHOST")
+          putENG$Target$C (literal_side_number)
+          putENG$result$I (ENG$Hit$Code)
+ 
+          call write_eng_rec                  # write the record
+         }
+ 
+       if (trace$engage$exe != $no)
+         {
+          call echor
+          call echohn (literal_side_number, $$MaxLit)
+          call echov ('(an ALSP ghost) was just killed by ')
+          call echohn (xUNT2$Name$C, $$MaxLit)
+          call echor
+         }      # end of trace information
+      }         # end of loop through destroyed aircraft in the flight
+ 
+     #$% CLK 5/11/93 - use the info in the report message to reduce the size
+     #$% of the target flight (an update or delete message SHOULD follow, but
+     #$% may not be read before the next cycle).
+ 
+     putUNT$NbrAC$I     (number_left)
+     putUNT$NbrAcTot$I  (number_left)
+    }
+  else      # boat / ship / sub / missile
+    {
+     if (UNT$Type$I == $CruiseMissile$Code)
+       {
+        putENG$Platform$C ("SPLASH  ")
+        putENG$Weapon$C ("ENGAGE  ")
+       }
+     else
+       {
+        putENG$Platform$C ("SINKING ")
+        putENG$Weapon$C ("DAMAGE  ")
+       }
+ 
+     if (log$engage != $no)             # if an engagement log is desired
+       {
+        call engdata(UNT2$Pointer,UNT$Pointer)  # JHM 7/03
+        putENG$Time$F (Game$Time)
+        putENG$Track$C ("GHOST")
+        putENG$Target$C (UNT$Name$C)
+        putENG$Result$I (ENG$Hit$Code)
+ 
+        call write_eng_rec                  # write the record
+       }
+ 
+     if (trace$engage$exe != $no)
+       {
+        call echor
+        call echohn (UNT$Name$C, $$MaxLit)
+        call echov ('(an ALSP ghost) was just killed by ')
+        call echohn (UNT2$Name$C, $$MaxLit)
+        call echor
+       }      # end of trace information
+   }
+ 
+return
+end
+
+ 
+subroutine ALSP_Interaction_Error (from_alspid, to_alspid, error_type)
+#########################################################################
+#$%
+#$% Purpose:    ALSP_Interaction_Error sends an error message to the
+#$%             swar terminal screen for an error occurring during
+#$%             interaction message processing.
+#$%
+#$% Called by:  ALSP_Receive_Interact
+#$%
+#$% Calls:      Smov..
+#$%
+#$% Tables:     None
+#$%
+#$% Date:       May 19, 1992
+#$%
+#$% Author:     Carol L. Kropp
+#$%
+#$% Modified:   Susan Miller - 2/96 (E1560)
+#$%             Filled message with blanks before filling it with the
+#$%             error message.
+#$%
+#$%             Susan Miller - 3/97 (E1795)
+#$%             Added new error type for a non-enumerated weapon types.
+#$%
+#########################################################################
+BBcommon
+include "alsp_io_rat.inc"
+ 
+integer    from_alspid, to_alspid, error_type, msg_len
+character  message[132]
+vaxcharacter*132 v_message
+integer    i, i_switch_1  # SMM 3/00
+ 
+Equivalence  (message, v_message)
+ 
+  # clear out the message -> 4 * 33 = 132   # smm 2/21/96 (E1560)
+  msg_len = 0
+  for (i = 1; i <= 4; i = i + 1)
+    call smovv  ("                                 ", message, msg_len)
+                 #         1         2         3
+                 #123456789012345678901234567890123
+ 
+  msg_len = 0
+  call smovv  ("*** ERROR IN ALSP MESSAGE:  From/Object ID = ", message, msg_len)
+  call smovi  (from_alspid, message, msg_len)
+  if (to_alspid > 0) {
+     call smovv  (" to ALSPID = ", message, msg_len)
+     call smovi  (to_alspid, message, msg_len)
+  }
+ 
+  switch(error_type)
+    {
+     case $being_deleted_status:
+            call smovv (" - Message recipient has a status of being deleted.",
+                                                                  message, msg_len)
+     case $ghost_to_ghost_engagement:
+            call smovv (" - Message recipient is a ghosted unit.", message, msg_len)
+     case $incorrect_actor_id:
+            call smovv (" - ID does not match actors ID number.", message, msg_len)
+     case $incorrect_class:
+            call smovv (" - Incorrect class type.", message, msg_len)
+     case $interaction_not_handled:
+            call smovv (" - Interaction is not processed by this actor.", message, msg_len)
+     case $no_id_match:
+            call smovv (" - No matching ALSP id in unit table.", message, msg_len)
+     case $no_weapon_match:
+            call smovv (" - Weapon not mapped, check data.", message, msg_len)
+     case $no_weapon_specified:
+            call smovv (" - No weapon specified in message.", message, msg_len)
+     case $unit_kind_mismatch:
+            call smovv (" - ", message, msg_len)
+     case $weapon_not_in_database:
+            call smovv (" - No matching weapon in game database.", message, msg_len)
+     case $zero_id:
+            call smovv (" - Zero ALSP id number.", message, msg_len)
+     case $no_weapon_enumeration:
+            call smovv (" - Weapon not enumerated.", message, msg_len)
+    }
+ 
+  if (ALSP$Logging == $ON)
+  {
+      write (msg_log_unit, fmt=*)
+      write (msg_log_unit, fmt=*) v_message         # write the message to the log file
+      write (msg_log_unit, fmt=*)
+  }
+ 
+return
+end
+
+ 
+subroutine ALSP_Receive_SAM_Engage (_
+                    alsp_interaction_type,  # in: type of alsp interction msg
+                    UNT$Pointer,       # unit pointer of target flight leader
+                    UNT2$Pointer,      # unit pointer of attacker (a ghost)
+                    UNT2$ALSPid$I,     # ALSP ID of the attacker
+                    MC$Pointer,        # characteristic pointer of SAM
+                    number_fired,      # number of missiles fired
+                    number_targeted,   # number of a/c which were shot at in the flight
+                    weapon_code,       # alsp weapon code number from alsp.inc
+                    correlation_id)    # pass to report-attrition
+#########################################################################
+#$%
+#$% Purpose:    ALSP_Receive_SAM_Engage processes interactions against RESA
+#$%             owned air units when attacked by an ALSP ghost.  The
+#$%             PK/PH must be calculated and damage assessed.  If the target
+#$%             is an aircraft flight, the destroyed a/c are updated in the DAC
+#$%             table and engagement log.  The results of the engagement
+#$%             are sent out and either an update or delete message is sent.
+#$%
+#$% Called By:  ALSP_Receive_Interact
+#$%
+#$% Calls:      RLL2RB              MBURange
+#$%
+#$% Tables:     UNT         ACC         CMC
+#$%
+#$% Date:       March 24, 1993
+#$%
+#$% Author:     Carol L. Kropp
+#$%
+#$% Modified:   Carol Kropp - 6/10/94 (E1286)
+#$%             Need to remove a/c that are killed from the flight
+#$%             chain.  These a/c were being report as COL also when
+#$%             the remaining a/c from the flight recovered.
+#$%
+#$%             Jay Braun - 4/2015
+#$%             Add correlation id as a pass-through from an incoming 
+#$%             engagement to an outgoing report-attrition
+#$%
+#########################################################################
+BBCommon
+ENCommon
+ 
+integer  alsp_interaction_type, UNT$Pointer, UNT2$Pointer, UNT2$ALSPid$I, MC$Pointer
+integer  number_fired, number_targeted, weapon_code
+ 
+real     mburange    # function to obtain main battle unit range
+ 
+integer  i,           idummy
+integer  range_to_target, range_to_mbu
+ 
+real      range,              bearing
+literal   attacker_name,      target_name,       weapon_name
+integer   sams_found,         sam_eqlist_index,  eqlist [5,30]
+integer   ac_target_flag,     target_max_alt,    target_eph_index
+integer   size_of_unit
+integer   number_of_targets,  number_to_fire,    number_killed
+real      probability_of_kill
+integer   previous_AML_pointer    # E1285
+literal   cstrip8						     # SMM 3/00
+integer   UNT$NbrAC$I, ACC$Pointer, AML$NextIndx$I, leader_aml_index # SMM 3/00
+integer   CMC$Pointer, UNT$TrueAltDepth$I, AML$Pointer, AML2$Status$I # SMM 3/00
+integer   AML2$Pointer, UNT$ALSPID$I				     # SMM 3/00
+integer    missiles_fired /1/  # jb E2208 - mismatch # of args  12/7/00
+real	  rannum, x, random                                          # SMM 3/00
+real      pcent
+vaxcharacter*MAX_STR_LEN correlation_id
+ 
+  target_name   = xUNT$Name$C
+  weapon_name   = xMC$Name$C
+ 
+  if (UNT2$Pointer$Ok)
+     attacker_name = xUNT2$Name$C
+  else
+     attacker_name = 'GHOST'
+ 
+  if (trace$engage$exe != $no)
+    {
+     call echor
+     call echov  ("*** ERROR IN ALSP MESSAGE - SAM Engagement.....")
+     call echohn (attacker_name, $$MaxLit)
+     call echov  (" (ghosted unit) is attacking ")
+     call echohn (target_name, $$MaxLit)
+     call echov  (" - targeting ")
+     call echoi  (number_targeted)
+     call echov  (", with ")
+     call echoi  (number_fired)
+     call echov  (" ")
+     call echohn (weapon_name, $$MaxLit)
+     call echov  (" SAMs.")
+     call echor
+    }
+ 
+  if (xUNT$Type$I == $Air$Code)     # if target is an a/c
+    {
+     UNT$NbrAC$I   = xUNT$NbrAC$I
+     size_of_unit = UNT$NbrAC$I
+     number_of_targets = number_targeted
+     if (number_of_targets > UNT$NbrAC$I)  # If the interaction msg indicates more
+        number_of_targets = UNT$NbrAC$I    # attacked than exist, attack the whole flight
+ 
+     ac_target_flag = $yes
+     ACC$pointer = xUNT$AccPntr$I
+     target_max_alt = xACC$MaxAlt$I
+     target_eph_index = xACC$TargetIndex$I
+ 
+     AML$NextIndx$I   = xUNT$AMLIndx$I        # target's AML pointers
+     leader_aml_index = AML$NextIndx$I        # Retain target's leader callsign after attrition
+    }
+  else  # target is a cruise missile
+    {
+     size_of_unit = 1
+     number_of_targets = 1
+     ac_target_flag = $no
+     CMC$Pointer = xUNT$CMCPntr$I
+     target_eph_index = xCMC$TargetIndex$I
+    }
+ 
+  #$% set up the first entry of the eqlist array for the type of
+  #$% SAM indicated in the interaction message
+  sams_found = 1
+  sam_eqlist_index = 1
+  eqlist [1,1] = 0                # there is no DEQ slot
+  eqlist [2,1] = MC$Pointer
+  eqlist [3,1] = number_fired     # make enough available
+  eqlist [4,1] = xMC$MaxRange$I
+  eqlist [5,1] = 0                # n/a for AAM - MC$NbrSimEngages$I
+ 
+  if (UNT2$Pointer$OK)
+    {
+     call RLL2RB (xUNT2$TrueLatitude$F, xUNT2$TrueLongitude$F, xUNT2$CosTrueLat$F,   # attacker
+                  xUNT$TrueLatitude$F,  xUNT$TrueLongitude$F,  xUNT$CosTrueLat$F,    # target
+                  range,                bearing)                                     # range and bearing from attacker to target
+    }
+  else
+    {
+     range = 0
+     bearing = 0
+    }
+ 
+  range_to_mbu = MBURange (UNT$Pointer)
+ 
+  UNT$TrueAltDepth$I = xUNT$TrueAltDepth$I     # target's altitude
+  range_to_target = INT (range + 0.5)
+ 
+  call Get_SAM_Probability_of_Hit (UNT$Pointer,       MC$Pointer,
+                                   target_eph_index,  probability_of_kill, idummy)
+ 
+  putUNT$UnderAttack$I ($yes)           # set the target's under attack flag
+ 
+  number_to_fire = MIN0 (number_fired, number_of_targets)
+  number_killed  = 0
+ 
+  for (i = 1; i <= number_to_fire; i = i + 1)
+    {
+     if (log$engage != $no)                # if engagement log is desired
+     {
+       if (UNT2$Pointer$Valid)      # JHM (E2257) CT02
+        {
+         call engdata (unt2$pointer, unt$pointer)    # E2224
+         putENG$Weapon$C (weapon_name)
+         putENG$Range$F (range_to_target)
+         putENG$MbuRange$F (range_to_mbu)
+        }
+       else
+        {
+         call engdata (unt2$pointer, unt$pointer)    # E2224
+         putENG$SalspID$I (UNT2$AlspId$I)       # jhm ct02 (E2257) 1/02 shooter alspid
+         putENG$Weapon$C (weapon_name)
+         putENG$Range$F (range_to_target)
+         putENG$MbuRange$F (range_to_mbu)
+         }
+        } # end of engagement log code
+     rannum = random(x)  # get random number
+     if (probability_of_kill < rannum)
+       {
+        if (log$engage != $no)              # if engagement log is desired
+           {                                # setup miss entry
+            putENG$Time$F (Game$Time)
+            putENG$Result$I (ENG$Miss$Code)
+            putENG$ResultPh$F (probability_of_kill * 100)
+           }
+        if (trace$engage$exe != $no)
+          {
+           call echov  (" SAM against ")
+           call echohn (target_name, $$MaxLit)
+           call echov  (" MISSED - ph=")
+           call echof  (probability_of_kill, 0705)
+           call echov  (" rannum=")
+           call echof  (rannum, 0705)
+          }
+       }
+     else      # a hit
+       {
+        if (log$engage != $no)              # if engagement log is desired
+          {
+           putENG$Time$F (Game$Time)
+           putENG$Result$I (ENG$Hit$Code)
+           call write_eng_rec
+          }
+ 
+        if (ac_target_flag == $yes)
+          {
+           AML$Pointer$To  (leader_aml_index)       # start at the beginning of
+           AML$NextIndx$I = xAML$NextIndx$I         # the flights AML chain and
+           if (AML$NextIndx$I == 0)                 # find the last non-destroyed
+              AML2$Status$I = $Destroyed$Code       # a/c - this will maintain
+           else  # the index is valid               # the flight leader call sign
+             {
+              AML2$Pointer$To  (AML$NextIndx$I)
+              AML2$Status$I = xAML2$Status$I
+             }
+           previous_AML_pointer = 0
+           while (AML$NextIndx$I != 0  &
+                  AML2$Status$I != $Destroyed$code)
+             {
+              previous_AML_pointer = AML$Pointer
+              AML$Pointer$To  (AML$NextIndx$I)
+              AML$NextIndx$I = xAML$NextIndx$I
+              if (AML$NextIndx$I != 0)
+                {
+                 AML2$Pointer$To  (AML$NextIndx$I)
+                 AML2$Status$I = xAML2$Status$I
+                }
+             }
+          }       # end of locating AML pointer for aircraft target
+ 
+        call Process_SAM_Hit (UNT2$Pointer,   UNT$Pointer,   ac_target_flag,
+                              AML$Pointer,    CMC$Pointer,   MC$Pointer,
+                              missiles_fired ) # jb E2208 -srg mismatch 12/7/00
+ 
+        number_killed = number_killed + 1
+ 
+        if (ac_target_flag == $yes)   # E1286: Need to removed the a/c
+          {                           #        from the flight chain.
+            # AML$Pointer is the a/c marked for destruction
+            # AML2$Pointer is the a/c pointing to it
+            AML2$Pointer = previous_AML_pointer
+            if (AML2$Pointer$Valid)
+              {
+                putAML2$NextIndx$I  (AML$NextIndx$I)
+                putAML$NextIndx$I   (0)
+              }
+          }
+ 
+        if (trace$engage$exe != $no)
+          {
+           call echov  (" ")
+           if (ac_target_flag == $yes)
+             call echohn (xAML$SideNumber$C, $$MaxLit)
+           else
+             call echohn (target_name, $$MaxLit)
+           call echov  (" HIT ")
+          }
+       }
+    }    # end of loop through number fired
+ 
+  UNT$ALSPid$I = xUNT$ALSPid$I
+  call ALSP_Send_Interaction_Msg (UNT$ALSPid$I, UNT2$ALSPid$I, 0,
+                                  $event_message, $report, alsp_interaction_type, weapon_code,
+                                  number_fired, number_targeted, number_killed, number_killed,
+                                  0.0, 0.0, 0, correlation_id)
+ 
+  if (size_of_unit == number_killed)       # if the whole flight was destroyed
+    {
+     putUNT$NbrAC$I     (0)
+     putUNT$NbrAcTot$I  (0)
+     putUNT$Status$I    ($BeingDeleted$Code)
+ 
+     call alsp_send_del ($event_message, UNT$ALSPid$I)
+     putUNT$ALSPid$I    (0)   # wipe out ALSP id - so two delete messages won't go out.
+    }
+  else if (number_killed > 0) # if there were any kills in the flight,
+    {                         # send out an update & decrease expendables
+     if (ac_target_flag == $yes)
+       {
+         putUNT$Hits$I       (0)    # these two fields incremented were in Process_SAM_Hit
+         putUNT$MissHits$I   (0)    # but, reset here so that the number of a/c can be updated
+                                    # without causing side effects.
+         UNT$NbrAC$I = UNT$NbrAC$I - number_killed
+         putUNT$NbrAC$I      (UNT$NbrAC$I)
+         putUNT$NbrAcTot$I   (UNT$NbrAC$I)     #\/ jb E2208 12/11/00 add $NO
+         call ALSP_Update_Aircraft_Flight (UNT$Pointer,$event_message,$NO)
+ 
+         #jhm 4/02 this code put back from comment
+         pcent = FLOAT (UNT$NbrAC$I) / FLOAT (UNT$NbrAC$I + number_killed)
+         call MOVEXP (UNT$Pointer, -1, pcent)
+       }
+    }
+ 
+return
+end
+
+ 
+#$%  Note:  Make a routine (or something) to verify that the units located
+#$%         match the type of interaction msg.
+subroutine ALSP_Locate_Interaction_Units (_
+                  to_unit_alsp_id,          # in: ALSP id of "TO" unit
+                  from_unit_alsp_id,        # in: ALSP id of "FROM" unit
+                  alsp_interaction_type,    # in: interaction "KIND"
+                  alsp_weapon_enumeration,  # in: enumeration value of weapon
+                  alsp_salvo_size,          # in: number of weapon fired
+                  alsp_targets_engaged,     # in: number of targets engaged
+                  UNT$Pointer,              # out: UNT pointer of "TO"
+                  UNT2$Pointer,             # out: UNT pointer of "FROM"
+                  success_flag)             # out: wether or not both units
+                                            #      were located successfully
+#$% Note:  alsp_weapon_enumeratin, alsp_salvo_size and alsp_targets_engaged
+#$%        are only used for calling ALSP_Send_Interaction_Msg, to report
+#$%        zero kills.
+#########################################################################
+#$%
+#$% Purpose:    ALSP_Locate_Interaction_Units searches the unit table
+#$%             for the two units involved in the ALSP interaction msg.
+#$%             Currently ground units are not ghosted and therefore have
+#$%             no unt entry.
+#$%
+#$% Called By:  ALSP_Receive_Interact
+#$%
+#$% Calls:      ALSP_Interaction_Error
+#$%             ALSP_Send_Del               <transifsend.c>
+#$%             ALSP_Get_UNT_Pointer        <alsp_update.rat>
+#$%             ALSP_Send_Refresh           <transifsend.c>
+#$%             ALSP_Send_Interaction_Msg   <alsp_send_interact.rat>
+#$%
+#$% Tables:     UNT
+#$%
+#$% Date:       Sept. 1993
+#$%
+#$% Author:     Carol L. Kropp
+#$%             General code moved from ALSP_Receive_Interact.
+#$%
+#$% Modified:   Carol Kropp - 10/95 (E1455)
+#$%             A shared base may be owned by another, but we need
+#$%             to process the interaction - so had to rearrange
+#$%             checks.
+#$%
+#$%             Carol Kropp - 2/96 (E1540)
+#$%             After talking with Ernie Page & John Tufarolo (MITRE),
+#$%             no report will be sent when no unit is located or when
+#$%             the unit is located, but is dead.  Was done originally
+#$%             for when CBS units shot at our a/c, but we did not handle
+#$%             air_to_ground (1st year).  Ernie and John suggested
+#$%             implementing the ALSP ERROR msg...see Tech Spec.
+#$%
+#########################################################################
+BBCommon
+include "alsp_io_rat.inc"               # mbx_io common block
+ 
+integer  to_unit_alsp_id,       from_unit_alsp_id
+integer  alsp_interaction_type, alsp_weapon_enumeration
+integer  alsp_salvo_size,       alsp_targets_engaged
+integer  UNT$Pointer,           UNT2$Pointer
+integer  success_flag
+ 
+integer  id_found, to_unit_actor_number
+integer  CMC$Pointer, SHC$Pointer  # SMM 3/00
+integer  MFD$Pointer
+ 
+  success_flag = $no
+ 
+  if (to_unit_alsp_id == 0)   # when units attack positions, there is no 'TO'
+    {
+     if (alsp_interaction_type == $air_to_ground)
+       {
+        call ALSP_Get_UNT_Pointer (UNT2$Pointer, from_unit_alsp_id, id_found)
+        if (id_found == $yes)
+          {
+            if (xUNT2$Type$I == $CruiseMissile$Code)
+              {
+               CMC$Pointer = xUNT2$CMCPntr$I
+               if (xCMC$Cat$I == $Ball$Code)
+                 {
+                   success_flag = $yes
+                   return
+                 }   # end of if a ballistic missile
+              }      # end of a cruise missile unit
+          }          # end of if unit found in UNT table
+       }             # end of if an air_to_ground msg
+ 
+     call ALSP_Interaction_Error (from_unit_alsp_id, to_unit_alsp_id, $zero_id)
+     return
+    }
+ 
+  call ALSP_Get_UNT_Pointer (UNT$Pointer, to_unit_alsp_id, id_found)
+ 
+  if (id_found == $no)             # if not found in the UNT table
+    {
+     call ALSP_Interaction_Error (from_unit_alsp_id, to_unit_alsp_id, $no_id_match)
+     return
+    }
+  else if (xUNT$GhostedUnit$I == $yes)   # if the msg recipient is a ghost
+    {
+     call ALSP_Interaction_Error (from_unit_alsp_id, to_unit_alsp_id,
+                                  $ghost_to_ghost_engagement)
+     return
+    }
+  else if (xUNT$Status$I == $BeingDeleted$Code)   # if unit is being deleted
+    {
+     call ALSP_Interaction_Error (from_unit_alsp_id, to_unit_alsp_id,
+                                  $being_deleted_status)
+     return
+    }
+ 
+  #$% This will work, as there is no shared ownership of aircraft, cruise missile,
+  #$% or vessel (boat, ship, sub) units at this point. At a later time, if RESA has
+  #$% ownership over units created within another actor, then this will not be sufficient.
+  to_unit_actor_number = INT (to_unit_alsp_id * 0.00001)  # see ALSP_Generate_ID <alsp_send_updates.rat>
+  if (to_unit_actor_number != actor)     # if the "to" parameter isn't meant for us
+    {
+     # check to see if the unit is a base, and if so is it shared   clk - 10/95 (E1455)
+     if (xUNT$Type$I == $ShoreBase$Code)
+       {
+        SHC$Pointer = xUNT$SHCpntr$I
+        if (xSHC$ALSPSharedBase$I == $no)
+          {
+           call ALSP_Interaction_Error (from_unit_alsp_id, to_unit_alsp_id, $incorrect_actor_id)
+           return
+          }
+       }
+     else
+       {
+        call ALSP_Interaction_Error (from_unit_alsp_id, to_unit_alsp_id, $incorrect_actor_id)
+        return
+       }
+    }
+ 
+  if (alsp_interaction_type == $ground_to_air    |
+      alsp_interaction_type == $ground_to_ground |
+      alsp_interaction_type == $ground_to_ship   )
+    {
+     #$% At this time ground units are not ghosted
+     UNT2$Pointer = $no
+    }
+  else
+    {
+      call ALSP_Get_UNT_Pointer (UNT2$Pointer, from_unit_alsp_id, id_found)
+      if (id_found == $No)
+        {
+         # Check for minefield
+         mfd$pointer = 0
+         call ALSP_Locate_Minefield (from_unit_alsp_id, mfd$pointer)
+         if (mfd$pointer != 0)
+            return
+ 
+         call ALSP_Interaction_Error (from_unit_alsp_id,
+                                      to_unit_alsp_id, $no_id_match)
+         if (alsp_interaction_type < $low_alsp_report_type |    # if this was not an
+             alsp_interaction_type > $high_alsp_report_type)    # interaction report
+           {
+            call ALSP_Send_Interaction_Msg (to_unit_alsp_id, from_unit_alsp_id, 0,
+                                            $event_message, $report, alsp_interaction_type,
+                                            alsp_weapon_enumeration, alsp_salvo_size,
+                                            alsp_targets_engaged, 0, 0, 0.0, 0.0, 0,"")
+            return
+           }
+        }
+    }        # end of locating the "FROM" unit
+ 
+  success_flag = $yes   # if there were any problems, the routine
+                        # will return out before this pointer
+ 
+return
+end
+
+ 
+subroutine ALSP_Receive_ASM_Engage (_
+                    UNT$Pointer,       # in: unit pointer of target flight leader
+                    UNT2$Pointer,      # in: unit pointer of attacker (a ghost)
+                    UNT2$ALSPid$I,     # in: alsp id of attacker
+                    MC$Pointer,        # in: characteristic pointer of ASM
+                    number_fired,      # in: number of missiles fired
+                    weapon_code,       # in: alsp weapon code number from alsp.inc
+                    correlation_id)    # in: pass to report-attrition
+#########################################################################
+#$%
+#$% Purpose:    ALSP_Receive_ASM_Engage processes interactions against RESA
+#$%             owned units when attacked by an ALSP ghost with ASMs.  The
+#$%             number of hits must be calculated and damage assessed.
+#$%             The result of the engagement is sent out and the engagement
+#$%             is logged (if desired).
+#$%
+#$% Called By:  ALSP_Receive_Interact
+#$%
+#$% Calls:      RLL2RB         ECHO..
+#$%             MBURange       Get_ASM_or_Bomb_Ph  <wgmdeng.rat>
+#$%             Random         INT
+#$%             Write_Eng_Rec
+#$%             ALSP_Send_Interction_Msg   <alsp_send_interact.rat>
+#$%
+#$% Tables:     UNT         SHC         MC
+#$%
+#$% Date:       Sept. 1993
+#$%
+#$% Author:     Carol L. Kropp
+#$%
+#$% Modified:   Carol Kropp - 10/95 (E1496)
+#$%             Don't send a report message when the target is
+#$%             a base.
+#$%
+#$%             John McCormick - 4/98 (E1952)
+#$%             Send a warning to the i/o that unit is under ASM attack.
+#$%
+#$%             Susan Miller 5/98 (E1988)
+#$%             Added weapon type parameter to get_asm_or_bomb_ph
+#$%
+#$%             Jay Braun - 4/2015
+#$%             Add correlation id as a pass-through from an incoming 
+#$%             engagement to an outgoing report-attrition
+#$%
+#########################################################################
+BBCommon
+ENCommon
+ 
+integer  UNT$Pointer, UNT2$Pointer, UNT2$ALSPid$I, MC$Pointer
+integer  number_fired, weapon_code
+ 
+real     MBUrange                              # function returning rng to main battle unit
+ 
+integer  i
+integer  range_to_target, range_to_mbu
+ 
+real      range,             bearing,        probability_of_hit
+literal   attacker_name,     target_name,    weapon_name
+integer   number_of_hits,    delivered_tnt
+ 
+literal   cstrip8							   # SMM 3/00
+integer   msg_len, UNT$Hits$I, UNT$MissHits$I, UNT$ARMHits$I, UNT$ALSPID$I # SMM 3/00
+real      rannum, x, random                                                # SMM 3/00
+character  msg[ARB]					            	   # SMM 3/00
+vaxcharacter*MAX_STR_LEN correlation_id
+ 
+  target_name   = xUNT$Name$C
+  weapon_name   = xMC$Name$C
+ 
+  if (UNT2$Pointer$Ok)
+    {
+     attacker_name = xUNT2$Name$C
+     call RLL2RB (xUNT2$TrueLatitude$F, xUNT2$TrueLongitude$F, xUNT2$CosTrueLat$F,   # attacker
+                  xUNT$TrueLatitude$F,  xUNT$TrueLongitude$F,  xUNT$CosTrueLat$F,    # target
+                  range,                bearing)                                     # range and bearing from attacker to target
+     range_to_target = INT (range + 0.5)
+    }
+  else
+    {
+     attacker_name = 'GHOST'
+     range_to_target = 0
+    }
+ 
+  if (UNT$Pointer$OK)      # send message to unit - jhm 4/98 (E1952)
+    {
+     msg_len = 0
+     call smovhn (target_name, $$MaxLit, msg, msg_len)
+     call smovv  (" UNDER ATTACK BY ASMs.", msg, msg_len)
+     call send_   (xUNT$View$I, 0, msg_len, msg)
+    }
+ 
+  if (trace$engage$exe != $no)
+    {
+     call echor
+     call echov  ("*** ERROR IN ALSP MESSAGE - ASM Engagement.....")
+     call echohn (attacker_name, $$MaxLit)
+     call echov  (" (ghosted unit) is attacking ")
+     call echohn (target_name, $$MaxLit)
+     call echov  (", with ")
+     call echoi  (number_fired)
+     call echov  (" ")
+     call echohn (weapon_name, $$MaxLit)
+     call echov  (" ASMs.")
+     call echor
+    }
+ 
+  range_to_mbu = MBURange (UNT$Pointer)
+ 
+  # SMM 5/98 (E1988) added type of weapon to parameter list.
+  call Get_ASM_or_Bomb_PH (UNT$Pointer, xMC$WeaponIndex$I,
+                           probability_of_hit, $asm$code)
+ 
+  putUNT$UnderAttack$I ($yes)           # set the target's under attack flag
+ 
+  number_of_hits  = 0                   # NOTE:  nuclear code not included.
+  for (i = 1; i <= number_fired; i = i + 1)
+    {
+     if (log$engage != $no)                # if engagement log is desired
+       {
+        call engdata (unt2$pointer, unt$pointer)    # E2224
+        putENG$Weapon$C (weapon_name)
+        putENG$Range$F (range_to_target)
+        putENG$MbuRange$F (range_to_mbu)
+       }
+ 
+     rannum = random(x)  # get random number
+     if (probability_of_hit < rannum)
+       {
+        if (log$engage != $no)              # if engagement log is desired
+           {                                # setup miss entry
+            putENG$Time$F (Game$Time)
+            putENG$Result$I (ENG$Miss$Code)
+            putENG$ResultPh$F (probability_of_hit * 100.)
+            call write_eng_rec
+           }
+       }
+     else      # a hit
+       {
+        if (log$engage != $no)              # if engagement log is desired
+          {
+            putENG$Time$F (Game$Time)
+            putENG$Result$I (ENG$Hit$Code)
+            call write_eng_rec
+          }
+        number_of_hits = number_of_hits + 1
+       }
+    }    # end of loop through number fired
+ 
+  if (number_of_hits > 0)
+    {
+     delivered_tnt = number_of_hits * xMC$Weight$I
+     UNT$Hits$I = xUNT$Hits$I + delivered_tnt
+     putUNT$Hits$I
+     UNT$MissHits$I = xUNT$MissHits$I + delivered_tnt
+     putUNT$MissHits$I
+     if (xMC$ARMflag$I == $yes)
+       {
+        UNT$ARMhits$I = xUNT$ARMhits$I + delivered_tnt
+        putUNT$ARMhits$I
+       }
+    }
+ 
+  if (xUNT$Type$I != $ShoreBase$Code)    # only surface platforms and bases
+    {                                    # should be getting attacked with ASMs
+     UNT$ALSPid$I = xUNT$ALSPid$I
+     call ALSP_Send_Interaction_Msg (UNT$ALSPid$I, UNT2$ALSPid$I, 0,
+                                     $event_message, $report, $air_to_ship, weapon_code,
+                                     number_fired, 1, number_of_hits, 0, 0.0, 0.0, 0, correlation_id)
+    }
+ 
+return
+end
+
+ 
+subroutine ALSP_Receive_Bomb_Engage (_
+                    UNT$Pointer,       # in: unit pointer of target flight leader
+                    UNT2$Pointer,      # in: unit pointer of attacker (a ghost)
+                    UNT2$ALSPid$I,     # in: alsp id of attacker
+                    BOM$Pointer,       # in: characteristic pointer of bomb
+                    number_dropped,    # in: number of bombs dropped
+                    weapon_code,       # in: alsp weapon code number from alsp.inc
+                    correlation_id)    # in: to pass to report-attrition
+#########################################################################
+#$%
+#$% Purpose:    ALSP_Receive_Bomb_Engage processes interactions against RESA
+#$%             owned units when attacked by an ALSP ghost with BOMBs.  The
+#$%             number of hits must be calculated and damage assessed.
+#$%             The result of the engagement is sent out and the engagement
+#$%             is logged (if desired).
+#$%
+#$% Called By:  ALSP_Receive_Interact
+#$%
+#$% Calls:      RLL2RB         MBURange
+#$%             ECHO..         Get_ASM_or_Bomb_PH   <wgmdeng.rat>
+#$%             INT            Write_Eng_Rec
+#$%             ALSP_Send_Interction_Msg   <alsp_send_interact.rat>
+#$%
+#$% Tables:     UNT         SHC         BOM
+#$%
+#$% Date:       Sept. 1993
+#$%
+#$% Author:     Carol L. Kropp
+#$%
+#$% Modified:   Carol Kropp - 10/95 (E1496)
+#$%             Don't send a report message when the target is
+#$%             a base.
+#$%
+#$%             Carol Kropp - 2/96 (E1547)
+#$%             Rather than one hit/miss entry for the interaction,
+#$%             it is desired to have one per bomb dropped. (Also
+#$%             solves the problem where every interaction was logged
+#$%             as a hit).  Also changed engagement logging to call
+#$%             engdata so that platform types are present.
+#$%
+#$%             John McCormick - 4/98 (E1952)
+#$%             Send a warning to the i/o that unit is under attack.
+#$%
+#$%             Susan Miller 5/98 (E1988)
+#$%             Added weapon type parameter to get_asm_or_bomb_ph
+#$%
+#$%             Jay Braun - 4/2015
+#$%             Add correlation id as a pass-through from an incoming 
+#$%             engagement to an outgoing report-attrition
+#$%
+#########################################################################
+BBCommon
+ENCommon
+ 
+integer  UNT$Pointer, UNT2$Pointer, UNT2$ALSPid$I, BOM$Pointer
+integer  number_dropped, weapon_code
+ 
+real     mburange    # function to obtain main battle unit range
+ 
+integer  i
+integer  range_to_target, range_to_mbu
+ 
+literal   attacker_name,     target_name,      weapon_name
+real      range,             bearing,          probability_of_hit
+integer   number_of_hits,    delivered_tnt
+literal   cstrip8,alspidname					     # SMM 3/00, JHM 1/02
+real      random_num, x, random  			     # SMM 3/00
+integer   msg_len, UNT$Hits$I, UNT$BombHits$I, UNT$ALSPID$I, kk  # SMM 3/00,jhm  1/02
+character msg[ARB], salspidname[ARB]					     # SMM 3/00
+vaxcharacter*MAX_STR_LEN correlation_id 
+ 
+  target_name   = xUNT$Name$C
+  weapon_name   = xBOM$Name$C
+  alspidname = 'GHOST'
+ 
+  if (UNT2$Pointer$Ok)
+    {
+     attacker_name = xUNT2$Name$C
+     call RLL2RB (xUNT2$TrueLatitude$F, xUNT2$TrueLongitude$F, xUNT2$CosTrueLat$F,   # attacker
+                  xUNT$TrueLatitude$F,  xUNT$TrueLongitude$F,  xUNT$CosTrueLat$F,    # target
+                  range,                bearing)                                     # range and bearing from attacker to target
+     range_to_target = INT (range + 0.5)
+    }
+  else
+    {
+     attacker_name = 'GHOST'
+     range_to_target = -1
+    }
+  range_to_mbu = MBURange (UNT$Pointer)
+ 
+  if (UNT$Pointer$OK)   # send message under attack - jhm 4/98 (E1952)
+    {
+     msg_len = 0
+     call smovhn (target_name, $$MaxLit, msg, msg_len)
+     call smovv  (" UNDER ATTACK BY BOMBS.", msg, msg_len)
+     call send_   (xUNT$View$I, 0, msg_len, msg)
+    }
+ 
+  if (trace$engage$exe != $no)
+    {
+     call echor
+     call echov  ("*** ERROR IN ALSP MESSAGE - BOMB Engagement.....")
+     call echohn (attacker_name, $$MaxLit)
+     call echov  (" (ghosted unit) is attacking ")
+     call echohn (target_name, $$MaxLit)
+     call echov  (", with ")
+     call echoi  (number_dropped)
+     call echov  (" ")
+     call echohn (weapon_name, $$MaxLit)
+     call echov  (" BOMBs.")
+     call echor
+    }
+ 
+  putUNT$UnderAttack$I ($yes)           # set the target's under attack flag
+ 
+  # SMM 5/98 (E1988) added type of weapon to parameter list.
+  call Get_ASM_or_Bomb_PH (UNT$Pointer, xBOM$WeaponIndex$I,
+                           probability_of_hit, $bomb$code)
+ 
+  if (xUNT$Type$I == $ShoreBase$Code)
+    {
+     delivered_tnt = INT (number_dropped * probability_of_hit * xBOM$Weight$I + 0.5)
+     number_of_hits = INT (number_dropped * probability_of_hit)
+     number_of_hits = MAX (number_of_hits, 1)
+     if (log$engage != $no)                # if engagement log is desired
+       {
+        for (i = 1; i <= number_of_hits; i = i + 1)
+          {
+           kk = 0
+           call engdata      (UNT2$Pointer, UNT$Pointer)
+           putENG$Time$F     (Game$Time)
+           #call smoviz (xUNT2$AlspId$I,8,salspidname,kk) # JHM 1/02 CT02
+           putENG$Track$C (salspidname)                         # (E2257)
+           putENG$Weapon$C   (weapon_name)
+           putENG$Range$F    (range_to_target)
+           putENG$MbuRange$F (range_to_mbu)
+           putENG$Result$I   (ENG$Hit$Code)
+           call write_eng_rec
+          }   # end of writing hits
+ 
+        for (i = 1; i <= (number_dropped - number_of_hits); i = i + 1)
+          {
+           kk = 0
+           call engdata (UNT2$Pointer, UNT$Pointer)
+           putENG$Time$F     (Game$Time)
+           #call smoviz (xUNT2$AlspId$I,8,salspidname,kk) # JHM 1/02 CT02
+           putENG$Track$C (alspidname)                         # (E2257)
+           putENG$Weapon$C   (weapon_name)
+           putENG$Range$F    (range_to_target)
+           putENG$MbuRange$F (range_to_mbu)
+           putENG$Result$I   (ENG$Miss$Code)
+           putENG$ResultPh$F (probability_of_hit * 100.0)
+           call write_eng_rec
+          }   # end of writting misses
+       }   # end of if an engagement log is being kept
+    }   # end of if the target is a shore base
+  else
+    {
+     number_of_hits = 0
+     for (i = 1; i <= number_dropped; i = i + 1)
+       {
+                                         # JHM 4/02 eng records loaded under each condition, not just at top
+        random_num = Random(x)           #   multiple passes clearing essential data
+        if (random_num <= probability_of_hit)
+          {
+           number_of_hits = number_of_hits + 1
+           if (log$engage != $no)                # if engagement log is desired
+             {
+              kk = 0
+              call engdata (UNT2$Pointer, UNT$Pointer)
+              putENG$Time$F     (Game$Time)
+              #call smoviz (xUNT2$AlspId$I,8,salspidname,kk) # JHM 1/02 CT02
+              putENG$Track$C (alspidname)                         # (E2257)
+              putENG$Weapon$C   (weapon_name)
+              putENG$Range$F    (range_to_target)
+              putENG$MbuRange$F (range_to_mbu)
+              putENG$Result$I   (ENG$Hit$Code)
+              call write_eng_rec
+             }
+          }
+        else
+          {
+           if (log$engage != $no)                # if engagement log is desired
+             {
+              kk = 0
+              call engdata (UNT2$Pointer, UNT$Pointer)
+              putENG$Time$F     (Game$Time)
+              #call smoviz (xUNT2$AlspId$I,8,salspidname,kk) # JHM 1/02 CT02
+              putENG$Track$C (alspidname)                         # (E2257)
+              putENG$Weapon$C   (weapon_name)
+              putENG$Range$F    (range_to_target)
+              putENG$MbuRange$F (range_to_mbu)
+              putENG$Result$I   (ENG$Hit$Code)
+              putENG$Result$I   (ENG$Miss$Code)
+              putENG$ResultPh$F (probability_of_hit * 100.0)
+              call write_eng_rec
+             }
+          }   # end of if bomb missed
+       }   # end of loop through the number of bomb dropped
+ 
+     delivered_tnt = number_of_hits * xBOM$Weight$I
+    }   # end of if target is not a shore base
+ 
+  UNT$Hits$I = xUNT$Hits$I + delivered_tnt
+  putUNT$Hits$I
+  UNT$BombHits$I = xUNT$BombHits$I + delivered_tnt
+  putUNT$BombHits$I
+ 
+  if (xUNT$Type$I != $ShoreBase$Code)    # only surface platforms and bases
+    {                                    # should be getting attacked with bombs
+     UNT$ALSPid$I = xUNT$ALSPid$I
+     call ALSP_Send_Interaction_Msg (UNT$ALSPid$I, UNT2$ALSPid$I, 0,
+                                     $event_message, $report, $air_to_ship, weapon_code,
+                                     number_dropped, 1, number_of_hits, 0, 0.0, 0.0, 0, correlation_id)
+    }
+ 
+return
+end
+
+ 
+subroutine ALSP_Receive_Gun_Engage (_
+                    UNT$Pointer,       # in: unit pointer of target flight leader
+                    UNT2$Pointer,      # in: unit pointer of attacker (a ghost)
+                    UNT2$ALSPid$I,     # in: alsp id of attacker
+                    TOR$Pointer,       # in: characteristic pointer of gun
+                    number_rounds,     # in: number of rounds of bullets
+                    weapon_code,       # in: alsp weapon code number from alsp.inc
+                    interaction_type,  # in: alsp interaction type code from alsp.inc
+                    attacker_lat,      # in: alsp firer_lat (floating pt degrees)
+                    attacker_long,     # in: alsp firer_long (floating pt degrees)
+                    correlation_id)    # in: pass to report-attrition
+#########################################################################
+#$%
+#$% Purpose:    ALSP_Receive_Gun_Engage processes interactions against RESA
+#$%             owned units when attacked by an ALSP ghost with GUNs.  The
+#$%             number of hits must be calculated and damage assessed.
+#$%             The result of the engagement is sent out and the engagement
+#$%             is logged (if desired).
+#$%
+#$% Called By:  ALSP_Receive_Interact
+#$%
+#$% Calls:      RLL2RB         MBURange
+#$%             ECHO..
+#$%             INT            Write_Eng_Rec
+#$%             ALSP_Send_Interction_Msg   <alsp_send_interact.rat>
+#$%
+#$% Tables:     UNT     SHC     ACC     TOR
+#$%
+#$% Date:       Dec. 1993
+#$%
+#$% Author:     Carol L. Kropp
+#$%
+#$% Modified:   Carol Kropp - 9/94     (E1325)
+#$%             During UFL the first gun engagement via ALSP against
+#$%             an a/c occured.  The calls to the engagement log were
+#$%             backwards (splash then hit) and the UNT Pointers in
+#$%             the call to ALSP_Send_Interaction_Msg were also backwards.
+#$%
+#$%             Carol Kropp - 3/95
+#$%             When the attacker is not in the unit table, use 10% as
+#$%             the probability of hit.  (This is temporary, the posit
+#$%             of the attacker may be provided in the message and
+#$%             should be used.)  If the attack is evaluated as a hit
+#$%             draw a second random number to determine the number of
+#$%             rounds that hit, when the attacker is not in the UNT
+#$%             table.
+#$%
+#$%             Carol Kropp - 10/95 (E1485)
+#$%             When the interaction is ground_to_ship send the unit
+#$%             a "under attack" message (including that attacker posit).
+#$%             Also use the firer posit to compute the range for
+#$%             ground_to_ship engagements.
+#$%
+#$%             Susan Miller - 12/95 (E1104)
+#$%             Added another parameter to update_destroyed_aircraft.
+#$%
+#$%             John McCormick - 3/98 (E1944)
+#$%             Rather than always sending a "0" to alsp_send_interaction_msg
+#$%             for the number of kill, the ac_kill_flag is used.  The value
+#$%             is defaulted to "0" and set to one if the target is an
+#$%             aircraft that is shot down.
+#$%
+#$%             Jay Braun - 4/2015
+#$%             Add correlation id as a pass-through from an incoming 
+#$%             engagement to an outgoing report-attrition
+#$%
+#########################################################################
+BBCommon
+ENCommon
+ 
+integer  UNT$Pointer, UNT2$Pointer, UNT2$ALSPid$I, TOR$Pointer
+integer  number_rounds, weapon_code, interaction_type
+real     attacker_lat, attacker_long
+ 
+real     mburange    # function to obtain main battle unit range
+ 
+integer  range_to_target, range_to_mbu
+ 
+literal   attacker_name,     target_name,      weapon_name
+real      range,             bearing
+integer   range_in_yrds
+real      probability_of_hit,  random_num
+integer   number_of_hits,   pounds_tnt
+integer   ac_kill_flag
+ 
+real      temp_lat, temp_long
+integer   msg_len
+character msg[ARB]
+vaxcharacter*MAX_STR_LEN correlation_id
+literal   cstrip8						     # SMM 3/00
+real      X, Random, resultph					     # SMM 3/00
+integer   UNT$Hits$I, UNT$GunHits$I, UNT$AMLIndx$I, AML$Pointer      # SMM 3/00
+integer   AML$NextIndx$I, AML2$Status$I, AML2$Pointer, UNT$ALSPID$I  # SMM 3/00
+integer   cbs_gun     #JHM UFL05
+  cbs_gun = 0         #initialize cbs gun flag
+ 
+  target_name   = xUNT$Name$C
+  weapon_name   = xTOR$Type$C
+ 
+  temp_lat  = (attacker_lat * $pi) / 180.0
+  temp_long = (attacker_long * $pi) / 180.0
+ 
+  if (UNT2$Pointer$Ok)
+    {
+     attacker_name = xUNT2$Name$C
+     call RLL2RB (xUNT2$TrueLatitude$F, xUNT2$TrueLongitude$F, xUNT2$CosTrueLat$F,   # attacker
+                  xUNT$TrueLatitude$F,  xUNT$TrueLongitude$F,  xUNT$CosTrueLat$F,    # target
+                  range,                bearing)                                     # range and bearing from attacker to target
+     range_to_target = INT (range + 0.5)
+     range_in_yrds = INT ((range * $Yds$Per$Mile) + 0.5)
+     call Calculate_Gun_Ph (UNT$Pointer, TOR$Pointer,
+                            range_in_yrds, probability_of_hit)
+    }
+  else
+    {
+     attacker_name = 'GHOST'
+     if (interaction_type == $ground_to_ship &    # clk - 10/95 (E1485)
+         (temp_lat != 0.0 & temp_long != 0.0))
+       {
+        call RLL2RB (temp_lat,             temp_long,             COS (temp_lat),       # attacker
+                     xUNT$TrueLatitude$F,  xUNT$TrueLongitude$F,  xUNT$CosTrueLat$F,    # target
+                     range,                bearing)                                     # range and bearing from attacker to target
+        range_in_yrds = INT ((range * $Yds$Per$Mile) + 0.5)
+        call Calculate_Gun_Ph (UNT$Pointer, TOR$Pointer,
+                               range_in_yrds, probability_of_hit)
+       }
+     else    # we have not point of reference for the attacker, use altitude
+       {
+        if (Xunt$type$i == $Air$code) #JHM UFL05
+        {                             #if ghost and no valid unt2 pointer
+                                      #this is a cbs ground fire shot
+            cbs_gun = 1
+            range = Xunt$TrueAltDepth$i * $ft2nmi # E2234 joa UFL01
+            range_to_target = INT (range + 0.5)
+            range_in_yrds = INT ((range * $Yds$Per$Mile) + 0.5)
+            call Calculate_Gun_Ph (UNT$Pointer, TOR$Pointer,
+                                   range_in_yrds, probability_of_hit)
+        }
+        else
+        {
+            range = 0.0
+            range_to_target = 0
+            range_in_yrds = 0
+            probability_of_hit = 0.1
+        }
+ 
+       }
+    }
+ 
+  # send an "under attack" warning message to the unit if ground_to_ship
+  if (interaction_type == $ground_to_ship)         # clk - 10/95 (E1485)
+    {
+     msg_len = 0
+     call smovhn (target_name, $$MaxLit, msg, msg_len)
+     call smovv  (" is under attack by coastal",msg, msg_len)
+     call smovv  (" artillery located near ",msg, msg_len)
+     call smovll (temp_lat, "NS", msg, msg_len)
+     call smovv  (" ", msg, msg_len)
+#     temp_posit = (attacker_long * $pi) / 180.0  # SMM 3/00 not used anywhere
+     call smovll (temp_long, "EW", msg, msg_len)
+     call smovv  (".", msg, msg_len)
+     call send_ (xUNT$View$I, 0, msg_len, msg)
+    }
+ 
+  range_to_mbu = MBURange (UNT$Pointer)
+ 
+  putUNT$UnderAttack$I ($yes)           # set the target's under attack flag
+ 
+  random_num = Random (x)
+ 
+  if (trace$engage$exe != $no)
+    {
+     call echor
+     call echov  ("*** ERROR IN ALSP MESSAGE - Gun Engagement.....")
+     call echohn (attacker_name, $$MaxLit)
+     call echov  (" (ghosted unit) is attacking ")
+     call echohn (target_name, $$MaxLit)
+     call echov  (", with ")
+     call echoi  (number_rounds)
+     call echov  (" rounds of ")
+     call echohn (weapon_name, $$MaxLit)
+     call echor
+ 
+     call echov  ("  Computed range is ")
+     call echoi  (range_in_yrds)
+     call echov  (" yds and ph = ")
+     call echof  (probability_of_hit, 0705)
+     call echov  (", random number =  ")
+     call echof  (random_num, 0705)
+     call echor
+    }
+ 
+  if (log$engage != $no)                # if engagement log is desired
+    {
+     call engdata (unt2$pointer, unt$pointer)   # E2224
+     putENG$Weapon$C   (weapon_name)
+     putENG$Range$F    (range_to_target)
+     putENG$Mburange$F (range_to_mbu)
+     putENG$Result$I   (ENG$Gun$Code)
+    }
+ 
+  number_of_hits = 0
+  ac_kill_flag = $no
+  if (probability_of_hit >= random_num)   # if a hit
+    {
+     if (UNT2$Pointer$Ok)
+        number_of_hits = INT (probability_of_hit * number_rounds)
+     else
+        number_of_hits = INT (number_rounds * Random (x))
+     pounds_tnt = xTOR$Weight$I * number_of_hits
+ 
+     if (log$engage != $no)                # if engagement log is desired
+       {
+        resultph = INT(probability_of_hit * 100 + .5) + pounds_tnt * 1000
+        if(cbs_gun == 1)
+          putENG$platform$c("CBS_Gun  ")    #JHM UFL05 8/05- shooter not in UNT table, must force identification
+        call write_eng_rec
+       }
+ 
+     UNT$Hits$I = xUNT$Hits$I + pounds_tnt
+     putUNT$Hits$I
+     UNT$GunHits$I = xUNT$GunHits$I + pounds_tnt
+     putUNT$GunHits$I
+ 
+     call Msg_Receive_Gun (UNT$Pointer)
+ 
+     if (xUNT$Type$I == $Air$Code)  # if Aircraft target hit
+       {
+        UNT$AMLIndx$I = xUNT$AMLIndx$I
+        AML$Pointer$To   (UNT$AMLIndx$I)
+        AML$NextIndx$I = xAML$NextIndx$I
+        if (AML$NextIndx$I == 0)
+          AML2$Status$I = $Destroyed$Code
+        else  # the index is valid
+          {
+           AML2$Pointer$To  (AML$NextIndx$I)
+           AML2$Status$I = xAML2$Status$I
+          }
+        while (AML$NextIndx$I != 0  &
+               AML2$Status$I != $Destroyed$code)
+          {
+           AML$Pointer$To  (AML$NextIndx$I)
+           AML$NextIndx$I = xAML$NextIndx$I
+           if (AML$NextIndx$I != 0)
+             {
+              AML2$Pointer$To  (AML$NextIndx$I)
+              AML2$Status$I = xAML2$Status$I
+             }
+          }
+ 
+        if (xAML$Status$I != $Destroyed$code)
+          {
+           ac_kill_flag = $yes
+           putAML$Status$I  ($Destroyed$Code)
+           if (log$engage != $no)   # if engagement log desired
+                If(cbs_gun == 1)                                               #JHM UFL05
+                  call Generate_eng_rec ("SPLASH  ", "ENGAGE  ", xUNT$Name$C)  #JHM UFl05 want to get lat long etc.
+                else
+                  call Generate_eng_rec ("SPLASH  ", "ENGAGE  ", xAML$SideNumber$C)# old code
+ 
+ 
+           call Update_Destroyed_Aircraft (UNT$Pointer, UNT2$Pointer,
+                                           $DestroyedByGunfire$Code,
+                                           xTOR$Type$C, AML$Pointer,
+                                           number_rounds)  # SMM (E1104)
+          }
+       }  # end of if target hit was an aircraft flight
+    }     # end of processing a hit
+  else    # a miss
+    {
+     if (log$engage != $no)                # if engagement log is desired
+       {
+        resultph = INT(probability_of_hit * 100 + .5)
+        call write_eng_rec
+       }
+    }
+ 
+  UNT$ALSPid$I = xUNT$ALSPid$I
+  call ALSP_Send_Interaction_Msg (UNT$ALSPid$I, UNT2$ALSPid$I, 0,
+                                  $event_message, $report, interaction_type, weapon_code,
+                                  number_rounds, 1, number_of_hits, ac_kill_flag, 0.0, 0.0, 0,
+                                  correlation_id)
+ 
+return
+end
+
+ 
+subroutine ALSP_Receive_CM_Engage (_
+                    UNT$Pointer,       # in: unit pointer of target
+                    UNT2$Pointer,      # in: unit pointer of attacker (a ghost)
+                    UNT2$ALSPid$I,     # in: alsp id of attacker
+                    CMC$Pointer,       # in: characteristic pointer of missile
+                    weapon_code,       # in: alsp weapon code number from alsp.inc
+                    interaction_type,  # in: alsp interaction type code from alsp.inc
+                    correlation_id)    # in: correlation_id to be reflected in report-attrition
+#########################################################################
+#$%
+#$% Purpose:    ALSP_Receive_CM_Engage processes interactions against RESA
+#$%             owned units when attacked by an ALSP ghost cruise misile.
+#$%             Hit/Miss must be calculated and damage assessed.  The
+#$%             result of the engagement is sent out and the engagement
+#$%             is logged (if desired).
+#$%
+#$% Called By:  ALSP_Receive_Interact
+#$%
+#$% Calls:      RLL2RB         MBURange
+#$%             DEQget
+#$%             Get_CM_PH
+#$%             ECHO..
+#$%             INT            Write_Eng_Rec
+#$%             ALSP_Send_Interction_Msg   <alsp_send_interact.rat>
+#$%             Process_CM_Air_Defense
+#$%
+#$% Tables:     UNT     SHC     ACC     CMC
+#$%
+#$% Date:       Dec. 1993
+#$%
+#$% Author:     Carol L. Kropp
+#$%
+#$% Modified:   Carol Kropp - 2/94
+#$%             Added units with CIWS to get a shot at incoming CMs.
+#$%
+#$%             Carol Kropp - 1/95
+#$%             Changed CIWS engagement for CM to air defense (adding
+#$%             for use of SAMs).
+#$%
+#$%             Jay Braun - 4/2015
+#$%             Add correlation id as a pass-through from an incoming 
+#$%             engagement to an outgoing report-attrition
+#$%
+#########################################################################
+BBCommon
+ENCommon
+ 
+integer  UNT$Pointer, UNT2$Pointer, UNT2$ALSPid$I, CMC$Pointer
+integer  weapon_code, interaction_type
+ 
+real     mburange    # function to obtain main battle unit range
+ 
+integer  idummy
+integer  range_to_target, range_to_mbu
+ 
+literal   attacker_name,     target_name,      weapon_name
+real      range,             bearing
+real      probability_of_hit,  random_num
+integer   hit_flag,          ac_killed_flag
+ 
+literal   cstrip8 		    # SMM 3/00
+real      x, random                 # SMM 3/00
+integer   UNT$Type$I, UNT$ALSPID$I  # SMM 3/00
+
+vaxcharacter*MAX_STR_LEN correlation_id
+ 
+  target_name   = xUNT$Name$C
+  weapon_name   = xCMC$Type$C
+ 
+  if (UNT2$Pointer$Ok)
+    {
+     attacker_name = xUNT2$Name$C
+     call RLL2RB (xUNT2$TrueLatitude$F, xUNT2$TrueLongitude$F, xUNT2$CosTrueLat$F,   # attacker
+                  xUNT$TrueLatitude$F,  xUNT$TrueLongitude$F,  xUNT$CosTrueLat$F,    # target
+                  range,                bearing)                                     # range and bearing from attacker to target
+     range_to_target = INT (range + 0.5)
+    }
+  else
+    {
+     attacker_name = 'GHOST'
+     range_to_target = 0
+    }
+  range_to_mbu = MBURange (UNT$Pointer)
+ 
+  if (trace$engage$exe != $no)
+    {
+     call echor
+     call echov  ("*** ERROR IN ALSP MESSAGE - Cruise Missile.....")
+     call echohn (attacker_name, $$MaxLit)
+     call echov  (" (ghosted unit) is attacking ")
+     call echohn (target_name, $$MaxLit)
+     call echor
+    }
+ 
+  putUNT$UnderAttack$I ($yes)           # set the target's under attack flag
+ 
+  call Process_CM_Air_Defense (UNT$Pointer, UNT2$Pointer, CMC$Pointer, hit_flag)
+ 
+  call Get_CM_PH (CMC$Pointer, UNT$Pointer,UNT2$Pointer,# handles RBOC in this routine
+                  probability_of_hit, idummy)  # SMM 3/00 removed extra parameter
+ 
+  if (hit_flag == $yes)
+    probability_of_hit = 0.0
+ 
+  random_num = Random (x)
+ 
+  if (trace$engage$exe != $no)
+    {
+     call echov  ("  Computed ph = ")
+     call echof  (probability_of_hit, 0705)
+     call echov  (", random number =  ")
+     call echof  (random_num, 0705)
+     call echor
+    }
+ 
+  hit_flag = $no
+  ac_killed_flag = $no
+  if (probability_of_hit >= random_num)   # if a hit
+    {
+     if (log$engage != $no)                # if engagement log is desired
+       {
+        call engdata (unt2$Pointer, unt$pointer)
+        putENG$Weapon$C (weapon_name)
+        putENG$Range$F (range_to_target)
+        putENG$MbuRange$F (range_to_mbu)
+        putENG$Result$I (ENG$Hit$Code)
+        call write_eng_rec
+       }
+ 
+     call Process_CM_Hit (UNT2$Pointer, CMC$Pointer, UNT$Pointer, idummy)
+     hit_flag = $yes
+ 
+     UNT$Type$I = xUNT$Type$I
+     if (UNT$Type$I == $Air$Code | UNT$Type$I == $CruiseMissile$Code)
+       ac_killed_flag = $yes
+    }     # end of processing a hit
+  else
+    {
+     if (log$engage != $no)                # if engagement log is desired
+       {
+        call engdata (unt2$Pointer, unt$pointer)
+        putENG$Weapon$C (weapon_name)
+        putENG$Range$F (range_to_target)
+        putENG$MbuRange$F (range_to_mbu)
+        putENG$Result$I (ENG$Miss$Code)
+        putENG$ResultPh$F (probability_of_hit * 100.)
+        call write_eng_rec
+       }
+    }
+ 
+  UNT$ALSPid$I = xUNT$ALSPid$I
+  call ALSP_Send_Interaction_Msg (UNT$ALSPid$I, UNT2$ALSPid$I, 0,
+                                  $event_message, $report, interaction_type, weapon_code,
+                                  1, 1, hit_flag, 0, 0.0, 0.0, 0, correlation_id)
+ 
+return
+end
+
+ 
+subroutine ALSP_Receive_Torpedo_Engage (_
+                    UNT$Pointer,       # in: unit pointer of target
+                    UNT2$Pointer,      # in: unit pointer of attacker (a ghost)
+                    UNT2$ALSPid$I,     # in: alsp id of attacker
+                    TRP$Pointer,       # in: characteristic pointer of torpedo
+                    weapon_code,       # in: alsp weapon code number from alsp.inc
+                    interaction_type,  # in: alsp interaction type code from alsp.inc
+                    correlation_id)    # in: to pass to report-attrition
+#########################################################################
+#$%
+#$% Purpose:    ALSP_Receive_Torpedo_Engage processes interactions against RESA
+#$%             owned units when attacked by an ALSP ghost torpedo.
+#$%             Hit/Miss must be calculated and damage assessed.  The
+#$%             result of the engagement is sent out and the engagement
+#$%             is logged (if desired).
+#$%
+#$% Called By:  ALSP_Receive_Interact
+#$%
+#$% Calls:      RLL2RB         MBURange
+#$%             DEQget
+#$%             Get_CM_PH
+#$%             ECHO..
+#$%             INT            Write_Eng_Rec
+#$%             ALSP_Send_Interction_Msg   <alsp_send_interact.rat>
+#$%             Process_CM_Air_Defense
+#$%             Get_torpedo_ph <wgmdtorp.rat>
+#$%
+#$% Tables:     UNT     SHC     ACC     TRP
+#$%
+#$% Date:       June 27, 2006
+#$%
+#$% Author:     James O. Allen
+#$%
+#$%             Jay Braun - 4/2015
+#$%             Add correlation id as a pass-through from an incoming 
+#$%             engagement to an outgoing report-attrition
+#$%
+#########################################################################
+BBCommon
+ENCommon
+ 
+integer  UNT$Pointer, UNT2$Pointer, UNT2$ALSPid$I, TRP$Pointer
+integer  weapon_code, interaction_type
+ 
+real     mburange    # function to obtain main battle unit range
+ 
+integer  idummy
+integer  range_to_target, range_to_mbu
+ 
+literal   attacker_name,     target_name,      weapon_name
+real      range,             bearing
+real      probability_of_hit,  random_num
+integer   hit_flag
+ 
+literal   cstrip8
+real      x, random
+integer   UNT$Type$I, UNT$ALSPID$I
+vaxcharacter*MAX_STR_LEN correlation_id
+ 
+  target_name   = xUNT$Name$C
+  weapon_name   = xTRP$Name$C
+ 
+  if (UNT2$Pointer$Ok)
+    {
+     attacker_name = xUNT2$Name$C
+     call RLL2RB (xUNT2$TrueLatitude$F, xUNT2$TrueLongitude$F, xUNT2$CosTrueLat$F,   # attacker
+                  xUNT$TrueLatitude$F,  xUNT$TrueLongitude$F,  xUNT$CosTrueLat$F,    # target
+                  range,                bearing)                                     # range and bearing from attacker to target
+     range_to_target = INT (range + 0.5)
+    }
+  else
+    {
+     attacker_name = 'GHOST'
+     range_to_target = 0
+    }
+  range_to_mbu = MBURange (UNT$Pointer)
+ 
+  if (trace$engage$exe != $no)
+    {
+     call echor
+     call echov  ("*** ERROR IN ALSP MESSAGE - Torpedo.....")
+     call echohn (attacker_name, $$MaxLit)
+     call echov  (" (ghosted unit) is attacking ")
+     call echohn (target_name, $$MaxLit)
+     call echor
+    }
+ 
+  putUNT$UnderAttack$I ($yes)           # set the target's under attack flag
+ 
+  call get_torpedo_ph(unt$pointer, trp$pointer, probability_of_hit)
+ 
+ 
+  random_num = Random (x)
+ 
+  if (trace$engage$exe != $no)
+    {
+     call echov  ("  Computed ph = ")
+     call echof  (probability_of_hit, 0705)
+     call echov  (", random number =  ")
+     call echof  (random_num, 0705)
+     call echor
+    }
+ 
+  hit_flag = $no
+  if (probability_of_hit >= random_num)   # if a hit
+    {
+     if (log$engage != $no)                # if engagement log is desired
+       {
+        call engdata (unt2$Pointer, unt$pointer)
+        putENG$Weapon$C (weapon_name)
+        putENG$Range$F (range_to_target)
+        putENG$MbuRange$F (range_to_mbu)
+        putENG$Result$I (ENG$Hit$Code)
+        putENG$ResultPh$F (probability_of_hit * 100.)
+        call write_eng_rec
+       }
+ 
+     call Torp_Hit (UNT2$Pointer, UNT$Pointer, TRP$Pointer)
+     hit_flag = $yes
+ 
+    }     # end of processing a hit
+  else
+    {
+     #Notify target that torpedo in area
+     call send_msg(UNT$Pointer$Index, UNT2$Pointer$Index,
+                   $InWater$Code )
+ 
+     if (log$engage != $no)                # if engagement log is desired
+       {
+        call engdata (unt2$Pointer, unt$pointer)
+        putENG$Weapon$C (weapon_name)
+        putENG$Range$F (range_to_target)
+        putENG$MbuRange$F (range_to_mbu)
+        putENG$Result$I (ENG$Miss$Code)
+        putENG$ResultPh$F (probability_of_hit * 100.)
+        call write_eng_rec
+       }
+    }
+ 
+  UNT$ALSPid$I = xUNT$ALSPid$I
+  call ALSP_Send_Interaction_Msg (UNT$ALSPid$I, UNT2$ALSPid$I, 0,
+                      $event_message, $report, interaction_type, weapon_code,
+                      1, 1, hit_flag, 0, 0.0, 0.0, 0, correlation_id)
+ 
+return
+end
+
+ 
+subroutine ALSP_Receive_Minefield_Engage (_
+                    UNT2$Pointer,      # in: unit pointer of target
+                    MFD$Pointer,       # in: minefield (ghost)
+                    MFD$ALSPid$I,      # in: alsp id of attacker
+                    BOM$Pointer,       # in: characteristic pointer of mine
+                    weapon_code,       # in: alsp weapon code number from alsp.inc
+                    interaction_type,  # in: alsp interaction type code from alsp.inc
+                    correlation_id)    # in: to pass to report-attrition
+#########################################################################
+#$%
+#$% Purpose:    ALSP_Receive_Minefield_Engage processes interactions against
+#$%             RESA owned units when attacked by an ALSP ghost minefield.
+#$%             Hit/Miss must be calculated and damage assessed.  The
+#$%             result of the engagement is sent out and the engagement
+#$%             is logged (if desired).
+#$%
+#$% Called By:  ALSP_Receive_Interact
+#$%
+#$% Calls:      RLL2RB         MBURange
+#$%             DEQget
+#$%             ECHO..
+#$%             INT            Write_Eng_Rec
+#$%             ALSP_Send_Interction_Msg   <alsp_send_interact.rat>
+#$%
+#$% Tables:     UNT     SHC     MFD    BOM
+#$%
+#$% Date:       Oct. 26, 2006
+#$%
+#$% Author:     James O. Allen
+#$%
+#$%             Jay Braun - 4/2015
+#$%             Add correlation id as a pass-through from an incoming 
+#$%             engagement to an outgoing report-attrition
+#$%
+#########################################################################
+BBCommon
+ENCommon
+ 
+integer  MFD$Pointer, UNT2$Pointer, MFD$ALSPid$I, BOM$Pointer
+integer  weapon_code, interaction_type
+ 
+integer  idummy
+ 
+literal   attacker_name,     target_name,      weapon_name
+real      range_to_mbu, range_to_target, MBURange
+real      probability_of_hit,  random_num
+integer   hit_flag
+integer   jj
+ 
+literal   cstrip8
+real      x, random
+BBDeclare  (UNT2$Type$I, UNT2$ALSPID$I, unt2$name$c, eng$result$i)
+character msg[ARB]
+vaxcharacter*MAX_STR_LEN correlation_id
+ 
+target_name   = xUNT2$Name$C
+weapon_name   = xBOM$Name$C
+range_to_target = 0
+ 
+if (MFD$Pointer$Ok)
+{
+    attacker_name = xMFD$Name$C
+}
+else
+{
+    attacker_name = 'GHOST'
+}
+ 
+range_to_mbu = MBURange (UNT2$Pointer)
+ 
+if (trace$engage$exe != $no)
+{
+    call echor
+    call echov  ("*** ERROR IN ALSP MESSAGE - Torpedo.....")
+    call echohn (attacker_name, $$MaxLit)
+    call echov  (" (ghosted unit) is attacking ")
+    call echohn (target_name, $$MaxLit)
+    call echor
+}
+ 
+probability_of_hit = Xbom$ProbHit$f
+ 
+random_num = Random (x)
+ 
+if (trace$engage$exe != $no)
+{
+    call echov  ("  Computed ph = ")
+    call echof  (probability_of_hit, 0705)
+    call echov  (", random number =  ")
+    call echof  (random_num, 0705)
+    call echor
+}
+ 
+hit_flag = $no
+if (probability_of_hit >= random_num)   # if a hit
+{
+    PUTunt2$Hits$i     (Xunt2$Hits$i + Xbom$Weight$i)
+    PUTunt2$TorpHits$i (Xunt2$TorpHits$i + Xbom$Weight$i)
+ 
+    hit_flag = $yes
+    ENG$Result$I = ENG$Hit$Code
+ 
+    if (XUNT2$SuperType$i != $SmallBoat$SuperCode)
+    {
+        unt2$name$c = xunt2$name$c
+        jj = 0
+        call smovhn (unt2$name$c, $$MaxLit, msg, jj)
+        Call SMOVV(" struck mine at ",msg,jj)
+ 
+        call smovll(xUNT2$assumedLATITUDE$f,"NS",msg,jj)
+        call smovV(" ",msg,jj)
+        call smovll(xUNT2$assumedLONGITUDE$f,"EW",msg,jj)
+ 
+        call send_  (xunt2$view$i, 0, jj, msg) # jb    7/11/89
+    }
+}     # end of processing a hit
+else
+{
+    ENG$Result$I = ENG$Miss$Code
+}
+ 
+if (log$engage != $no)                # if engagement log is desired
+{
+    call engdata (0, unt2$pointer)
+    putENG$Platform$C (attacker_name)
+    putENG$PlatformType$C ("MINE")
+    putENG$Weapon$C (weapon_name)
+    putENG$Range$F (range_to_target)
+    putENG$MbuRange$F (range_to_mbu)
+    putENG$Result$I
+    putENG$ResultPh$F (probability_of_hit * 100.)
+    call write_eng_rec
+}
+ 
+  UNT2$ALSPid$I = xUNT2$ALSPid$I
+  call ALSP_Send_Interaction_Msg (UNT2$ALSPid$I, MFD$ALSPid$I, 0,
+                      $event_message, $report, interaction_type, weapon_code,
+                      1, 1, hit_flag, 0, 0.0, 0.0, 0, correlation_id)
+ 
+return
+end
+
+ 
+subroutine ALSP_Receive_TBM_Engage (_
+                    UNT$Pointer,       # in: unit pointer of attacker (a ghost)
+                    UNT$ALSPid$I,      # in: alsp id of attacker
+                    CMC$Pointer,       # in: characteristic pointer of missile
+                    impact_lat,        # in: latitude of the impact point (degrees)
+                    impact_long,       # in: longitude of the impact point (degrees)
+                    weapon_code,       # in: alsp weapon code number from alsp.inc
+                    interaction_type,  # in: alsp interaction type code from alsp.inc
+                    correlation_id)    # in: correlation id to reflect out
+#########################################################################
+#$%
+#$% Purpose:    ALSP_Receive_TBM_Engage processes interactions when
+#$%             attacked by an ALSP ghost ballistic misile.  Damage is
+#$%             assessed to units within the damage radius.
+#$%
+#$% Called By:  ALSP_Receive_Interact
+#$%
+#$% Calls:      Echo...
+#$%             Log_Posit_Eng          <wgmdeng.rat>
+#$%             Process_TBM_Hits       <wgmdeng.rat>
+#$%
+#$% Tables:     UNT     SHC     ACC     TOR
+#$%
+#$% Date:       Dec. 1993
+#$%
+#$% Author:     Carol L. Kropp
+#$%
+#$%             Jay Braun - 4/2015
+#$%             Add correlation id as a pass-through from an incoming 
+#$%             engagement to an outgoing report-attrition
+#$%
+#########################################################################
+BBCommon
+ENCommon
+ 
+integer  UNT$Pointer, UNT$ALSPid$I, UNT2$ALSPid$i, CMC$Pointer
+integer  weapon_code, interaction_type
+integer  hit_flag
+ 
+real     impact_lat, impact_long
+ 
+literal   attacker_name,      weapon_name
+real      impact_lat_radians, impact_long_radians
+integer   epus
+literal   cstrip8	# SMM 3/00
+
+vaxcharacter*MAX_STR_LEN correlation_id
+ 
+  attacker_name = xUNT$Name$C
+  weapon_name   = xCMC$Type$C
+ 
+  impact_lat_radians = (impact_lat * $PI) / 180.0
+  impact_long_radians = (impact_long * $PI) / 180.0
+ 
+  if (trace$engage$exe != $no)
+    {
+     call echor
+     call echov  ("*** ERROR IN ALSP MESSAGE - ")
+     call echov  ("Ballistic Missile.....")
+     call echohn (attacker_name, $$MaxLit)
+     call echov  (" type ")
+     call echohn (weapon_name, $$MaxLit)
+     call echov  (" (ghosted unit)")
+     call echor
+    }
+ 
+  epus = INT ((xCMC$Weight$I * 0.01) + 0.5)
+  call Log_Posit_Eng (UNT$Pointer, CMC$Pointer,
+                      impact_lat_radians, impact_long_radians,
+                      0, 1, 1, epus)
+ 
+  hit_flag = $no
+  call Process_TBM_Hits (UNT$Pointer, CMC$Pointer,
+                         impact_lat_radians, impact_long_radians, hit_flag)
+ 
+  UNT2$ALSPid$i = 0
+  call ALSP_Send_Interaction_Msg (UNT$ALSPid$I, UNT2$ALSPid$I, 0,
+                       $event_message, $report, interaction_type, weapon_code,
+                                  1, 1, hit_flag, 0, 0.0, 0.0, 0, correlation_id)
+ 
+return
+end
+
+ 
+subroutine Process_CM_Air_Defense (_
+              UNT$Pointer,    # in: unit pointer of target platform
+              UNT2$Pointer,   # in: unit pointer of attacker (ghost cm)
+              CMC$Pointer,    # in: characteristic pointer of missile
+                              hit_flag)       # out: flag for if hit was scored against the cm
+#########################################################################
+#$%
+#$% Purpose:    Process_CM_Air_Defense determines if the target platform
+#$%             is equipped with SAM and CIWS, then allows engagement of
+#$%             the incoming cm.  SAM systems (shortest to longest range
+#$%             order) will be tried first, followed by the CIWS.
+#$%
+#$% Called By:  ALSP_Receive_CM_Engage
+#$%
+#$% Calls:      DEQGET
+#$%             sort_eqlist
+#$%             Get_SAM_Probability_of_Hit
+#$%             Random
+#$%             Echo...
+#$%             MBURange
+#$%             Write_Eng_Rec
+#$%
+#$% Tables:     UNT     CMC     MC   DEQ
+#$%
+#$% Date:       Jan. 1995
+#$%
+#$% Author:     Carol L. Kropp
+#$%             Replaced Process_CIWS_Shot, incorporating SAMs.
+#$%
+#########################################################################
+BBCommon
+ENCommon
+ 
+integer  UNT$Pointer, UNT2$Pointer, CMC$Pointer, hit_flag
+ 
+real     mburange    # function to obtain main battle unit range
+ 
+integer  num_eq, eqlist[5,30], indx
+integer  MC$Pointer, MC$MaxRange$I
+integer  cm_eph_index, idummy
+real     prob_hit, rannum
+literal  cstrip8			# SMM 3/00
+real     x, random 	 		# SMM 3/00
+integer  DEQ$Pointer, DEQ$Remaining$I   # SMM 3/00
+ 
+  hit_flag = $no
+ 
+  putUNT$EngageStatus$I ($Engaging$Code)
+  cm_eph_index = xCMC$TargetIndex$I
+ 
+  num_eq = 0
+  call DEQGET (UNT$Pointer, $SAM$Code, num_eq, eqlist)
+  for (indx = 1; indx <= num_eq; indx = indx + 1)
+    {
+     MC$Pointer = eqlist[2,indx]
+     MC$MaxRange$I = xMC$MaxRange$I
+     eqlist[4,indx] = MAX (1, MC$MaxRange$I)
+    }
+  call sort_eqlist (eqlist, num_eq, 4)
+ 
+  call DEQGET (UNT$Pointer, $CIWS$Code, num_eq, eqlist)
+ 
+  for (indx = 1; indx <= num_eq; indx = indx + 1)
+    {
+     if (eqlist [3, indx] > 0)
+       {
+        MC$Pointer = eqlist [2, indx]
+        call Get_SAM_Probability_of_Hit (UNT2$Pointer, MC$Pointer,
+                                         cm_eph_index, prob_hit, idummy)
+ 
+        rannum = random(x)
+        if (rannum <= prob_hit)
+          {
+           putENG$Result$I (ENG$Hit$Code)
+           hit_flag = $yes
+          }
+        else
+          {
+           putENG$Result$I (ENG$Miss$Code)
+           putENG$ResultPh$F (prob_hit * 100.)
+          }
+ 
+        if (log$engage != $no)
+          {
+           call engdata (unt$pointer, unt2$pointer)     # E2224
+           putENG$Weapon$C (xMC$Name$C)
+           putENG$Target$C (xCMC$Type$C)
+           putENG$MbuRange$F (MBUrange(UNT2$Pointer))
+ 
+           call write_eng_rec
+          }
+ 
+        DEQ$Pointer$To  (eqlist [1, indx])
+        DEQ$Remaining$I = xDEQ$Remaining$I - 1
+        putDEQ$Remaining$I
+ 
+        if (hit_flag == $yes)
+          break
+       }      # end of if SAM/CIWS system has ammunition
+    }
+ 
+  if (trace$engage$exe != $no)
+    {
+     if (num_eq > 0)
+       {
+        call echov  ("  Target has Air Defenses...")
+        if (hit_flag == $no)
+          call echov ("Cruise Missile made it through.")
+        else
+          call echov ("Cruise Missile was shot down.")
+        call echor
+       }
+    }
+ 
+return
+end
+
+ 
+subroutine ALSP_Receive_Refuel_Interaction(_
+                    UNT$Pointer,            # in: To unit pointer
+                    UNT2$Pointer,           # in: From unit pointer
+                    message_kind,           # in: 1 of 4 kinds of message
+                    type_of_fuel,           # in: type of fuel currently JP4
+                    kgs_of_fuel,            # in: amt of fuel requested
+                    denial_reason)          # in: only set if request denied
+#########################################################################
+#$%
+#$% Purpose:    ALSP_Receive_Refuel_Interaction handles incoming refuel
+#$%             interaction messages.
+#$%
+#$% Called By:  ALSP_Receive_Interact
+#$%
+#$% Calls:      ALSP_Receive_Refuel_Request
+#$%             ALSP_Receive_Refuel_Issue
+#$%             smovhn      smovv
+#$%
+#$% Tables:     UNT
+#$%
+#$% Date:       Oct. 1995
+#$%
+#$% Author:     Susan Miller
+#$%
+#########################################################################
+BBCommon
+ 
+integer UNT$Pointer, UNT2$Pointer
+integer message_kind, type_of_fuel
+integer kgs_of_fuel, denial_reason
+ 
+integer lbs_of_fuel_requested
+literal cstrip8		# SMM 3/00
+ 
+ lbs_of_fuel_requested = kgs_of_fuel * kg_to_lbs
+ 
+ if ((message_kind == $supporting_units_request) |
+     (message_kind == $pol_request))
+    {
+     # in this case, UNT2$Pointer is the requesting a/c
+     # and UNT$Pointer is the tanker a/c
+     call ALSP_Receive_Refuel_Request(_
+                    UNT$Pointer,        # in: To unit pointer
+                    UNT2$Pointer,       # in: From unit pointer
+                    message_kind,       # in: 1 of 2 kinds of message
+                    type_of_fuel,       # in: type of fuel currently JP4
+                    kgs_of_fuel)        # in: amt of fuel requested
+ 
+     return
+    }
+ else if ((message_kind == $supporting_units_issue) |
+          (message_kind == $pol_issue))
+    {
+     # in this case, UNT$Pointer is the requesting a/c
+     # and UNT2$Pointer is the tanker a/c
+     call ALSP_Receive_Refuel_Issue(_
+                    UNT$Pointer,        # in: To unit pointer
+                    UNT2$Pointer,       # in: From unit pointer
+                    message_kind,       # in: 1 of 2 kinds of message
+                    kgs_of_fuel,        # in: amt of fuel requested
+                    denial_reason)      # in: only set if request denied
+     return
+    }
+ 
+ else
+    {
+    if (trace$engage$exe != $no)
+        {
+         call echor
+         call echov  ("**** AIR SUPPLY INTERACTION ")
+         call echov  ("MESSAGE NOT HANDLED. ****")
+         call echor
+         call echov  ("**** INTERACTION BETWEEN ")
+         call echohn (xUNT$Name$C, $$MaxLit)
+         call echov  (" AND ")
+         call echohn (xUNT2$Name$C, $$MaxLit)
+         call echor
+        }
+    }
+ 
+return
+end # ALSP_Receive_Refuel_Interaction
+
+ 
+ 
+subroutine ALSP_Receive_Refuel_Request(_
+                    UNT$Pointer,            # in: To unit pointer
+                    UNT2$Pointer,           # in: From unit pointer
+                    message_kind,           # in: 1 of 4 kinds of message
+                    type_of_fuel,           # in: type of fuel currently JP4
+                    kgs_of_fuel)            # in: amt of fuel requested
+#########################################################################
+#$%
+#$% Purpose:    ALSP_Receive_Refuel_Request handles incoming refuel
+#$%             request messages.  There are 2 types of messages that
+#$%             need to be processed:
+#$%             a) SUPPORTING_UNITS.REQUEST - Ghosted a/c requesting fuel
+#$%                from a RESA airtanker before unit is within refuel range.
+#$%                RESA needs to send a response message with the amount of
+#$%                fuel available or reason it is not available.
+#$%
+#$%             b) POL.REQUEST - Ghosted a/c requesting fuel from a RESA
+#$%                airtanker once the requesting unit is within refuel range.
+#$%
+#$% Called By:  ALSP_Receive_Refuel_Interaction
+#$%
+#$% Calls:      Find_max_fuel_to_deliver   <wgmdflt.rat>
+#$%             ALSP_Send_Refuel_Response  <alsp_send_interact.rat>
+#$%             smovhn      smovv
+#$%
+#$% Tables:     UNT
+#$%
+#$% Date:       Oct. 1995
+#$%
+#$% Author:     Susan Miller
+#$%
+#$% Modified:   Carol Kropp - 2/96 (E1467)
+#$%             Replace UNT$AcFuelRemaining$I reference with new TNK
+#$%             subtable.
+#$%
+#########################################################################
+BBCommon
+ 
+integer UNT$Pointer, UNT2$Pointer
+integer message_kind, type_of_fuel
+integer kgs_of_fuel, lbs_of_fuel_requested
+integer msglen, response
+Character msg[ARB]
+ 
+integer ACC$Pointer, fuel_to_deliver
+integer UNT$TNK$Index
+real    UNT$TNK$FuelRemaining$F
+literal cstrip8   # SMM 3/00
+ 
+ lbs_of_fuel_requested = kgs_of_fuel * kg_to_lbs
+ 
+ # in this case, UNT2$Pointer is the requesting a/c
+ # and UNT$Pointer is the tanker a/c
+ 
+ # get tanker a/c characteristic pointer
+ ACC$Pointer = xUNT$ACCPntr$I
+ 
+ call Find_max_fuel_to_deliver(ACC$Pointer,     # tanker characteristic
+                               UNT$Pointer,     # tanker UNT pointer
+                               1,               # number in flight
+                               fuel_to_deliver) # return fuel available
+                                                # for delivery in lbs.
+ # if more than amount requested, tanker can refuel
+ # requesting a/c ghost
+ if (fuel_to_deliver > lbs_of_fuel_requested)
+     response = $yes
+ else # need to send a reason tanker cannot refuel
+     response = $no
+ 
+ if (message_kind == $supporting_units_request)
+    {
+     message_kind = $supporting_units_issue
+ 
+     msglen = 0
+     call smovhn(xUNT$Name$C,$$MaxLit,msg,msglen)
+     if (response == $yes)
+        {
+         call smovv (" is responding to refuel",msg,msglen)
+         call smovv (" request from ghost a/c ",msg,msglen)
+        }
+     else # if (response == $no)
+        {
+         call smovv (" does not have enough fuel",msg,msglen)
+         call smovv (" to issue to ghost a/c ",msg,msglen)
+        }
+     call smovhn(xUNT2$Name$C,$$MaxLit,msg,msglen)
+     call smovv (".  ",msg,msglen)
+     call send_ (xUNT$View$I,0,msglen,msg)
+    }
+ else if (message_kind == $pol_request)
+    {
+     message_kind = $pol_issue
+ 
+     msglen = 0
+     call smovhn(xUNT$Name$C,$$MaxLit,msg,msglen)
+     if (response == $yes)
+        {
+         call smovv (" is issuing fuel to ghost a/c ",msg,msglen)
+ 
+         UNT$TNK$Index = AviationFuelTank$Code       # clk 2/96 (E1467)
+         UNT$TNK$FuelRemaining$F = xUNT$TNK$FuelRemaining$F - float(lbs_of_fuel_requested)
+         putUNT$TNK$FuelRemaining$F
+        }
+     else # if (response == $no)
+        {
+         call smovv (" does not have enough fuel to",msg,msglen)
+         call smovv (" issue to ghost a/c ",msg,msglen)
+        }
+     call smovhn(xUNT2$Name$C,$$MaxLit,msg,msglen)
+     call smovv (" as requested.  ",msg,msglen)
+     call send_ (xUNT$View$I,0,msglen,msg)
+    }
+ 
+ call ALSP_Send_Refuel_Response (UNT2$Pointer,  # requesting a/c
+                                 UNT$Pointer,   # tanker a/c
+                                 kgs_of_fuel,   # fuel requested
+                                 response,      # yes or no response
+                                 message_kind)  # type of message
+ 
+return
+end # ALSP_Receive_Refuel_Request
+
+ 
+ 
+subroutine ALSP_Receive_Refuel_Issue(_
+                    UNT$Pointer,            # in: To unit pointer
+                    UNT2$Pointer,           # in: From unit pointer
+                    message_kind,           # in: 1 of 4 kinds of message
+                    kgs_of_fuel,            # in: amt of fuel requested
+                    denial_reason)          # in: only set if request denied
+#########################################################################
+#$%
+#$% Purpose:    ALSP_Receive_Refuel_Issue handles incoming refuel
+#$%             request messages.  There are 2 types of messages that
+#$%             need to be processed:
+#$%             a) SUPPORTING_UNITS.ISSUE - Ghosted airtanker response from
+#$%                a RESA a/c refuel request.  If there is fuel available as
+#$%                requested, then vector the requesting RESA a/c to position
+#$%                of tanker.  Otherwise send a no fuel message and go some-
+#$%                where else for refuel.
+#$%
+#$%             b) POL.ISSUE - Ghosted airtanker response from a RESA a/c
+#$%                fuel request.
+#$%
+#$% Called By:  ALSP_Receive_Refuel_Interaction
+#$%
+#$% Calls:      Vector_unit_for_refuel   <wgopord.rat>
+#$%             smovhn      smovv
+#$%
+#$% Tables:     UNT     ACC
+#$%
+#$% Date:       Oct. 1995
+#$%
+#$% Author:     Susan Miller
+#$%
+#$% Modified:   Carol Kropp - 2/96 (E1467)
+#$%             Replace UNT$AcFuelRemaining$I reference with new TNK
+#$%             subtable.
+#$%
+#$%             Carol Kropp - 1/97 (E1733)
+#$%             Aircraft were vectoring at last ordered speed, so if it was
+#$%             at 0...it vectored at 0.  Vector at loiter speed.
+#$%
+#$%             Carol Kropp - 3/97 (E1796)
+#$%             When the AWSIM/R tanker was rejecting the request it
+#$%             returned NUMBER(0) - no reason, as a defensive measure
+#$%             if the amount issued is 0 the reason is set to none
+#$%             available.
+#$%
+#########################################################################
+BBCommon
+ 
+integer UNT$Pointer, UNT2$Pointer
+integer message_kind, kgs_of_fuel
+integer denial_reason
+integer ACC$Pointer
+real    UNT$OrderedSpeed$F
+ 
+integer msglen
+Character msg[ARB]
+ 
+integer lbs_of_fuel_requested, UNT$ALSPRefuelStatus$I
+integer UNT$RefuelAmount$I, UNT$Status$I, UNT$AttackIndx$I
+integer UNT$FuelWarning$I
+integer UNT$TNK$Index
+real    UNT$TNK$FuelRemaining$F
+literal cstrip8   # SMM 3/00
+ 
+ lbs_of_fuel_requested = kgs_of_fuel * kg_to_lbs
+ 
+ if (lbs_of_fuel_requested <= 0)                  # clk 3/97 (E1796)
+   denial_reason = $alsp_supply_none_available
+ 
+ if (denial_reason == $alsp_supply_none_available)
+    {
+     # somehow need to cancel the refuel order that is
+     # still in the queue for this unit.
+     UNT$ALSPRefuelStatus$I = $Refuel_Denied
+     putUNT$ALSPRefuelStatus$I
+ 
+     msglen = 0
+     call smovhn(xUNT2$Name$C,$$MaxLit,msg,msglen)
+     call smovv (" cannot refuel ",msg,msglen)
+     call smovhn(xUNT$Name$C,$$MaxLit,msg,msglen)
+     call smovv (" due to insufficient fuel.  ",msg,msglen)
+     call send_ (xUNT2$View$I,0,msglen,msg)
+ 
+     if (message_kind == $pol_issue)
+        {
+         # clear out the amount of fuel to refuel
+         UNT$RefuelAmount$I = 0
+         putUNT$RefuelAmount$I
+ 
+         # change the status from fuel to proceeding
+         UNT$Status$I = $PROCEEDING$CODE
+         putUNT$Status$I
+ 
+         # Remove maneuver restrictions - clk 1/98 (E1832)
+         putUNT$LastManeuverOrderCode$I (NO$order)
+ 
+         UNT$AttackIndx$I = $NO
+         putUNT$AttackIndx$I
+ 
+         UNT$FuelWarning$I = $NO
+         PUTUNT$FuelWarning$I
+ 
+         UNT$ALSPRefuelStatus$I = 0
+         putUNT$ALSPRefuelStatus$I
+        }
+    }
+ else
+    {
+     if (message_kind == $supporting_units_issue)
+        {
+         call Vector_unit_for_refuel(_
+                UNT2$Pointer,      # tanker index
+                UNT$Pointer,       # requesting unit index
+                lbs_of_fuel_requested)# amt of fuel to load
+ 
+         ACC$Pointer = xUNT$AccPntr$I        # vector at loiter speed
+         UNT$OrderedSpeed$F = float (xACC$LoiterSpeed$I)
+         putUNT$OrderedSpeed$F
+ 
+         UNT$RefuelAmount$I = lbs_of_fuel_requested
+         putUNT$RefuelAmount$I
+ 
+         msglen = 0
+         call smovhn(xUNT$Name$C,$$MaxLit,msg,msglen)
+         call smovv (" is proceeding to refuel from  ",msg,msglen)
+         call smovhn(xUNT2$Name$C,$$MaxLit,msg,msglen)
+         call smovv (".  ",msg,msglen)
+         call send_ (xUNT2$View$I,0,msglen,msg)
+        }
+     else if (message_kind == $pol_issue)
+        {
+         # increment the amount of fuel
+         UNT$TNK$Index = AviationFuelTank$Code       # clk 2/96 (E1467)
+         UNT$TNK$FuelRemaining$F = xUNT$TNK$FuelRemaining$F + float(lbs_of_fuel_requested)
+         putUNT$TNK$FuelRemaining$F
+ 
+         # clear out the amount of fuel to refuel
+         UNT$RefuelAmount$I = 0
+         putUNT$RefuelAmount$I
+ 
+         # change the status from fuel to proceeding
+         UNT$Status$I = $PROCEEDING$CODE
+         putUNT$Status$I
+ 
+         # Remove maneuver restrictions - clk 1/98 (E1832)
+         putUNT$LastManeuverOrderCode$I (NO$order)
+ 
+         UNT$AttackIndx$I = $NO
+         putUNT$AttackIndx$I
+ 
+         UNT$FuelWarning$I = $NO
+         PUTUNT$FuelWarning$I
+ 
+         UNT$ALSPRefuelStatus$I = 0
+         putUNT$ALSPRefuelStatus$I
+ 
+         msglen = 0
+         call smovhn(xUNT$Name$C,$$MaxLit,msg,msglen)
+         call smovv (" has received fuel from  ",msg,msglen)
+         call smovhn(xUNT2$Name$C,$$MaxLit,msg,msglen)
+         call smovv (" as requested.  ",msg,msglen)
+         call send_ (xUNT2$View$I,0,msglen,msg)
+        }
+    }
+ 
+return
+end
+
+ 
+Subroutine ALSP_Locate_Minefield (mfd$AlspId$i, mfdpointer)
+BBcommon
+integer mfdpointer
+bbdeclare (mfd$pointer, mfd$alspid$i)
+ 
+mfdpointer = 0
+for (mfd$pointer$first; mfd$pointer$ok; mfd$pointer$next)
+{
+    if (Xmfd$ALSPId$i == mfd$ALSPId$i)
+    {
+        mfdpointer = mfd$pointer
+        break
+    }
+}
+return
+end
+ 

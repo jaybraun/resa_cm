@@ -1,0 +1,898 @@
+ 
+#####   version 3.1  dated-  7apr81
+ 
+ 
+#####   version 3.0  dated- 22dec80
+ 
+ 
+# 
+ 
+#$%      MODULE                       UTILITY                     DATA
+#$%    SUBROUTINES                  SUBROUTINES                  TABLES
+#$%    ===========                  ===========                  ======
+#$%
+#$%      WGLCRU                        ECHOH                      CMC
+#$%      GETSR  <WGLOAD>               ECHOR                      RAD
+#$%      GSLOTM <WGLOAD>                                          NAV
+#$%      EQFIND <WGLOAD>
+#$%
+#$%
+#$%
+#$%    NOTES
+#$%    =====
+#$%
+#$%    1.  <FILENAME> INDICATES WHERE SUBROUTINE IS LOCATED.
+#$%
+#$%    2.  UTILITY SUBROUTINES NOT SHOWN ON FLOWCHART.
+#$%
+#$%    3.  * INDICATES NO OTHER SUBROUTINES CALLED.
+#$%
+#$%
+#$%
+#$%    FLOWCHART FOR FILE WGLCRU
+#$%    =========================
+#$%
+#$%    START0 <WARGAM> - WGLOAD - WGLCRU - GETSR *
+#$%                                      - GSLOTM*
+#$%                                      - EQFIND*
+#$%
+#$% Modified Nov. 1993 by Susan Miller in accordance with the
+#$% Improved Air Defense Model.
+ 
+
+ 
+define($xxxxx,)                         #quick fix for esm-only seeker
+define(DEBUG,#)
+define(DEBUGL,#)
+include "bbctl.inc"
+include "bbcode.inc"
+include "bbcmc.inc"                     # cruz/ball/adcru  Alex V. July 1993
+include "bbirc.inc"                     # radar/esm/ir     Alex V. July 1993
+include "bbrad.inc"
+include "bbnav.inc"
+include "ascii.inc"
+include "wimain_eq.inc"                 # MJC 4/27/2000
+ 
+define (BBImplicit, Implicit None)      # MJC 4/26/2000
+ 
+Subroutine wglcru (reccnt,recsz,rec)    #load in the cruisemissile scenario file
+ 
+########################################################
+#$%
+#$% Purpose:   WGLCRU loads in the cruise missile
+#$%            scenario file data.
+#$%
+#$% Called By: WGLOAD
+#$%
+#$% Calls:     ECHOH      ECHOR      EQFIND
+#$%            GETSR      GSLOTM     proc_sam_load
+#$%
+#$% Tables:    CMC        RAD        NAV
+#$%
+#$% Date:      OCT 80
+#$%
+#$% Author:    Ron Williams, Dana Wills
+#$%
+#$% Modifications:
+#$%   1-17-91  trs   added aspect dependent cross section (MSECT)
+#$%   june 1993  Alex Vagus
+#$%              modified to map ballistic and advanced cruise missiles into black-board
+#$%
+#$%
+#$%             Susan Miller 4/99 (E2074)
+#$%             In order to fix problem with EMIT not loading
+#$%             put in a kludge call to findeq. Need more time
+#$%             to fully investigate what the true problem is.
+########################################################
+ 
+BBcommon
+ 
+integer reccnt,recsz,pnt,icat
+literal rec[1500],cat
+integer pointer     # SMM 4/99 (E2074)
+ 
+EqErr$Common        # MJC 4/27/2000
+ 
+integer ILEN, LOOP, LEN, ISTAT, IPTR,
+        RAD$Pointer, NAV$Pointer,
+        CMC$Targship$I, CMC$Targaircraft$I,
+        CMC$Targcruise$I, CMC$Pointer,
+        CMC$Cat$I, CMC$Avgspeed$I,
+        CMC$Weight$I, CMC$Firerate$I,
+        CMC$ASP$Index, CMC$ASP$crosssect$I,
+        CMC$Vrblxs$I, CMC$Launchdepth$I,
+        CMC$RE$Index, CMC$RBL$Index,
+        CMC$Minengagerange$I, CMC$Maxwaypoints$I,
+        CMC$Acquirelandastarget$I, CMC$Usercsinselection$I,
+        CMC$Minseekerrcs$I, CMC$RBL$targetradius$I,
+        CMC$RBL$firerange$I, CMC$RBL$targetspeed$I,
+        CMC$Bursttype$I, CMC$Burstdepth$I,
+        CMC$Yield$I, CMC$Maxflightdur$I,
+        CMC$Flightalt$I, CMC$Seekertype$I,
+        CMC$Rdrpntr$I, CMC$Seekerrange$I,
+        CMC$Seekerarc$I,  CMC$Targsel$I,
+        CMC$Hdgpntr$I, CMC$Spdpntr$I,
+        CMC$Navpntr$I, CMC$RE$indx$I,
+        CMC$Maxrange$I, CMC$Cirerrprob$I,
+        CMC$Damageradi$I, CMC$Maxalt$I                      # MJC 4/26/2000
+real    CMC$Problaunch$F, CMC$Phrangefactor$F,
+        CMC$Phspeedfactor$F, CMC$Effectdecpt$F,
+        CMC$Effectblip$F, CMC$Effectchaff$F,
+        CMC$Effectjam$F, CMC$Probhit$F                      # MJC 4/26/2000
+literal CMC$Type$C                                          # MJC 4/26/2000
+integer kk                      # jb  E2209    11/30/00
+BBdeclare (CMC$FullName$V)      # jb  E2209    11/30/00
+ 
+DEBUG call echov("<wglcru:")
+ 
+#$% set ilen to zero for smovv
+ilen = 0
+ 
+#$% move "Missile " to cfile for eventual display and set flag
+Call SMOVV("Missile   ",cfile,ilen)  # SMM 11/93
+cflg = $yes
+ 
+#$% if file empty
+if (reccnt <= 1)
+   {
+    #$% send error message to user
+    call echov ("Cruisemissle File Empty")
+    call echor
+    return
+   }
+ 
+for (loop = 2; loop <= reccnt; )        #for each record in the file
+    {
+     cmc$targSHIP$i     = $NO           #               7/16/85
+     cmc$targAircraft$i = $NO           #               7/16/85
+     cmc$targCruise$i   = $NO           #               7/16/85
+ 
+     call getsr (loop,recsz,rec)        #get scenario record
+     len = rec[1]                       #save length
+ 
+     #$% call to get slots
+     call gslotm (cmc$pointer,$$cmc,cmc$entry,istat)
+ 
+     #$% if status is NO (file not loaded)
+     if(istat == $no)
+       {
+        call echov ("Missiles from ")
+        call echohn (rec[3],$$MaxLit)
+        call echov (" and on are not loaded.")
+        call echor
+        return
+       }
+     #$% get name of missile and save
+     CMC$TYPE$C = rec[3]
+     PUTCMC$TYPE$C
+     cname = rec[3]
+ 
+DEBUGL  call echov ("Loading CMissile ")
+DEBUGL  call echohn (rec[3],$$MaxLit)
+DEBUGL  call echor
+ 
+     #$% get missile type cruz=1 ball=2  SAM=4 and save
+     cat = rec[5]
+     if(cat == 'CRUZ')  icat = $Cruz$Code
+     if(cat == 'BALL')  icat = $Ball$Code
+     if(cat == 'SAM')  icat = $NewSAM$Code
+ 
+     CMC$CAT$I = icat
+     PUTCMC$CAT$I
+ 
+     #$% get average missile speed and save
+     CMC$AVGSPEED$I = rec[7]
+     PUTCMC$AVGSPEED$I          # (Note:  scaling is 2)
+ 
+     #$% get missile probability of successful launch and save
+     CMC$PROBLAUNCH$F = rec[9]/100.
+     PUTCMC$PROBLAUNCH$F
+ 
+     if (icat != $NewSAM$Code)
+        {
+         #$% get equivelant warhead weight (EPU) of missile and save
+         CMC$WEIGHT$I = rec[11] * 100                 # convert to pounds
+         PUTCMC$WEIGHT$I
+ 
+         #$% get missile firing rate and save
+         CMC$FIRERATE$I = rec[13]
+         PUTCMC$FIRERATE$I
+ 
+         # changed 1/17/91 trs
+         #$% get missile cross section and save
+         CMC$ASP$index = 1
+         CMC$ASP$CrossSect$i = REC[15]        #store dB// cross section
+         putCMC$ASP$CrossSect$i
+         CMC$VrblXS$i = $NO
+         putCMC$VrblXS$i
+ 
+         #$% get missile max launch depth and save
+         CMC$LAUNCHDEPTH$I = rec[17]
+         PUTCMC$LAUNCHDEPTH$I
+ 
+         pnt = 18     # save record pointer index
+        }
+    else # it is a SAM
+        {
+         call proc_sam_load(rec,len,CMC$Pointer)
+        }
+ 
+    #$% set REL (recognized emitter list) table index to zero
+    CMC$RE$INDEX = 0
+ 
+    #$% get cruz missile characteristics
+    if (icat == $Cruz$Code)      # is a cruz missile
+     {
+      # Set default values for RBL parameters - joa 2/98 (E1864)
+      putCMC$MinEngageRange$I  (0)
+      putCMC$MaxWayPoints$I  (0)
+      putCMC$AcquireLandAsTarget$I  ($YES)
+      putCMC$PHRangeFactor$F  (.5)
+      putCMC$PHSpeedFactor$F  (.5)
+      putCMC$MinSeekerRCS$I  (0)
+      putCMC$UseRCSInSelection$I  ($YES)
+ 
+      CMC$RBL$Index = SmallAOU$Index
+      putCMC$RBL$TargetRadius$I  (0)
+      putCMC$RBL$FireRange$I  (0)
+      putCMC$RBL$TargetSpeed$I  (0)
+ 
+      CMC$RBL$Index = MediumAOU$Index
+      putCMC$RBL$TargetRadius$I  (0)
+      putCMC$RBL$FireRange$I  (0)
+      putCMC$RBL$TargetSpeed$I  (0)
+ 
+      CMC$RBL$Index = LargeAOU$Index
+      putCMC$RBL$TargetRadius$I  (0)
+      putCMC$RBL$FireRange$I  (0)
+      putCMC$RBL$TargetSpeed$I  (0)
+ 
+      for(iptr=pnt; iptr <=len; iptr = iptr + 2)
+        {
+ 
+         if(rec[iptr] == 'MXSEC')
+          {
+            CMC$VrblXS$i = $YES
+            putCMC$VrblXS$i
+ 
+            FOR (CMC$ASP$Index = 1;
+                 CMC$ASP$Index$Ok;
+                 CMC$ASP$Index = CMC$ASP$Index + 1)
+                {
+                 CMC$ASP$CrossSect$i = rec[iptr+CMC$ASP$Index]
+                 putCMC$ASP$CrossSect$i
+                }
+            #$% we unconditionally add 6 to iptr at top of loop
+            iptr = iptr + 6  # actually is to adjust the iptr
+ 
+          }
+ 
+         else if(rec[iptr] == 'NOMEN')    # jb E2209 (FULLname)     11/30/00
+                {
+                CMC$Fullname$V = ""
+                kk = 0
+                call vmovh (rec[iptr+1], 24, CMC$Fullname$V, kk)
+                putCMC$Fullname$V
+                iptr = iptr + 2
+                }
+         else if(rec[iptr] == 'UDB') # jb E2209 (FULLname)     11/30/00
+            {
+            if      (rec[iptr+1] == 'YES') putCMC$UDB$i ($YES)
+            else if (rec[iptr+1] != 'NO') putCMC$UDB$i (!$NO)
+            }
+ 
+         else if(rec[iptr] == 'MNRNG')           # joa 2/98 (E1864)
+          {
+             CMC$MinEngageRange$I = rec[iptr+1]
+             putCMC$MinEngageRange$I
+          }
+ 
+         else if(rec[iptr] == 'WAYPT')           # joa 2/98 (E1864)
+          {
+             CMC$MaxWayPoints$I = rec[iptr+1]
+             putCMC$MaxWayPoints$I
+          }
+ 
+         else if(rec[iptr] == 'LNDAQ')           # joa 2/98 (E1864)
+          {
+             CMC$AcquireLandAsTarget$I = rec[iptr+1]
+             putCMC$AcquireLandAsTarget$I
+          }
+ 
+         else if(rec[iptr] == 'TGRCS')           # joa 2/98 (E1864)
+          {
+             CMC$UseRCSInSelection$I = rec[iptr+1]
+             putCMC$UseRCSInSelection$I
+          }
+ 
+         else if(rec[iptr] == 'MNRCS')           # joa 2/98 (E1864)
+          {
+             CMC$MinSeekerRCS$I = rec[iptr+1]
+             putCMC$MinSeekerRCS$I
+          }
+ 
+         else if(rec[iptr] == 'PHRNG')           # joa 2/98 (E1864)
+          {
+             CMC$PHRangeFactor$F = rec[iptr+1]/100.
+             putCMC$PHRangeFactor$F
+          }
+ 
+         else if(rec[iptr] == 'PHSPD')           # joa 2/98 (E1864)
+          {
+             CMC$PHSpeedFactor$F = rec[iptr+1]/100.
+             putCMC$PHSpeedFactor$F
+          }
+ 
+         else if(rec[iptr] == 'RBLSM')           # joa 2/98 (E1864)
+          {
+            CMC$RBL$Index = SmallAOU$Index
+ 
+            CMC$RBL$TargetRadius$I = rec[iptr+1]
+            putCMC$RBL$TargetRadius$I
+ 
+            CMC$RBL$FireRange$I = rec[iptr+2]
+            putCMC$RBL$FireRange$I
+ 
+            CMC$RBL$TargetSpeed$I = rec[iptr+3]
+            putCMC$RBL$TargetSpeed$I
+ 
+            iptr = iptr + 2
+          }
+ 
+         else if(rec[iptr] == 'RBLMD')           # joa 2/98 (E1864)
+          {
+            CMC$RBL$Index = MediumAOU$Index
+ 
+            CMC$RBL$TargetRadius$I = rec[iptr+1]
+            putCMC$RBL$TargetRadius$I
+ 
+            CMC$RBL$FireRange$I = rec[iptr+2]
+            putCMC$RBL$FireRange$I
+ 
+            CMC$RBL$TargetSpeed$I = rec[iptr+3]
+            putCMC$RBL$TargetSpeed$I
+ 
+            iptr = iptr + 2
+          }
+ 
+         else if(rec[iptr] == 'RBLLG')           # joa 2/98 (E1864)
+          {
+            CMC$RBL$Index = LargeAOU$Index
+ 
+            CMC$RBL$TargetRadius$I = rec[iptr+1]
+            putCMC$RBL$TargetRadius$I
+ 
+            CMC$RBL$FireRange$I = rec[iptr+2]
+            putCMC$RBL$FireRange$I
+ 
+            CMC$RBL$TargetSpeed$I = rec[iptr+3]
+            putCMC$RBL$TargetSpeed$I
+ 
+            iptr = iptr + 2
+          }
+ 
+         else if(rec[iptr] == 'BURST')                    #   4/3/85
+          {                             # 1 Air; 2 Subsurf; 3 Surf
+             if (rec[iptr+1]== 'AIR')
+                 cmc$BurstType$i = $Air$Code
+             else if (rec[iptr+1]== 'SUBSU')
+                 cmc$BurstType$i = $SubSurface$Code
+             else if (rec[iptr+1]== 'SURF')
+                 cmc$BurstType$i = $Surface$Code
+ 
+             PUTCMC$BurstType$I
+          }
+ 
+         else if(rec[iptr] == 'BDPTH')                    #   4/3/85
+          {                             #
+           if (rec[iptr+1]== 'DEEP' )
+                cmc$BurstDepth$i = 1            # FLAG as DEEP
+           else cmc$BurstDepth$i = 0    # default to SHALLOW
+           PUTcmc$BurstDepth$I
+          }
+ 
+         else if(rec[iptr] == 'YIELD')                    #   4/3/85
+          {
+            cmc$YIELD$i = rec[iptr + 1]
+            PUTcmc$YIELD$i
+          }
+ 
+         else if(rec[iptr] == 'FLDUR')
+          {
+           #$% get max missile flight duration and save
+           CMC$MAXFLIGHTDUR$I = rec[iptr + 1]
+           PUTCMC$MAXFLIGHTDUR$I
+          }
+ 
+         else if (rec[iptr] == 'ACRU')
+           {
+            #$% get missile flight altitude and save
+            CMC$FLIGHTALT$I = rec[iptr + 1]
+            PUTCMC$FLIGHTALT$I
+           }
+ 
+         else if (rec[iptr] == 'SEEKR')
+           {
+             #$% get missile seeker type and save
+             CMC$SEEKERTYPE$I = $RADAR$CODE     #assume is radar
+             if (rec[iptr + 1] == 'RDESM')      #but some times is rdesm
+               CMC$SEEKERTYPE$I = $RADESM$CODE
+ 
+             if (rec[iptr + 3] == 'XXXXX')      #this is obscure and
+               CMC$SEEKERTYPE$I = $ESM$CODE      # and unethical see bellow
+ 
+             PUTCMC$SEEKERTYPE$I
+           }
+ 
+         else if (rec[iptr] == 'RADAR')
+            {
+              if (rec[iptr + 1] != 'XXXXX')
+              #$% find equipment type in radar equipment table
+              call eqfind($$rad,rad$entry,rec[iptr + 1],rad$pointer)
+              #$% if found
+              if(rad$pointer != 0)
+               {
+                #$% set cruise missile radar pointer to radar table and save
+                CMC$RDRPNTR$I = RAD$POINTER
+                PUTCMC$RDRPNTR$I
+               }
+            }
+ 
+         else if (rec[iptr] == 'SKRNG')
+            {
+              #$% get missile max detecting range and save
+              CMC$SEEKERRANGE$I = rec[iptr + 1]
+              PUTCMC$SEEKERRANGE$I
+            }
+ 
+         else if (rec[iptr] == 'ARC')
+            {
+              #$% get missile max sector scan arc and save
+              CMC$SEEKERARC$I = rec[iptr + 1]
+              PUTCMC$SEEKERARC$I
+            }
+ 
+         else if (rec[iptr] == 'PROTL')
+            {
+              #$% get missile protocol (far/near) and save
+              CMC$TARGSEL$I = $FAR$CODE
+              if(rec[iptr + 1] == 'NEAR') CMC$TARGSEL$I = $NEAR$CODE
+              PUTCMC$TARGSEL$I
+            }
+ 
+         else if (rec[iptr] == 'PHD')
+            {
+              #$% get missile hit probability in presence of DECM and save
+              CMC$EFFECTDECPT$F = rec[iptr + 1]/100.
+              PUTCMC$EFFECTDECPT$F
+            }
+ 
+         else if (rec[iptr] == 'PHB')
+            {
+              #$% get missile hit probability in presence of BLIP and save
+              CMC$EFFECTBLIP$F = rec[iptr + 1]/100.
+              PUTCMC$EFFECTBLIP$F
+            }
+ 
+         else if (rec[iptr] == 'PHC')
+            {
+              #$% get missile hit probability in presence of CHAFF and save
+              CMC$EFFECTCHAFF$F = rec[iptr + 1]/100.
+              PUTCMC$EFFECTCHAFF$F
+            }
+ 
+        else if (rec[iptr] == 'PHJ')
+            {
+             #$% get missile hit probability in presence of JAMMING and save
+             CMC$EFFECTJAM$F = rec[iptr + 1]/100.
+             PUTCMC$EFFECTJAM$F
+            }
+ 
+        else if (rec[iptr] == 'PH')
+            {
+             #$% get missile probability of hitting target and save
+             CMC$PROBHIT$F = rec[iptr + 1] / 100.
+             PUTCMC$PROBHIT$F
+            }
+ 
+        else if (rec[iptr] == 'HDG')
+            {
+             #$% find equipment type in navigation equipment table
+             call eqfind($$nav,nav$entry,rec[iptr + 1],nav$pointer)
+             #$% if equipment found
+             if(nav$pointer!= 0)
+               {
+                #$% set cruise missile heading pointer to nav pointer & save
+                CMC$HDGPNTR$I = NAV$POINTER
+                PUTCMC$HDGPNTR$I
+               }
+            }
+ 
+       else if (rec[iptr] == 'SPD')
+           {
+             #$% find equipment type in navigation equipment table
+             call eqfind($$nav,nav$entry,rec[iptr + 1],nav$pointer)
+             #$% if found
+             if(nav$pointer!= 0)
+              {
+                #$% set cruise missile speed pointer to nav table pointer & save
+                CMC$SPDPNTR$I = NAV$POINTER
+                PUTCMC$SPDPNTR$I
+              }
+           }
+ 
+       else if (rec[iptr] == 'NAV')
+           {
+              #$% find equipment type in navigation equipment table
+              call eqfind($$nav,nav$entry,rec[iptr + 1],nav$pointer)
+              #$% if found
+              if(nav$pointer!= 0)
+               {
+                #$% set cruise missile nav pointer to match nav pointer
+                CMC$NAVPNTR$I = NAV$POINTER
+                PUTCMC$NAVPNTR$I
+               }
+           }
+ 
+        else if (rec[iptr] == 'TSHIP')
+            {
+              cmc$targSHIP$i = rec[iptr + 1]
+              PUTcmc$targSHIP$i
+            }
+ 
+        else if(rec[iptr] == 'TAIRC')                    #   7/8/85
+            {
+              cmc$targAircraft$i = rec[iptr + 1]
+              PUTcmc$targAircraft$i
+            }
+ 
+        else if(rec[iptr] == 'TCRUZ')                    #   7/8/85
+            {
+              cmc$targCruise$i = rec[iptr + 1]
+              PUTcmc$targCruise$i
+            }
+ 
+        else if (rec[iptr] == 'EMIT')
+            {
+             #$% if recognized emitter index is 10, next
+             if(CMC$RE$INDEX == 10) next
+ 
+             #$% find equipment type in radar equipment table
+             call eqfind($$rad,rad$entry,rec[iptr + 1],rad$pointer)
+# kludge for problem that needs a lot more inspection SMM 4/99 (E2074)
+             pointer = 0
+             call findeq($$rad,rad$entry,rec[iptr + 1],pointer)
+             #$% if found
+             if(RAD$pointer != 0)
+              {
+               #$% increment recognized emitter index
+               CMC$RE$INDEX = CMC$RE$INDEX + 1
+ 
+               #$% set recognized emitter index to radar pointer index & save
+               CMC$RE$INDX$I = RAD$POINTER$INDEX
+               PUTCMC$RE$INDX$I
+              }
+            }     # End if EMITter
+ 
+        } # end for(iptr=pnt;iptr<=len;iptr+2)
+ 
+       if(cmc$targSHIP$i +cmc$targAircraft$i +cmc$targCruise$i < 1)# 7/15/85
+         PUTcmc$targSHIP$i (1)                                    # 7/15/85
+ 
+     }  # end if (icat==$Cruz$Code) is a cruz missile
+ 
+ 
+    #$% get ballistic missile characterics
+    else if (icat == $Ball$Code)  # is a ballistic missile
+       {
+        for(iptr=pnt; iptr<=len; iptr = iptr + 2)
+          {
+ 
+           if(rec[iptr] == 'MXSEC')
+            {
+             CMC$VrblXS$i = $YES
+             putCMC$VrblXS$i
+ 
+             FOR (CMC$ASP$Index = 1;
+                 CMC$ASP$Index$Ok;
+                 CMC$ASP$Index = CMC$ASP$Index + 1)
+                {
+                 CMC$ASP$CrossSect$i = rec[iptr+CMC$ASP$Index]
+                 putCMC$ASP$CrossSect$i
+                }
+             #$% we unconditionally add 6 to iptr at top of loop
+             iptr = iptr + 6  # actually is to adjust the iptr to point to next field name
+            }
+ 
+           else if(rec[iptr] == 'BURST')                    #   4/3/85
+            {                             # 1 Air; 2 Subsurf; 3 Surf
+             if (rec[iptr+1]== 'AIR')
+                 cmc$BurstType$i = $Air$Code
+             else if (rec[iptr+1]== 'SUBSU')
+                 cmc$BurstType$i = $SubSurface$Code
+             else if (rec[iptr+1]== 'SURF')
+                 cmc$BurstType$i = $Surface$Code
+ 
+             PUTCMC$BurstType$I
+            }
+ 
+           else if(rec[iptr] == 'BDPTH')                    #   4/3/85
+            {                             #
+             if (rec[iptr+1]== 'DEEP' )
+                cmc$BurstDepth$i = 1            # FLAG as DEEP
+             else cmc$BurstDepth$i = 0    # default to SHALLOW
+             PUTcmc$BurstDepth$I
+            }
+ 
+           else if(rec[iptr] == 'YIELD')                    #   4/3/85
+            {
+             cmc$YIELD$i = rec[iptr + 1]
+             PUTcmc$YIELD$i
+            }
+ 
+           else if(rec[iptr] == 'RANGE')
+             {
+              #$% get missile max range and save
+              CMC$MAXRANGE$I = rec[iptr + 1]
+              PUTCMC$MAXRANGE$I
+             }
+ 
+            else if(rec[iptr] == 'CEP')
+             {
+              #$% get missile circular error and save
+              CMC$CIRERRPROB$I = rec[iptr + 1]
+              PUTCMC$CIRERRPROB$I
+             }
+ 
+            else if(rec[iptr] == 'DAMR')
+             {
+              #$% get missile damage radius and save
+              CMC$DAMAGERADI$I = rec[iptr + 1]
+              PUTCMC$DAMAGERADI$I
+             }
+ 
+            else if(rec[iptr] == 'AMAX')
+             {
+              #$% get missile max altitude and save
+              CMC$MAXALT$I = rec[iptr + 1]
+              PUTCMC$MAXALT$I
+             }
+ 
+            else if(rec[iptr] == 'NOMEN')    # jb E2209 (FULLname)     11/30/00
+                {
+                CMC$Fullname$V = ""
+                kk = 0
+                call vmovh (rec[iptr+1], 24, CMC$Fullname$V, kk)
+                putCMC$Fullname$V
+                iptr = iptr + 2
+                }
+            else if(rec[iptr] == 'UDB') # jb E2209 (FULLname)     11/30/00
+                {
+                if      (rec[iptr+1] == 'YES') putCMC$UDB$i ($YES)
+                else if (rec[iptr+1] != 'NO') putCMC$UDB$i (!$NO)
+                }
+ 
+          } # end for(iptr=pnt;iptr<=len;iptr=iptr+2)
+ 
+       } # end else if (icat==$Ball$Code) is a ballistic missile
+  } # end for(loop=2;loop<=recnt;loop+1)
+ 
+ 
+return
+end
+
+ 
+Subroutine Proc_SAM_load(rec,len,CMC$Pointer)
+ 
+########################################################
+#$%
+#$% Purpose:   Proc_SAM_load loads the surface-to-air missile
+#$%            scenario file data.
+#$%
+#$% Called By: WGLCRU
+#$%
+#$% Calls:
+#$%
+#$% Tables:    CMC        RAD
+#$%
+#$% Date:      NOV 1993
+#$%
+#$% Author:    Susan Miller
+#$%
+########################################################
+BBcommon
+ 
+literal rec[1500]
+integer CMC$SAMMaxRange$I, CMC$SAMMaxAlt$I, CMC$SAMSimul$I
+integer CMC$SeekerRange$I, CMC$SeekerArc$I, CMC$RdrPntr$I
+integer CMC$BND$Altitude$I, CMC$BND$MaxRange$I, CMC$NbrofAltBands$I
+integer CMC$Pointer, RAD$Pointer, CMC$BND$ProbHit$I
+integer CMC$BND$Index
+integer len, pnt, iptr, band_info[3,5], nbr_of_bands, info, i, j, n, m
+real    CMC$ProbHit$F
+integer kk                      # jb  E2209    11/30/00
+BBdeclare (CMC$FullName$V)      # jb  E2209    11/30/00
+ 
+ # initialize to zero
+ nbr_of_bands = 0
+ for (i=1;i<=5;i=i+1)
+    {
+     for (j=1;j<=3;j=j+1)
+        {
+         band_info[j,i] = 0
+        }
+    }
+ 
+ #'MXRNG'
+ CMC$SAMMaxRange$I = rec[11]
+ putCMC$SAMMaxRange$I
+ 
+ #'MXALT'
+ CMC$SAMMaxAlt$I = rec[13]
+ putCMC$SAMMaxAlt$I
+ 
+ #'SIMUL'
+ CMC$SAMSimul$I = rec[15]
+ putCMC$SAMSimul$I
+ 
+ #'PH   '
+ CMC$ProbHit$F = rec[17]/100.0
+ putCMC$ProbHit$F
+ 
+ pnt = 18
+ 
+ for (iptr=pnt; iptr<=len; iptr = iptr + 2)
+    {
+     if (rec[iptr] == 'ARC')
+        {
+         CMC$SeekerArc$I = rec[iptr + 1]
+         putCMC$SeekerArc$I
+        }
+     else if (rec[iptr] == 'SKRNG')
+        {
+         CMC$SeekerRange$I = rec[iptr+1]
+         putCMC$SeekerRange$I
+        }
+     else if (rec[iptr] == 'RADAR')
+        {
+         if (rec[iptr + 1] != 'XXXXX')
+         # find equipment type in radar equip. table and
+         # return RAD pointer
+            call eqfind ($$rad,rad$entry,rec[iptr+1],RAD$Pointer)
+ 
+         if (RAD$Pointer != 0)
+            {
+             CMC$RdrPntr$I = RAD$Pointer
+             putCMC$RdrPntr$I
+            }
+        }
+     else if ((rec[iptr] == 'ALT1') | (rec[iptr] == 'ALT2') |
+              (rec[iptr] == 'ALT3') | (rec[iptr] == 'ALT4') |
+              (rec[iptr] == 'ALT5'))
+        {
+         nbr_of_bands = nbr_of_bands + 1
+         band_info[1,nbr_of_bands] = rec[iptr+1]   # upper end of altitude band
+         band_info[2,nbr_of_bands] = rec[iptr+2]   # probability of hit for band
+         band_info[3,nbr_of_bands] = rec[iptr+3]   # maximum range for band
+         iptr = iptr + 2
+        }
+     else if(rec[iptr] == 'NOMEN')    # jb E2209 (FULLname)     11/30/00
+          {
+          CMC$Fullname$V = ""
+          kk = 0
+          call vmovh (rec[iptr+1], 24, CMC$Fullname$V, kk)
+          putCMC$Fullname$V
+          iptr = iptr + 2
+          }
+     else if(rec[iptr] == 'UDB') # jb E2209 (FULLname)     11/30/00
+          {
+          if      (rec[iptr+1] == 'YES') putCMC$UDB$i ($YES)
+          else if (rec[iptr+1] != 'NO') putCMC$UDB$i (!$NO)
+          }
+    }
+ 
+ # if there were altitude bands entered, sort them in ascending order
+ # before putting them in the table
+ if (nbr_of_bands > 0)
+    {
+     for (n = 1; n < nbr_of_bands; n = n+1)
+        {
+        for (m = n+1; m <= nbr_of_bands; m = m+1)
+            {
+            if (band_info[1,n] <= band_info[1,m]) next
+ 
+            info = band_info[1,n]
+            band_info[1,n] = band_info[1,m]
+            band_info[1,m] = info
+            info = band_info[2,n]
+            band_info[2,n] = band_info[2,m]
+            band_info[2,m] = info
+            info = band_info[3,n]
+            band_info[3,n] = band_info[3,m]
+            band_info[3,m] = info
+            }
+        }
+     for (i = 1; i <= nbr_of_bands; i = i + 1)
+        {
+         CMC$BND$Index = i
+         CMC$BND$Altitude$I = band_info[1,i]    # (Note:  scaling is 2)
+         putCMC$BND$Altitude$I
+         CMC$BND$ProbHit$I = band_info[2,i]
+         putCMC$BND$ProbHit$I
+         CMC$BND$MaxRange$I = band_info[3,i]  # (Note:  scaling is 2)
+         putCMC$BND$MaxRange$I
+ 
+         if (CMC$SAMMaxRange$I < CMC$BND$MaxRange$I)
+            {
+             CMC$SAMMaxRange$I = CMC$BND$MaxRange$I
+            }
+        }
+     putCMC$SAMMaxRange$I
+    }
+ # save the number of altitude bands that were entered
+ CMC$NbrofAltBands$I = nbr_of_bands
+ putCMC$NbrofAltBands$I
+ 
+ # check to see if the last altitude band has a greater altitude or range
+ # than the max altitude or max range entered earlier
+ if (nbr_of_bands != 0)
+    {
+     if (CMC$SAMMaxAlt$I < band_info[1,nbr_of_bands])
+        {
+         CMC$SAMMaxAlt$I = band_info[1,nbr_of_bands]
+         putCMC$SAMMaxAlt$I
+        }
+    }
+ 
+return
+end
+
+include "wimain_eq.inc"
+ 
+Subroutine findeq($$tbl,tbl$entry,name,tbl$pointer)  #find the passed 'name'
+    # WARNING:  $$tbl and tbl$entry MAY BE CONSTANTS:  DONT CHANGE!
+########################################################
+#$%
+#$% Purpose:   FINDEQ searches any given equipment
+#$%            characteristics table for a specific
+#$%            named item.
+#$%
+#$% Called By:           WGLCRU
+#$%
+#$%
+#$% Calls:     ECHOH      ECHOR
+#$%
+#$% Tables:    Variable
+#$%
+#$% Date:      OCT 80
+#$%
+#$% Author:    Ron Williams, Dana Wills
+#$%            Code taken out of WILD.RAT
+#$%
+########################################################
+ 
+BBcommon                                             # in the blackboard
+ 
+EqErr$common
+literal name
+ 
+integer TBL$Entry, TBL$Pointer, $$TBL, LCOMP                    # MJC 4/26/2000
+ 
+#$% if table entry found
+if (tbl$entry != 0)
+   {
+    #$% for each table entry
+    for (tbl$pointer=tbl$base;
+         tbl$pointer<tbl$last;
+         tbl$pointer=tbl$pointer+tbl$entry)
+       {
+        if(lcomp(ibb[tbl$pointer],name) == 0) return   #do a literal compare
+       }
+   }
+ 
+#$% initialize table pointer
+tbl$pointer = 0
+ 
+return
+end
+ 

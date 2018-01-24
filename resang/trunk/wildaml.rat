@@ -1,0 +1,202 @@
+ 
+#####   version 3.1  dated-  7apr81
+ 
+ 
+#####   version 3.0  dated- 22dec80
+ 
+ 
+# 
+ 
+ 
+ 
+#$%      MODULE                      UTILITY                     DATA
+#$%    SUBROUTINES                 SUBROUTINES                  TABLES
+#$%    ===========                 ===========                  ======
+#$%
+#$%      WGLAML                       ECHOH                      AML
+#$%      GETSR  <WGLOAD>              ECHOI                      ACC
+#$%                                   ECHOR                      UNT
+#$%
+#$%
+#$%
+#$%    NOTES
+#$%    =====
+#$%
+#$%    1.  <FILENAME> INDICATES WHERE SUBROUTINE IS LOCATED.
+#$%
+#$%    2.  UTILITY SUBROUTINES NOT SHOWN ON FLOWCHART.
+#$%
+#$%    3.  * INDICATES NO OTHER SUBROUTINES CALLED.
+#$%
+#$%
+#$%
+#$%    FLOWCHART FOR FILE WGLAML
+#$%    =========================
+#$%
+#$%    START0 <WARGAM> - WGLOAD - WGLAML - GETSR*
+ 
+
+ 
+ include "bbctl.inc"
+ include "bbcode.inc"
+ include "bbaml.inc"
+ include "bbacc.inc"
+ include "bbunt.inc"
+ include "bbdeq.inc"
+ include "ascii.inc"
+ include "wimain_eq.inc"           # jb Consists of EqErr$Common  2/5/92
+ 
+ define (BBImplicit, Implicit None)     # MJC 4/25/2000
+ 
+ Subroutine WGLAML(_
+            reccnt,
+            recsz,
+            rec)
+ 
+ #######################################################
+ #$%
+ #$% Purpose:   WGLAML loads in the Aircraft Main-
+ #$%            tenance Log data.
+ #$%
+ #$% Called By: WGLOAD
+ #$%
+ #$% Calls:     ECHOH      ECHOI      ECHOR
+ #$%            GETSR
+ #$%
+ #$% Tables:    AML        ACC        UNT
+ #$%
+ #$% Date:      OCT 80
+ #$%
+ #$% Author:    Ron Williams, Dana Wills
+ #$%
+ #######################################################
+ 
+ BBcommon
+ EqErr$Common                          # jb In WIMAIN_EQ.inc    2/5/92
+ 
+# integer cflg                         # jb EqErr$Common replaces
+# character cfile[11]                  #    these 4 lines
+# literal cname
+# common /eqerr/cfile,cname,cflg
+ 
+ literal rec[1500]
+ integer reccnt,recsz
+ 
+ integer ILEN, LOOP,              # MJC 4/25/2000
+         ACC$Pointer,             # MJC 4/25/2000
+         UNT$Pointer,             # MJC 4/25/2000
+         AML$Pointer,             # MJC 4/25/2000
+         AML$Status$I,            # MJC 4/25/2000
+         AML$Sqdindx$I,           # MJC 4/25/2000
+         AML$Accpntr$I,           # MJC 4/25/2000
+         AML$Ownerindx$I,         # MJC 4/25/2000
+         AML$Defaultmission$I     # MJC 4/25/2000
+ literal AML$Timeflown$F,         # MJC 4/25/2000
+         AML$Timelaunch$F,        # MJC 4/25/2000
+         AML$Timemaint$F,         # MJC 4/25/2000
+         AML$Sidenumber$C,        # MJC 4/25/2000
+         ACC$Type$C,              # MJC 4/25/2000
+         CSTRIP8                  # MJC 4/25/2000
+ 
+ #$% set length
+ ilen = 0
+ #$% move "Aircraft" to cfile for eventual display
+ call smovv ("Aircraft   ", cfile, ilen)
+ 
+ cflg = $yes
+ 
+ #$% if file empty
+ if(reccnt <= 1)
+   {
+    #$% display error message to user
+    call echov("Aircraft Maintainance Log File Empty.  ")
+    call echor
+    return
+   }
+ #$% go to first entry in table
+ AML$POINTER$FIRST
+ 
+ #$% for each AML entry
+ for(loop=2;loop<=reccnt;)
+    {
+     #$% call to get scenario record
+     call getsr(loop,recsz,rec)
+ 
+     #$% if pointer not in valid position
+     if(!AML$POINTER$VALID)
+       {
+        #$% display error message to user
+        call ECHOv("Aircraft Maintainance Log from ")
+        call ECHOI(rec[2])
+        call ECHOv(" and on are not loaded.")
+        call ECHOR
+        return
+       }
+     #$% get a/c side number and save
+     AML$SIDENUMBER$C = rec[2]
+     PUTAML$SIDENUMBER$C
+ 
+     #$% for each a/c in the ACC table
+     for(ACC$POINTER$FIRST;ACC$POINTER$OK;ACC$POINTER$NEXT)
+        {
+         #$% get a/c type
+         ACC$TYPE$C = XACC$TYPE$C
+ 
+         #$% if a/c type found
+         if(ACC$TYPE$C == rec[3])
+           {
+            #$% set AML pointer to a/c pointer and save
+            AML$ACCPNTR$I = ACC$POINTER
+            PUTAML$ACCPNTR$I
+ 
+            break
+           }
+        }
+     #$% for each unit in the UNT table
+     for(UNT$POINTER$FIRST;UNT$POINTER$OK;UNT$POINTER$NEXT)
+        {
+         #$% if unit found
+         if(XUNT$NAME$C == rec[4])
+           {
+            #$% set AML owner index to unit pointer index & save
+            AML$OWNERINDX$I = UNT$POINTER$INDEX
+            PUTAML$OWNERINDX$I
+ 
+            # need to see if this UNT has a DEQ entry for this type A/C
+            call Check_AC_DEQ (UNT$pointer, ACC$pointer)     # add as needed
+ 
+            break
+           }
+        }
+     #$% get time a/c flown, convert to minutes and save
+     aml$TimeFlown$f = rec[5] * $Minutes$Per$Hour
+     PUTaml$TimeFlown$f
+ 
+     #$% get time of launch and save
+     aml$TimeLaunch$f = rec[6]
+     PUTaml$TimeLaunch$f
+     If (aml$TimeLaunch$f > 31)         # <<<>>>        11/13/86
+        PUTaml$HANGARflag$i ($YES)      # <<<>>>        11/13/86
+ 
+     #$% get squadron name index and default mission - clk 4/95 (e1394)
+     AML$SQDIndx$I = rec[7]
+     putAML$SQDIndx$I
+     AML$DefaultMission$I = rec[8]
+     putAML$DefaultMission$I
+ 
+     #$% set status as on deck and save
+     AML$STATUS$I = $ONDECK$CODE
+     PUTAML$STATUS$I
+ 
+     aml$TimeMaint$f = 1.E35           # jb -vice zero- 4/30/87
+     PUTaml$TimeMaint$f                 # jb -vice zero- 4/30/87
+ 
+     #$% increment pointer by appropriate entry size
+     AML$POINTER$NEXT
+ 
+     #$% set to last entry in table
+     AML$LAST$TO AML$POINTER - 1
+    }
+ return
+ end
+ 

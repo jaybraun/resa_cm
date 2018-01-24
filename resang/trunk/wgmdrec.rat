@@ -1,0 +1,863 @@
+############################################# oct-28-82
+#
+#        Changed history-file OPEN statements (see ACCESS, RECL).
+#
+#        Changed all WRITE statements to corrolate with OPEN statements
+#        by adding a new subroutine WRITE_RECORD.
+##############################################
+ 
+##  VAX Conversion
+# January 1982:
+#   1. Number of CODES transferred via array AVE(17) decreased by 1 from
+#       18:  PASSIVE and SONAR replaced by PASSIVESONAR$CODE.
+#   2. CFILE changed from DOUBLE PRECISION to LITERAL.  SMOVHN and SMOVH
+#       statements substituted for WGCAT calls, for file-name construction.
+#   3. Number of words transferred for each set of UNT/POS data increased
+#       from 9 to 10, because NAME now occupies 2 words.
+#   4. Number of words transferred for each set of track data decreased from
+#       5 to 4:  some fields are now smaller, and DetectSource field gone.
+#   5. In anticipation of possible re-insertion of TMA and/or Triangulation:
+#       -logic adjusted to accept passive tracks if Range isn't less than 1;
+#       -DetectionType$I field transferred from BlackBoard, vice hard-coded.
+#
+#   6. Changed history-file OPEN statements (see ACCESS, FORM, STATUS; and
+#       eliminated MODE and DEVICE  keywords.  Hopefully the result will be
+#       compatible with the MODE=IMAGE statements on the DEC-20.
+#   7.  Adapted Post-Game-Analysis (PGA) track buffer-record DBF for use by
+#       this RECORDing process, by changing the "system" to HS vice AN, and
+#       the buffer name to DET from DBF, with name of the resulting INCLUDE
+#       file, HSDET.inc, which replaces the former DBDET.inc
+#   8.  Similarly, adapted PGA's UBF buffer-record for data read from the
+#       UNT and POS tables, under new name HSUPS.inc.  Changed program logic
+#       to put data into this UPS record, then write words from the record
+#       to the History file, instead of writing words directly from the UNT
+#       and POS tables.  May be a bit slower, but also may make documenta-
+#       tion of the interface easier/better; and tends to reduce dependency
+#       on the precise word structure of the BlackBoard.
+#   9.  Because there will be no WARREC Fork in the VAX simulation, inact-
+#       ivated the corresponding statements, which may be seen in the file
+#       by searching for:
+################### bblod   $fork   hltslf   BBmap  BBunmap #############
+#  10.  1/26/82:  Incorporated Flag (now det$NoMore$I) into det$record in-
+#       stead of writing it as separate word.  Requires changing ANMAIN and
+#       ANSURVL post-game-analysis .rat files to match.
+#  11.  Programmer note:  In some earlier versions, the name of the executive
+#       routine for this group of subroutines was RECORD.  When the name
+#       RECORD was given to the reiterative subroutine for recording data from
+#       the UNT, POS and RMT tables, the executive was renamed WARREC.  On 1
+#       Feb. '82, in connection with changing from a FORK program to subroutine
+#       status, the executive logic was transferred to WARCYC, and a file-open-
+#       ing convention was adopted that avoids conflict in assignments of unit
+#       numbers.  (There's no longer a WARREC.)
+#
+#  12.  $EXSUP$VIEW changed to $NEUTRAL$VIEW                    10/14/82
+#
+#  13.  Conversion from UNT,DYN,POS to UNT,DEQ
+## --------------------------------------------------------------------------
+#####   version 3.1  dated-  7apr81
+ 
+ 
+###
+### mod to version 3.0          dated 24-feb-1981
+###
+### smn prog    module  comments
+### === ====    ======  =================================================
+### 002 dew
+###
+###
+ 
+###
+### 3/23/89  Replaced POS$ with UNT$
+###          Removed  POS$POINTER$TO (UNT$POINTER$INDEX)
+###
+###
+ 
+#####   version 3.0  dated- 22dec80
+ 
+ 
+# 
+ 
+#$%      MODULE                       UTILITY                    DATA
+#$%    SUBROUTINES                  SUBROUTINES                 TABLES
+#$%    ===========                  ===========                 ======
+#$%
+#$%                                                              UNT
+#$%
+#$%      SRECRD                       ECHO                       VUE
+#$%      RRECRD                       ECHOI
+#$%      RECORD                       ECHOR                      RMT
+#$%      WRITE_RECORD                 ECHOH                      DET
+#$%      RECOPN                       REMOVE                     SWD
+#$%                                   CLOSE                      SOS
+#$%                                   TTYOUT
+#$%                                   OPEN
+#$%
+#$%
+#$%
+#$%
+#$%    NOTES
+#$%    =====
+#$%
+#$%    1.  UTILITY SUBROUTINES ARE NOT SHOWN ON FLOWCHART.
+#$%
+#$%    2.  * INDICATES NO OTHER SUBROUTINES CALLED.
+#$%
+#$%
+#$%
+#$%    FLOWCHART FOR FILE WGDMREC (RECRD is external/called by WARCYC)
+#$%    =========================  (WGHALT "  "         "    "    "   )
+#$%
+#$%   (recrd )  - RECORD - WRITE_RECORD*
+#$%   (wghalt)  - RECEOF - WRITE_RECORD*
+#$%             - SRECRD - WRITE_RECORD*
+#$%             - RRECRD - WRITE_RECORD*
+#$%             - RECOPN - SRECRD*
+#$%                      - RRECRD*
+#$%
+#$%
+#$%    (ECHO is a utility subroutine and is commented in file ECHO)
+ 
+
+ 
+ ############################################################################
+ #                                                                          #
+ #  Based on logic that has been transferred to WARCYC in connection with   #
+ # the reference to the RECORD process by individual subroutines rather     #
+ # than as a program fork, recording of position/surveillance data is per-  #
+ # performed at intervals controlled by the user-designated                 #
+ # TIME$BETWEEN$RECORDS parameter.                                          #
+ #
+ #  SUBROUTINES:
+ #      recOPN  (Select START or RESTART)                               2/1/82
+ #      recEOF  (File-close)[Unit = $lfc$record]                        2/1/82
+ #      SRECRD  (Called at start of new game)                           2/1/82
+ #      RRECRD  (Called upon restart/continuation)                      2/1/82
+ #      RECORD  (Reiterations each recorded game-minute)                2/1/82
+ #      WRITE_RECORD  (Used to write a record to the History file) tpa10/28/82
+ #
+ #                             5/28/80    6/24/80                       2/1/82
+ ############################################################################
+ 
+ 
+ 
+ include "bbctl.inc"                                     # Include Blackboard
+ include "bbcode.inc"                                    # definitions
+ include "hsups.inc"             # UNT/POS data buffer (VAX Convers'n) 1/25/82
+ include "bbrad.inc"
+ include "bbunt.inc"
+ include "bbcmc.inc"            #JHM ufl05
+ include "bbtor.inc"            #JHM ufl05
+ include "bbtrp.inc"            #JHM
+ include "bbvue.inc"            #JHM ufl05
+ include "bbrmt.inc"             #                                      2/22/82
+ include "cenglog.inc"           # 8/85 for engagement log stuff.
+ include "bbswd.inc"             # clk 11/4/91 adding SWABS detections to p.g.
+ include "bbsos.inc"             # clk 11/4/91 adding Sosus detections to p.g.
+ include "bbacc.inc"             # clk 10/92 adding classification of detections
+ include "bbrtl.inc"             # clk 10/92 adding classification of detections
+ include "bbshc.inc"             # clk 10/92 adding classification of detections
+ include "bbhfd.inc"             # SMM 10/92 adding HFDF detections
+ include "bbird.inc"             # SMM 10/92 adding EOIR detections
+ include "bbssr.inc"             # SMM 10/92 adding SurvSat detections
+ include "bbsat.inc"             # SMM 10/92 adding SurvSat detections
+ include "hseng.inc"
+ include "ascii.inc"
+ 
+define (BBimplicit, IMPLICIT NONE)  # jb E2145  6/20/00
+ 
+define($DEBUGV,$$Debug$Control)
+define($DEBUGV,##)                      # Temporary, for compile test 1/19/82
+define(UNT$POS$ENTRIES,IUPENT)                                        #smn002
+undefine write                          #                             1/20/82
+undefine err                            #                             1/20/82
+ 
+#--------------------------------------------------------------------
+# The following define alters the performance of the RECORD module.
+# The value of PSL$Record$Length will be the size (in 32-bit words) of
+# each record written.  The volume of data is from the HSDET & HSUPS
+# records.  Where the HSDET record is 4 words long and the HSUPS
+# record is 10 words long.
+#
+#               --- HSDET ---   --- HSUPS ---
+#   Possible    Disk    Wasted  Disk    Wasted
+#   Length      Writes  Words   Writes  Words
+#   ======      ======  =====   ======  =====
+#     1            4      0       10      0
+#     4            1      0        3      2
+#     5            1      1        2      0
+#    10            1      6        1      0
+#
+ 
+define (PSL$Record$Length,5)        # length of each record in POS/SURV Log file
+ 
+subroutine RECopn       # Called by FILEOP in wgfile.rat
+BBcommon
+ 
+record$status$flag = $first$code                                #       2/3/82
+ 
+if (game$minute == 1)
+   {
+    call srecrd                # Start Record
+   }
+else
+   {
+    call rrecrd                # Re-start Record
+   }
+ 
+record$status$flag = $reit$code                                 #       2/3/82
+ 
+return
+end
+ 
+#############################################################################
+ 
+subroutine RECeof
+BBcommon
+ 
+close (UNIT = $LFC$EngLog)                      # Close Engagement Log File
+                                                # <RG>  (July 1985)
+ 
+return
+end
+ 
+
+ 
+ #########################################################################
+ #                                                                       #
+ # Called if this is a new record request.                               ##
+ # Control is then returned to WARCYC.                                   #
+ #                                                                       #
+ #########################################################################
+ 
+ Subroutine SRECRD                             # Start processor
+ 
+ #######################################################
+ #$%
+ #$% Purpose:     SRECRD starts record processor if a
+ #$%              new record request (i.e. new game)
+ #$%              and creates a new history file.
+ #$%
+ #$% Called By:   WAR
+ #$%
+ #$% Calls:       ECHOH      ECHOI
+ #$%              AVE        OPEN       WRITE_RECORD (tpa)
+ #$%
+ #$% Inputs From: BBCODE.INC
+ #$%              BBVUE
+ #$%
+ #$% Date:        NOV 80
+ #$%
+ #$% Author:      M.Einhorn / J.Bryant; Dana Wills
+ #$%
+ #$% Date Modif:  OCT 82
+ #$%
+ #$% Author:      Timothy P. Adamos
+ #$%
+ #######################################################
+ 
+ BBcommon                                       # Utilize Blackboard common
+ 
+# Create and load table to transfer value elements to history file
+# (unit being deleted, detection age unit type or detection class,
+# and assumed relative identity of target).
+ 
+LITERAL VUE$TrackCode$C, CSTRIP, CSTRIP8    # jb    E2145  6/20/00
+Integer ILEN,IVIEW,VUE$Pointer,RAD$Pointer  # jb    E2145  6/20/00
+integer irc, delete_file_version
+ 
+character   CFILE[30]                           # for file-names        1/20/82
+vaxcharacter*30 v_cfile
+equivalence (cfile, v_cfile)
+ 
+## <RG>  (JULY 1985)
+## REPEAT ABOVE PROCESS TO OPEN THE FILE FOR THE
+## ENGAGEMENT LOG.  THE FILE WILL BE OPENED EVEN
+## SUBROUTINE 'WGHALT'.
+ 
+ilen=0          # move the parts of the game identification to the file name...
+ 
+call smovhn (scenario$name,6,cfile,ilen)        #  > Scenario name
+ 
+if (Game$Designation != 0)                      # is there a game number ?
+    {                                           # YES
+    call smovv ("g",cfile,ilen)                  #  > a seperator character
+    call smovi(Game$Designation,cfile,ilen)     #  > Game Number
+    }
+ 
+call smovv  ("h.eng",cfile,ilen)              #  > code & type
+call smov   (EOS,cfile,ilen)                    #  > Terminator
+ 
+irc = delete_file_version (cfile)		# Delete file so can open new
+ 
+open (unit    = $LFC$EngLog,            #       jb 9/16/86
+      FILE    =  V_CFILE,
+#      BLOCKSIZE = 512,
+#      CARRIAGECONTROL = 'NONE',
+      ERR     = 250,
+      FORM    = "UNFORMATTED",
+      RECL    =  eng$length*4,
+      STATUS  = 'NEW')
+#      DISP    = 'SAVE',
+#      RECORDTYPE = 'FIXED')
+ 
+ 
+return                                         # return to record
+ 
+ 
+250
+ 
+ENGAGE$FILE$ERROR = $NEWFILE$OPENERR      # Engagement log file open error
+ 
+return
+end
+ 
+#--------------------------------------------------------------------
+ 
+ 
+undefine read
+ 
+Subroutine RRECRD                       # Continue or restart
+ 
+########################################################
+#$%
+#$% Purpose:   RRECRD is called by RECOPN (above).. which
+#$%            is called fy FILEOP, in wgfile.rat
+#$%            It opens an existing history file,
+#$%            to be appended to
+#$%            RECORD.
+#$%
+#$% Called By: RECOPN
+#$%
+#$% Calls:     ECHOH      ECHOI
+#$%            OPEN       WRITE_RECORD
+#$%
+#$% Tables:    None
+#$%
+#$% Date:      NOV 80
+#$%
+#$% Author:    M.Einhorn / J.Bryant; Dana Wills
+#$%
+#$% Date Mod:  OCT 82
+#$%
+#$% Author:    Timothy P. Adamos
+#$%
+########################################################
+BBcommon                                # Utilize blackboard common
+Eng$Record$Definition
+BBdeclare(eng$time$f)
+Integer k, ILEN, IERR_CODE      # jb E2145  6/20/00
+integer irc, delete_file_version
+ 
+character       msg[100],
+                errmsg[ARB]
+ 
+character       CFILE[30]              # for file-names             1/20/82
+vaxcharacter*30 V_CFILE
+equivalence (cfile, v_cfile)
+ 
+character       TFILE[30]              # for temp file-name
+vaxcharacter*30 V_TFILE
+equivalence (tfile, v_tfile)
+ 
+## <RG>  (JULY 1985)
+## REPEAT ABOVE PROCESS TO OPEN THE FILE FOR THE
+## ENGAGEMENT LOG.  THE FILE WILL BE CLOSED IN
+## SUBROUTINE 'WGHALT'.
+ 
+ilen=0          # move the parts of the game identification to the file name...
+call smovhn (scenario$name,$$maxlit,cfile,ilen)        #  > Scenario name
+call smovv  ("h.eng",cfile,ilen)              #  > code & type
+call smov   (EOS,cfile,ilen)                    #  > Terminator
+ 
+if (game$minute > 1)
+{
+    open (unit    = $LFC$OldEngLog,
+          FILE    = v_cfile,
+          ERR     = 250,
+          FORM    = "UNFORMATTED",
+          RECL    =  eng$length,
+          STATUS  = 'OLD')
+ 
+	ilen=0          # move the parts of the game identification to the file name...
+	call smovv  ("t.eng",tfile,ilen)              #  > code & type
+	call smov   (EOS,tfile,ilen)                    #  > Terminator
+ 
+ 
+    open (unit    = $LFC$EngLog,
+          FILE    = v_tfile,
+          ERR     = 250,
+          FORM    = "UNFORMATTED",
+          RECL    =  eng$length*4,
+          STATUS  = 'UNKNOWN')
+ 
+    # For restart, copy engagement file to point of restart
+    read ($LFC$OldEngLog,end=8007) eng$record
+    eng$time$f = Xeng$Time$f
+ 
+    while (eng$time$f < game$time)
+    {
+        write ($LFC$EngLog) eng$record                   # write record to file
+        read ($LFC$OldEngLog,end=8007) eng$record
+        eng$time$f = Xeng$Time$f
+    }
+8007    continue
+    close(unit = $LFC$OldEngLog)
+    close(unit = $LFC$EngLog)
+ 
+	# Copy temporary new engagement log to file with proper name
+    open (unit    = $LFC$OldEngLog,
+          FILE    = v_tfile,
+          ERR     = 250,
+          FORM    = "UNFORMATTED",
+          RECL    =  eng$length,
+          STATUS  = 'OLD')
+ 
+	irc = delete_file_version (cfile)		# Delete file so can open new
+ 
+    open (unit    = $LFC$EngLog,
+          FILE    = v_cfile,
+          ERR     = 250,
+          FORM    = "UNFORMATTED",
+          RECL    =  eng$length*4,
+          STATUS  = 'NEW')
+ 
+    repeat
+    {
+    	read ($LFC$OldEngLog,end=8027) eng$record
+        write ($LFC$EngLog) eng$record                   # write record to file
+ 
+    }
+8027    continue
+    close(unit = $LFC$OldEngLog)
+#    close(unit = $LFC$EngLog)
+ 
+}
+ 
+#open (unit    = $LFC$EngLog,
+#      FILE    = v_cfile,
+#      ERR     = 250,
+#      FORM    = "UNFORMATTED",
+#      RECL    =  eng$length*4,
+#      STATUS  = 'OLD',
+#      ACCESS  = 'APPEND')
+ 
+return
+ 
+250
+ 
+ENGAGE$FILE$ERROR = $NEWFILE$OPENERR      # Engagement log file open error
+ 
+ 
+return
+end
+ 
+ 
+ 
+
+Subroutine Generate_eng_rec (A_Platform, A_weapon, A_Target)
+ 
+############################################################
+#$%
+#$% Purpose:   Generate_eng_rec builds and writes out an engagement record
+#$%            to the postgame engagemenmt log from the three fields supplied.
+#$%
+#$% Called By: a number of places
+#$%
+#$% Calls:     write_eng_rec
+#$%
+#$% Tables:
+#$%
+#$% Date:      1/14/90
+#$%
+#$% Author:    Dane Wills
+#$%
+############################################################
+BBcommon
+ENcommon
+ 
+LITERAL ENG$Platform$C, ENG$Weapon$C    # jb E2144    9/6/00
+literal         A_Target,cstrip8, damage$c
+VMSchar*(*)     A_Platform, A_weapon    # jb E2144 (vice LITERAL) 9/6/00
+Integer         kk                      # jb E2144    9/6/00
+real     UNT$TrueLongitude$f,UNT$TrueLatitude$f
+integer  UNT$Alspid$I,UNT$HierarchyId$I,UNT$pointer,find_unit
+integer  TBL$Pointer,UNT$CmcPntr$I, UNT$ShcPntr$I,UNT$AccPnter$I
+integer  UNT$SubType$I,UNT$Type$I,lcomp
+damage$c = 'DAMAGE'
+kk = 0; call smovv ("        ", ENG$Platform$C, kk)
+kk = 0                                     # jb E2144    9/6/00
+call smovV (A_Platform,ENG$Platform$C,kk)  # jb E2144    9/6/00
+kk = 0; call smovv ("        ", ENG$Weapon$C, kk)
+kk = 0                                     # jb E2144    9/6/00
+call smovV (A_Weapon,ENG$Weapon$C,kk)      # jb E2144    9/6/00
+                                                       # JHM ufl05 extensive rewrite to get lat/long etc in to pga
+UNT$Pointer = find_unit(a_target)                      # JHM UFL05
+if (UNT$Pointer$Valid & (lcomp(damage$c,ENG$Weapon$C)==0))# check for valid pointer
+ {                                                       # and ship/sub/boat rec
+  PUTeng$Platform$c
+  PUTeng$Weapon$c
+  PUTeng$Target$c( A_Target )
+  PUTeng$Time$f( game$time )
+  putENG$RecLon$f (xUNT$TrueLongitude$f)
+  putENG$TAlspId$I (xUNT$Alspid$I)
+  putENG$HierarchyId$I (xUNT$HierarchyId$I)
+  putENG$RecLat$f (xUNT$TrueLatitude$f)
+ 
+  UNT$Type$I = xUNT$Type$I           # obtain and store
+  if (UNT$Type$I == $Air$Code)       # type
+         TBL$Pointer = xUNT$AccPntr$I
+  else if (UNT$Type$I == $CruiseMissile$Code)
+         TBL$Pointer = xUNT$CmcPntr$I
+  else if (UNT$Type$I == $Sub$Code)
+     {
+       UNT$SubType$I = xUNT$SubType$I
+       if (UNT$SubType$I == $Torpedo$SubCode)
+           TBL$Pointer = xUNT$TrpPntr$I
+       else   # a marker or regular sub
+           TBL$Pointer = xUNT$ShcPntr$I
+      }
+  else   # ship or boat
+         TBL$Pointer = xUNT$ShcPntr$I
+  putENG$TargetType$C (xTBL$Name$C)
+  PUTeng$Result$i (eng$HitAmplification$code)        #end of rewrite by JHM at UFL05
+ }                                                   #after the else is the old code
+else
+ {
+  PUTeng$Platform$c
+  PUTeng$Weapon$c
+  PUTeng$Target$c( A_Target )
+  PUTeng$Time$f( game$time )
+  PUTeng$Result$i( eng$HitAmplification$code )
+ }
+ 
+ 
+call write_eng_rec
+ 
+return
+end
+ 
+
+Subroutine write_eng_rec
+ 
+############################################################
+#$%
+#$% Purpose:   Write_eng_rec writes out an engagement record
+#$%            to the postgame engagemenmt log.
+#$%
+#$% Called By: ENGDATA    CMHIT    OFCRU1
+#$%
+#$% Calls:     Game_DTG   SMOVH    SMOVIZ
+#$%
+#$% Tables:
+#$%
+#$% Date:      August 1985
+#$%
+#$% Author:    Russ Golish  &  Charlie Farbstein
+#$%
+#$% Modified:  Carol Kropp - 6/95 (E1419)
+#$%            Added optional BE and TIN information.
+#$%
+#$%            Carol Kropp - 7/95 (E1425)
+#$%            Added optional platform type information.
+#$%
+#$%            Carol Kropp - 2/97 (E1731)
+#$%            Added PersistentMunition yes/no flag.
+#$%
+#$%            John McCormick - AAI03
+#$%            Added JQUAD feed logic
+############################################################
+BBcommon
+encommon
+ 
+write ($LFC$EngLog) eng$record                   # write record to file
+if(JQUAD$FEED == 1)
+  call write_Eng_Feed()                          # write JQUAD feed JHM (E2330)
+ 
+ENTRY Init_Eng_Rec                              # reset engagement record
+ 
+putENG$Time$F          (0.0)
+putENG$Platform$C      ("        ")
+putENG$PlatformType$C  ("        ")
+PUTeng$Weapon$c        ("        ")
+putENG$Track$C         ("        ")
+putENG$Target$C        ("        ")
+putENG$TargetType$C    ("        ")
+putENG$BEPart1$C       ("        ")
+putENG$BEPart2$C       ("        ")
+putENG$TIN$C           ("        ")
+putENG$RecLat$F        (0.0)         # JHM 12/01 (E2247)
+putENG$RecLon$F        (0.0)         #   Must reinit Lat/Long
+putENG$Result$I        (0)
+putENG$ResultPH$F      (0.0)
+putENG$Range$F         (0.0)
+putENG$MBURange$F      (0.0)
+putENG$PersistentMunition$I ($no)
+putENG$HierarchyId$I   (0)  # JHM 12/31
+putENG$TalspId$i       (0)  #
+putENG$SalspId$i       (0)  #
+putENG$ShoLat$F        (0.0)            #
+putENG$ShoLong$F       (0.0)            #
+ 
+return
+end
+
+ 
+Subroutine Establish_RMT_Classification  (RMT$Pointer,
+                                          class)
+############################################################
+#$%
+#$% Purpose:   Establish_RMT_classification will determine
+#$%            what the classification of the detection is,
+#$%            based on the data within the RMT table.
+#$%
+#$% Called By: RECORD
+#$%
+#$% Calls:     None
+#$%
+#$% Tables:    RMT    UNT
+#$%
+#$% Date:      October, 1992
+#$%
+#$% Author:    Carol L. Kropp
+#$%
+############################################################
+BBcommon
+ 
+LITERAL CSTRIP8, RMT$Userclass$C                           # jb E2145 6/20/00
+literal       class
+integer       RMT$Pointer, UNT$Pointer, kk
+Integer  RMT$Class$I,RMT$Classified$I,RMT$Detectiontype$I, # jb E2145 6/20/00
+    RMT$Lastdettype$I, RMT$Classscore$I,                   # jb E2145 6/20/00
+    RTL$Pointer                                            # jb E2145 6/20/00
+vaxcharacter  char_class*8
+ 
+kk = 0; call smovv ("        ", class, kk)
+ 
+  RMT$Class$I = xRMT$Class$I
+  RMT$Classified$I = xRMT$Classified$I
+  RMT$DetectionType$I = xRMT$DetectionType$I
+ 
+  UNT$Pointer$To  (xRMT$Detectee$I)
+ 
+  if (RMT$DetectionType$I == $ActiveVisual$Code   |
+      RMT$DetectionType$I == $ActiveNonVisual$Code)
+    {
+     if (RMT$Classified$I != $no)        # if classified
+       {
+        if (RMT$Class$I == $Air$Code)    # if classification is air,
+          class = xRMT$ACCName$C         # get name from air slot
+        else                             # otherwise,
+          class = xRMT$SHCName$C         # get name from ship slot
+       }
+     else       # else classification has not been made
+       {
+        RMT$LastDetType$I = xRMT$LastDetType$I
+        if (RMT$LastDetType$I == $MAD$type)
+          class = 'MAD'
+        else if (RMT$LastDetType$i == $LIDAR$type)
+          class = 'LIDAR'
+        else if (RMT$LastDetType$I == $Bistatic$Type)
+          continue
+        else if (xRMT$VisualClass$I == $yes)  # if a visual detection ...
+          {
+           if (RMT$Class$I == $Air$Code)
+             class = 'AIR'
+           else if (RMT$Class$I == $Surface$Code)
+             class = 'SHIP'
+           else if (RMT$Class$I == $Sub$Code)
+             class = 'SUB'
+          }         # end of a visual track
+       }            # end of active track not classified
+    }               # end of an active track
+ 
+  else if (RMT$DetectionType$I == $PassiveSonar$Code)
+    {
+     RMT$UserClass$C = xRMT$UserClass$C
+     RMT$LastDetType$I = xRMT$LastDetType$I
+     RMT$ClassScore$I = xRMT$ClassScore$I
+ 
+     if (xUNT$Type$I == $Air$Code)    # either pass det of aircraft or
+       {                              # an active buoy owned by the a/c
+        if (xRMT$EchoFreq$I == 0)     # if no echo frequency
+          class = 'ACFT'          # passive detection of aircraft
+        else
+          class = 'BUOY'
+       }
+     if (xUNT$SuperType$I == $Torpedo$SuperCode  &
+         xUNT$TrueSpeed$F >= 30.0                )
+       class = 'TORP'
+     else if (RMT$LastDetType$I == $Bistatic$Type)
+       class = 'BSTAT'
+     else if (RMT$LastDetType$I == $LFASteal$Type)
+       class = 'STEAL'
+     else if (RMT$ClassScore$I == $SonFP1$Code)  # E1142
+       {
+        if (xUNT$RTLIndx$I != 0) # JFR 7/19/94 (no recognized tonals)
+           {
+            RTL$Pointer$To  (xUNT$RTLIndx$I)
+            class = xRTL$Classification1$C
+           }
+       }
+     else if (RMT$ClassScore$I == $SonFP2$Code)  # JFR 5/11/93
+       {
+        if (xUNT$RTLIndx$I != 0) # JFR 7/19/94 (no recognized tonals)
+           {
+            RTL$Pointer$To  (xUNT$RTLIndx$I)         # JFR 5/11/93
+            class = xRTL$Classification2$C           # JFR 5/11/93
+           }
+       }
+     else if (RMT$ClassScore$I == $SonFP3$Code)  # JFR 5/11/93
+       {
+        if (xUNT$RTLIndx$I != 0) # JFR 7/19/94 (no recognized tonals)
+           {
+            RTL$Pointer$To  (xUNT$RTLIndx$I)         # JFR 5/11/93
+            class = xRTL$Classification3$C           # JFR 5/11/93
+           }
+       }
+     else if (RMT$ClassScore$I == $SonFP4$Code)  # JFR 5/11/93
+       {
+        if (xUNT$RTLIndx$I != 0) # JFR 7/19/94 (no recognized tonals)
+           {
+            RTL$Pointer$To  (xUNT$RTLIndx$I)         # JFR 5/11/93
+            class = xRTL$Classification4$C           # JFR 5/11/93
+           }
+       }
+     else if (RMT$UserClass$C > 0)
+       {
+        write (char_class, '(a8)')  RMT$UserClass$C
+        char_class = "-"//char_class[1:7]
+        read (char_class, '(a8)')   class
+       }
+    }           # end of a passive sonar track
+ 
+  else if (RMT$DetectionType$I == $ESM$Code)
+    {
+     if (xRMT$FingerPrinted$I == $yes)
+       class = xUNT$Name$C
+    }           # end of an ESM track
+ 
+return
+end
+ 
+Subroutine write_eng_feed
+ 
+############################################################
+#$%
+#$% Purpose:   Write_eng_rec writes out an engagement record
+#$%            to a file to be read by JQUAD
+#$%
+#$% Called By: WRITE_ENG_DATA
+#$%
+#$% Calls:     Game_DTG   SMOVH    SMOVIZ
+#$%
+#$% Tables:
+#$%
+#$% Date:      March 2002 (E2330)
+#$%
+#$% Author:    John McCormick
+#$%
+#$%
+############################################################
+BBcommon
+encommon
+include "alsp_io_rat.inc"
+ 
+character outbuf[132]
+integer Game_DTG,k, kk, alsp_shooter_number,alsp_target_number
+real eng$time$f, eng$RecLat$f, eng$RecLon$f, eng$Range$f
+real  eng$MbuRange$f, eng$ResultPh$f, eng$ShoLong$f, eng$ShoLat$f
+real target_lat_deg, target_lon_deg, sho_lat_deg, sho_lon_deg
+integer*4 eng$Result$i, eng$GunEpu$i, eng$NumberFired$i, eng$NumberHit$i
+integer*4 eng$HierarchyId$I, eng$PersistentMunition$i, eng$TAlspId$I, eng$SAlspId$I
+LITERAL   eng$Platform$c, eng$Weapon$c, eng$Target$c, eng$Track$c, cstrip8
+LITERAL   eng$BEPart1$c, eng$BEPart2$c, eng$TIN$c, eng$PlatformType$c, eng$TargetType$c
+ 
+    eng$Time$f     = Xeng$Time$f
+    eng$Platform$c = Xeng$Platform$c
+    eng$Weapon$c   = Xeng$Weapon$c
+    eng$Target$c   = Xeng$Target$c
+    eng$RecLat$f   = Xeng$RecLat$f
+    eng$RecLon$f   = Xeng$RecLon$f
+    eng$ShoLat$f   = Xeng$ShoLat$f
+    eng$ShoLong$f  = Xeng$ShoLong$f
+    eng$Track$c    = Xeng$Track$c
+    eng$Result$i   = Xeng$Result$i
+    eng$Range$f    = Xeng$Range$f
+    eng$MbuRange$f = Xeng$MbuRange$f
+    eng$GunEpu$i       = Xeng$GunEpu$i
+    eng$NumberFired$i  = Xeng$NumberFired$i
+    eng$NumberHit$i    = Xeng$NumberHit$i
+    eng$ResultPh$f     = Xeng$ResultPh$f
+    eng$PersistentMunition$i = Xeng$PersistentMunition$i
+    eng$PlatformType$c = Xeng$PlatformType$c
+    eng$TargetType$c   = Xeng$TargetType$c
+    eng$BEPart1$c      = Xeng$BEPart1$c
+    eng$BEPart2$c      = Xeng$BEPart2$c
+    eng$TIN$c          = Xeng$Tin$c
+    eng$HierarchyId$I  = Xeng$HierarchyId$I
+    eng$TAlspId$I      = Xeng$TAlspId$I
+    eng$SAlspId$I      = Xeng$SAlspId$I
+ 
+ 
+ 
+ 
+    if (eng$result$i == 9)return    # hit amplification is redundant
+    kk = 0
+    call smov($SPACE,outbuf,kk)   # print control
+    #logic for determining whether within RESA only
+    alsp_shooter_number = INT (eng$SALSPid$I * 0.00001)# see ALSP_Generate_ID <alsp_send_updates.rat>
+    alsp_target_number = INT (eng$TALSPid$I * 0.00001)
+    if (alsp_shooter_number == actor & alsp_target_number == actor)     # Does RESA own it in the Confed
+        call smovv("R,",outbuf,kk)
+    else
+        call smovv("N,",outbuf,kk)
+    call smoviz(Game_dtg(game$time),6, outbuf, kk)
+    call smovv (",", outbuf, kk)
+    call smoviz (eng$TAlspId$i, 6, outbuf, kk)
+    call smovv (",", outbuf, kk)
+#    call smovlls(ENG$RecLat$F, "NS", outbuf, kk)
+#    call smovv (",", outbuf, kk)
+#    call smovlls(ENG$RecLon$F, "EW", outbuf, kk)
+    target_lat_deg = ENG$RecLat$F * $rad2deg
+    call smovf(target_lat_deg,6,outbuf,kk)
+    call smovv (",", outbuf, kk)
+    target_lon_deg = ENG$RecLon$F * $rad2deg
+    call smovf(target_lon_deg,6,outbuf,kk)
+    call smovv (",", outbuf, kk)
+    call smovh (ENG$Weapon$C, $$MaxLit, outbuf, kk)
+    call smovv (",", outbuf, kk)
+    call smoviz(ENG$Result$I,1,outbuf,kk)
+    call smovv (",", outbuf, kk)
+    call smoviz(eng$NumberFired$i, 3, outbuf, kk)
+    call smovv (",", outbuf, kk)
+    call smoviz(eng$NumberHit$i, 3, outbuf, kk)
+    call smovv (",", outbuf, kk)
+    if (eng$PersistentMunition$i == 1)     # Does RESA own it in the Confed
+        call smovv("P,",outbuf,kk)
+    else
+        call smovv("N,",outbuf,kk)
+    call smovh (eng$TargetType$c, $$MaxLit, outbuf, kk)
+    call smovv (",", outbuf, kk)
+    call smovh (eng$PlatformType$c, $$MaxLit, outbuf, kk)
+    call smovv (",", outbuf, kk)
+    call smoviz (eng$SAlspId$I,8,outbuf,kk)
+    call smovv (",", outbuf, kk)
+#    call smovlls(ENG$ShoLat$F, "NS", outbuf, kk)
+#    call smovv (",", outbuf, kk)
+#    call smovlls(ENG$ShoLong$F, "EW", outbuf, kk)
+#    call smovv (",", outbuf, kk)
+    sho_lat_deg = ENG$ShoLat$F * $rad2deg
+    call smovf(sho_lat_deg,6,outbuf,kk)
+    call smovv (",", outbuf, kk)
+    sho_lon_deg = ENG$ShoLong$F * $rad2deg
+    call smovf(sho_lon_deg,6,outbuf,kk)
+    call smovv (",", outbuf, kk)
+    call smoviz(eng$HierarchyId$i,5,outbuf,kk)
+    call smov  (EOS, outbuf, kk)
+ 
+    write($LFC$JQUAD_FEED_ENG, 200)  (outbuf[k],k=1,kk)
+200 format (132a1)
+ 
+ 
+    return
+    end

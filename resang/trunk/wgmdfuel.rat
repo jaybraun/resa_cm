@@ -1,0 +1,1553 @@
+#  File:  WGMDFUEL.RAT
+#         Processing of Fuel Consumption.
+ 
+include "ascii.inc"
+include "bbctl.inc"
+include "bbcode.inc"
+ 
+include "bbacc.inc"
+include "bbaml.inc"
+include "bbhwf.inc"
+include "bbshc.inc"
+include "bbunt.inc"
+include "bbwet.inc"
+include "bbwvf.inc"
+ 
+define (BBImplicit, Implicit None)
+ 
+define(trace$damage$EXE,istrip(trace$damage,0,M1bits)) # jb 5/6/87
+define(trace$damage$WEP,istrip(trace$damage,1,M1bits)) # jb 5/6/87
+ 
+define(Tanker$RefuelRate$PerCycle,(1500.*Model$Interval))   # 1500 pnds/min
+define(Ship$RefuelRate$PerCycle,(1000.*Model$Interval))     # 1000 pnds/min
+
+ 
+ 
+Subroutine Fuel_Model
+#############################################################
+#$%
+#$% Purpose:   Main driver for fuel consumption modeling.
+#$%            Fuel consumption is not processed for
+#$%            ghosted units.
+#$%
+#$% Called By: warcyc    <wgmain.rat>
+#$%
+#$% Calls:     fuel_consumption
+#$%            refuel
+#$%
+#$% Tables:    UNT
+#$%
+#$% Date:      February 1996  (E1467)
+#$%
+#$% Author:    James Allen
+#$%
+#############################################################
+BBcommon
+ 
+real    elapsed_time
+integer UNT$Pointer
+integer UNT$Status$I
+ 
+elapsed_time = Model$Interval  # note: Model$Interval is set by
+                               # the $X_Model macro in wgmain.rat
+ 
+for (UNT$Pointer$First; still_ok(UNT); UNT$Pointer$Next)
+  {
+    if (xUNT$InUse$I == $No)  # if slot is not in use, skip it
+      next
+ 
+    UNT$Status$I = xUNT$Status$I                #get status
+    if (UNT$Status$I == $BeingDeleted$Code |
+        UNT$Status$I == $DeadInWater$Code  |
+        UNT$Status$I == $Sinking$Code      )
+      next
+ 
+    if (xUNT$GhostedUnit$I == $yes)
+        Next
+ 
+    call fuel_consumption (UNT$Pointer, elapsed_time)
+    call refuel (UNT$Pointer, elapsed_time)
+  }
+ 
+return
+end
+ 
+
+ 
+Subroutine Fuel_Consumption (_             # Overloaded fuel consumption method
+                             UNT$Pointer,  # Fuel consumer: in: int
+                             elapsed_time) # Time since last processed:  in: real
+#############################################################
+#$%
+#$% Purpose:   Driver for unit level fuel consumption modeling.
+#$%            The type of modeling is determined by the type
+#$%            of unit passed into the routine.  Fuel
+#$%            consumption is handled for aircraft, boats and
+#$%            ships.
+#$%
+#$% Called By: Fuel_Model
+#$%
+#$% Calls:     Boat_Fuel_Consumption
+#$%            Ship_Fuel_Consumption
+#$%            Aircraft_Fuel_Consumption
+#$%
+#$% Tables:    UNT
+#$%
+#$% Date:      February 1996  (E1467)
+#$%
+#$% Author:    James Allen
+#$%
+#$% Modified:  Carol Kropp - 5/96 (E1467)
+#$%            When a ship is in port, it should cease
+#$%            expending fuel.
+#$%
+#$% Modified:  Jim Allen - 8/98 (E1964)
+#$%            Removed negative logic for ship not in port and speed > 0
+#$%            In port and speed near zero is also in burn rate routine
+#############################################################
+BBcommon
+ 
+integer UNT$Pointer
+real    elapsed_time
+ 
+integer UNT$Type$I
+integer UNT$Status$I
+integer i_switch_1
+ 
+UNT$Type$I   = xUNT$Type$I
+UNT$Status$I = xUNT$Status$I
+ 
+switch (UNT$Type$I)
+{
+    case $Surface$Code, $SurfaceWithAC$Code:
+    {
+      if (xUNT$SubType$I == $SmallBoat$SubCode)
+      {
+        if (BoatFuelConsumption$Flag == $ON & xUNT$FuelConsumptionFlag$I == $ON)
+        {
+             If (UNT$Status$I != $UnderTow$Code  &
+                 UNT$Status$I != $ReadyToRecover$Code  )
+               call Boat_Fuel_Consumption (UNT$Pointer, elapsed_time)
+        }
+      }         # end of if a boat unit
+      else
+      {
+        if (ShipFuelConsumption$Flag == $ON & xUNT$FuelConsumptionFlag$I == $ON)
+          {
+              call Ship_Fuel_Consumption (UNT$Pointer, elapsed_time)
+          }   # end of if fuel consumption for the unit should be done
+      }
+    }   # end of if a surface vessel
+ 
+    case $Air$Code:
+    {
+        if (AirFuelConsumption$Flag == $ON & xUNT$FuelConsumptionFlag$I == $ON)
+        {
+            if (UNT$Status$I != $AwaitingLaunch$Code)
+                call Aircraft_Fuel_Consumption (UNT$Pointer, elapsed_time)
+        }
+    }
+}
+ 
+return
+end
+
+ 
+Subroutine Ship_Fuel_Consumption (UNT$Pointer,   # in: unit table pointer
+                                  elapsed_time)  # in: time since last processed
+#############################################################
+#$%
+#$% Purpose:   Driver for ship fuel consumption modeling.
+#$%
+#$% Called By: Fuel_Consumption
+#$%
+#$% Calls:     Ship_Fuel_Burn_Rate    <wgopfuel.rat>
+#$%            TNK_adjust_fuel_remaining
+#$%            ship_fuel_alert
+#$%
+#$% Tables:    UNT
+#$%
+#$% Date:      February 1996  (E1467)
+#$%
+#$% Author:    James Allen
+#$%
+#############################################################
+BBcommon
+ 
+integer UNT$Pointer
+real    elapsed_time
+ 
+real    Ship_Fuel_Burn_Rate             # Function to compute burn rate/min
+ 
+integer UNT$TNK$Index
+real    fuel_before_burn
+real    burn_rate
+real    fuel_burned
+ 
+UNT$TNK$Index = ShipFuelTank$Index
+fuel_before_burn = xUNT$TNK$FuelRemaining$F
+ 
+burn_rate = Ship_fuel_burn_rate (UNT$Pointer, xUNT$TrueCourse$F,
+                                 xUNT$TrueSpeed$F)
+ 
+fuel_burned = burn_rate * elapsed_time
+ 
+# Decrement fuel remaining
+call TNK_adjust_fuel_remaining (UNT$Pointer, ShipFuelTank$Index,
+                                fuel_burned * (-1.0) )
+ 
+call ship_fuel_alert (UNT$Pointer, fuel_before_burn)
+ 
+return
+end
+ 
+
+ 
+Subroutine ship_fuel_alert (_            # Send alert message if time
+                 UNT$Pointer,      # Pointer to consumer: in: int
+                 fuel_before_burn) # Amount of fuel before step: in: real
+#############################################################
+#$%
+#$% Purpose:   Percentage of fuel remaining is computed to
+#$%            determine if the ship has reached one of the
+#$%            pre-determined fuel alter states (ALT sub-table).
+#$%            If an alter state has been reached, a message
+#$%            is sent to the view of the unit.  If the unit
+#$%            has no fuel left, it will become DIW.
+#$%
+#$% Called By: Ship_Fuel_Consumption
+#$%
+#$% Calls:     smov..         <lbsmov.rat>
+#$%            send           <wgxsend.rat>
+#$%
+#$% Tables:    UNT     SHC
+#$%
+#$% Date:      February 1996  (E1467)
+#$%
+#$% Author:    James Allen
+#$%
+#$% Modified:  James Allen - 3/96 (E1467)
+#$%            Replaced fuel_burned_before with fuel_before_burn.
+#$%            Rather than total ship fuel capacity, use the
+#$%            reserve amount.
+#$%
+#############################################################
+BBcommon
+ 
+real    fuel_before_burn
+ 
+literal cstrip8
+ 
+integer SHC$Pointer
+integer SHC$ALT$Index
+real    SHC$TNK$Capacity$F
+integer SHC$TNK$Index
+literal UNT$Name$C
+real    UNT$TNK$FuelRemaining$F
+integer UNT$TNK$Index
+integer UNT$Pointer
+integer UNT$View$I
+real    fuel_pct
+real    fuleft
+integer jj
+Character msg[ARB]
+logical nosend[SHC$ALT$Slots]
+logical nosend0
+ 
+SHC$Pointer = xUNT$Shcpntr$I
+ 
+SHC$TNK$Index = ShipFuelTank$Index
+UNT$TNK$Index = ShipFuelTank$Index
+ 
+nosend0   = (fuel_before_burn < 0.1 )
+ 
+# Really ship reserve capacity - joa 3/96 (E1467)
+SHC$TNK$Capacity$F =  xSHC$TNK$Capacity$F * xSHC$PctShipFuelReserve$F
+ 
+for (SHC$ALT$Index=1; SHC$ALT$Index <= xSHC$AlertLevelCoUNT$I;
+     SHC$ALT$Index = SHC$ALT$Index + 1)
+{
+    if (SHC$TNK$Capacity$F > 0.0)           #joa UFL01 8/01
+    {
+        nosend[shc$alt$index] =
+        (fuel_before_burn/shc$TNK$Capacity$f *100.) < Xshc$alt$PctFuelRemaining$i
+    }
+    else
+        nosend[shc$alt$index] = .true.
+}
+ 
+# Fuel burned after cycle
+FULEFT = xUNT$TNK$FuelRemaining$F
+ 
+if (SHC$TNK$Capacity$F > 0.0)
+    Fuel_Pct = fuleft / SHC$TNK$Capacity$F * 100.
+else
+    Fuel_Pct = 100.0
+ 
+UNT$Name$C = xUNT$Name$C
+UNT$View$I = xUNT$View$I
+ 
+if(FULEFT == 0.0)    # OUT of FUEL
+{
+   putUNT$TrueSpeed$F       (0.0)
+   putUNT$OrderedSpeed$F    (0.0)
+   putUNT$AssumedSpeed$F    (0.0)
+   putUNT$Status$I    ($DeadInWater$CODE)
+ 
+   if (!NOsend0)
+    {             # Notify Owner - out of fuel
+        jj = 0
+        call smovhn (UNT$Name$C, $$MaxLit, msg, jj)
+        call smovv  (" speed zero (NO FUEL)", msg, jj)
+        call send_   (UNT$View$I, 0, jj, msg)
+    }
+}
+ 
+else    # Percent FuelRemaining may be under alert levels
+{
+    for (SHC$ALT$Index=1; SHC$ALT$Index <= xSHC$AlertLevelCount$I;
+         SHC$ALT$Index = SHC$ALT$Index + 1)
+    {
+       if (!NOsend[shc$alt$index] & (Fuel_pct < Xshc$alt$PctFuelRemaining$i))
+        {       # Notify Owner of alert
+          jj = 0
+          call smovhn (UNT$Name$C, $$MaxLit, msg, jj)
+          Call smovv  (" FUEL under ", msg, jj)
+          call smovi  (xSHC$ALT$PctFuelRemaining$I, msg, jj)
+          call smovv  ("%", msg, jj)
+          call send_   (UNT$View$I, 0, jj, msg)
+          break
+        }
+    }
+}
+ 
+return
+end
+
+ 
+Subroutine Boat_Fuel_Consumption (_
+                     UNT$Pointer,   # in: unit pointer
+                     elapsed_time)  # in: time in minutes since last processed
+#######################################################
+#$%
+#$% Purpose:   Driver for boat fuel consumption modeling.
+#$%            Boat_fuel_comsumption computes fuel comsumption for
+#$%            boat units, updates fuelremaining,
+#$%            and sets the Ordered/True Speeds, if necessary.
+#$%
+#$% Called By: Fuel_Consumption
+#$%
+#$% Calls:     MAX
+#$%            TNK_adjust_fuel_remaining
+#$%            ship_fuel_alert
+#$%
+#$% Tables:    UNT        SHC
+#$%
+#$% Date:      April 1989
+#$%
+#$% Author:    Joe Bryant        4/89
+#$%
+#$% Modified:  James Allen - 2/96 (E1467)
+#$%            Replaces BoatFuel from wgmdmot.rat.
+#$%            Rather than compute everything here,
+#$%            utility routines were created so that
+#$%            other fuel comsumption modeling could
+#$%            reuse code.
+#$%
+#######################################################
+BBcommon
+ 
+integer UNT$Pointer
+real    elapsed_time
+ 
+real    UNT$TrueSpeed$F
+integer UNT$TNK$Index
+real    UNT$TNK$FuelRemaining$F
+real    fuel_before_burn
+integer SHC$Pointer
+integer SHC$CruiseSpeed$I
+real    SHC$OnePctFuel$F
+real    GalsPerMin
+real    fuel_expended
+ 
+UNT$TrueSpeed$F = xUNT$TrueSpeed$F
+UNT$TNK$Index = ShipFuelTank$Index
+UNT$TNK$FuelRemaining$F = xUNT$TNK$FuelRemaining$F
+fuel_before_burn = UNT$TNK$FuelRemaining$F
+ 
+SHC$Pointer  =  xUNT$SHCpntr$I
+SHC$ONEpctFUEL$F = xSHC$ONEpctFUEL$F
+ 
+SHC$CruiseSpeed$I = MAX (2, xSHC$CruiseSpeed$I)
+ 
+GalsPerMin = FLOAT(SHC$CruiseSpeed$I)
+GalsPerMin = xSHC$FuelRate$F * UNT$TrueSpeed$F / GalsPerMin
+ 
+fuel_expended = GalsPerMin * elapsed_time
+ 
+call TNK_adjust_fuel_remaining (UNT$Pointer,
+                                ShipFuelTank$Index,
+                                fuel_expended * (-1.0) )
+ 
+call ship_fuel_alert (UNT$Pointer, fuel_before_burn)
+ 
+return
+end
+ 
+
+ 
+Subroutine Aircraft_Fuel_Consumption (UNT$Pointer,   # in: unit table pointer
+                                      elapsed_time)  # in: time since last processed
+########################################################################
+#$%
+#$%  Note:      Combination of NWfuel and Air_Fuel_Consumption
+#$%
+#$%  Purpose:   Aircraft_Fuel_Consumtion processes aircraft fuel
+#$%             comsumption for the amount of time that has elapsed,
+#$%             updates the fuel remaining, and sets the low fuel
+#$%             flag if necessary.   (Using the algorithm described in
+#$%             Enhanced Aircraft Engagements (March 1992) for
+#$%             level$air$engagement = 1.)
+#$%
+#$% Called By:  MOTMAN
+#$%
+#$% Calls:      FLOAT               AC_Fuel_Per_Sec
+#$%             INT                 MAX
+#$%             Aircraft_Fuel_Expended
+#$%             GETRB_M             Smov..
+#$%             Send                BINGO
+#$%             TNK_adjust_fuel_remaining
+#$%
+#$% Tables:     ACC         UNT
+#$%
+#$% Date:       February 1996 (E1467)
+#$%
+#$% Author:     James Allen
+#$%
+########################################################################
+BBCommon
+ 
+integer  UNT$Pointer
+real     elapsed_time
+ 
+integer  ACC$Pointer
+real     ac_fuel_max, percent_remaining
+real     fuel_margin, fuel_left, bingo_speed, bingo_range
+integer  UNT$Status$I, UNT$MarshallStatus$I
+real     UNT$TrueSpeed$F, pounds_consumed
+integer  UNT$TNK$Index
+integer  UNT$Mission$I
+integer  UNT2$Pointer
+literal  UNT$Name$C, cstrip8
+integer  UNT$View$I, jj
+real     xrng, brg
+character msg[ARB] # SMM 10/99 E2141
+ 
+ 
+  UNT$Status$I = xUNT$Status$I
+  UNT$MarshallStatus$I = xUNT$MarshallStatus$I
+  ACC$Pointer = xUNT$AccPntr$I                # characteristics pointer
+  UNT$TNK$Index = AviationFuelTank$Index
+  UNT$TrueSpeed$F = xUNT$TrueSpeed$F          # get true speed of aircraft
+ 
+  call AC_Fuel_Per_Sec (ACC$Pointer, UNT$Status$I,
+                        UNT$MarshallStatus$I, UNT$TrueSpeed$F,
+                        xUNT$TrueAltDepth$I, pounds_consumed)
+  pounds_consumed = pounds_consumed * $Seconds$Per$Minute * elapsed_time
+ 
+  call TNK_adjust_fuel_remaining (UNT$Pointer,
+                                  AviationFuelTank$Index,
+                                  Pounds_consumed * (-1.0) )
+ 
+  if (xUNT$TNK$FuelRemaining$F  == 0)     # if all the fuel is expended
+     call Aircraft_Fuel_Expended (UNT$Pointer)
+  else
+    {
+     ac_fuel_max = FLOAT (xACC$MaxFuel$I)
+     percent_remaining = xUNT$TNK$FuelRemaining$F  / ac_fuel_max
+ 
+     UNT$Mission$I = xUNT$Mission$I
+     fuel_margin = 0.15
+     if (UNT$Mission$I == $AirTanker$Code |
+         UNT$Mission$I == $STTanker$Code  )
+       {
+        fuel_left   = 0.55
+        if (Level$Air$Engagement >= 1)
+          fuel_margin = 0.05
+       }
+     else
+        fuel_left   = 0.65
+ 
+     if (percent_remaining <= fuel_left & xUNT$FuelWarning$I == $No &
+         UNT$Status$I != $ACRefuel$Code )
+       {
+        if (Level$Air$Engagement >= 1)      # bingo at 0.93 * cruise speed
+          bingo_speed = 0.93 * xACC$CruiseSpeed$I
+        else
+          bingo_speed = xACC$CruiseSpeed$I * 1.0    # jb E2145  (1.0) 9/27/00
+        call AC_Fuel_Per_Sec (ACC$Pointer, UNT$Status$I,
+                              UNT$MarshallStatus$I, bingo_speed,
+                              xUNT$TrueAltDepth$I,
+                              pounds_consumed)
+        bingo_range = bingo_speed  *
+                      (ac_fuel_max / (pounds_consumed * $Seconds$Per$Hour)) *
+                      (percent_remaining - fuel_margin)
+ 
+        UNT2$Pointer$To xUNT$RecoverIndx$I        # recover-base UNT pointer
+        call GETRB_M (UNT$Pointer, UNT2$Pointer, xrng, brg)
+ 
+        if (xrng >= bingo_range)            # if recovery necessary
+          {
+           putUNT$FuelWarning$I ($yes)
+           UNT$Name$C = xUNT$Name$C
+           UNT$View$I = xUNT$View$I
+           if (UNT$Mission$I == $AirTanker$Code |  # Send tanker bingo message
+               UNT$Mission$I == $STTanker$Code  )
+             {
+              # "Tanker xxxxx returning to base, low fuel."
+              jj = 0
+              call smovv ("Tanker ", msg, jj)              # SMM 10/99 E2141
+              call smovhn (UNT$Name$C, $$MaxName, msg, jj) # SMM 10/99 E2141
+              call smovv (" returning to base, low fuel.", msg, jj ) # SMM 10/99 E2141
+              call send_  (UNT$View$I, 0, jj, msg)          # SMM 10/99 E2141
+              call bingo (UNT$Pointer)
+             }
+           else     # Send auto bingo message
+             {
+              # "xxxxx returning to base due to low fuel."
+              jj = 0
+              call smovhn (UNT$Name$C, $$MaxName, msg, jj) # SMM 10/99 E2141
+              call smovv (" returning to base due to low fuel.", msg, jj) # SMM 10/99 E2141
+              call send_  (UNT$View$I, 0, jj, msg)          # SMM 10/99 E2141
+              call bingo (UNT$Pointer)
+             }
+          }      # end of if recovery necessary
+       }         # end of percentage of fuel remaining is less than factor
+    }            # end of if aircraft had any fuel left
+ 
+return
+end
+ 
+
+ 
+Subroutine Aircraft_Fuel_Expended(_
+                                  UNT$Pointer)   # unit table pointer
+########################################################################
+#$%
+#$%  Purpose:   Aircraft_Fuel_Expended updates the information
+#$%             regarding the aircraft's status, notifies the
+#$%             view and trace, and calls routines to process
+#$%             the information for the engagement log and DAC table.
+#$%
+#$% Called By:  Aircraft_Fuel_Consumption
+#$%
+#$% Calls:      ECHO..              GAME_DTG
+#$%             Generate_Eng_Rec    AirExp      Update_Destroyed_Aircraft
+#$%             SMOV..              send
+#$%
+#$% Tables:     UNT         AML
+#$%
+#$% Date:       March 1992
+#$%
+#$% Author:     Carol Kropp
+#$%             Reused code from AWSIM
+#$%             file: wgmdmot.rat   routine: fuel
+#$%             Reused code from RESA
+#$%             file: wgmdmot.rat   routine: NWfuel
+#$%
+#$%             James Allen - 2/96 (E1467)
+#$%             Routine moved from wgmdmot to wgmdfuel.
+#$%             Replaced FuelRemaining references with TNK subtable.
+#$%
+########################################################################
+ 
+BBCommon
+ 
+integer  UNT$Pointer     # parameter - pointer to UNT slot of aircraft
+ 
+literal   UNT$Name$C
+integer   AML$Pointer, AML$Status$I, aml_pointer
+literal   AML$SideNumber$C
+integer   Game_DTG, icnt, jj, idummy
+literal   cstrip8     # macro function from lbecho.rat
+integer   UNT$Tnk$Index
+character msg[ARB]
+ 
+  UNT$Name$C = xUNT$Name$C
+ 
+  if (trace$damage$WEP != $NO)     # if trace is on print out flame out info.
+   {                               # this trace statement was previously in nwfuel
+    call echor
+    call echov  ('#')
+    call echoiz (Game_DTG(Game$time),6)
+    call echov  (" Flt ")
+    call echohn (UNT$Name$C,$$MaxLit)
+    call echov  (" flamed out: ")
+    icnt = 0           # initialize counter for each line of side-numbers
+  }
+ 
+  UNT$TNK$Index = AviationFuelTank$Index
+  putUNT$TNK$FuelRemaining$F   (0)       # zero out the aircraft fuel
+  putUNT$Status$I  ($BeingDeleted$Code)  # set to delete flight
+ 
+  aml_pointer = xUNT$AMLIndx$I
+  while (aml_pointer != 0)
+    {
+     AML$Pointer$To aml_pointer        # point to the ac in aml table
+     aml_pointer = xAML$NextIndx$I     # get the pointer to the next
+ 
+     if (log$engage != $No)            # if engagement log desired
+     {
+ 
+       call engdata (unt$pointer, 0)
+       call Generate_eng_rec ("SPLASH  ","NOFUEL  ",xAML$SideNumber$C)
+     }
+     idummy = 0
+     call Update_Destroyed_Aircraft (UNT$Pointer, idummy,
+                                     $OutofFuel$Code, idummy, AML$Pointer,0)
+ 
+     if (trace$damage$WEP != $NO)   # if trace is on
+       {                            # this trace statement was previously in nwfuel
+        if (icnt == 0 | icnt > 11)
+          {
+           if (icnt > 11)
+             icnt = 0
+           call echor
+           call echov ('#')
+          }
+        icnt = icnt + 1
+ 
+        AML$SideNumber$C = xAML$SideNumber$C
+        call echohn (AML$SideNumber$C,5)
+        call echov (' ')
+ 
+        call airEXP(UNT$Pointer,-2,0.0) # jb for wpns lost 3/89
+        call echor
+       } # end of if trace$damage$WEP != $NO
+ 
+     AML$Status$I = $Destroyed$Code    # destroy aircraft in flight
+     putAML$Status$I
+     putAML$NextIndx$I (0)             # break ac flight pntr chain
+     }
+ 
+  jj = 0
+  call smovhn (UNT$Name$C, $$MaxLit, msg, jj) # SMM 10/99 E2141
+  call smovv (" DOWN, FUEL EXPENDED", msg, jj)
+  call send_  (xUNT$View$I, 0, jj, msg)
+ 
+return
+end                       # end of Aircraft_Fuel_Expended
+ 
+
+ 
+Subroutine AC_Fuel_Per_Sec (ACC$Pointer,     # in: Characteristic Pointer
+                            status,          # in: aircraft status
+                            marshallstatus,  # in: marshall status (level 1)
+                            speed,           # in: speed in knots
+                            altitude,        # in: altitude in feet
+                            fuel_expended)   # out: fuel consumed per second at speed
+########################################################################
+#$%
+#$%  Purpose:   AC_Fuel_Per_Sec computes the amount of fuel the aircraft
+#$%             type will burn at the given speed per second.
+#$%
+#$% Called By:  Aircraft_Fuel_Consumtion
+#$%
+#$% Calls:      FLOAT       MAX       EXP
+#$%
+#$% Tables:     ACC
+#$%
+#$% Date:       October 1993
+#$%
+#$% Author:     Carol Kropp
+#$%             Combination of FuelPerMin and Air_Fuel_Consumption
+#$%             rate computations.
+#$%
+#$%             James Allen - 2/96 (E1467)
+#$%             Routine moved from wgmdmot to wgmdfuel.
+#$%
+########################################################################
+BBCommon
+ 
+integer  ACC$Pointer, status, marshallstatus, altitude
+real     speed, fuel_expended
+ 
+integer  ACC$Category$I, ACC$FuelPrefix$I
+integer  ACC$LoiterSpeed$I, ACC$LoiterFuel$I
+real     ACC$FuelXpnt$F
+real     rate
+real     delta_speed, slope, xpon
+real     fmax, rcru, scru, use, altitude_factor
+ 
+  ACC$Category$I = xACC$Category$I
+  if (Level$Air$Engagement < 1 |       # if not enhanced air, or
+      ACC$Category$I == $HELO$Code)    # unit is a helicopter
+    {                                  # use the 1984 fuel calculations
+      ACC$FuelXpnt$F    = xACC$FuelXpnt$F
+      ACC$FuelPrefix$I  = xACC$FuelPrefix$I
+      ACC$LoiterSpeed$I = xACC$LoiterSpeed$I
+      ACC$LoiterFuel$I  = xACC$LoiterFuel$I   # LoiterFuel BASIS (see below)
+ 
+      #----------------------------------------------------------
+      # Programmer Note:  HELO's equations don't fit the fixed-wing
+      # field names/lengths/data-types.  To adapt HELO equations to
+      # the fixed-wing fields:
+      #               -the PREFIX     field will hold LOITERfuel
+      #               -the LOITERFUEL field will hold HOVERfuel
+      #               -the EXPNT      field will hold LBSKT (lbs per knot--
+      #                                        ABOVE LoiterSpeed, not below)
+      #       ALSO note, for HELO's:
+      # For HELO's, when the BUILD program asks for input of "LoiterFuel",
+      # the figure supplied for input is not fuel used at loiter, but
+      # rather the projected fuel-rate-axis intercept of the straight line
+      # used to define rates at speeds above Loiter.  Adding to this figure
+      # the product of  (LBSKT * LoiterSpeed)  yields the desired value for
+      # LoiterFuel, as can be seen by the form of the User's equation for
+      # speeds above loiter:
+      #       consumption rate = (LoiterFuel BASIS) + (LBSKT)*speed
+      # If this equation were restated as:
+      #       consumption rate = (LoiterFuel) +(LBSKT) * (speed -LoiterSpeed),
+      # then the supplied figure would be fuel used at loiter.  Reason for not
+      # doing this?  Possibly because available numbers fit the first equation??
+      # The required adjustment is made by the first instruction for HELO's.
+      #
+      #       ALSO note, for HELO's:
+      # No User-supplied figure for the negative slope of the fuel-rate line
+      # between Hover and Loiter speeds is accepted:  it may be valid for the
+      # specified values of HoverFuel, LoiterSpeed and LoiterFuel, but becomes
+      # ambiguous if the User changes one of these parameters.  So, from the
+      # line's end-points, this subroutine computes the Slope.
+      #
+      #       ALSO note, for Fixed-Wing:
+      # In some cases, the User-supplied figure for Loiter-Speed may not
+      # correspond to the speed at the intersection of the loiter-speed line
+      # and the exponential equation defining fuel-rates at higher speeds.
+      # If so, there is a discontinuity - in effect, an ambiguity because
+      # there is a specified as well as an implied loiter-speed.  To avoid
+      # the most unacceptable consequence, the subroutine reports the
+      # loiter-fuel rate instead of any lesser computed rate.
+      #----------------------------------------------------------
+ 
+      # Determine the amount of fuel (pounds) consumed per hour - RATE
+      IF ( acc$Category$I == $HELO$Code )
+        {
+         ## This instruction adjusts FuelPrefix to represent LoiterFuel rate:
+         ## LoiterFuel rate= LoiterFuel BASIS + (lbs-per-kt  * kts-at-loiter)
+         acc$FuelPrefix$I  = acc$FuelPrefix$I + (acc$FuelXPNT$F * acc$LoiterSpeed$I + .5)
+ 
+         if ( speed >= acc$LoiterSpeed$I )   # LoiterSpeed or greater..
+           {
+            delta_speed = speed - acc$LoiterSpeed$I       # knots ABOVE LoiterSpeed
+            RATE = acc$FuelPrefix$I + acc$FuelXPNT$F * delta_speed
+           }
+         else
+           {#        LOITERfuel rate  - HOVERfuel rate
+            Slope = (acc$FuelPrefix$I - acc$LoiterFuel$I) / FLOAT(acc$LoiterSpeed$I)
+            RATE   = acc$LoiterFuel$I + Slope * Speed
+           }
+        }
+      ELSE   # not a helicopter
+        {
+         if ( Speed <= acc$LoiterSpeed$I )
+            RATE = acc$LoiterFuel$I
+         else
+           {
+            XPON = acc$FuelXPNT$F * Speed/1000.
+            RATE = acc$FuelPrefix$I * EXP(XPON)       # pounds per HOUR
+            RATE = max (RATE, FLOAT(acc$LoiterFuel$I) )
+           }
+        }   # end of unit is not a helicopter
+    }       # end of unit is a helicopter or level check is zero, 1984 fuel computations
+  else
+    {
+      fmax = FLOAT (xACC$MaxFuel$I)           # get max fuel
+      rcru = FLOAT (xACC$CruiseRange$I)       # get cruise range
+      scru = FLOAT (xACC$CruiseSpeed$I)       # get cruise speed
+ 
+      # The following code is designed to force aircraft who are at a
+      # speed of 0 to burn fuel at the cruise speed rate.
+      if (Speed < 1.0)
+        use = 1.0               # consume fuel at cruise speed rate
+      else
+        use = Speed / scru      # get fuel utilization
+ 
+      use = use * use * use
+      if (use < 0.81)
+        use = 0.81
+ 
+      # compute the altitude factor
+      #$% clk - 11/23/92:  set altitude_factor = 1.0 for recovering a/c
+      if (ACC$Category$I == $Prop$Code)
+           altitude_factor = 1.0
+      else if (Status == $ReturningToBase$Code |
+               Status == $ReadyToRecover$Code  |
+               MarshallStatus == $Recovering$Code)
+           altitude_factor = 1.0
+      else  # a jet a/c not recovering
+           altitude_factor = 58333.0 / (23333.0 + FLOAT (altitude))
+ 
+      # consumption rate per hour
+      rate = (fmax / rcru) * (scru * use) * altitude_factor
+    }
+ 
+  fuel_expended = rate * $Hours$Per$Second  # pounds per hour * 3600 seconds per hour
+ 
+return
+end
+ 
+
+ 
+Subroutine TNK_adjust_fuel_remaining(           # Adjust fuel remaining in tank
+                               UNT$Pointer,     # Owner of tank:in :int
+                               tank_type,       # Tank type code:in :int
+                               amount)          # Amount of fuel:in :real
+                                                #  : gal/pnd
+#############################################################
+#$%
+#$% Purpose:   Adjust the amount of fuel in the specified
+#$%            tank by the amount passed in for a unit.
+#$%
+#$% Called By: Ship_Fuel_Consumption
+#$%            Boat_Fuel_Consumption
+#$%            Aircraft_Fuel_Consumption
+#$%            Refuel_Ship
+#$%            Refuel_Aircraft
+#$%
+#$% Calls:     MIN
+#$%
+#$% Tables:    UNT     SHC
+#$%
+#$% Date:      February 1996  (E1467)
+#$%
+#$% Author:    James Allen
+#$%
+#$% Modified:  James Allen - 6/03 (E2347)
+#$%            Honor replenish order when ship fuel capacity is zero
+#############################################################
+BBcommon
+ 
+integer UNT$Pointer
+integer tank_type
+real    amount
+ 
+integer UNT$Tnk$Index
+real    UNT$TNK$FuelRemaining$F
+integer SHC$Pointer
+integer SHC$TNK$Index
+ 
+UNT$TNK$Index = tank_type
+UNT$TNK$FuelRemaining$F = xUNT$TNK$FuelRemaining$F + amount
+UNT$TNK$FuelRemaining$F = max(0.0, UNT$TNK$FuelRemaining$F) # Don't go below 0
+ 
+ 
+# Ship fuel tank will overflow at 256% of capacity
+if (tank_type == ShipFuelTank$Index)
+{
+    SHC$Pointer = xUNT$ShcPntr$I
+    SHC$TNK$Index = ShipFuelTank$Index
+    if (xSHC$TNK$Capacity$F > 0.0)      # Replenish order sets remaining even if
+    {                                   # capacity is zero (E2347)
+        UNT$TNK$FuelRemaining$F = min(2.56 * xSHC$TNK$Capacity$F,
+                                  UNT$TNK$FuelRemaining$F)
+    }
+}
+ 
+putUNT$TNK$FuelRemaining$F
+ 
+return
+end
+ 
+Subroutine refuel (_            # Overloaded refuel method
+                   UNT$Pointer, # Unit being refueled: in: int
+                   elapsed_time)# Time since last processed:  in: real
+#############################################################
+#$%
+#$% Purpose:   Driver to carry out refueling operations.
+#$%            Refueling operation to be used is determined
+#$%            by the type of unit being refueled.
+#$%
+#$% Called By: Fuel_Model
+#$%
+#$% Calls:     refuel_ship
+#$%            refuel_aircraft
+#$%
+#$% Tables:    UNT
+#$%
+#$% Date:      February 1996  (E1467)
+#$%
+#$% Author:    James Allen
+#$%
+#############################################################
+BBcommon
+ 
+integer UNT$Pointer
+real    elapsed_time
+ 
+integer UNT$Type$I
+integer UNT$Status$I
+integer i_switch_1
+ 
+UNT$Type$I = xUNT$Type$I
+UNT$Status$I = xUNT$Status$I
+ 
+switch (UNT$Type$I)
+{
+    case $Surface$Code:
+    {
+        if (xUNT$HosesAllocatedFlag$I == $YES)
+            call refuel_ship (UNT$Pointer, elapsed_time)
+    }
+ 
+    case $Air$Code:
+    {
+        if (UNT$Status$I == $ACrefuel$Code & xUNT$RangeToNext$F == 0.0)
+            call refuel_aircraft (UNT$Pointer, elapsed_time)
+    }
+}
+ 
+return
+end
+ 
+
+ 
+Subroutine refuel_ship (_        # Transfer fuel
+                   UNT$Pointer,  # Unit undergoing fuel op: in: int
+                   elapsed_time) # Time since last processed:  in: real
+#############################################################
+#$%
+#$% Purpose:   Process refueling of ship platforms.
+#$%            If unit has arrived at refueling station,
+#$%            the status is set to refueling and the amount
+#$%            of fuel to be transfered is determined.  When
+#$%            amount to refuel reaches 0, the refueling
+#$%            equipment is made available and status' cleared.
+#$%
+#$% Called By: refuel
+#$%
+#$% Calls:     MIN
+#$%            TNK_adjust_fuel_remaining
+#$%            free_fuel_transfer_equip
+#$%            smov..         <lbsmov.rat>
+#$%            send           <wgxsend.rat>
+#$%
+#$% Tables:    UNT     SHC
+#$%
+#$% Date:      February 1996  (E1467)
+#$%
+#$% Author:    James Allen
+#$%
+#$% Modified:  James Allen - 3/96 (E1467)
+#$%            Provide msg to refueler when it has exhausted
+#$%            ship fuel supply.  Added check to make sure
+#$%            refueler does not provide aviation fuel it does
+#$%            not have.  Changed completed message to not
+#$%            provide breakaway line when the refueler is a base.
+#$%
+#$%            James Allen - 12/97 (E1832)
+#$%            Clear the flag which indicates that the unit's
+#$%            available maneuver commands should be restrictred.
+#$%
+#$%            Susan Miller - 12/97 (E1660)
+#$%            Aviation fuel stored as gallons so removed
+#$%            conversion factor, since it is now entered in
+#$%            gallons as well.
+#$%
+#############################################################
+BBcommon
+ 
+integer     UNT$Pointer
+real        elapsed_time
+ 
+literal     cstrip8
+ 
+real        aviation_fuel_transferred
+real        fuel_reserve
+integer     jj
+character   msg[ARB]
+integer     SHC$Pointer
+real        ship_fuel_transferred
+integer     SHC$TNK$Index
+integer     SHC2$FuelTransferRate$I
+integer     SHC2$Pointer
+real        SHC2$TNK$Capacity$F
+integer     SHC2$TNK$Index
+real        UNT$AviationRefuelAmount$F
+real        UNT$ShipRefuelAmount$F
+integer     UNT$TNK$Index
+integer     UNT2$Pointer
+real        UNT2$Tnk$FuelRemaining$F
+integer     UNT2$TNK$Index
+integer     UNT2$Type$I
+ 
+#   if at refuel station
+#       set unit status to refueling
+#       set remaining fuel to transfer
+#   transfer fuel
+#   if fuel remaining to transfer = 0
+#      free fuel transfer equipment
+ 
+if (xUNT$Status$I == $ShipRefuel$Code)
+{
+    if (xUNT$RangeToNext$F > 0.0)
+        return
+}
+else
+    return
+ 
+UNT2$Pointer$To xUNT$GuideIndx$I        # Supplier
+SHC2$Pointer = xUNT2$SHCPntr$I
+SHC2$FuelTransferRate$I = xSHC2$FuelTransferRate$I  # Gal/hr
+ 
+# Transfer ship fuel
+ship_fuel_transferred = SHC2$FuelTransferRate$I *
+                        xUNT$ShipHoseRequest$I *
+                        elapsed_time * $Hours$Per$Minute
+ship_fuel_transferred = min (ship_fuel_transferred, xUNT$ShipRefuelAmount$F)
+ 
+# Don't transfer beyond suppliers capacity
+UNT2$TNK$Index = ShipFuelTank$Index
+SHC2$TNK$Index = ShipFuelTank$Index
+SHC2$TNK$Capacity$F = xSHC2$TNK$Capacity$F
+fuel_reserve = SHC2$TNK$Capacity$F * xSHC2$PctShipFuelReserve$F
+UNT2$Tnk$FuelRemaining$F = xUNT2$Tnk$FuelRemaining$F
+ 
+if ((UNT2$TNK$FuelRemaining$F - ship_fuel_transferred) < fuel_reserve)
+{
+    if (xUNT$ShipRefuelAmount$F > 0.0)    # joa 3/96 (E1467)
+      {
+        jj = 0
+        call smovhn (xUNT2$Name$C, $$Maxlit, msg, jj)
+        call smovv  (" has exhausted ship fuel supplies refueling ", msg, jj)
+        call smovhn (xUNT$Name$C, $$Maxlit, msg, jj)
+        call send_   (xUNT$View$I, 0, jj, msg)
+      }
+    ship_fuel_transferred = UNT2$TNK$FuelRemaining$F - fuel_reserve
+    putUNT$ShipRefuelAmount$F (0.0)     # Stop ship fuel
+}
+else
+{
+    UNT$ShipRefuelAmount$F = xUNT$ShipRefuelAmount$F - ship_fuel_transferred
+    putUNT$ShipRefuelAmount$F
+}
+ 
+# Don't exceed fuel tank capacity
+UNT$TNK$Index = ShipFuelTank$Index
+SHC$Pointer   = xUNT$SHCPntr$I
+SHC$TNK$Index = ShipFuelTank$Index
+if ((xUNT$Tnk$FuelRemaining$F + ship_fuel_transferred) > xSHC$TNK$Capacity$F)
+{
+    ship_fuel_transferred = xSHC$TNK$Capacity$F - xUNT$TNK$FuelRemaining$F
+    putUNT$ShipRefuelAmount$F (0.0)     # Stop ship fuel
+}
+ 
+call TNK_adjust_fuel_remaining (UNT$Pointer,
+                                ShipFuelTank$Index,
+                                Ship_fuel_transferred )
+ 
+call TNK_adjust_fuel_remaining (UNT2$Pointer,
+                                ShipFuelTank$Index,
+                                Ship_fuel_transferred * (-1.0) )
+ 
+# Transfer aviation fuel
+# removed $Pounds$Per$Gallon conversion - smm 12/97 (E1660)
+aviation_fuel_transferred = SHC2$FuelTransferRate$I * $Hours$Per$Minute *
+                            xUNT$AviationHoseRequest$I *
+                            elapsed_time
+ 
+aviation_fuel_transferred = min (aviation_fuel_transferred, xUNT$AviationRefuelAmount$F)
+ 
+# Don't transfer beyond suppliers capacity - joa 3/96 (E1467)
+UNT2$TNK$Index = AviationFuelTank$index
+SHC2$TNK$Index = AviationFuelTank$index
+SHC2$TNK$Capacity$F = xSHC2$TNK$Capacity$F
+UNT2$TNK$FuelRemaining$F = xUNT2$TNK$FuelRemaining$F
+ 
+if ((UNT2$TNK$FuelRemaining$F - aviation_fuel_transferred) <= 0.0)
+  {
+   if (xUNT$AviationRefuelAmount$F > 0.0)
+     {
+      jj = 0
+      call smovhn (xUNT2$Name$C, $$Maxlit, msg, jj)
+      call smovv  (" has exhausted aviation fuel supplies refueling ", msg, jj)
+      call smovhn (xUNT$Name$C, $$Maxlit, msg, jj)
+      call send_   (XUNT$View$I,0,jj,msg)
+     }
+   aviation_fuel_transferred = UNT2$TNK$FuelRemaining$F
+   putUNT$AviationRefuelAmount$F (0.0)     # Stop aviation fuel
+  }
+else
+  {
+   UNT$AviationRefuelAmount$F = xUNT$AviationRefuelAmount$F - aviation_fuel_transferred
+   putUNT$AviationRefuelAmount$F
+  }
+ 
+# Don't exceed fuel tank capacity
+UNT$TNK$Index = AviationFuelTank$Index
+SHC$TNK$Index = AviationFuelTank$Index
+if ((xUNT$Tnk$FuelRemaining$F + aviation_fuel_transferred) > xSHC$TNK$Capacity$F)
+{
+    aviation_fuel_transferred = xSHC$TNK$Capacity$F - xUNT$TNK$FuelRemaining$F
+    putUNT$AviationRefuelAmount$F (0.0)     # Stop aviation fuel
+}
+ 
+call TNK_adjust_fuel_remaining (UNT$Pointer,
+                                AviationFuelTank$Index,
+                                aviation_fuel_transferred )
+ 
+call TNK_adjust_fuel_remaining (UNT2$Pointer,
+                                AviationFuelTank$Index,
+                                aviation_fuel_transferred * (-1.0) )
+ 
+# Terminate refuel operations
+if (xUNT$ShipRefuelAmount$F == 0.0 & xUNT$AviationRefuelAmount$F == 0.0)
+{
+    call free_fuel_transfer_equip (UNT$Pointer)
+ 
+    # Set status depending supplier type
+    UNT2$Type$I = xUNT2$Type$I
+    if (UNT2$Type$I == $ShoreBase$Code)
+    {
+        putUNT$Status$I ($InPort$Code)
+    }
+    if (UNT2$Type$I == $Surface$Code | UNT2$Type$I == $SurfaceWithAC$Code)
+    {
+        putUNT$Status$I ($Proceeding$Code)
+    }
+ 
+    putUNT$LastManeuverOrderCode$I (NO$order)   # Remove maneuver restrictions - joa 12/97 (E1832)
+ 
+    jj = 0
+    call smovhn (xUNT$Name$C, $$Maxlit, msg, jj)
+    call smovv  (" has completed refueling at ", msg, jj)
+    call smovhn (xUNT2$Name$C, $$Maxlit, msg, jj)
+    if (unt2$Type$i != $ShoreBase$Code)  # joa 3/96 (E1467)
+        call smovv (".  Ready for Breakaway.", msg, jj)
+    call send_   (xUNT$View$I, 0, jj, msg)
+}
+ 
+return
+end
+ 
+
+ 
+subroutine free_fuel_transfer_equip (_
+                    UNT$Pointer) # Unit being refueled: in: int
+#############################################################
+#$%
+#$% Purpose:   Deallocate the use of fuel transfer equipment
+#$%            for the specified unit.
+#$%
+#$% Called By: refuel_ship
+#$%
+#$% Calls:     None
+#$%
+#$% Tables:    UNT
+#$%
+#$% Date:      February 1996  (E1467)
+#$%
+#$% Author:    James Allen
+#$%
+#############################################################
+BBcommon
+ 
+integer     UNT$Pointer
+ 
+integer     UNT2$HosesAvailable$I
+integer     UNT2$Pointer
+integer     UNT2$Type$I
+ 
+UNT2$Pointer$To xUNT$GuideIndx$I        # Supplier
+ 
+#Free hoses
+if (xUNT$HosesAllocatedFlag$I == $YES)
+{
+    UNT2$HosesAvailable$I = xUNT2$HosesAvailable$I +
+                            xUNT$AviationHoseRequest$I +
+                            xUNT$ShipHoseRequest$I
+    putUNT2$HosesAvailable$I
+ 
+    # Free refuel station if UNREP
+    UNT2$Type$I = xUNT2$Type$I
+    if (UNT2$Type$I == $Surface$Code | UNT2$Type$I == $SurfaceWithAc$Code)
+    {
+        if (xUNT$GuideBearing$F == $Port$Station)
+            putUNT2$PortRefuelCount$I (xUNT2$PortRefuelCount$I - 1)
+        if (xUNT$GuideBearing$F == $Starboard$Station)
+            putUNT2$StarboardRefuelCount$I (xUNT2$StarboardRefuelCount$I - 1)
+    }
+}
+ 
+putUNT$AviationHoseRequest$I (0)
+putUNT$ShipHoseRequest$I (0)
+putUNT$HosesAllocatedFlag$I ($NO)
+ 
+return
+end
+
+ 
+include "alsp.inc"
+ 
+Subroutine REFUEL_aircraft (
+                   UNT$Pointer,         #receive flight pointer
+                   elapsed_time)        # Time since last processed:  in: real
+#######################################################
+#$%
+#$% Purpose:   refuel_aircraft processes the refueling of aircraft
+#$%            by tanker aircraft while in flight.  It
+#$%            also sends the tanker home if fuel is reduced
+#$%            to 15% plus cruise-speed fuel for bingo.        5/2/84
+#$%
+#$% Called By: FLTOPS
+#$%
+#$% Calls:     BINGO           FuelPerMin      GETRB_M
+#$%            find_max_fuel_to_deliver
+#$%            tnk_adjust_fuel_remaining.
+#$%
+#$% Tables:    ACC
+#$%            UNT
+#$%
+#$% Date:      APRIL 81
+#$%
+#$% Author:    DANE WILLS
+#$%
+#$% Modified:  Dane Wills 18-Dec-89, Allowed Partial Refueling
+#$%
+#$%            Carol Kropp 20-Nov-92:  Assignment of
+#$%                 ACC$Pointer for tanker used UNT$AccPntr$I,
+#$%                 which is the flight to be refueled and
+#$%                 caused the calculation of fuel needed for
+#$%                 the tanker to return to base to be wrong.
+#$%                 Also added the different fuel consumtion
+#$%                 computation for level$Air$engagement >= 1.
+#$%
+#$%            Susan Miller Oct. 1995 (E1453)
+#$%            Moved code used into routine find_max_fuel_to_deliver
+#$%            so it could be called from alsp code to handle ghost
+#$%            tanking request.
+#$%
+#$%            Susan Miller - 10/95 (E1453)
+#$%            When the tanker is a ghosted unit, send a POL_REQUEST
+#$%            message instead of processing internal refueling.
+#$%            (This check was previously done in FLTOPS, but
+#$%            FLTOPS no longer calls the routines to refuel).
+#$%
+#$%            James Allen - 2/96 (E1467)
+#$%            Previously this was routine refuel located
+#$%            in wgmdflt.rat.  New routine refuel is overloaded
+#$%            operation for all refueling operations.
+#$%            Replaced FuelRemaining references with new
+#$%            TNK subtable variable.  Rather than set fuel
+#$%            amounts directly call tnk_adjust_fuel_remaining.
+#$%
+#$%            James Allen - 12/97 (E1832)
+#$%            Clear the flag which indicates that the unit's
+#$%            available maneuver commands should be restrictred.
+#$%
+#$%            Susan Miller - 10/99 (E2141)
+#$%            Changed how the I/O message is created in order
+#$%            to accomodate names up to 8 characters.
+#######################################################
+ 
+BBcommon
+ 
+integer     ACC$MaxFuel$I
+integer     ACC$Pointer
+literal     cstrip8
+real        elapsed_time
+integer     igive
+integer     inflt
+integer     intflt
+integer     iquit
+integer     irate
+integer     ixfr
+integer     jj
+integer     maxdel
+integer     MaxRcv
+real        take
+integer     UNT$AttackIndx$I
+integer     UNT$OrderedAltDepth$I
+real        UNT$OrderedLatitude$F
+real        UNT$OrderedLongitude$F
+real        UNT$OrderedSpeed$F
+integer     UNT$Pointer
+integer     UNT$RefuelAmount$I
+real        UNT$TNK$FuelRemaining$F
+integer     UNT$TNK$Index
+integer     UNT$ALSPRefuelStatus$I
+integer     UNT2$FuelWarning$I
+integer     UNT2$Pointer
+integer     dummy
+character   fumsg1[ARB], fumsg2[ARB]
+ 
+UNT$AttackIndx$I = xUNT$AttackIndx$I
+UNT2$Pointer$To     UNT$AttackIndx$I
+ 
+  # if this is a ghosted tanker, then a fuel request message
+  # has already been sent but another message needs to be sent now
+  # that the requesting a/c has completed rendezvous and the POL
+  # request has not been sent.  smm 10/95 (E1453)
+  dummy = 0
+  if (xUNT2$GhostedUnit$I == $yes)
+    {
+     if (xUNT$ALSPRefuelStatus$I != $At_Posit_Refuel_Requested)
+       {
+        call ALSP_Send_Refuel_Request(_
+                    UNT$Pointer,     # in - unit pointer of a/c requesting fuel
+                    UNT2$Pointer,    # in - unit pointer of ghosted tanker
+                    $pol_request,    # in - kind of message
+                    dummy)           # in - fuel to offload, not known here
+ 
+        UNT$ALSPRefuelStatus$I = $At_Posit_Refuel_Requested
+        putUNT$ALSPRefuelStatus$I
+       }
+     return
+   }   # end of if the tanker is a ghosted object
+ 
+ 
+IQUIT  = $NO                                   #flag dont quit refueling
+TAKE   = $no
+ 
+INFLT = max(xUNT$NBRAC$I, 1)                   #get number in flight joa UFL01
+ 
+#$% Get the flight's refuel amount, fuel remaining, and the max amount
+#$% he can carry.
+UNT$RefuelAmount$I = xUNT$RefuelAmount$I
+UNT$TNK$Index = AviationFuelTank$Index
+UNT$TNK$FuelRemaining$F = xUNT$TNK$FuelRemaining$F
+ACC$Pointer         = xUNT$ACCPntr$I           #get flight's characteristics pointer
+acc$MaxFuel$I       = xacc$MaxFuel$I
+ 
+if (UNT$RefuelAmount$I == 0)
+    {
+    # If refuel amount is 0, max amount to receive is max he can carry minus
+    # amount remaining.
+ 
+    MaxRcv = (Acc$MaxFuel$I - UNT$TNK$FuelRemaining$F) * InFlt
+    }
+else
+    {
+    if ((UNT$RefuelAmount$I + UNT$TNK$FuelRemaining$F) <= acc$MaxFuel$I)
+        {
+        # If amount to refuel plus fuel remaining is less than max he can carry,
+        # then max to receive is the refuel amount * nbr a/c in the flight.
+ 
+        MaxRcv = (UNT$RefuelAmount$I * InFlt)
+        }
+    else
+        {
+        # If amount to refuel plus fuel remaining is greater than max he can
+        # carry, then max to receive is the max he can carry minus fuel
+        # remaining times the nbr a/c in the flight.
+ 
+        MaxRcv = (acc$MaxFuel$I - UNT$TNK$FuelRemaining$F) * InFlt
+        }
+    }
+ 
+IF (xUNT2$TYPE$I == $Air$Code) # AirTanker to deliver fuel..   5/27/86
+  {
+   INTFLT = max(xUNT2$NBRAC$I, 1)  #get number in tanker flight joa UFL01
+ 
+   if(INFLT < INTFLT)  IRATE = INFLT  * Tanker$RefuelRate$PerCycle   # less in flt than tankers
+   else                IRATE = INTFLT * Tanker$RefuelRate$PerCycle   # vice 1000     9/17/86
+ 
+   ACC$Pointer = xunt2$AccPntr$I                #set acc pntr for tanker
+ 
+   # Find fuel needed for tanker to return to base:
+   call find_max_fuel_to_deliver(ACC$Pointer,           # SMM 10/95 (E1453)
+                                 UNT2$Pointer,
+                                 INTFLT,
+                                 MAXDEL)
+ 
+   UNT2$FuelWarning$I = xUNT2$FuelWarning$I     ## get tanker fuel warning
+  }
+ELSE           # Helo unrep by SHIP..                          5/27/86
+  {
+   IRATE = Ship$RefuelRate$PerCycle   # assumed ship's Helo fuel transfer rate    5/27/86
+   MAXDEL = MAXRCV                                      #       5/27/86
+   intflt = 1                         # joa UFL01 8/01
+   UNT2$FuelWarning$I = $NO     # Ship has 'unlimited' supply.. 5/27/86
+   }
+ 
+ IXFR = MAXRCV  # (Init'lz same for both Airtanker & Ship)      5/27/86
+ 
+#String fumsg1 "Tanker xxxxx breaking off refuel of xxxxx - low fuel."
+ jj = 0 # SMM 10/99 E2141
+ call smovv ("Tanker ",fumsg1,jj)
+ 
+ if (UNT2$FuelWarning$I == YES) # (Tanker low on fuel...)
+    {
+    MAXDEL = 0
+    IQUIT  = YES                        ## end refueling
+ 
+    call smovhn (xUNT2$Name$C, $$MaxName, fumsg1, jj) # SMM 10/99 E2141
+    call smovv (" breaking off refuel of ",fumsg1,jj) # SMM 10/99 E2141
+    call smovhn (xUNT$Name$C,  $$MaxName, fumsg1, jj) # SMM 10/99 E2141
+    call smovv (" - low fuel.",fumsg1,jj)             # SMM 10/99 E2141
+    call send_  (xUNT2$View$I, 0, jj, fumsg1)          # SMM 10/99 E2141
+    }
+ else
+    {
+     if(MAXDEL < MAXRCV)                        #if less fuel to deliver
+        {
+        IXFR = MAXDEL                           #transfer max tanker has
+        }
+ 
+     if(IXFR <= IRATE)                          #if all can be delivered now
+        {
+        IRATE = IXFR                            #transfer all of it
+        IQUIT = $YES                            #flag refueling complete
+ 
+        if (MAXDEL < MAXRCV)    # if the tanker doesn't have as much
+          {                     # fuel to give as the flight can take
+           call smovhn (xUNT2$Name$C, $$MaxName, fumsg1, jj) # SMM 10/99 E2141
+           call smovv (" breaking off refuel of ",fumsg1,jj) # SMM 10/99 E2141
+           call smovhn (xUNT$Name$C, $$MaxName, fumsg1, jj)  # SMM 10/99 E2141
+           call smovv (" - low fuel.",fumsg1,jj)             # SMM 10/99 E2141
+           call send_  (xUNT2$View$I, 0, jj, fumsg1)          # SMM 10/99 E2141
+          }
+        else                    # the flight will hit 100% fuel
+          {
+           #String fumsg2 "xxxxx refuel complete."
+           jj = 0
+           call smovh (xUNT$Name$C,$$MaxName, fumsg2, jj)    # SMM 10/99 E2141
+           call smovv (" refuel complete.",fumsg2,jj) # SMM 10/99 E2141
+           call send_  (xUNT2$View$I, 0, jj, fumsg2)   # SMM 10/99 E2141
+          }
+        }                                       # end if all can be dlvrd now
+ 
+    IGIVE = IRATE/INTFLT                        #compute expended from tanker
+ 
+    call TNK_adjust_fuel_remaining(UNT2$Pointer,
+                                  AviationFuelTank$Index,
+                                  igive * (-1.0) )
+    TAKE = float(IRATE)/float(INFLT)               #compute taken by flight
+ 
+    call TNK_adjust_fuel_remaining(UNT$Pointer,
+                                  AviationFuelTank$Index,
+                                  take )
+    }
+ 
+if (IQUIT == YES)                               #if refueling complete
+    {
+    putUNT$ATTACKINDX$I (NO)                    #delete tanker guide
+    putUNT$STATUS$I ($PROCEEDING$CODE)          #flight status proceeding
+    putUNT$LastManeuverOrderCode$I (NO$order)   # Remove maneuver restrictions - joa 12/97 (E1832)
+    if (TAKE > 0) # jb <<<>>>  hopefully, enough received..?   7/8/87
+      {
+        putUNT$FUELWARNING$I (NO)               #clear fuel warning flag
+ 
+        # If the unit has an assigned CAP position, send it back    clk 3/92
+        if (xUNT$AssignedCap$I == $yes)
+          {
+           UNT$OrderedAltDepth$I = xUNT$CapAltitude$I
+           putUNT$OrderedAltDepth$I
+           UNT$OrderedLatitude$F  = xUNT$CapLatitude$F
+           putUNT$OrderedLatitude$F
+           UNT$OrderedLongitude$F = xUNT$CapLongitude$F
+           putUNT$OrderedLongitude$F
+ 
+           ACC$Pointer = xUNT$AccPntr$I
+           UNT$OrderedSpeed$F = xACC$CruiseSpeed$I
+           putUNT$OrderedSpeed$F
+          }
+      }
+ 
+    }                                           #end if refueling complete
+ 
+return
+end
+
+ 
+subroutine find_max_fuel_to_deliver(ACC$Pointer,
+                                    UNT2$Pointer,
+                                    number_in_flt,
+                                    fuel_to_deliver)
+#########################################################################
+#$%
+#$% Purpose:    Calculate the maximum fuel for the tanker (UNT2$Pointer)
+#$%             to deliver
+#$%
+#$% Called By:  Refuel
+#$%
+#$% Calls:      FuelPerMin  GETRB_M
+#$%
+#$% Tables:     UNT     ACC
+#$%
+#$% Date:       Oct. 1995
+#$%
+#$% Author:     Susan Miller - code removed from routine REFUEL <wgmdflt.rat>
+#$%             and variable names changed for easier use.  (PER E1453)
+#$%
+#$% Modified:   James Allen - 2/96 (E1467)
+#$%             Routine moved from wgmdflt.rat to consolidate fuel related
+#$%             routines.  Replaced reference to FuelRemaining to TNK
+#$%             subtable variable.
+#$%
+#########################################################################
+BBCommon
+ 
+integer ACC$Pointer, UNT2$Pointer, number_in_flt, fuel_to_deliver
+ 
+integer ACC$CruiseRange$I
+integer UNT2$TNK$Index
+integer  lbs_per_min, min_to_base, lbs_to_base
+real    tanker_cruise_spd, lbs_per_sec  # jb E2145 (spd) 9/27/00
+integer UNT$Pointer, tanker_max_fuel
+real  fuse, falt
+real  range_to_base, base_bearing
+ 
+ tanker_cruise_spd = xACC$CruiseSpeed$I *1.0  # jb E2145 (*1.0)  9/27/00
+ 
+ if (xACC$LoiterFuel$I > 0)
+   {
+    if ((Level$Air$Engagement < 1) | (xACC$Category$I == $HELO$code))
+      {
+       call Ac_fuel_per_sec (ACC$Pointer, xUNT2$status$i, xUNT2$Marshallstatus$i,
+                             tanker_cruise_spd, xUNT2$OrderedAltdepth$i, lbs_per_sec)
+       lbs_per_min = INT (lbs_per_sec * 60.0)
+      }
+    else # use calculations from enhanced air-to-air model description
+      {
+       ACC$CruiseRange$I = MAX (1, xACC$CruiseRange$I) # avoid divide by 0
+ 
+       # bingo at 0.93 * cruise speed, so ...
+       # MAX (0.81, ((speed/cruise speed)^3))
+       fuse = 0.81
+ 
+       # altitude factor = 1.0 when at bingo or marshall status
+       falt = 1.0
+ 
+       lbs_per_min = INT((xACC$MaxFuel$I/ACC$CruiseRange$I) *
+                      ((tanker_cruise_spd * fuse) / 60.0) * falt)
+      }
+   }
+   else lbs_per_min = 80 # in case new characteristics absent
+ 
+   UNT$Pointer$To xUNT2$RecoverIndx$I # recover-base pointer for tanker
+ 
+   call GETRB_M(_   #get range to recovery
+                UNT2$Pointer,    #pass tnkr position
+                UNT$Pointer,     #pass base pointer
+                range_to_base,   #receive range
+                base_bearing)    #receive bearing - not used
+ 
+   if ((Level$Air$Engagement < 1) | (xACC$Category$I == $HELO$code))
+      # Min. to cruise to base
+      Min_to_base = (60*range_to_base/tanker_cruise_spd + 0.5)
+   else
+      Min_to_base = (60*range_to_base/(tanker_cruise_spd * 0.93) + 0.5)
+   # Fuel to base 4/23/84
+   lbs_to_base = Min_to_base * lbs_per_min
+ 
+   # tanker fuel/min  (tanker reserve = 5%)
+   tanker_max_fuel = INT(xACC$MaxFuel$I * 0.05 + lbs_to_base)
+ 
+   # max fuel to deliver
+   UNT2$TNK$Index = AviationFuelTank$Index
+   fuel_to_deliver = INT ((xUNT2$TNK$FuelRemaining$F - tanker_max_fuel)) * number_in_flt
+   fuel_to_deliver = MAX (0, fuel_to_deliver) # To avoid negative numbers
+ 
+return
+end # find_max_fuel_to_deliver
+
+ 

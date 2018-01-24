@@ -1,0 +1,557 @@
+#####   FILE:ASACBDA.rat           JUNE 1993
+#####   This is a new ASTAB for History of ENEMY Destroyed Aircraft.
+#####   ALL information for this ASTAB is retrieved exclusively from the
+#####   DAC table.
+ 
+#################################################################
+#####       JFR --- JUNE 1993
+##### MODIFIED THE DAC STATUS BOARD TO REPORT INFORMATION
+##### ON ENEMY DAMAGED AIRCRAFT
+#####
+##### It is a BDA (Battle Damage Assessment) ASTAB
+#####
+##### CREATED A NEW STATUS BOARD
+#####     DAC TABLE IS STILL USED !!!
+##### NOTE: DAC STATUS BOARD WAS ORIGINALLY FOR OWN FORCE
+#####       DAMAGE REPORTING
+#####       JFR --- JUNE 1993
+#################################################################
+ 
+#####   Reused code from AWSIM <asacdstry.rat>
+#####   Changed $outH ("...",#) to $outV ("...")
+ 
+#####   Blackboard defines and include ascii constants
+ 
+include "bbcode.inc"
+include "bbctl.inc"
+include "ascii.inc"
+include "bbdac.inc"
+include "bbrvu.inc"
+include "stmain.inc"
+ 
+define (BBimplicit, IMPLICIT NONE)  # jb E2145  3/21/00
+define ($low$order$key,ikey)
+define ($increment$keys,$low$order$key = $low$order$key + 1)
+ 
+define (DAC$common,
+    Integer*4 last_dac_table_slot, SPLASH, FIRED
+    Common/last_dac_common/last_dac_table_slot, SPLASH, FIRED
+    )
+ 
+
+ 
+Subroutine DAC_Air_Status
+#######################################################
+#$%
+#$% Purpose:   DAC_Air_Status generates the history of
+#$%            aircraft BDA status board.
+#$%
+#$% Called By: STDISP <stmain.rat>
+#$%            FORMAT_ASTAB <asformat.rat>
+#$%
+#$% Calls:     DAADAC   DAATIT
+#$%
+#$% Tables:    None
+#$%
+#$% Date:      June 1993
+#$%
+#$% Author:    JOHN F. RICHARDSON
+#$%            Modified reused code from AWSIM
+#$%            file: ASACDSTRY.RAT
+#$%
+#######################################################
+BBcommon
+STATUScommon
+ 
+  #$% Display title
+  call DAATIT
+ 
+  #$% Display status board
+  call DAADAC
+ 
+return
+end
+ 
+
+ 
+Subroutine DAATIT
+#######################################################
+#$%
+#$% Purpose:   DAATIT generates a title for the
+#$%            history of destroyed aircraft status board.
+#$%
+#$% Called By: DAC_Air_Status
+#$%
+#$% Calls:     OUTV     OUTIZ     OUTIB
+#$%
+#$% Tables:    None
+#$%
+#$% Date:      June 1993
+#$%
+#$% Author:    JOHN F. RICHARDSON
+#$%            Modified reused code from AWSIM
+#$%            file: ASACDSTRY.RAT
+#$%
+#########################################################
+BBcommon
+STATUScommon
+ 
+integer Game_DTGs
+ 
+  $prepare$next$line
+ 
+  $column  1 ; $outV("View: ") ; $outH(nmvue,5)
+  $column 14 ; $outV("AIR TARGETS BDA STATUS BOARD [") ; $outI(iboard)
+               $outV("] - Page ") ; $outIB(kpage,2)
+  $column 61 ; $outV("Game Time: ") ; $outIZ(Game_DTGs(igmin),8)
+ 
+return
+end
+ 
+
+ 
+Subroutine DAADAC
+########################################################
+#$%
+#$% Purpose:   DAADAC executes the subroutines that
+#$%            generate the history of destroyed
+#$%            aircraft status board.
+#$%
+#$% Called By: DAASTA
+#$%
+#$% Calls:     DAAENT     DAAHED
+#$%            DAANUN     NXTDAA
+#$%
+#$% Tables:    DAC
+#$%
+#$% Date:      June 1993
+#$%
+#$% Author:    JOHN F. RICHARDSON
+#$%            Modified reused code from AWSIM
+#$%            file: ASACDSTRY.RAT
+#$%
+##########################################################
+BBcommon
+STATUScommon
+ 
+DAC$Common
+ 
+literal prevattacker[DAC$SLOTS], preveventname[DAC$SLOTS],
+        prevweapon[DAC$SLOTS],  CSTRIP8     # jb E2145 3/21/00
+real*4    prevtime[DAC$SLOTS]
+integer*4 NbrDestroyed[DAC$SLOTS], fltpntr[DAC$SLOTS]
+integer*4 TOP, accum, NbrFIRED[DAC$SLOTS]
+Integer  I, IFOUND, DACFLAG, IACCUM, DAC$Pointer  # jb E2145  3/21/00
+ 
+ 
+     #$% display heading
+     call DAAHED
+ 
+     $exit$on$overflow
+ 
+     #$% initialize flag
+     ifound = $no
+ 
+     dacflag = $yes  # init first pass
+     for (i = 1 ; i <= DAC$slots; i = i + 1)
+         {
+          prevtime[i] = 0.0
+          preveventname[i] = $BLANKLIT
+          prevattacker[i] = $BLANKLIT
+          prevweapon[i] = $BLANKLIT
+         }
+ 
+     TOP = 0
+     for (i = 1 ; i <= DAC$slots ; i = i + 1)
+         { # init the arrays for splash count (reaccumulation)
+          fltpntr[i] = 0
+          NbrDestroyed[i] = 0
+          NbrFIRED[i] = 0
+         }
+ 
+     #$% get next history record
+ 
+     #$% find all the DAC table entry's for a "flight"
+     #$% first Key on the DAC entries by time and flight
+     #$% annoying since all the damaged members of the flight are
+     #$% "deaccumulated by being put into DAC table
+     #$% so we must reaccumulate them
+ 
+     repeat # until all the sorts are complete
+          { # and the pointers are loaded up for a flight
+           call NXTDAA(dac$pointer)
+ 
+           # this is valid since we are setting DAC$LAST and filling in
+           # table entries
+           if (dac$pointer == 0) break
+ 
+           # DON'T display if a/c Crashed On Takeoff
+           if (xDAC$HowDestroyed$I == $CrashedOnTakeoff$code)
+              { # since DACENT normally updates IKEY we must do it here
+                # during the reaccumulation process or NXTDAA goes
+                # off into never never land
+               Ikey = Ikey + 1
+               next
+              }
+ 
+           #$% found one
+           ifound = $yes
+           # since DACENT normally updates IKEY we must do it here
+           # during the reaccumulation process or NXTDAA goes
+           # off into never never land
+           Ikey = Ikey + 1
+ 
+           # cycle through list and reaccumulate
+           iaccum = $no
+           for (accum = 1 ; accum <= TOP ; accum = accum + 1)
+               {# FOR EACH STATUS BOARD ENTRY WE ARE ACCUMULATING WE:
+                # want same time of destruction
+                # want same event of victim
+                # want same event of attacker
+                # want same weapon that destroyed it
+                if (xdac$timedestroyed$F == prevtime[accum]   &
+                    xdac$EventName$C == preveventname[accum] &
+                    xdac$WpnTypThatGotIt$C == prevweapon[accum] &
+                    xdac$attackerevent$c == prevattacker[accum])
+                   { # increment nbr splashed
+                    NbrDestroyed[accum] = NbrDestroyed[accum] + 1
+                    NbrFIRED[accum] = NbrFIRED[accum] + xDAC$NbrFired$i
+                    iaccum = $yes # flag already accumulated for this air event
+                    break # exit accumulator
+                   }
+               }
+ 
+           if (iaccum == $no)
+              { # load accumulation list for first occurence of this
+                # event number. Note: since the flight leader is the last
+                # to get shot down and since we are going backwards this
+                # should give the flight leaders pointer in the case of
+                # a grand slam
+               TOP = TOP + 1
+               prevtime[TOP] = xdac$timedestroyed$F
+               preveventname[TOP] = xdac$eventname$C
+               prevattacker[TOP] = xdac$attackerevent$c
+               prevweapon[TOP] = xdac$WpnTypThatGotIt$C
+               fltpntr[TOP] = dac$pointer
+               NbrFIRED[TOP] = xDAC$NbrFired$i
+               NbrDestroyed[TOP] = 1
+              }
+          }
+ 
+     # adjust top for exit from repeat with iaccum = $yes
+     if (iaccum == $yes) TOP = TOP + 1 # to make index 1 greater in this case
+ 
+     for (i = 1 ; i < TOP ; i = i + 1) # indx 1 greater than pointers
+         {
+          #$% get history data
+          DAC$Pointer = fltpntr[i]
+          if (DAC$Pointer != 0)
+            {
+             splash = NbrDestroyed[i]
+             fired = NbrFIRED[i]
+             call DAAENT(dac$pointer)
+            }
+         }
+ 
+     $exit$on$overflow
+ 
+     #$% if none, send message
+     if (ifound == $no)  call DAANUN
+ 
+return
+end
+
+ 
+Subroutine DAAHED
+###########################################################
+#$%
+#$% Purpose:   DAAHED  generates heading for the
+#$%            history of aircraft BDA status board.
+#$%
+#$% Called By: DAADAC
+#$%
+#$% Calls:     SMOVH
+#$%
+#$% Tables:    None
+#$%
+#$% Date:      June 1993
+#$%
+#$% Author:    JOHN F. RICHARDSON
+#$%            Modified reused code from AWSIM
+#$%            file: STACDSTRY.RAT
+###########################################################
+BBcommon
+STATUScommon
+ 
+Integer ILEN  # jb E2145  3/21/00
+ 
+string msg2 "        Track                            --------- HOW  DAMAGED ---------"
+string msg3 "Time    Numbr    Class      Lat    Lon   Attacker  Weapon  #Fired  Splash"
+string msg4 "------  -----   --------  ------ ------- -------- -------- ------  ------"
+#            xxxxxx  xxxxxxx xxxxxxxx  xxxxxx xxxxxxx xxxxxxxx xxxxxxxx    xxx     xxx
+#            0123456789012345678901234567890123456789012345678901234567890123456789012345678
+#                      1         2         3         4         5         6         7
+ 
+  #$% set line lengths
+  ilen = 0; call smovh(msg2,ARB,Ipage[1,2],ilen)
+  LINLEN[2] = ilen      # jb 2141   3/6/00
+  ilen = 0; call smovh(msg3,ARB,Ipage[1,3],ilen)
+  LINLEN[3] = ilen      # jb 2141   3/6/00
+  ilen = 0; call smovh(msg4,ARB,Ipage[1,4],ilen)
+  LINLEN[4] = ilen      # jb 2141   3/6/00
+ 
+  #$% set line counter
+  LINCNT = 4
+ 
+return
+end
+ 
+
+ 
+Subroutine NXTDAA(DAC$pointer)
+#################################################
+#$%
+#$% Purpose:   NXTDAC locates next history entry.
+#$%
+#$% Called By: DACDAC
+#$%
+#$% Calls:     None
+#$%
+#$% Tables:    DAC
+#$%
+#$% Date:      March 1992
+#$%
+#$% Author:    Reused code from AWSIM
+#$%            file: ASACDSTRY.RAT
+#$%            Modified code for use by A/C BDA Astab
+#$%            JULY 1993
+#$%
+###################################################
+BBcommon
+StatusCommon
+ 
+DAC$common
+ 
+Integer DAC$Pointer         # jb E2145  3/21/00
+ 
+  if (IKey == 1)
+     last_dac_table_slot = dac$last
+  else if (ikey > dac$slots)   # if outside table
+    ikey = 1                   # set it to the beginning
+ 
+  repeat
+    {
+     DAC$pointer = last_dac_table_slot + 1 - DAC$entry*IKey
+     if (DAC$pointer$ok)
+       {# see if the attacker matches this view
+        if (xDAC$AttackerView$I == iview)
+           return # with DAC$pointer and IKey sey
+ 
+        IKey = IKey +1
+       }
+     else # backed up past beginning of table
+       {
+        DAC$pointer = 0
+        return
+       }
+    } # end of repeat loop
+ 
+return
+end
+ 
+ 
+
+ 
+ 
+Subroutine DAAENT(dac$pointer)
+##################################################################
+#$%
+#$% Purpose:   DACENT gets data for history of
+#$%            aircraft BDA status board.
+#$%
+#$% Called By: DAADAC
+#$%
+#$% Calls:     SMOVIB      SMOVH      SMOVLL
+#$%
+#$% Tables:    DAC
+#$%
+#$% Date:      June 1993
+#$%
+#$% Author:    JOHN F. RICHARDSON
+#$%            Modified reused code from AWSIM
+#$%            file: ASACDSTRY.RAT
+#$%            Added Astab_Mission call and changed positions
+#$%            and DESTRY possibilities
+#$%
+#$% Modified:  Susan Miller 10/99 E2168
+#$%            Replaced Game_time with Game_dtg
+#$%            in order to display the dtg correctly.
+######################################################################
+BBcommon
+STATUScommon
+DAC$Common
+ 
+literal icodee, iclcode, notrack, a_track
+LitCharEquiv(iclsch,0:4)
+literal DAC$WHOdestroyedIT$C,DAC$WpnTypThatGotIt$C, # jb E2145  3/21/00
+        DAC$AttackerEvent$C,DAC$Type$C,CSTRIP,CSTRIP8 # jb E2145  3/21/00
+literal DAC$Classification$C                        # jb E2145  3/21/00
+Real*4 DAC$Timedestroyed$F,DAC$Latitudedestroyed$F, # jb E2145  3/21/00
+                           DAC$Longitudedestroyed$F # jb E2145  3/21/00
+Integer DAC$Pointer,DAC$Howdestroyed$I,             # jb E2145  3/21/00
+        DAC$Tracknumber$I, DAC$View$I,              # jb E2145  3/21/00
+        GAME_DTG, RVU$Pointer                       # jb E2145  3/21/00
+ 
+data iclschC[$air$code     ]/ "A       " / # rmt$class$i used for 2nd lettter in track
+data iclschC[$surface$code ]/ "S       " / # rmt$class$i used for 2nd lettter in track
+data iclschC[$sub$code     ]/ "U       " / # rmt$class$i used for 2nd lettter in track
+data iclschC[$null$code    ]/ "        " / # rmt$class$i used for 2nd lettter in track
+data iclschC[$BDA$ESMcode  ]/ "E       " / # rmt$detectiontype$i used for 2nd lettter in track
+ 
+  $test$next$line
+  $exit$on$overflow
+  $save$line$count
+  $update$keys
+ 
+  $prepare$next$line
+ 
+  #$% get all DAC table entries to be used
+  DAC$View$I               = xDAC$View$I
+  DAC$WhoDestroyedIt$C     = xDAC$WhoDestroyedIt$C
+  DAC$WpnTypThatGotIt$C    = xDAC$WpnTypThatGotIt$C
+  DAC$Type$C               = xDAC$Type$C
+  DAC$TimeDestroyed$F      = xDAC$TimeDestroyed$F
+  DAC$LatitudeDestroyed$F  = xDAC$LatitudeDestroyed$F
+  DAC$LongitudeDestroyed$F = xDAC$LongitudeDestroyed$F
+  DAC$HowDestroyed$I       = xDAC$HowDestroyed$I
+  DAC$AttackerEvent$C      = xDAC$Attackerevent$C
+  DAC$TrackNumber$I        = xDAC$TrackNumber$I
+  DAC$Classification$c     = xDAC$Classification$c
+ 
+  IBYTE = 0
+  #$% display time the a/c was destroyed # SMM 10/99 E2168 replaced game_time with game_dtg
+  call SMOVIZ(Game_DTG(DAC$TimeDestroyed$F),6,IPAGE[1,LINCNT],IBYTE)
+ 
+  #$% display track name, if any
+  #$% set RVU pointer; set track code
+  RVU$pointer$to iview
+  icodee = xRVU$trackcode$c       # this is track code for the view
+  iclcode = ICLSCH[xdac$ClassID$i] # get class code (A, S, U = sub, E = ESM)
+  if (DAC$HowDestroyed$I != $DestroyedOnGround$Code &
+      DAC$Tracknumber$I != 0)
+    { # have a RMT track so display it
+     $column 8; $OutHN (a_track(icodee,iclcode,DAC$TrackNumber$I),$$MaxLit)            # (E2172)
+    }
+  else if (DAC$HowDestroyed$I != $DestroyedOnGround$Code &
+           DAC$Tracknumber$I == 0)
+          { # must be a local track (can happen if weapon range is about
+            # same as radar range so local track exists but RMT track
+            # does not exist since a/c destroyed before RMT table updated)
+            notrack = 'LOCAL'  # Display LOCAL
+            IBYTE = 8
+            call SMOVH(notrack,5,IPAGE[1,LINCNT],IBYTE)
+          }
+  else if (DAC$HowDestroyed$I == $DestroyedOnGround$Code)
+     {
+      notrack = 'DOG'
+      IBYTE = 8
+      call SMOVH(notrack,5,IPAGE[1,LINCNT],IBYTE)
+     }
+ 
+  #$% Display track classification if possible
+  IBYTE = 16
+  call SMOVH(DAC$Classification$c,$$MAXname,IPAGE[1,LINCNT],IBYTE) # jb 3/7/00
+ 
+  #$% display position a/c was destroyed, if not code of DOG,CTAK,CLND
+  if (DAC$HowDestroyed$i != $DestroyedonGround$Code &
+      DAC$HowDestroyed$i != $CrashedonTakeoff$Code  &
+      DAC$HowDestroyed$i != $CrashedonLanding$Code  )
+    {
+     #$% display latitude
+     IBYTE = 26     # jb E2141  (26 vs 23)  3/7/00
+     call SMOVLL(DAC$LatitudeDestroyed$f,"NS",IPAGE[1,LINCNT],IBYTE)
+ 
+     #$% display longitude
+     IBYTE = 33     # jb E2141  (33 vs 30)  3/7/00
+     call SMOVLL(DAC$LongitudeDestroyed$f,"EW",IPAGE[1,LINCNT],IBYTE)
+    }
+ 
+  if (Dac$HowDestroyed$I == $AirToAirMissile$Code     |
+      Dac$HowDestroyed$I == $CloseInWeaponSystem$Code |
+      Dac$HowDestroyed$I == $DestroyedByGunfire$Code  |
+      DAC$HowDestroyed$I == $SurfToAirMissile$Code    )
+     {
+      IBYTE = 41     # jb E2141  (41 vs 38)  3/7/00
+      call smovH(DAC$WhoDestroyedIt$C,$$MAXname,IPAGE[1,LINCNT],IBYTE) # jb 3/00
+ 
+      IBYTE = 50     # jb E2141  (50 vs 45)  3/7/00
+      call smovH(DAC$WpnTypThatGotIt$C,$$MAXname,IPAGE[1,LINCNT],IBYTE) #jb 3/00
+     }
+ 
+  #$% Display the number of weapons fired (FROM COMMON BLOCK)
+  IBYTE = 60         # jb E2141  (60 vs 55)  3/7/00
+  call SMOVIB(FIRED,5,IPAGE[1,LINCNT],IBYTE)
+ 
+  #$% Display the number of aircraft in flight hit (FROM COMMON BLOCK)
+  IBYTE = 68         # jb E2141  (68 vs 65)  3/7/00
+  call SMOVIB(SPLASH,5,IPAGE[1,LINCNT],IBYTE)
+ 
+ 
+  #$% set line length
+  LINLEN[LINCNT] = IBYTE
+ 
+  #$% if control view then display RESA name of target
+  if (mside == $control$code)  # Control signed on?
+     { # test and exit if status board full, then go to next line
+      $test$next$line
+      $exit$on$overflow
+      $prepare$next$line
+ 
+      IBYTE = 6   # jb E2141 6 vs 7, to leave room for ghost sidenumbers  3/7/00
+      call smov ($Lparen,IPAGE[1,LINCNT],IBYTE) # move left parenthesis in IPAGE arrray
+      call smovhn(xDAC$SideNumber$C,$$MAXname,IPAGE[1,LINCNT],IBYTE) #jb 3/7/00
+## call smov ($Rparen,IPAGE[1,LINCNT],IBYTE) # jb omit paren here        3/7/00
+ 
+      IBYTE = 16  # \/ jb E2141 omit parens between sidnumber & type   3/7/00
+##  call smov ($Lparen,IPAGE[1,LINCNT],IBYTE) # move left parenthesis
+      call smovhn(xDAC$Type$C,$$MAXname,IPAGE[1,LINCNT],IBYTE) #jb E2141 3/7/00
+      call smov ($Rparen,IPAGE[1,LINCNT],IBYTE) # move right parenthesis
+ 
+      LINLEN[LINCNT] = IBYTE
+     }
+ 
+return
+end
+
+ 
+Subroutine DAANUN
+################################################################
+#$%
+#$% Purpose:   DAANUN displays message if there is no destroyed
+#$%            aircraft for this view
+#$%
+#$% Called By: DAADAC
+#$%
+#$% Calls:     OUTV
+#$%
+#$% Tables:    None
+#$%
+#$% Date:      June 1993
+#$%
+#$% Author:    JOHN F. RICHARDSON
+#$%            Modified reused code from AWSIM
+#$%            file: ASACDSTRY.RAT
+#$%
+################################################################
+BBcommon
+STATUScommon
+ 
+  $test$next$line
+  $exit$on$overflow
+  $prepare$next$line
+ 
+  #$% send no aircraft message
+  $column 1 ; $outV("No Damaged Aircraft or Missiles in this view")
+ 
+return
+end

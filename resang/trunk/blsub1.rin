@@ -1,0 +1,532 @@
+
+#####   version 3.0  dated- 22dec80
+
+
+# 
+
+#
+#  BUILD1.INC
+#
+#
+# This section includes the main logic for each model.
+########################################################################
+#   Data declarations for BUILD's .RAT and .RIN files: # jb E2145 3/22/00
+
+##Integer  NXTCOM,NXTTYP,NXTARG # jb 3/00; MAY see in BLMAIN,BLSUBS!.rat   
+Literal     R  # jb E2145 (Argunemt for NUTEST, vice r_lit)    3/28/00
+Literal qval[6]
+VMSchar*8 qvalC[6]
+equivalence (qval, qvalC)
+
+Integer     line_len,i,i2,j,n,narg,arg,ninput,    # jb  E2145  3/23/00
+            acnt,scan,scan2,argtyp,argrpt,fld,cntl  # jb  E2145  3/23/00
+Integer ISNUMBER, cur,NXTFLD,NXTREC,NXTWRK,loading  # jb  E2145  3/28/00
+Logical NUTEST  # jb E2145 (declation was in BLMAIN.inc)  E2145  3/28/00
+Integer lcomp_v
+        ## For BLSUB1.rin:
+Integer*8 zsave
+integer nscan, l
+Integer ptr,serr                  # jb  E2145  3/23/00
+        ## For BLSUB2.rin:
+Integer k,k2,argh,hit,tpnt              # jb  E2145  3/23/00
+        ## For BLSUB1 & BLSUB2.rin:
+Integer ptrcnt,fldpnt,fldcnt,verr, argn # jb  E2145  3/23/00
+
+vmschar*8 req_str/ "*REQ*   " /
+literal req_str_L
+equivalence (req_str, req_str_L)
+character cupper
+
+##############################################################################
+####
+####      FORMAT STATEMENTS
+####
+####  E2141: A8 vice a5 in formats 9003, 9008, 9011, 9026     # jb  1/5/00
+##############################################################################
+
+9001 format (80a1)
+9002 format (1x,'Correct the above errors and try again.')
+9003 format (1x,4a8,' "',A8,'" Could not be found.')    # jn E2141 a8 1/5/00
+9008 format (1x,'Word #',i2,', "',A8,'" is not a field name.') # jb " 1/5/00
+9009 format (1x,'The remainder of the input line is IGNORED.')
+9010 format (1x,'The CAT field cannot be changed.')
+9011 format (1x,'Word #',i2,', "',A8,'" of the ',a5,' field is NOT NUMERIC.')
+9012 format (1x,'Word #',i2,', "',i7,'" of the ',a5,' field is NOT ALPHA.')
+9024 format (1x,'The first occurrence of ',a5,' is being replaced because',/,
+             1x,i8,' occurrences are allowed and they are all used.')
+9025 format (1x,'Total Record Count =',i4)
+9026 format (1X,i6,')',4(1x,a8),1x,3a8)
+9027 format (1x,'Delete what?  (ENTRY or Field name).')
+
+#####################################################################
+#
+#
+#    define statement functions                 # These functions step thru
+#                                               # the various data tables...
+## nxtcom(cur) = cur + 1 ##(jb 3/00 see BLMAIN,BLSUBS!.rat    # .DEFCOM
+## nxttyp(cur) = cur + 2 + deftyp(cur+1)*2  #jb 3/00 (as above) .DEFTYP
+## nxtarg(cur) = cur + 1   ##(jb 3/00 see BLMAIN,BLSUBS!.rat .DEFARG
+     nxtfld(cur) = cur + 7 + deffld(cur+1)*2    # .DEFFLD
+     nxtwrk(cur) = cur + 2 + work(cur+1)        # .WORK
+     nxtrec(cur) = cur + (oldlen+recsz-1)/recsz # .Data File
+     nutest(r) = $isnumeric (r)                 # Test numeric jb 3/28/00
+##nutest(i) = iabs(i) <= 20000000           # Test numeric
+#
+##############################################################################
+####
+####   BEGIN LOGIC
+####
+##############################################################################
+#
+      #house keeping
+
+        #
+        call loading_build (loading)                # E2141 dew 6/14/00
+
+        call echor
+        call echor
+        call echoh (object,26)
+        call echov (" Input")   # jb  E2144     5/23/00
+        call echor
+
+        # clear out current work record.... reset flags and pointers
+
+        call bsbldA (work,               # current record array
+                     wrkopt,             # pointers to the work array
+                     defcom,dccom,       # common definition table and size
+                     deftyp,dctyp,       # type definition table and size
+                     deffld,dcfld,       # field definition table and size
+                     defarg,dsarg,dcarg, # argument definition table and size
+                     deffmt,dcfmt)       # format definition table and size
+
+      repeat
+
+       {
+        call echor
+        call echov (' >')  # jb  E2144     5/23/00
+
+        call getlnh_r (handle,line,80)
+        for (line_len = 80; 
+             line_len >= 0 & line[line_len] == $SPACE; # how many non-blank chars ?
+             line_len = line_len - 1);
+
+        # Save Raw Input (for use by BSVERF/Strings)            # dew 11/2000
+        i = 0; r_line = " "
+        call vmovh (line, 80, r_line, i)
+
+        # force input to uppercase
+        do i = 1, line_len
+         {#if (line[i] >= $lita & line[i] <= $litz)
+            #line[i] = line[i] - ($lita - $LETA)
+		  line[i] = cupper(line[i])
+         }
+
+        # Save UPPERcase Input (for use by BSVERF/Strings)      # dew 11/2000
+        i = 0; u_line = " "
+        call vmovh (line, 80, u_line, i)
+
+        Call Recall_Add (Handle, Line, line_len)
+
+        # analyze the input for words....
+
+        call anlyz (line,irtn,ninput)
+    
+        irtn[ninput+1] = EOS
+
+        #************************************************************
+        if (ninput == 0)                 # PRINT CURRENT RECORD *****
+         {
+
+          call bsprin(work,              # current record array
+                      wrkopt,            # pointers to the work array
+                      .false.,           # output to be TYPEd (vs PRINTed)
+                      deffld,dcfld,      # field definition table and size
+                      defarg,dsarg,dcarg,# argument definition table and size
+                      deffmt,dcfmt)      # format definition table and size
+
+         }
+
+        #************************************************************
+        else if (lcomp_v(irtn[1], 'FIND ') == 0)       # FIND *********************
+         {if (anyinp)   # any input ?
+           { # Verify requirements
+
+            assign 7101 to zsave         # set up return address
+            goto 8000                    # process inline validation code
+
+ 7101       call bschek (work,wrkopt,out) # check for required fields and
+                                          # generate output record from work
+            if (serr>0 | out[1)==0)
+              {print 9002                 # display info about errors found
+               next                      # get next input line
+              }
+
+            # save the current record
+
+            call bssave                  # all data found in common
+
+           }
+
+          # build the standard basic record in work
+
+          call bsbldA (work,             # current record array
+                     wrkopt,             # pointers to the work array
+                     defcom,dccom,       # common definition table and size
+                     deftyp,dctyp,       # type definition table and size
+                     deffld,dcfld,       # field definition table and size
+                     defarg,dsarg,dcarg, # argument definition table and size
+                     deffmt,dcfmt)       # format definition table and size
+
+
+          # SEARCH file for match
+          found = .false.
+          qfld = irtn[2)
+
+          for (i = 2; i <= reccnt; i = nxtrec(i))
+           {
+            read (31, REC=i) (out[m),m=1,recsz)
+            oldlen = out[1) + 1
+            oldpos = i
+
+            if (out[3) == qfld)
+             {
+              found = .true.
+              break
+             }
+           }
+
+          if (found)
+           {
+            # build in work, the record found on disc.....
+
+            call bsbldC(defcom,dccom,    # common definition table and size
+                     deftyp,dctyp,       # type definition table and size
+                     deffld,dcfld,       # field definition table and size
+                     defarg,dsarg,dcarg, # argument definition table and size
+                     deffmt,dcfmt)       # format definition table and size
+
+
+            if (Loading == NO)
+            call bsprin(work,              # current record array
+                        wrkopt,            # pointers to the work array
+                        .false.,           # output to be TYPEd (vs PRINTed)
+                        deffld,dcfld,      # field definition table and size
+                        defarg,dsarg,dcarg,# argument definition table and size
+                        deffmt,dcfmt)      # format definition table and size
+
+           }
+
+          else
+           {print 9003,object,irtn[2)       # cannot FIND the requested item
+            oldlen = 0
+            oldpos = 0
+           }
+         }
+
+        #************************************************************
+        else if (lcomp_v(irtn[1), 'KILL ') == 0)       # KILL *********************
+         {
+          # build the basic standard record in work
+
+          call bsbldA (work,             # current record array
+                     wrkopt,             # pointers to the work array
+                     defcom,dccom,       # common definition table and size
+                     deftyp,dctyp,       # type definition table and size
+                     deffld,dcfld,       # field definition table and size
+                     defarg,dsarg,dcarg, # argument definition table and size
+                     deffmt,dcfmt)       # format definition table and size
+
+          # print the current record
+
+          call bsprin(work,              # current record array
+                      wrkopt,            # pointers to the work array
+                      .false.,           # output to be TYPEd (vs PRINTed)
+                      deffld,dcfld,      # field definition table and size
+                      defarg,dsarg,dcarg,# argument definition table and size
+                      deffmt,dcfmt)      # format definition table and size
+
+         }
+
+        #************************************************************
+        else if (lcomp_v(irtn[1), 'BYE  ') == 0) break # BYE **********************
+
+        #************************************************************
+        else if (lcomp_v(irtn[1), 'QUIT ') == 0) break # QUIT *********************
+
+        #************************************************************
+        else if (lcomp_v(irtn[1), 'HELP ') == 0)       # HELP *********************
+         {call bshelp(irtn,              # input list
+                      defcom,dccom,      # common definition table and size
+                      deftyp,dctyp,      # type definition table and size
+                      deffld,dcfld,      # field definition table and size
+                      defarg,dsarg,dcarg)# argument definition table and size
+         }
+
+        #************************************************************
+        else if (lcomp_v(irtn[1), 'LIST ') == 0)       # LIST *********************
+         {
+          # SEARCH file for all records
+          j = 0
+		  call echov('Total Record Count = ')
+		  call echoi (reccnt)
+		  call echor
+		  
+          for (i2= 2; i2 <= reccnt; i2 = i2 + (out[1)+recsz)/recsz)
+           {
+            read (31, REC=i2) (out[m),m=1,recsz)
+            j = j + 1
+
+#*******************************************************************
+          oldlen = out[1]+1
+          i = i2
+          l = recsz
+          for (k = recsz + 1; k <= oldlen; k = k + recsz)
+            {
+             i = i + 1
+             l = l + recsz
+             read (31, REC=i) (out[m],m=k,l)
+            }
+
+          scan = 1
+          nscan = 4
+          irtnC[1] = "CAT"
+          irtnC[2] = "TYPE"
+          irtnC[3] = "FUNCT"
+          irtnC[4] = "NOMEN"
+          
+          for (scan = 1; scan <= nscan; scan = scan + 1)
+           {#   Search for the fields entered.......
+
+            qfld = irtn[scan]
+
+            # find the fields nomen, cat, function (keep cnt and ptrs)
+
+            qvalC[scan] = " "
+            qvalC[5] = " "
+            qvalC[6] = " "
+            for (ptr=2;ptr < out(1);ptr=ptr+1)
+             {
+              if (out[ptr] == qfld)       # Match?
+               {
+                qval[scan] = out[ptr+1]
+                if (scan == 4)              # Nomen
+                 {
+                   qval[scan+1] = out[ptr+2]
+                   qval[scan+2] = out[ptr+3]
+                 }
+                break
+               }
+             }
+           }
+#*******************************************************************
+            #print 9026, j,out[3], (qval[i], i=1,nscan+2)
+			call echoib(j,6)
+			call echov(" ")
+			call echoh(out[3],8)
+			call echov(" ")
+			for (i=1; i<=nscan+2; i=i+1)
+			{
+				call echoh (qval[i],8)
+				if (i < 4) call echov(" ") #tmb was a 5
+			}
+			call echor
+           }
+         }
+
+        #************************************************************
+        else if (lcomp_v(irtn[1), 'SAVE ') == 0)       # SAVE *********************
+         {if (anyinp)     # any input ?
+           { # Verify requirements
+
+            assign 7102 to zsave         # set up return address
+            goto 8000                    # process inline validation code
+
+ 7102       call bschek (work,wrkopt,out) # check for required fields and
+                                          # generate output record from work
+            if (serr>0 | out[1)==0)
+              {print 9002                 # display info about errors found
+               next                      # get next input line
+              }
+
+            # Save the current record
+
+            call bssave                  # all data found in common
+
+           }
+
+          break
+
+         }
+
+        #************************************************************
+        else if (lcomp_v(irtn[1), 'MORE ') == 0)       # MORE *********************
+         {if (anyinp)     # any input ?
+           { # Verify requirements
+
+            assign 7103 to zsave         # set up return address
+            goto 8000                    # process inline validation code
+
+ 7103       call bschek (work,wrkopt,out) # check for required fields and
+                                          # generate output record from work
+            if (serr>0 | out[1)==0)
+              {print 9002                 # display info about errors found
+               next                      # get next input line
+              }
+
+            # Save the current record
+
+            call bssave                  # all data found in common
+
+           }
+
+          oldpos=0
+          oldlen=0
+          found= .false.
+          anyinp= .false.
+          work(4)= req_str_L
+
+         }
+
+        #************************************************************
+        else if (lcomp_v(irtn[1), 'DELET') == 0 |  # DELETE ******************* # jb |   1/5/00
+             lcomp_v(irtn[1), 'DELETE') == 0 ) # jb .. also  Recognize 6 characters  1/5/00
+         {
+           #process delete
+      if (ninput == 1)                 # if a field delete
+           {
+        print 9027
+        next
+           }
+          else if (lcomp_v(irtn[2], "ENTRY") != 0)   # if a field delete
+           {
+            qfld = irtn[2)
+
+            call bsdele(qfld,             # the name of the field to delete
+                       defcom,dccom,      # common definition table and size
+                       deftyp,dctyp,      # type definition table and size
+                       deffld,dcfld,      # field definition table and size
+                       defarg,dsarg,dcarg,# argument definition table and size
+                       deffmt,dcfmt)      # format definition table and size
+
+           }  # end of field delete structure
+
+          else
+           {
+            # delete the current record from the file
+
+            out[1] = 0
+            call bssave                  # all data found in common
+
+            # build the basic standard record in work
+
+            call bsbldA (work,          # current record array
+                    wrkopt,             # pointers to the work array
+                    defcom,dccom,       # common definition table and size
+                    deftyp,dctyp,       # type definition table and size
+                    deffld,dcfld,       # field definition table and size
+                    defarg,dsarg,dcarg, # argument definition table and size
+                    deffmt,dcfmt)       # format definition table and size
+
+           }
+
+         }
+
+
+        #************************************************************
+        else                             # DATA INPUT ***************
+         {#process input
+
+          scan = 1
+
+          repeat
+           {#   Search for the fields entered.......
+
+            qfld = irtn[scan)
+            fldcnt=0
+            fldpnt=0
+
+            # find the field (keep cnt and ptrs)
+
+            for (ptr=2;ptr < work(1);ptr=nxtwrk(ptr))
+             {
+              if (work(ptr)!=qfld)       # Match?
+               {if (fldpnt==0) next      # haven't found one yet
+                else break               # found some and now beyond
+               }
+              else
+               {fldcnt = fldcnt + 1      # count the occurrence
+                if (fldcnt == 1)
+                 {fldpnt = ptr           # set pointer to first occurrence
+                 }
+               }
+             }
+
+            if (fldpnt <= 1)
+             {print 9008,scan,irtn[scan)  # not a field name.......
+              scan = scan + 1
+              next
+             }
+                                          # process input field
+            else
+             {verr = 0                    # reset error count to zero
+              ptrcnt = 0                  #     & arguments used counter
+              argcnt = 0
+              args[1] = req_str_L
+              acnt = work(fldpnt+1)      # save count of arguments
+                                         # fldpnt+2 points to first argument
+
+              # Validate arguments
+
+              # find the field in the field table....
+              for (fld=1;deffld(fld) != qfld;fld=nxtfld(fld))
+               {continue
+               }
+
+              narg=deffld(fld+1)-1        # define the number of different arg
+
+              do cntl= 0, narg
+               {qarg = deffld(fld+3+cntl*2)
+                argrpt = deffld(fld+4+cntl*2)
+
+                                          # find the argument in the arg tbl
+                for (arg=1;defarg[1,arg] != qarg;arg=arg+1)
+                 {continue
+                 }
+                argtyp = defarg[2,arg]/1000         # setup the type of test
+                if (argtyp>9) argtyp = 6            # types >9 default to 6
+                argn = defarg[2,arg] - argtyp*1000  # setup the size of list
+                argh = argtyp
+
+                do k = 1, argrpt
+                 {argcnt = argcnt + 1
+                  ptrcnt = ptrcnt + 1
+                  scan2 = scan+ptrcnt
+                  arg1=irtn[scan+ptrcnt)
+                  args[argcnt]=arg1
+
+                  # ** test the field *********************
+
+                  # ** do basic alpha/numeric test
+
+                  if (argtyp <= 0)   continue
+
+                  else if (argtyp <= 5 & ! nutest(arg1))        # if literal
+                   {
+                    print 9011,scan2,arg1,qfld
+                    verr = verr + 1
+                    next
+                   }
+
+                  else if (argtyp >= 6 & 
+                           argtyp <= 8 & 
+                           nutest(arg1))                        # if numeric
+
+                   {n = arg1       
+                    print 9012,scan2,n,qfld
+                    verr = verr + 1
+                    next
+                   }
+
+                  # ** continue with other tests now...
+
+                  # ** end of bldpt1.inc

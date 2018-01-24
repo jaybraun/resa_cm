@@ -1,0 +1,1534 @@
+#####   FILE:   ASFORMAT.rat
+ 
+### Record of Modifications to Version 3.1 :
+###
+###   date    prog   module       comments
+### ========= ====   ======       =========
+###
+###
+### 18-AUG-89 AM     Format_ASTAB expanded for BEES Model.
+###
+### 18-MAY-89 AM     Format_ASTAB expanded for Small Boat Model.
+###
+ 
+######   version 3.1(NWISS)  dated-  18oct82
+ 
+####
+#### mod to version 3.1          dated 18-oct-1982
+####
+#### smn prog    module         comments
+#### === ====    ======         ==============================================
+####     TPA     Format_Astab   a modification was made to allow reverse-video
+####                            for ASTAB changes under the following condition
+####                            .  SBI$UpdateRequest$I is not NEW or CONTINUE
+####                            .  output is to a VT100 terminal
+####
+ 
+######   version 3.1(NWISS)  dated-  11may82
+ 
+####
+#### mod to version 3.1          dated 11-may-1982
+####
+#### smn prog    module  comments
+#### === ====    ======  =================================================
+####     STATUS  Status program was modified to create a page image
+####                     for each requested status board and store the image
+####                     In the Blackboard SBI table.
+####                     All initialization was removed, status is no longer
+####                     an executable process but now a subroutine named
+####                     ASFORMAT which is called by PLAYER when the command
+####                     SHOW is requested.
+####             STINIT  Removed
+####             SETDLY  Removed
+####             PROCRQ  Removed
+####             STDISP  Modified moved to ASFORMAT subroutine.
+####             HELP    Removed
+####             ASKWHO  Removed
+####             GET_CH  Removed
+####             ASKNUM  Removed
+####             RNAME   Removed
+####             debug   Debug subroutines were removed.
+####             BBSBI   Name of the new Blackboard table.
+####             BUILD_BUf  New subroutine, which builds the page buffer
+####                     into the SBI table in the field name SBI$LIN$Buf$I.
+####                     Status display codes in STMAIN.INC were moved
+####                     to BBCODE.INC.
+####
+ 
+ 
+######   version 3.1  dated-  7apr81
+ 
+####
+#### mod to version 3.0          dated 9-mar-1981
+####
+#### smn prog    module  comments
+#### === ====    ======  =================================================
+#### 002 rjw             modularized the main STATUS driver;
+####                     made it compatible with the use of search keys;
+####                     removed blackboard locking logic;
+####                     added a number of general-purpose routines
+####                     used by a number of status boards;
+####                     added debug features;
+####
+ 
+####
+#### mod to version 3.0          dated 2-jan-1981
+####
+#### smn prog    module  comments
+#### === ====    ======  =================================================
+#### 002 sfc             changed code to access and manipulate data in
+####                     the RMT, OWN, & INV Tables rather than in the
+####                     DET, DYN, & POS Tables;
+####                     added Subroutines INVENT and OWNSTA;
+####                     deleted Subroutines AIRORD, AIROR1, SHPORD,
+####                     SHRORD, and SUBORD;
+####                     fixed floating page number print position in
+####                     Subroutine LINE1;
+####
+ 
+####
+#### mod to version 3.0          dated 29-dec-1980
+####
+#### smn prog    module  comments
+#### === ====    ======  =================================================
+#### 003 dew     status  corrected overiding-read-locks problem
+####
+ 
+ 
+######   version 3.0     dated 22-dec-1980
+ 
+ 
+# 
+ 
+######################################################################
+#$%
+#$% Information on the programs and subroutines located in ASFORMAT.RAT
+#$% along with those that are called is provided in DOC.WHO.
+#$%
+#$% Flowcharts illustrating the interrelationships of the programs
+#$% and subprograms for this program are contained in ASMAIN.HIR
+#$%
+######################################################################
+ 
+##
+## INCLUDE BLACKBOARD DEFINITIONS
+##
+include "ascii.inc"
+include "bbcode.inc"
+include "bbctl.inc"
+include "bbsta.inc"
+include "bbinv.inc"
+include "bbown.inc"
+include "bbunt.inc"                 # jb  UNT replaces DUP    4/4/89
+include "bbrmt.inc"
+include "bbsbi.inc"
+include "bbjew.inc"             # SMM 4/98 (E1506)
+include "bbmc.inc"              # SMM 4/98 (E1506)
+include "bbcmc.inc"             # SMM 4/98 (E1506)
+include "bbdeq.inc"             # SMM 4/98 (E1506)
+include "stmain.inc"
+ 
+define (BBimplicit, IMPLICIT NONE)  # jb E2145  3/29/00
+ 
+
+ 
+Subroutine Format_Astab (SBI$Pointer, sta$Pointer,MaxLines,
+                         ActualLines,RequestType)
+ 
+ #######################################################
+ #$%
+ #$% Purpose:   Builds a page image of the status display
+ #$%
+ #$% Called By: ASTAB
+ #$%
+ #$% Calls:     AIRSTA
+ #$%            AVASTA
+ #$%            BOGSTA
+ #$%            CASSTA
+ #$%            ESMSTA
+ #$%            FLTSTA
+ #$%            HFDSTA
+ #$%            PASSTA
+ #$%            RPTSTA
+ #$%            SHPSTA
+ #$%            SHRSTA
+ #$%            SOSSTA
+ #$%            SUBSTA
+ #$%            SRVSTA
+ #$%            TRKSTA
+ #$%            WEASTA
+ #$%            CNTMSG
+ #$%            RESET_FLAGS
+ #$%            BUILD_FLAGS
+ #$%            BUILD_BUF
+ #$%            DAC_AIR_STATUS
+ #$%            DSS_SHIP_STATUS
+ #$%            DSS_SHORE_STATUS
+ #$%
+ #$% Tables:    STA, SBI
+ #$%
+ #$% Date:      10-MAR-82
+ #$%
+ #$% Author:    Timothy P. Adamos
+ #$%
+ #$% Modified:  JFR (E1104)
+ #$%            Added calls for three BDA ASTABs: Air, Ship, Shore
+ #$%
+ #######################################################
+BBcommon                                        ## Common variables
+STATUScommon                                    ## from SBMAIN.INC
+OmronCommon                                     ##
+ 
+literal NAMEVU, CSTRIP8                           # jb E2145     3/29/00
+Integer NMBRVU, I_SWITCH_1  # jb Integer function & SWITCH E2145 3/29/00
+Integer MaxLines,ActualLines,ireqst,RequestType,
+        STA$Pointer,                              # jb E2145     3/29/00
+        SBI$Pointer,SBI$KEY$Index                 # jb E2145     3/29/00
+ 
+mview = Xsta$view$i                             ## view signed on as
+mside = Xsta$side$i                             ## side signed on as
+ismin = status$minute                           ## saved minute
+igmin = game$time                               ## game time
+ 
+nblue = $LastBlue$View   - $FirstBlue$View   + 1 # number of blue views
+norng = $LastOrange$View - $FirstOrange$View + 1 # number of orange views
+ 
+ 
+##
+## EXTRACT VARIABLES IN BBSBI, PUT INTO STATUS COMMON VARIABLES
+##
+ 
+#limit                 =  xSBI$MaxLines$I        ## Max number of lines on page
+limit                 =  MaxLines      # for loading the ipage array  with more
+                                       # than 24 lines. Limit is reset later.
+lincnt                =  xSBI$NbrLines$I        ## Number of lines present
+kpage                 =  xSBI$CurrPage$I        ## Page counter
+iview                 =  xSBI$CurrView$I        ## View of current board
+iside                 =  xSBI$CurrSide$I        ## Side for current board
+inmbr                 =  xSBI$CurrPlayer$I      ## View nbr for current board
+ 
+lsect                 =  xSBI$CurrSect$I        ## Sect of board top curr page
+lsect2                =  xSBI$CurrSect2$I       ## Sub sect of lsect jpk 12/7/87
+SBI$KEY$Index         =  1
+lkey                  =  xSBI$KEY$Curr$C        ## Prim key item top curr page
+SBI$KEY$Index         =  2
+lkey2                 =  xSBI$KEY$Curr$C        ## Secon key item top curr page
+ 
+nsect                 =  xSBI$NextSect$I        ## Sect of board top next page
+nsect2                =  xSBI$NextSect2$I       ## Sub sect of bd jpk 12/7/87
+SBI$KEY$Index         =  1
+nkey                  =  xSBI$KEY$Next$C        ## Prim key item top next page
+SBI$KEY$Index         =  2
+nkey2                 =  xSBI$KEY$Next$C        ##Second key item top next page
+ 
+ibrdrq                =  xSBI$ReqBoard$I        ## Requested board
+isidrq                =  xSBI$ReqSide$I         ## Requested side
+inbrrq                =  xSBI$ReqPlayer$I       ## Requested number
+ireqst                =  xSBI$UpdateRequest$I   ## Request new/continue
+RequestType           =  ireqst                 ## passes it back for flags
+iovflo                =  xSBI$PageOverFlo$I     ## Page overflow flag
+rx_count              =  xSBI$Unit_Page$I       ## Page count per unit
+ 
+iboard                =  ibrdrq                 ## save Requested board
+ 
+putSBI$UpdateRequest$I($None$Code)              ## Reset update request
+ 
+iview = NMBRVU(iside,inmbr)                     ## Get view number
+ 
+if (isidrq != iside | inbrrq != inmbr)          ## If req side & view are
+                                                ## diff from curr side & view
+   {
+    if      (isidrq ==   $Blue$Code)            ## If req side is blue
+ 
+              inmbr =  MIN(inbrrq,nblue)        ## Get lowest number of the two
+ 
+    else if (isidrq == $Orange$Code)            ## If req side is orange
+ 
+              inmbr =  MIN(inbrrq,norng)        ## Get lowest number of the two
+ 
+    iside = isidrq                              ## Curr side = requested side
+    iview = NMBRVU(iside,inmbr)                 ## get view number
+   }
+ 
+nmvue = NAMEVU(iside,inmbr)                     ## Get ascii name for side
+ 
+asb_refresh = $YES
+ 
+if (ireqst == $New$Code)                        ## Update request is new
+   {
+    kpage = 1                                   ## Page counter = 1
+    lsect = xSBI$ReqSect$I                      ## Put req sect into lsect
+ 
+    #$% set first key index
+    SBI$KEY$Index = 1
+    #$% put key request into lkey
+    lkey  = xSBI$KEY$Req$C
+ 
+    #$% set second key index
+    SBI$KEY$Index = 2
+    #$% put key request into lkey
+    lkey2 = xSBI$KEY$Req$C
+    rx_count = 0
+    asb_refresh = $NO
+   }
+else if (ireqst == $Continue$Code)              ## update request continue
+   {
+    asb_refresh = $NO
+ 
+    if (iovflo == $NO)                          ## no overflow
+      {
+       kpage = 1                                ## Page count is one
+       lsect = 1                                ## lsect top of page
+       lsect2 = 1                               ## jpk 12/7/87 fotc boards
+       lkey  = 1                                ##
+       lkey2 = 1
+       rx_count = 0
+      }
+    else
+      {
+       kpage = kpage + 1                        ## Increment page count
+       lsect = nsect                            ## Put next page key & sec
+       lkey  = nkey                             ## into lsect
+       lkey2 = nkey2
+       lsect2 = nsect2                          ## jpk 12/7/87 fotc boards
+      }
+    }
+ 
+ 
+lview  = iview                                  ## Current = Previous boards
+iovflo = $no                                    ## No page overflow
+ 
+isect = lsect                                   ## Curr page into working area
+ikey  = lkey                                    ##
+ikey2 = lkey2                                   ##
+isect2 = lsect2                                 ## jpk 12/7/87 fotc boards
+ 
+$save$keys                                      ## Put work area into next sect
+ 
+$top$of$page                                    ## Line count set at zero
+ 
+ 
+################ CALL STATUS DISPLAYS #####################################
+ 
+Switch(ibrdrq)
+   {
+    #$% call appropriate subroutine for status board requested
+    Case  $ActiveAir$Board:     call ACTAIR;
+    Case  $ActiveSub$Board:     call ACTSUB;
+    Case  $ActiveSurface$Board: call ACTSUR;
+    Case  $AirAlert$Board:      call ALRSTA;
+    Case  $AirBDA$Board:        call DAC_AIR_STATUS;  # JFR (E1104)
+    Case  $AirEvents$Board, $AmphibEvents$Board:     call AIRSTA;
+    Case  $Availability$Board:  call AVASTA;
+    Case  $BogeyTote$Board:     call BOGSTA;
+    Case  $Damage$Board:        call CASSTA;          ## tpa 4/8/83
+    Case  $DamageTime$Board:    call CASSTAT;
+    Case  $DefinedRoute$Board:   call RTESTA;     # reh 11/20/89
+    Case  $DownedAircraft$Board: call DAC_Status  # clk 3/92 air-to-airt upgrade
+    Case  $ESM$Board:           call ESMSTA($ESM$Board, STA$Pointer);
+    Case  $AirESM$Board:        call ESMSTA($AirESM$Board, STA$Pointer);
+    Case  $SurfESM$Board:       call ESMSTA($SurfESM$Board, STA$Pointer);
+    Case  $Flight$Board, $AmphibFlight$Board:        call FLTSTA;
+    Case  $HFDF$Board:          call HFDSTA;
+    Case  $IntellReport$Board:  call ISRSTA;          ## tpa 4/11/83
+    Case  $PassiveSonar$Board:  call PASSTA;
+    Case  $ReportPolicy$Board:  call RPTSTA;
+    Case  $Ship$Board:          call SHPSTA;
+    Case  $ShipBDA$Board:       call DSS_SHIP_STATUS; # JFR (E1104)
+    Case  $Shorebase$board:     call SHRSTA;
+    Case  $ShorebaseBDA$Board:  call DSS_SHORE_STATUS; # JFR (E1104)
+    Case  $SOSUS$Board:         call SOSSTA;
+    Case  $Sub$Board:           call SUBSTA;
+    Case  $Survsat$Board:       call SRVSTA;
+    Case  $Track$Board:         call TRKSTA;
+    Case  $Weather$Board:       call WEASTA;
+    Case  $Help$Board:          call ASHELP;
+    Case  $ASWCFlight$Board:    call FLTSTA;          ## tpa 7/29/83
+    Case  $AAWCFlight$Board:    call FLTSTA;          ## tpa 7/29/83
+    Case  $ASUWCFlight$Board:   call FLTSTA;          ## tpa 7/29/83
+    Case  $ASWCEvents$Board:    call AIRSTA;          ## tpa 8/10/83
+    Case  $AAWCEvents$Board:    call AIRSTA;          ## tpa 8/10/83
+    Case  $ASUWCEvents$Board:   call AIRSTA;          ## tpa 8/10/83
+    Case  $EWCFlight$Board:     call FLTSTA;          ## jb  10/1/86
+    Case  $EWCEvents$Board:     call AIRSTA;          ## jb  10/1/86
+    Case  $Rothr$Board:         call ROTSTA;          ## cml 4/30/90
+    Case  $FOTCP$Board:         call FOTCSTA;         ## jpk  9/9/87
+    Case  $FOTCS$Board:         call SFOTCSTA;        ## jpk 11/10/87
+    Case  $AirMissionHist$Board: call Air_Mission_History_Astab   # clk 12/96 (E1726)
+    Case  $AirDefenseSAM$Board: call AirDefense_STA   # SMM 12/93
+    Case  $BoatAvail$Board:     call BOATAVA;         #  AM   5/18/89
+    Case  $BoatOps$Board,$AmphibBoatOps$Board:
+       call BOATSTA;         #  reh 12/11/89
+#    Case  $EMIStat$Board:       call EMISTAT;         #  AM   8/18/89
+#    Case  $RxSignal$Board:      call SIGSTA           #  AM   8/18/89
+    Case  $Assault$Board:       call ASSAULT_ASTAB    # reh   12/7/89
+    Case  $EOIRtrack$Board:
+        {
+        if (level$ir == 0)      call EOISTA           # DEW   3/5/90
+        else                    call IRSTA
+        }
+    Case  $SPA$Board:           call SPA_Status       # SMM, CLK 10/22/91
+    Case  $MineField$Board:     call MFD_Status       # joa  4/22/95
+    Case  $NonRealTimeTrack$Board: call NRT_Status    # SMM 12/92
+    Case  $JTIDSTrack$Board:       call L16_Astab         # clk 11/95 (E1469)
+    Case  $JTIDSAirTrack$Board:    call L16_Air_Astab     # clk 12/95 (E1469)
+    Case  $JTIDSLandTrack$Board:   call L16_Land_Astab    # clk 12/95 (E1469)
+    Case  $JTIDSSurfTrack$Board:   call L16_Surf_Astab    # clk 12/95 (E1469)
+    Case  $JTMDAirToGround$Board:  call JTMD_Air_to_Ground_ASTAB  # clk 5/97 (E1791)
+    Case  $ATO$Board:              call ATOSTA
+#   Default:                    call something or other
+   }
+ 
+if  (iovflo == $yes) call CNTMSG                ## If page overflow, output
+                                                ## continue message
+ 
+if (Xsbi$AstabType$i != $VT300$code)
+    {
+    call ClsMsg                                 ## output Classification
+    }
+ 
+limit        =  xSBI$MaxLines$I    #$% reset limit to max lines
+ActualLines  = lincnt              #$% return number of lines built into ipage
+ 
+RETURN
+end
+ 
+ 
+
+ 
+Subroutine Save_State(SBI$Pointer)
+ 
+ #######################################################
+ #$%
+ #$% Purpose:   Saves  astab keys in common
+ #$%
+ #$% Called By: ASTABS
+ #$%
+ #$% Tables:    SBI
+ #$%
+ #$% Date:      March 1991
+ #$%
+ #$% Author:    H.D. Fisher
+ #$%
+ #######################################################
+BBcommon                                        ## Common variables
+STATUScommon                                    ## from STMAIN.INC
+OmronCommon                                     ##
+ 
+Integer SBI$Pointer, SBI$KEY$Index  # jb E2145     3/29/00
+ 
+##
+## PUT VARIABLE FROM STATUS COMMON BACK INTO BBSBI TABLE
+##
+#putSBI$NbrLines$I(lincnt)
+putSBI$CurrBoard$I(xSBI$ReqBoard$i) # (ibrdrq)
+putSBI$CurrPage$I(kpage)
+putSBI$CurrView$I(iview)
+putSBI$CurrSide$I(iside)
+putSBI$CurrPlayer$I(inmbr)
+ 
+putSBI$NextSect$I(nsect)
+putSBI$NextSect2$I(nsect2)                      # for fotc boards jpk 12/7/87
+SBI$KEY$Index = 1
+putSBI$KEY$Next$C(nkey)
+SBI$KEY$Index = 2
+putSBI$KEY$Next$C(nkey2)
+ 
+putSBI$CurrSect$I(lsect)
+putSBI$CurrSect2$I(lsect2)                      # for fotc boards jpk 12/7/87
+SBI$KEY$Index = 1
+putSBI$KEY$Curr$C(lkey)
+SBI$KEY$Index = 2
+putSBI$KEY$Curr$C(lkey2)
+ 
+putSBI$PageOverFlo$I(iovflo)
+putSBI$Unit_Page$I(rx_count)
+ 
+Return
+END
+
+ 
+Subroutine  BUILD_BUF(SBI$Pointer,LineStart)
+ 
+ #######################################################
+ #$%
+ #$% Purpose:   Builds a page buffer into SBI$LIN$Buf
+ #$%
+ #$% Called By: FORMAT_ASTAB
+ #$%
+ #$% Calls:     SMOVH
+ #$%
+ #$% Tables:    SBI
+ #$%
+ #$% Date:      10-MAR-82
+ #$%
+ #$% REWRITE:    Timothy P. Adamos
+ #$%
+ #######################################################
+BBcommon
+Statuscommon
+ 
+Integer*4 LineStart,LineCount,nn,   i2,jj,k         # jb E2145  3/29/00
+Integer SBI$Pointer,SBI$LIN$Index,SBI$LIN$Length$I  # jb E2145  3/29/00
+ 
+LineCount = 0
+NN = LineStart
+ 
+for (k = 1; k <= limit ; k = k+1)   ## For all lines on 1 page
+   {
+    SBI$LIN$Index = k
+ 
+    IF  (nn <= lincnt)
+        {
+        SBI$LIN$Length$I = linlen[nn]
+        jj = 0
+        i2 = SBI$LIN$Address+1
+        call smovh (ipage[1,nn], SBI$LIN$Length$I, ibb[i2], jj)
+        }
+    ELSE
+        {
+        SBI$LIN$Length$I = 0
+        }
+    putSBI$LIN$LENGTH$I
+    LineCount = LineCount + 1
+    nn = nn + 1
+   }
+putSBI$NBRLines$I (LineCount)
+ 
+return
+end
+ 
+
+ 
+literal Function NAMEVU(iside,inmbr)
+ 
+ ###########################################################################
+ #$%
+ #$% Purpose:   Convert current side code and view number into ascii name
+ #$%
+ #$% Called By: FORMAT_ASTAB
+ #$%
+ #$% Calls:     SMOVI
+ #$%
+ #$% Tables:    NONE
+ #$%
+ #$% Date:      10-MAR-82
+ #$%
+ #$% Author:    Timothy P. Adamos
+ #$%
+ ##############################################################################
+BBcommon
+ 
+Integer iside, inmbr, len   # jb E2145  3/29/00
+ 
+#$% set namevu to requested side
+if      (iside == $neutral$code) namevu = 'NEUT'
+else if (iside == $Blue$code  )  namevu = 'BLUE'
+else                             namevu = 'ORNG'
+ 
+#$% set following smovi to start after view side (4 characters)
+len = 4
+#$% if not control view, move view number to position following view side
+if (iside != $neutral$code) call smovi(inmbr,namevu,len)
+ 
+return
+end
+ 
+
+ 
+Integer Function NMBRVU(iside,inmbr)   # jb E2145 (Integer) 3/29/00
+ 
+ ##############################################################
+ #$%
+ #$% Purpose:   Find the view number for requested view side
+ #$%
+ #$% Called By: FORMAT_ASTAB
+ #$%
+ #$% Calls:     NONE
+ #$%
+ #$% Tables:    NONE
+ #$%
+ #$% Date:      10-MAR-82
+ #$%
+ #$% Author:    Timothy P. Adamos
+ #$%
+ ################################################################
+BBcommon
+ 
+Integer iside, inmbr   # jb E2145  3/29/00
+#$% set minimum number to one
+if (inmbr < 1) inmbr = 1
+ 
+#$% convert absolute view number to a number relative to
+#$% view side
+if      (iside == $neutral$code) nmbrvu = $neutral$View
+else if (iside ==  $Blue$code)
+                        nmbrvu = $FirstBlue$View   - 1 + inmbr
+else                    nmbrvu = $FirstOrange$View - 1 + inmbr
+ 
+return
+end
+ 
+
+ 
+ Integer Function COURSE(XARG)
+ 
+ #######################################################
+ #$%
+ #$% Purpose:   Convert radians to degrees
+ #$%
+ #$% Called By:
+ #$%
+ #$% Calls:
+ #$%
+ #$% Tables:
+ #$%
+ #$% Date:      10-MAR-82
+ #$%
+ #$% Author:    Timothy P. Adamos
+ #$%
+ #######################################################
+ BBimplicit     # jb E2145  3/29/00
+ 
+ REAL*4  XDEG,  XMIN, XARG  # jb  E2145  3/29/00
+ Integer IXDEG,IXMIN        # jb  E2145  3/29/00
+ 
+ XDEG = ABS(XARG*180./$PI)                      #Convert to degrees and
+ 
+ IXDEG = INT(XDEG)                              #Find integer part
+ 
+ XMIN = (XDEG-FLOAT(IXDEG))*60.                 #Convert excess to minutes
+ 
+ IXMIN = INT(XMIN+0.5)                          #Round to nearest whole min
+ 
+ if(IXMIN >= 60)                # If 60 min (might better be > 30 vice >= 60?)
+ 
+    IXDEG = IXDEG + 1
+ 
+ #$% ensure course is between 0 and 359 degrees
+ if(IXDEG >= 360)
+    IXDEG = 0
+ COURSE = IXDEG
+ 
+ return
+ 
+ end
+ 
+
+ 
+ Integer Function TRUBRG(_
+                  UNT$HEADINGERROR$F,
+                  rmt$BEARING$I)
+ 
+ #######################################################
+ #$%
+ #$% Purpose:   Gets the true bearing of force.
+ #$%
+ #$% Called By:
+ #$%
+ #$% Calls:
+ #$%
+ #$% Tables:    UNT, RMT
+ #$%
+ #$% Date:      10-MAR-82
+ #$%
+ #$% Author:    Timothy P. Adamos
+ #$%
+ #######################################################
+ BBCommon
+ 
+ REAL*4  XDEG, XMIN,UNT$HEADINGERROR$F  # jb  E2145  3/29/00
+ Integer IXDEG,IXMIN,                   # jb  E2145  3/29/00
+         RMT$Bearing$I                  # jb  E2145  3/29/00
+ 
+ XDEG = ABS(UNT$HEADINGERROR$F * 180./$PI)
+ 
+ IXDEG = INT(XDEG)
+ 
+ XMIN = (XDEG - FLOAT(IXDEG)) * 60.
+ 
+ IXMIN = INT(XMIN + 0.5)
+ 
+ if (IXMIN >=  60)                         #  Should this be 30 vice 60??
+ 
+     IXDEG = IXDEG + 1                     #
+ 
+ if (UNT$HEADINGERROR$F < 0.)              #
+ 
+     IXDEG = -IXDEG                        #
+ 
+ TRUBRG = RMT$BEARING$I - IXDEG
+ while (TRUBRG > 359) TRUBRG =TRUBRG - 360 # Adjust if over 359 deg.    4/6/82
+ 
+ RETURN
+ 
+ END
+ 
+ 
+
+ 
+Subroutine CNTMSG
+ 
+ #######################################################
+ #$%
+ #$% Purpose:   Display a continue message at bottom of page
+ #$%
+ #$% Called By:
+ #$%
+ #$% Calls:     OUTH
+ #$%
+ #$% Tables:
+ #$%
+ #$% Date:      10-MAR-82
+ #$%
+ #$% Author:    Timothy P. Adamos
+ #$%
+ #######################################################
+STATUScommon
+ 
+$restore$saved$line$count
+ 
+$prepare$next$line
+ 
+$column 15 ; $outV("***** Continued *****")
+ 
+return
+end
+ 
+
+ 
+Subroutine ClsMSG
+ 
+ #######################################################
+ #$%
+ #$% Purpose:   Display a Classification message at bottom of page
+ #$%
+ #$% Called By:
+ #$%
+ #$% Calls:     OUTH
+ #$%
+ #$% Tables:
+ #$%
+ #$% Date:      29-Jan-91
+ #$%
+ #$% Author:    Dane Wills
+ #$%
+ #######################################################
+STATUScommon
+ 
+character   class [ARB]
+ 
+class[1] = EOS
+call trnlog_v ("EXERCISE_CLASSIFICATION", class)
+ 
+if (class[1] == $SPACE & class[2] == EOS) return
+if  (iovflo == $no & lincnt == limit) return		# Don't overwrite last line of full page with classification
+ 
+ 
+# $restore$saved$line$count
+ 
+while (lincnt < limit) $prepare$next$line
+ 
+$column 40 ; $outH(class,39)  # no more than 79 characters....
+ 
+return
+end
+ 
+
+ 
+Subroutine OutH(string,kchars)
+ 
+ #######################################################
+ #$%
+ #$% Purpose:   Output a string
+ #$%
+ #$% Called By:
+ #$%
+ #$% Calls:     SMOVH
+ #$%
+ #$% Tables:
+ #$%
+ #$% Date:      10-MAR-82
+ #$%
+ #$% Author:    Timothy P. Adamos
+ #$%
+ #######################################################
+STATUScommon
+ 
+literal string[arb]
+Integer kchars          # jb  E2145  3/29/00
+ 
+call smovh(string,kchars,ipage[1,lincnt],ibyte)
+ 
+linlen[lincnt] = ibyte
+ 
+return
+end
+ 
+
+ 
+Subroutine OutHN(string,kchars)
+ 
+ #######################################################
+ #$%
+ #$% Purpose:   Output a string no prceding blanks
+ #$%
+ #$% Called By:
+ #$%
+ #$% Calls:
+ #$%
+ #$% Tables:    SMOVH
+ #$%
+ #$% Date:      10-MAR-82
+ #$%
+ #$% Author:    Timothy P. Adamos
+ #$%
+ #######################################################
+STATUScommon
+ 
+literal string[arb]
+Integer kchars          # jb  E2145  3/29/00
+ 
+call smovhn(string,kchars,ipage[1,lincnt],ibyte)
+ 
+linlen[lincnt] = ibyte
+ 
+return
+end
+ 
+ 
+
+ 
+Subroutine OutI(ival)
+ 
+ #######################################################
+ #$%
+ #$% Purpose:   Output an integer value
+ #$%
+ #$% Called By:
+ #$%
+ #$% Calls:     SMOVI
+ #$%
+ #$% Tables:
+ #$%
+ #$% Date:      10-MAR-82
+ #$%
+ #$% Author:    Timothy P. Adamos
+ #$%
+ #######################################################
+BBimplicit            # jb E2145  3/29/00
+STATUScommon
+ 
+Integer ival        # jb E2145  3/29/00
+ 
+call smovi(ival,ipage[1,lincnt],ibyte)
+ 
+linlen[lincnt] = ibyte
+ 
+return
+end
+ 
+ 
+
+ 
+Subroutine OutIB(ival,kchars)
+ 
+ #######################################################
+ #$%
+ #$% Purpose:   Output an integer value with no preceding blamks
+ #$%
+ #$% Called By:
+ #$%
+ #$% Calls:
+ #$%
+ #$% Tables:    SMOVIB
+ #$%
+ #$% Date:      10-MAR-82
+ #$%
+ #$% Author:    Timothy P. Adamos
+ #$%
+ #######################################################
+BBimplicit             # jb E2145  3/29/00
+STATUScommon
+ 
+Integer ival, kchars  # jb E2145  3/29/00
+ 
+call smovib(ival,kchars,ipage[1,lincnt],ibyte)
+ 
+linlen[lincnt] = ibyte
+ 
+return
+end
+ 
+ 
+
+ 
+Subroutine OutIZ(ival,kchars)
+ 
+ #######################################################
+ #$%
+ #$% Purpose:   Outputs an integer value with preceding zeros
+ #$%
+ #$% Called By:
+ #$%
+ #$% Calls:     SMOVIZ
+ #$%
+ #$% Tables:
+ #$%
+ #$% Date:      10-MAR-82
+ #$%
+ #$% Author:    Timothy P. Adamos
+ #$%
+ #######################################################
+BBimplicit             # jb E2145  3/29/00
+STATUScommon
+ 
+Integer ival, kchars  # jb E2145  3/29/00
+ 
+call smoviz(ival,kchars,ipage[1,lincnt],ibyte)
+ 
+linlen[lincnt] = ibyte
+ 
+return
+end
+ 
+
+ 
+Subroutine OutLL(rads,idir)
+ 
+ #######################################################
+ #$%
+ #$% Purpose:   Output the Latitude and Longitude
+ #$%
+ #$% Called By:
+ #$%
+ #$% Calls:     SMOVLL
+ #$%
+ #$% Tables:
+ #$%
+ #$% Date:      10-MAR-82
+ #$%
+ #$% Author:    Timothy P. Adamos
+ #$%
+ #######################################################
+BBimplicit             # jb E2145  3/29/00
+STATUScommon
+ 
+REAL*4      rads            # jb E2145  3/29/00
+VMSchar*2   idir            # DEW 8/1//00
+ 
+call smovll(rads,idir,ipage[1,lincnt],ibyte)
+ 
+linlen[lincnt] = ibyte
+ 
+return
+end
+ 
+
+ 
+Subroutine Out(ichar)
+ 
+ #######################################################
+ #$%
+ #$% Purpose:   Out puts a single character
+ #$%
+ #$% Called By:
+ #$%
+ #$% Calls:     SMOV
+ #$%
+ #$% Tables:
+ #$%
+ #$% Date:      10-MAR-82
+ #$%
+ #$% Author:    Timothy P. Adamos
+ #$%
+ #######################################################
+BBimplicit             # jb E2145  3/29/00
+STATUScommon
+ 
+Integer ichar          # jb E2145  3/29/00
+ 
+call smov(ichar,ipage[1,lincnt],ibyte)
+ 
+linlen[lincnt] = ibyte
+ 
+return
+end
+ 
+
+ 
+Subroutine LSTEXP(own$pointer,none)
+ 
+ #######################################################
+ #$%
+ #$% Purpose:   List the expendables
+ #$%
+ #$% Called By:
+ #$%
+ #$% Calls:     INVENT
+ #$%
+ #$% Tables:    OWN, INV
+ #$%
+ #$% Date:      10-MAR-82
+ #$%
+ #$% Author:    Timothy P. Adamos
+ #$%
+ #######################################################
+BBcommon
+InventoryCommon
+ 
+Literal name
+Integer none,inext,number,itype,        # jb  E2145   3/29/00
+        OWN$pointer,OWN$FirstInvIndx$i, # jb  E2145   3/29/00
+        INV$Pointer,INV$EXP$index       # jb  E2145   3/29/00
+ 
+repeat
+   {
+    own$FirstInvIndx$i = xown$FirstInvIndx$i
+ 
+    inext = own$FirstInvIndx$i
+    inv$exp$index = 0
+ 
+    nbreq = 0
+ 
+    repeat
+       {
+        call INVENT (inv$pointer,inv$exp$index,inext,itype,name,number)
+ 
+        if (itype == $null$code) break
+ 
+###        if (itype != $NonAC$code) next    # jb Removed    8/2/90
+ 
+         #$% if type not expendable item, get next entry
+         if (itype != $Expendable$code) next
+ 
+        nbreq = nbreq + 1
+ 
+        if (nbreq > 100) break
+ 
+        iquant[nbreq] = number
+        nameq[nbreq]  = name
+       }
+ 
+   } until (xown$FirstInvIndx$i == own$FirstInvIndx$i)
+ 
+if (nbreq > 0) none = $no
+else           none = $yes
+ 
+return
+end
+ 
+
+ 
+Subroutine LSTGND(own$pointer,none)
+ 
+########################################################################
+#$%
+#$% Purpose:   LSTGND generates list of equipment names and number of
+#$%            items remaining of ground equipment items.
+#$%
+#$% Called By: AIRENT     SHPENT
+#$%            SHRENT     SUBENT
+#$%
+#$% Calls:     INVENT
+#$%
+#$% Tables:    OWN     INV
+#$%
+#$% Date:      4/5/90
+#$%
+#$% Author:    hfisher - CSC
+#$%
+########################################################################
+BBcommon
+InventoryCommon
+ 
+Literal name
+Integer none,inext,number,itype,        # jb  E2145   3/29/00
+        OWN$pointer,OWN$FirstInvIndx$i, # jb  E2145   3/29/00
+        INV$Pointer,INV$EXP$index       # jb  E2145   3/29/00
+ 
+repeat
+   {
+    #$% set index for INV table
+    own$FirstInvIndx$i = xown$FirstInvIndx$i
+ 
+    #$% set next index
+    inext = own$FirstInvIndx$i
+    inv$exp$index = 0
+ 
+    #$% zero equipment number
+    nbreq = 0
+ 
+    repeat
+       {
+        #$% get equipment type, name, and number remaining
+        call INVENT (inv$pointer,inv$exp$index,inext,itype,name,number)
+ 
+        #$% if type is null, break loop
+        if (itype == $null$code) break
+ 
+         #$% if type not ground item, get next entry
+         if (itype != $GroundObject$code) next
+ 
+        #$% increment equipment number
+        nbreq = nbreq + 1
+ 
+        #$% if greater than limit, break loop
+        if (nbreq > 100) break
+ 
+        #$% save name and number remaining
+        iquant[nbreq] = number
+        nameq[nbreq] = name
+       }
+ 
+     #$% end loop
+   } until (xown$FirstInvIndx$i == own$FirstInvIndx$i)
+ 
+#$% set test flag
+if (nbreq > 0) none = $no
+else           none = $yes
+ 
+return
+end
+ 
+
+ 
+Subroutine INVENT (inv$pointer,inv$exp$index,inext,itype,name,number)
+ 
+ #######################################################
+ #$%
+ #$% Purpose:   Get the inventory of a force
+ #$%
+ #$% Called By:
+ #$%
+ #$% Calls:
+ #$%
+ #$% Tables:    INV
+ #$%
+ #$% Date:      10-MAR-82
+ #$%
+ #$% Author:    Timothy P. Adamos
+ #$%
+ #######################################################
+BBcommon
+ 
+Literal name, INV$EXP$Name$C, CSTRIP8       # jb  E2145   3/29/00
+Integer inext,number,itype,                 # jb  E2145   3/29/00
+        INV$Pointer, INV$EXP$Remaining$I,   # jb  E2145   3/29/00
+        INV$EXP$Type$I,INV$EXP$index        # jb  E2145   3/29/00
+ 
+inv$exp$index = inv$exp$index + 1
+ 
+if (inv$exp$index > inv$exp$slots)
+   {
+    inv$exp$index = 1
+   }
+ 
+if (inv$exp$index == 1)
+   {
+    if (inext == 0)
+       {
+        itype = $null$code
+        return
+       }
+ 
+    inv$pointer$to inext
+ 
+    inext = xinv$nextindx$i
+   }
+ 
+inv$exp$type$i = xinv$exp$type$i
+itype = inv$exp$type$i
+ 
+if (itype == $null$code)  return
+ 
+inv$exp$remaining$i = xinv$exp$remaining$i
+inv$exp$name$c      = xinv$exp$name$c
+ 
+number = inv$exp$remaining$i
+name   = inv$exp$name$c
+ 
+return
+end
+ 
+
+ 
+Subroutine FMTEXP(icol)
+ 
+ #######################################################
+ #$%
+ #$% Purpose:   Format the expendables
+ #$%
+ #$% Called By:
+ #$%
+ #$% Calls:     NEXTEXP, OUTIB, OUTH
+ #$%
+ #$% Tables:
+ #$%
+ #$% Date:      10-MAR-82
+ #$%
+ #$% Author:    Timothy P. Adamos
+ #$%
+ #######################################################
+BBimplicit              # jb E2145  3/29/00
+StatusCommon
+ 
+Literal jname
+Integer icol, jquant    # jb E2145  3/29/00
+ 
+repeat
+   {
+    call NXTEXP(jquant,jname)
+ 
+    if (jname == 0) break
+ 
+    if ($beyond$column 68)
+       {
+        $test$next$line ; $exit$on$overflow
+ 
+        $prepare$next$line
+ 
+        $column icol
+       }
+ 
+    $outIB(jquant,5) ; $over 1 ; $outH(jname,$$MaxLit) ; $over 2
+   }
+ 
+return
+end
+ 
+
+ 
+Subroutine NXTEXP(jquant,jname)
+ 
+ #######################################################
+ #$%
+ #$% Purpose:   Get the next expendable
+ #$%
+ #$% Called By:
+ #$%
+ #$% Calls:
+ #$%
+ #$% Tables:
+ #$%
+ #$% Date:      10-MAR-82
+ #$%
+ #$% Author:    Timothy P. Adamos
+ #$%
+ #$% Modified:  Susan Miller - 4/98 (E1506)
+ #$%            Added loop to add an asterisk to the name
+ #$%            of a SAM to be displayed on the ASTAB when
+ #$%            JECEWSI jamming is occuring.
+ #$%
+ #######################################################
+BBimplicit              # jb E2145  3/29/00
+InventoryCommon
+StatusCommon
+ 
+Literal jname,iname
+integer loop, result
+Integer i,inxt, jquant,nres, LITCMP # jb E2145  3/29/00
+ 
+jname = $highest$ascii
+ 
+for (i=1 ; i<=nbreq ; i=i+1)
+   {
+    iname = nameq[i]
+    if (iname == 0) next
+ 
+    nres = litcmp(iname,jname)
+ 
+    if  (nres >= 0) next
+ 
+    jname = iname                               # at this point, have
+                                                # best candidate so far
+    inxt = i
+   }
+ 
+if (jname == $highest$ascii)
+   {
+    jname = 0
+    return
+   }
+ 
+jquant = iquant[inxt]
+jname  = nameq[inxt]
+ 
+nameq[inxt] = 0
+ 
+# only greater than 0 if jecewsi game and launch is degraded. SMM 4/98 (E1506)
+if (number_of_sams > 0)
+  {
+   for (loop = 1; loop <= number_of_sams; loop = loop + 1)
+     {
+      result = litcmp(sam_names(loop),jname)
+      if (result == 0)
+        {
+         call add_an_asterisk(jname)
+         break
+        }
+     }
+  }
+ 
+return
+end
+
+ 
+Subroutine Check_for_degraded_SAM_launch(UNT$Pointer,  # attacker pointer
+                                         DEQ_Index)    # SAM DEQ index
+ 
+#######################################################
+#$%
+#$% Purpose:   To check for jecewsi values that may
+#$%            keep a SAM from being launched so it
+#$%            can be displayed on the ASTAB. (E1506)
+#$%
+#$% Called By: SHPENT
+#$%
+#$% Calls:
+#$%
+#$% Tables:    DEQ  JEW   UNT   MC   CMC
+#$%
+#$% Date:      April 1998
+#$%
+#$% Author:    Susan Miller (E1506)
+#$%
+#######################################################
+BBCommon
+InventoryCommon # defines sam_names, number_of_sams
+ 
+Literal CSTRIP8                 # jb E2145  3/29/00
+integer UNT$Pointer, DEQ_Index
+integer launch_degraded
+integer MC$Pointer, CMC$Pointer
+Integer DEQ$Pointer,JEW$Pointer # jb E2145  3/29/00
+ 
+DEQ$Pointer$To DEQ_Index
+ 
+if (JECEWSI$GAME != $no)
+  {
+   JEW$Pointer$To (UNT$Pointer$Index)
+   if ((xJEW$LaunchFactor1$F < 1.0) |
+       (xJEW$LaunchFactor2$F < 1.0) |
+       (xJEW$LaunchFactor3$F < 1.0) |
+       (xJEW$LaunchFactor4$F < 1.0) |
+       (xJEW$LaunchFactor5$F < 1.0) |
+       (xJEW$LaunchFactor6$F < 1.0) |
+       (xJEW$LaunchFactor7$F < 1.0) |
+       (xJEW$LaunchFactor8$F < 1.0))
+     {
+      number_of_sams = number_of_sams + 1
+      if ((xDEQ$Ident$I == $SAM$Code) &
+          (Level$AA > 0))
+        {
+         launch_degraded = $yes
+         MC$Pointer = xDEQ$Pntr$I
+         sam_names(number_of_sams) = xMC$Name$C
+        }
+      else
+        {
+         launch_degraded = $yes
+         CMC$Pointer = xDEQ$Pntr$I
+         sam_names(number_of_sams) = xCMC$Type$C
+        }
+     } # end if launch degraded
+  }
+ 
+return
+end
+
+subroutine add_an_asterisk(device_name)
+#######################################################
+#$%
+#$% Purpose:   Add an asterisk in the appropriate place
+#$%            in the name in order to indicate on the
+#$%            ASTAB that JECEWSI jamming is degrading
+#$%            SAM launchs.
+#$% Note:  Assume that the SAM name is not greater than 5 characters.
+#$%         Oops.. no longer true assumption... changed for
+#$%         case where names may now be $$MaxName characters.
+#$%         (up to 8 characters)  In which case, zap last byte.
+#$%
+#$% Called By: NXTEXP
+#$%
+#$% Date:      April 1998
+#$%
+#$% Author:    Susan Miller (E1506)
+#$% Modified:   2-Aug-2000 D Wills (E2149) Argument
+#$%
+#######################################################
+BBCommon
+ 
+literal     device_name
+ 
+literal     name_lit
+VMSchar*8   name_str
+equivalence (name_lit,name_str)
+ 
+integer     kk, nn
+ 
+name_lit = $BLANKLIT
+kk = 0
+ 
+call vmovhn (device_name, $$MaxName, name_str, kk)
+ 
+# is there room for 3 characters?
+# between the actual length of name and $$MaxLit
+#
+# Alternating   " *" and " @" if 2 or more bytes available
+# or if only 1, "*"  and "@"
+ 
+# Lose the last byte if no room....(make room)  # DEW 2-aug-00
+if (kk >= $$MaxLit) kk = $$MaxLit - 1
+nn = $$MaxLit - kk
+ 
+if (nn >= 2) call vmovv (" ",  name_str,kk)
+ 
+if (mod(Game$Minute,2)==0)  # On EVEN Minutes
+    {
+    call vmovv ("*",   name_str,kk)
+    }
+else                        # On ODD Minutes
+    {
+    call vmovv ("@",   name_str,kk)
+    }
+ 
+device_name = name_lit
+ 
+return
+end
+ 
+
+ 
+Subroutine Astab_find_text (SBI$Pointer, sta$Pointer,LineTotal,
+                            ActualLines,RequestType)
+ 
+ #######################################################
+ #$%
+ #$% Purpose:   Controls finding of text on current astab
+ #$%
+ #$% Called By: ASTAB
+ #$%
+ #$% Tables:    STA, SBI
+ #$%
+ #$% Date:      11-FEB-07
+ #$%
+ #$% Author:    James O. Allen
+ #$%
+ #######################################################
+BBcommon                                        ## Common variables
+STATUScommon                                    ## from SBMAIN.INC
+OmronCommon                                     ##
+ 
+literal NAMEVU, CSTRIP8                           # jb E2145     3/29/00
+Integer NMBRVU, I_SWITCH_1  # jb Integer function & SWITCH E2145 3/29/00
+Integer LineTotal,ActualLines,ireqst,RequestType,
+        STA$Pointer,                              # jb E2145     3/29/00
+        SBI$Pointer,SBI$KEY$Index                 # jb E2145     3/29/00
+ 
+integer fpage, fline, fcol, tfound, astab_find_text_onpage
+ 
+ 
+# Remember current page, line and column
+fpage                 =  xSBI$CurrPage$I
+fline                 =  xSBI$CurrFindLine$I
+fcol                  =  xSBI$CurrFindCol$I
+tfound = $no
+putSBI$UpdateRequest$I($None$Code)
+ 
+# Attempt to find string.  Stop when reach last page of astab.
+repeat
+{
+    # Search from current position
+    call format_astab (sbi$pointer, sta$pointer,LineTotal,
+                       ActualLines, RequestType)
+ 
+    tfound = astab_find_text_onpage (SBI$Pointer)
+    if (tfound == $yes) break
+ 
+    if (iovflo == $no) break        # Reached last page of astab
+ 
+    putSBI$UpdateRequest$I($Continue$Code)
+    PUTsbi$CurrFindLine$i (0)
+    PUTsbi$CurrFindCol$i (0)
+ 
+    call save_state (sbi$pointer)
+}
+ 
+if (tfound == $no)
+{
+	print "(A)", "Text not found on current ASTAB.\n\r"
+    #call echov ("Text not found on current ASTAB.")
+    #call echor
+}
+ 
+ 
+RETURN
+end
+
+integer function astab_find_text_onpage (SBI$Pointer)
+BBcommon                                        ## Common variables
+STATUScommon                                    ## from SBMAIN.INC
+OmronCommon                                     ##
+ 
+character CPAGE[arith($ST$Line$words,*,4),$Max$Lines]    ## page buffer
+equivalence (ipage, cpage)
+ 
+literal text, cstrip8
+character ctext[9]
+equivalence (ctext, text)
+ 
+BBDeclare (sbi$pointer,
+           sbi$CurrFindLine$i,
+           sbi$CurrFindCol$i,
+           sbi$AstabFindText$c)
+ 
+integer line, col, lentext, lastcol, almostequaluc
+ 
+lentext = 0
+text = $BLANKLIT
+call smovhn (Xsbi$AstabFindText$c, $$MaxLit, text, lentext)
+call smov   (EOS, text, lentext)
+ 
+sbi$CurrFindLine$i = Xsbi$CurrFindLine$i
+sbi$CurrFindCol$i  = Xsbi$CurrFindCol$i
+ 
+if (sbi$CurrFindLine$i == 0) sbi$CurrFindLine$i = 3    # Ship first two lines of header
+ 
+# Loop through remainder of page
+for (line = sbi$CurrFindLine$i; line <= lincnt; line=line+1)
+{
+    lastcol = linlen[line] - lenText + 2
+    for (col = sbi$CurrFindCol$i + 1; col <= lastcol; col = col + 1)
+    {
+        if (almostequaluc (text, cpage[col,line]) == YES)
+        {
+            PUTsbi$CurrFindLine$i (line)
+            PUTsbi$CurrFindCol$i (col)
+            return ($yes)
+        }
+ 
+    }
+    sbi$CurrFindCol$i = 0
+}
+ 
+return ($no)
+end
+ 
+
+ 
+integer function almostequaluc (str1,str2)        # compare two strings for the
+IMPLICIT NONE
+Integer i
+character       str1[ARB], str2[ARB]            # length of the first argument
+                                                # (till the first NULL)
+character cupper
+ 
+for (i=1; str1[i] != EOS; i=i+1)
+{
+    if (cupper(str1[i]) != cupper(str2[i])) return NO
+}
+ 
+return YES
+ 
+end

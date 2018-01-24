@@ -1,0 +1,1908 @@
+# This file contains cruise missile engagement routines (E1864)
+# The following routines iused to be in wgmdeng.rat:
+#    cmepro, cmfind, cmtsel, cmhit, get_cm_ph, and process_cm_hit
+ 
+define($epsilon,(1.0/6000.0))   # Added to prevent problem with roundoff  DEW 8/99
+ 
+include "ascii.inc"
+include "bbacc.inc"
+include "bbaml.inc"
+include "bbbom.inc"
+include "bbcode.inc"
+include "bbcmc.inc"
+include "bbctl.inc"
+include "bbdeq.inc"                  # jb (replaced DYN with DEQ table)   3/89
+include "bbjew.inc"               # JFR for jecewsi - 8/31/94
+include "bblcl.inc"
+include "bbmc.inc"
+include "bbpim.inc"
+include "bbrad.inc"
+include "bbshc.inc"
+include "bbunt.inc"
+include "cenglog.inc"             # 7/12/85 COMMON BLOCK FOR ENGAGE LOG DATA
+include "orders.inc"                # jb                               7/20/89
+include "macros.inc"
+                                  # GATHERING CODE.  called "ENcommon".
+include "hseng.inc"
+include "wgmdeng.inc"               # reh, 5/14/90
+ 
+ 
+define(trace$engage$exe, istrip(trace$engage,0,M1bits)) # trace general exec
+define(BBimplicit, IMPLICIT NONE)   # jb E2145  5/17/00
+
+ 
+subroutine cmepro (UNT$Pointer)
+ 
+########################################################
+#$%
+#$% Purpose:   CMEPRO processes cruise missile
+#$%            engagements.  If previous target
+#$%            is lost, an attempt is made to
+#$%            locate a new target.
+#$%
+#$% Called By: ENGAGE
+#$%
+#$% Calls:     CMFIND     CMHIT
+#$%
+#$% Tables:    UNT
+#$%
+#$% Date:      JAN 81
+#$%
+#$% Author:    Dana Wills
+#$%
+#$% Modified:  Susan Miller 4/93 to allow launching of cruise missiles
+#$%            at positions PER #E1165
+#$%
+#$%            Jim Allen - 2/98 (E1864)
+#$%            Use rangetonext=0 & attackindx check to call cmhit
+#$%
+#$%            John McCormick - 10/98 (e2043)
+#$%            Use attackedtarget flag rather than last leg for test
+#$%            to avoid vanishing symbol on leg before last waypoint.
+########################################################
+ 
+BBcommon
+ENcommon
+ 
+LITERAL  CSTRIP8                                     # jb E2145 5/18/00
+integer UNT$CMFireMode$I, UNT$AttackedTarget$I    # smm 4/93
+Integer UNT$Pointer,UNT$Status$I, UNT$Assignedtarget$I, # jb E2145 5/17/00
+        CMC$Pointer,UNT2$Pointer,PIM$Pointer            # jb E2145 5/17/00
+ 
+UNT$CMFireMode$I = xUNT$CMFireMode$I
+UNT$AttackedTarget$I = xUNT$AttackedTarget$I
+ 
+CMC$Pointer = xUNT$CMCpntr$I     # Get the characteristics pointer
+ 
+UNT$AssignedTarget$i = xUNT$AssignedTarget$i
+UNT$CMFireMode$i = xUNT$CMFireMode$i
+ 
+if (UNT$assignedtarget$i != $no &
+    UNT$AssignedTarget$i != UNT$Engaging$Position &
+    UNT$CMFireMode$i     != $CMBase$code &
+    UNT$AssignedTarget$i != Missile$Engaging$Land)
+    {
+    call check_loss_of_target (UNT$Pointer)
+    }
+ 
+if (xUNT$assignedtarget$i == $no)
+   {
+    UNT$status$i = $proceeding$code
+    putUNT$status$i
+    putUNT$assignedtarget$i ($NO)
+    putUNT$attackindx$i ($NO)
+ 
+    call cmfind(UNT$Pointer)                    #try to locate a target
+   }
+ 
+#$% if missile seeker activated, target will know
+if(xUNT$TimeSeek$F <= Game$Time &
+   UNT$assignedTarget$i != $no   &
+   Xcmc$SeekerType$i != $ESM$Code)
+{
+    unt2$pointer$to UNT$AssignedTarget$i
+    if (unt2$pointer$ok)                        # Could be attacking position
+        putunt2$underattack$i ($YES)
+}
+ 
+if (UNT$AssignedTarget$i == UNT$Engaging$Position)
+{
+    unt2$pointer = 0
+    PIM$Pointer$to Xunt$PIMindx$i
+ 
+    # CM on last leg  JA 8/98 E2017
+    # Using attacktedtarget rather than last leg for test (E2043) jhm 10/98
+    if (xUNT$RangeToNext$f == 0.0 & xUNT$AttackedTarget$I == $YES)
+        call cmhit(UNT$Pointer,unt2$pointer)    #test for effect of missile
+}
+ 
+else if (xUNT$AttackIndx$i != 0)
+ 
+{
+    unt2$pointer$to xUNT$AttackIndx$i
+    if (xUNT$RangeToNext$f == 0.0)
+        call cmhit(UNT$Pointer,unt2$pointer)    #test for effect of missile
+}
+ 
+if (xUNT$TimeTerm$F <= Game$Time)             #if missile flight terminated
+{
+ 
+    if (xUNT$AssignedTarget$i == Missile$Engaging$Land)
+    {
+        if (log$engage != $no)
+        {
+            putENG$Time$F (Game$Time)
+            putENG$Platform$C (xUNT$Name$C)
+            putENG$Track$C ("LAND    ")           # 12/01 JHM (E2248)
+            putENG$RecLat$f (Xunt$TrueLatitude$f)       # E2224
+            putENG$RecLon$f (Xunt$TrueLongitude$f)
+            putENG$Weapon$C (xCMC$Type$C)
+            putENG$Result$I (ENG$Miss$Code)
+            call write_eng_rec
+        }   # end of if an engagement log is desired
+    }
+    else if (xUNT$Status$i != $BeingDeleted$code)  # Has not hit
+    {
+        #$% if an engagment log is being kept, log the termination
+        if (log$engage != $no)                  # clk 2/94 (E1124)
+            call Log_Run_Time_Termination (UNT$Pointer, CMC$Pointer)
+    }
+ 
+    putUNT$status$i ($beingdeleted$code)        #remove missile from system
+}                                            #end if missile flight term.
+ 
+ 
+return
+end    # End CMEPRO
+
+ 
+subroutine check_loss_of_target (_
+                                 UNT$Pointer)  # Cruise Missile
+BBcommon
+Integer UNT$Pointer, UNT$Status$I,       # jb E2145 5/17/00
+    UNT2$Pointer, UNT2$Status$I,         # jb E2145 5/17/00
+    SHC$Pointer,CMC$Pointer,DEQ$Pointer, # jb E2145 5/17/00
+    KRDRON, IUPI                         # jb E2145 5/17/00
+logical iSURFCD                          # jb       7/3/89
+ 
+unt2$pointer$to xUNT$assignedtarget$i
+ 
+isurfcd = .true.
+ 
+# Note:  CMFIND eliminates FALSE units..
+if (Xunt2$type$i == $sub$code )         # if target IS sub,     4/7/83
+{
+    SHC$Pointer = xUNT2$SHCpntr$i       # below KEEL depth? (jb 3/27/89)
+    iSURFCD = (Xunt2$truealtdepth$i <= Xshc$KEELDEPTH$i) # flag (jb 7/3/89)
+}
+ 
+KrdrON = $YES                           # Initlz. radarON flag  6/1/83
+CMC$Pointer = xUNT$CMCpntr$I     # Get the characteristics pointer SMM 8/98
+if (Xcmc$SeekerType$i == $ESM$Code)     # If an ARM msl:        5/25/83
+{
+    if (Xunt2$NbrEq$i > 0)              #                       3/27/89
+    {
+        KrdrON = $NO            # Assume targt radar OFF        5/25/83
+        iUPI = UNT2$Pointer$index       # jb                    3/27/89
+        for_DEQ_CHAIN (iUPI)            # jb                    3/27/89
+        {                            # jb                    3/27/89
+            if ( xDEQ$IDENT$i == $RADAR$code & xDEQ$ON$i == $ON )
+            {
+                KrdrON = $YES           # Flag radar ON
+                BREAK
+            }
+        } # end of loop thru deq chain
+    } # end if target has some equipment # 5/25/83
+}   #  End "if (Xcmc$SeekerType$i == $ESM$Code)"            5/25/83
+ 
+unt2$status$i = xunt2$status$i
+ 
+##--- Take action if target is inappropriate:--
+ 
+if(unt2$status$i == $beingdeleted$code |        # or gone, or radar is
+   KrdrON == $NO | !iSURFCD)          #jb  OFF; or submerged    7/3/89
+{
+    if (trace$engage$exe     != $no &
+        xUNT$assignedtarget$i != $no  ) # SMM 8/98
+    {
+        call echor
+        call echoV  ('!')         # jb E2144 (echoV)         8/2/00
+        call echov (" CM ")     # jb  E2144 (pass string)   5/22/00
+        call echoi (UNT$Pointer$index)
+        call echov (", target lost ! (")    # jb  E2144 (pass string)  5/22/00
+        call echoi (krdron)
+        call echoi (isurfcd)        # note that isurfcd is a LOGICAL..
+        call echoi (unt2$status$i)
+        call echoV  (")")                # jb E2144 (echoV)        8/2/00
+    }
+ 
+    UNT$status$i = $proceeding$code
+    putUNT$status$i
+ 
+    putUNT$assignedtarget$i ($NO)
+    putUNT$attackindx$i     ($NO)
+}
+ 
+return
+end
+ 
+
+ Subroutine CMFIND(_                            #
+            UNT$POINTER)                        #receive unit pointer
+ 
+ 
+#######################################################
+ #$%
+ #$% Purpose:   CMFIND invokes specific find based on fire mode
+ #$%
+ #$% Called By: CMEPRO
+ #$%
+ #$% Calls:     cmfind_bol  cmfind_rbl
+ #$%
+ #$% Tables:    UNT        CMC
+ #$%
+ #$% Date:      Feb 1998 (E1864)
+ #$%
+ #$% Author:    Jim Allen  - 2/98 (E1864)
+ #$%            Added handling for BOL and RBL target
+ #$%            acquisition
+ #$%
+ #######################################################
+BBcommon
+ENcommon
+ 
+Integer UNT$Pointer, UNT$CMfiremode$I     # jb E2145 5/17/00
+ 
+UNT$CMFireMode$i = xUNT$CMFireMode$i
+ 
+if (UNT$CMFireMode$i == $CMBOL$code)
+    call cmfind_BOL (UNT$Pointer)
+else if (UNT$CMFireMode$i == $CMRBL$code)
+    call cmfind_RBL (UNT$Pointer)
+else if (UNT$CMFireMode$i == $CMPOS$code)
+    putUNT$AssignedTarget$I (UNT$Engaging$Position)
+# Never should lose base assignment.
+ 
+return
+end
+ 
+
+ Subroutine CMFIND_BOL(_                            #
+            UNT$POINTER)                        #receive unit pointer
+ 
+#######################################################
+ #$%
+ #$% Purpose:   CMFIND_BOL locates a new target within
+ #$%            range and field for a cruise missile
+ #$%            which has lost the previous target
+ #$%            and if following a line of bearing
+ #$%
+ #$% Called By: CMFIND
+ #$%
+ #$% Calls:     PREPRX_M    PROXIM_M     ANGPI
+ #$%            CMTSEL
+ #$%
+ #$% Tables:    UNT        CMC
+ #$%
+ #$% Date:      JAN 81
+ #$%
+ #$% Author:    Gary Thoma
+ #$%
+ #$% Modified:  Jim Allen - 11/95 (E1422)
+ #$%            Missiles with active seekers over land
+ #$%            will acquire the land and impact.
+ #$%
+ #$%            Jim Allen - 2/98 (E1864)
+ #$%            Changed name from cmfind to cmfind_bol
+ #$%            Seeker range adjusted to max(seeker range, min travel)
+ #$%
+ #$%            Susan Miller 4/99 (E2077)
+ #$%            Allow a shorebase to be a target.
+ #######################################################
+BBcommon
+ENcommon
+ 
+LITERAL  CSTRIP8                                     # jb E2145 5/18/00
+real    launch_lat, launch_lon, csLaunchlat          # jb E2145 5/18/00
+REAL  HALFSWATH,BRNG,DIFF,HALFARC,DIFF_LNCH,BEARING  # jb E2145 5/17/00
+REAL  RNG,XRNG,RNG_FROM_LAUNCH,RANGE_SEEKER_ON,RANGE,  # jb E2145 5/17/00
+      SEEKERRANGE, SEEKEROFFRANGE                     # jb E2145 5/17/00
+REAL  TIME_EARLY, TRAVELPERCYCLE, CPA                 # jb E2145 5/18/00
+REAL  UNT$Timeseek$F,UNT$Truelatitude$F, UNT$Timeterm$F,  # jb E2145 5/17/00
+      UNT$Costruelat$F,UNT$Attackrange$F,UNT$Truelongitude$F #jb E2145 5/17/00
+REAL  UNT2$Truelatitude$F, UNT2$Truelongitude$F, UNT2$Costruelat$F #jb E2145
+Integer UNT$Pointer,UNT$Status$I,UNT$Assignedtarget$I,  # jb E2145 5/17/00
+        UNT$Attackindx$I                                # jb E2145 5/17/00
+Integer CMC$Pointer, CMC$Seekerrange$I,                 # jb E2145 5/17/00
+        CMC$Seekertype$I, CMC$Targsel$I                 # jb E2145 5/17/00
+Integer UNT2$Pointer, UNT2$Type$I                       # jb E2145 5/17/00
+Integer SHC$Pointer                                     # jb E2145 5/17/00
+Integer lesm,NTCS,iCAN,I_SWITCH_1,ISIDE1,ISIDE2         # jb E2145 5/17/00
+integer NTPTR                                  #               8/9/95
+integer land_target    # function to determine land interference (E1422)
+ 
+ 
+UNT$TimeSeek$F = xUNT$TimeSeek$F
+ 
+if(UNT$TimeSeek$F - Time$Step + $epsilon > Game$Time)   #if seeker not activated within ts
+    return                                    # JA 8/98 E2017
+                                              # take advantage of floating pt time
+CMC$POINTER = xUNT$CMCPNTR$I                #get CMC pointer
+ 
+# compute if this is being done a cycle early (look-ahead)
+time_early = max (0.0, UNT$TimeSeek$F - game$time )         # DEW 8/99
+ 
+TravelPerCycle = Xcmc$AvgSpeed$i * $Hours$per$minute * Time$Step  #JA 8/98 E2017
+                                                                  # travel now per cycle, not per minute (necessarily)
+# Make sure missile does not hop over targets by possibly adjusting seeker rng
+SeekerRange = max(float(Xcmc$SeekerRange$i), TravelPerCycle)
+ 
+#$% Get range seeker turns on
+ 
+range_seeker_on = (xUNT$TimeSeek$f - xUNT$TimeLaunched$F) * $Hours$per$Minute *
+         Xcmc$AvgSpeed$i
+ 
+#$% initialize proximity parameters
+UNT$TRUELATITUDE$F = xUNT$TRUELATITUDE$F
+UNT$TRUELONGITUDE$F = xUNT$TRUELONGITUDE$F
+UNT$COSTRUELAT$F    = xUNT$COSTRUELAT$F
+ 
+CMC$SeekerType$I = xCMC$SeekerType$I       # CM radar seeker can not detect
+ 
+# Calculate launch position using launch time and reverse bearing
+Launch_lat = UNT$TrueLatitude$f
+Launch_lon = UNT$TrueLongitude$f
+csLaunchlat = UNT$CosTrueLat$f
+ 
+range = (Game$Time - xUNT$TimeLaunched$F) * $Hours$per$Minute *
+         Xcmc$AvgSpeed$i
+bearing = xUNT$TrueCourse$f + $PI
+call ang2pi (bearing)
+ 
+call RRB2LL(launch_lat, launch_lon, range, bearing, 0.0, csLaunchlat)
+ 
+# We now have the Launch Lat/Lon
+ 
+# if we are turning seeker on early, move lat/lon to where we would be if on time
+ 
+if (time_early > 0.0)  # this is the looking-ahead condition  # DEW 8/99
+    {
+    # compute position of where seeker should be turned on (from launch point)
+ 
+    UNT$TRUELATITUDE$F  = launch_lat
+    UNT$TRUELONGITUDE$F = Launch_lon
+    UNT$COSTRUELAT$F    = csLaunchlat
+ 
+    bearing = xUNT$TrueCourse$f
+    range = range_seeker_on
+ 
+    call RRB2LL(UNT$TRUELATITUDE$F,
+                UNT$TRUELONGITUDE$F,
+                range, bearing, 0.0,
+                UNT$COSTRUELAT$F)
+ 
+    # This Lat/Lon now at the seeker-on point,
+    # which is farther ahead than the current TRUE lat/Lon    # DEW 8/99
+    }
+ 
+# Set PREPRX to the True location of Missile
+ 
+call preprx_M(UNT$Pointer$Index,                  # jb  _M      9/05/89
+              UNT$TRUELATITUDE$F,
+              UNT$TRUELONGITUDE$F,
+              UNT$COSTRUELAT$F,
+              SeekerRange)
+ 
+NTCS = 0                                    #initialize TCS to 0
+ 
+NTPTR = 0                                   #initialize target to 0
+ 
+LESM = $NO                                  #flag no ESM detection
+ 
+CMC$SEEKERTYPE$I = XCMC$SEEKERTYPE$I        #get seeker type
+ 
+CMC$TARGSEL$I = XCMC$TARGSEL$I              #get select protocol
+ 
+XRNG = 0.                                   #set min range for test
+ 
+if(CMC$TARGSEL$I == $NEAR$CODE)             #if protocol is near
+{
+    XRNG = 100000.                           #set max range for test
+}                                         #end if near protocol
+ 
+# get the side of this missile              # DEW 8/99
+call whside(xUNT$view$i,iside1)             #       8/9/85
+ 
+#$% for each unit entry, look for potential targets
+for(UNT2$POINTER$FIRST;still_ok(UNT2);UNT2$POINTER$NEXT)  # 9/26/88
+{
+    if(unt2$Pointer == UNT$Pointer) NEXT    #               8/8/85
+    if(Xunt2$Status$i == $BeingDeleted$code) next
+ 
+    #$% if unit is hiding, get next one
+    if (xunt2$HideStatus$I == $CurrentlyHiding) next           #KHC 9/92
+ 
+    #$% if the unit is a Hide Site, then get next one
+    if (xUNT2$type$I == $Site$Code & xUNT2$SubType$I == $HideSite$SubCode) #khc 9/92
+        NEXT
+ 
+    #$% get range from missile launch position to target
+    call RLL2RB(Launch_lat,
+                Launch_lon,
+                csLaunchlat,
+                Xunt2$TrueLatitude$f,
+                Xunt2$TrueLongitude$f,
+                Xunt2$CosTrueLat$f,
+                rng_from_launch,
+                brng)
+ 
+    if (rng_from_launch < Xcmc$MinEngageRange$i) next
+ 
+    if (rng_from_launch < range_seeker_on ) next                # DEW 8/99
+ 
+    diff = brng - xUNT$truecourse$f
+    $angpi(diff)
+    diff_lnch = ABS(diff)
+ 
+    UNT2$TYPE$I = XUNT2$TYPE$I               #get target type
+ 
+    ICAN = $NO                               #               8/8/85
+    SWITCH (unt2$TYPE$I)
+    {
+        case $air$code:
+            if (Xcmc$TargAircraft$i != $NO) ican = $YES   #       7/8/85
+ 
+        case $CruiseMissile$CODE:
+        {
+            #$% find blue/orange allegiance of this missile..
+            call whside(Xunt2$view$i,iside2)             #       8/9/85
+            #$% if both missiles on the same side,
+            if (iside1 == iside2) NEXT   #MUST NOT BE CONSIDERED 8/9/85
+            else if (Xcmc$TargCruise$i != $NO)   ican = $YES     #7/8/85
+        }
+ 
+        # added shorebase SMM 4/99 (E2077)
+        case $SURFACE$CODE,$SUB$CODE,$Shorebase$Code :  # $SURFACEWITHAC$CODE,
+            if (Xcmc$TargShip$i != $NO) ican = $YES       #       7/8/85
+    }
+ 
+ 
+    if (ican != $NO)                                 #       7/8/85
+    {
+        if (unt2$type$i == $sub$code )        # if target IS sub, 4/7/83
+        {
+            SHC$Pointer = xunt2$SHCpntr$i       #  below KEEL depth..3/27/89
+            if (Xunt2$truealtdepth$i > Xshc$KEELDEPTH$i) #Ifso, SKIP 3/27/89
+                NEXT
+        }
+ 
+        #$% get range and bearing to target
+        unt2$TRUELATITUDE$F  = xunt2$TRUELATITUDE$F
+        unt2$TRUELONGITUDE$F = xunt2$TRUELONGITUDE$F
+        unt2$COSTRUELAT$F    = xunt2$COSTRUELAT$F
+ 
+        call proxim_M(unt2$Pointer$Index,    # jb    _M        9/5/89
+                      unt2$TRUELATITUDE$F,
+                      unt2$TRUELONGITUDE$F,
+                      unt2$COSTRUELAT$F,
+                      RNG,                      #receive range
+                      BRNG)                     #receive true bearing
+ 
+        if (rng < 0.0)  next                  #skip if too far away
+ 
+        diff = brng - xUNT$truecourse$f
+        $angpi(diff)
+        diff = ABS(diff)                      #               8/20/85
+ 
+        # See if Target is behind cruise missile
+        if (diff > $PI/2.)    NEXT            #               8/20/85
+ 
+        cmc$SeekerRange$i =Xcmc$SeekerRange$i #               8/20/85
+        HalfArc = (Xcmc$SeekerArc$i/2.) * $deg2rad      # always <= PI/4.
+ 
+#        # See if target is outside the seeker arc               # DEW 8/99
+#        if (diff > HalfArc )    NEXT            # Target outside of Arc DEW
+ 
+        if (HalfArc < $PI/2.)                   # Avoid infinite value
+            HalfSwath = cmc$SeekerRange$i * SIN(HalfArc)
+        else
+            HalfSwath = cmc$SeekerRange$i       # Half swath = seeker range
+ 
+        # There is an assumption that missile travels the length of
+        # the arc wedge in one cycle.
+#        if (xUNT$TimeSeek$F == Game$Time)   # this line is broke (FLOAT == FLOAT)
+        if (xUNT$TimeSeek$F - Game$Time >= 0.0)
+        {
+            if (diff > HalfArc) NEXT     # target outside arc
+        }
+        else if (xUNT$TimeSeek$F < Game$Time)
+        {
+            CPA = rng * SIN(diff)        # Closest point of approach
+            if (CPA > HalfSwath) NEXT    # Outside swath
+        }
+ 
+        #$% test cruise missile target
+        call CMTSEL(_                         #select best target
+               UNT$Pointer,                     #pass missile pointer
+               cmc$pointer,                     #pass missile char pointer
+               UNT2$POINTER,                    #pass possible target pointer
+               RNG,                             #pass possible target range
+               BRNG,                            #pass true bearing to possible target     # clk 12/31/92
+               CMC$TARGSEL$I,                   #pass select protocol
+               XRNG,                            #pass/receive target test range
+               NTCS,                            #pass/receive TCS status
+               LESM,                            #pass/receive ESM flag
+               NTPTR)                           #receive target pointer
+ 
+        if(xUNT$Status$i == $BeingDeleted$code) BREAK
+    }
+}                                         #end for all units
+ 
+if (LESM == 0)                            # Used Radar for targeting
+{
+    if (land_target(UNT$Pointer, CMC$Pointer) == $yes)  # if the missile acquired land
+    {                                              # impact it - joa 11/95 (E1422)
+        putUNT$AssignedTarget$I (Missile$Engaging$Land)
+        putUNT$TimeTerm$F (Game$Time - Time$Step)   # JOA UFL04 TimeTerm i
+                                                    # packed field and may
+                                                    # not compare exactly
+                                                    # with game$time
+        ntptr = 0
+ 
+        IF  (trace$engage$exe != $no)
+        {
+            call echor
+            call echov ("! CM.....")
+            call echohn (xUNT$Name$C, $$MaxLit)
+            call echov (" Attacking Land ")
+            call echor
+        }
+    } # end of if the missile is over land
+}
+ 
+if(NTPTR != 0)                              #if a target was selected
+{
+    UNT2$POINTER = NTPTR                     #restore target pointer
+ 
+    PUTUNT2$UNDERATTACK$I ($YES)
+ 
+    UNT$ASSIGNEDTARGET$I = UNT2$POINTER$INDEX #insert assigned tgt index
+    putUNT$ASSIGNEDTARGET$I
+ 
+    UNT$status$i = $proceeding$code
+    putUNT$status$i
+ 
+    UNT$ATTACKINDX$I = UNT$assignedtarget$i  #insert tgt as attack guide
+    putUNT$ATTACKINDX$I
+ 
+    UNT$ATTACKRANGE$F = 0.0                  #attack range zero
+    putUNT$ATTACKRANGE$F
+ 
+    # Once a target is assigned enable missile to use all gas
+    UNT$TimeTerm$F = xUNT$TimeLaunched$F + Float(xCMC$MaxFlightDur$I)
+    putUNT$TimeTerm$F
+ 
+    if (trace$engage$exe != $no)
+    {
+        call echor
+        call echoV  ('!')                    # jb E2144 (echoV)        8/2/00
+        call echov (" CM target select....") # jb E2144 (pass string) 5/22/00
+        call echoi (UNT$Pointer$index)
+        call echov (" Attacking ")           # jb E2144 (pass string) 5/22/00
+        call echohn (xunt2$name$c,$$MaxLit)
+    }
+}                                         #end if target selected
+ 
+return
+end    # End CMFIND_BOL
+
+ Subroutine CMFIND_RBL(_                            #
+            UNT$POINTER)                        #receive unit pointer
+ 
+#######################################################
+ #$%
+ #$% Purpose:   CMFIND_RBL locates a new target within
+ #$%            an acquisition circle.  The largest target
+ #$%            closest to to circle center is chosen.
+ #$%
+ #$% Called By: CMFIND
+ #$%
+ #$% Calls:     PREPRX    PROXIM     ANGPI
+ #$%
+ #$% Tables:    UNT        CMC
+ #$%
+ #$% Date:      Feb 1998 (E1864)
+ #$%
+ #$% Author:    Jim Allen
+ #$%
+ #$% Modified:  Jim Allen 8/98 UFL98
+ #$%            Fixed CM that never terminates because slightly away from
+ #$%            circle center
+ #$%
+ #$%            Susan Miller 4/99 (E2077)
+ #$%            Allow a shorebase to be a target.
+ #######################################################
+BBcommon
+ENcommon
+ 
+LITERAL  CSTRIP8                                     # jb E2145 5/18/00
+real    destruct_delay
+real    launch_lat, launch_lon, CSlaunchLAT                # jb E2145 5/18/00
+REAL    PIM$PTS$Latitude$F, PIM$PTS$Longitude$F            # jb E2145 5/18/00
+Integer PIM$Pointer, PIM$PTS$Index,                        # jb E2145 5/17/00
+        UNT$Pointer,UNT$Status$I, SHC$Pointer              # jb E2145 5/18/00
+REAL UNT$Attackrange$F,UNT$Timeterm$F,UNT2$Truelatitude$F, # jb E2145 5/17/00
+    UNT2$Truelongitude$F,UNT2$Costruelat$F                 # jb E2145 5/17/00
+REAL RANGE,XRNG,RNG_FROM_LAUNCH,RNG,RNG_FROM_MISSILE       # jb E2145 5/17/00
+REAL BEARING,BRNG,DIFF                                     # jb E2145 5/17/00
+Integer UNT2$Pointer,UNT2$Type$I,                           # jb E2145 5/17/00
+        UNT$Assignedtarget$I,UNT$Attackindx$I              # jb E2145 5/18/00
+Integer CMC$Pointer,CMC$RBL$Index,CMC$RBL$targetradius$I,  # jb E2145 5/17/00
+        CMC$Seekertype$I, CMC$Targsel$I                    # jb E2145 5/17/00
+Integer ICAN,I_SWITCH_1,ISIDE1,ISIDE2,NTCS,LESM            # jb E2145 5/17/00
+integer NTPTR                                  #               8/9/95
+integer land_target    # function to determine land interference (E1422)
+ 
+ 
+if(xUNT$TimeSeek$F - Time$Step + $epsilon > Game$Time)   #if seeker not activated within ts
+    return                                    # JA 8/98 E2017, include time step time interval
+ 
+CMC$POINTER = xUNT$CMCPNTR$I                #get CMC pointer
+ 
+#$% initialize proximity parameters
+pim$pointer$to xUNT$PimIndx$i
+pim$PTS$index = Xpim$Nlegs$i + 1                # Last pim point is circle center
+pim$PTS$Latitude$f =  Xpim$PTS$Latitude$f
+pim$PTS$Longitude$f = Xpim$PTS$Longitude$f
+cmc$RBL$Index = xUNT$CMRBLIndx$i
+cmc$RBL$TargetRadius$i = Xcmc$RBL$TargetRadius$i
+call preprx(_
+              pim$PTS$Latitude$f,
+              pim$PTS$Longitude$f,
+              cos(pim$PTS$Latitude$f),
+              float(cmc$RBL$TargetRadius$i))
+ 
+# Calculate launch position using launch time and reverse bearing
+Launch_lat = xUNT$TrueLatitude$f
+Launch_lon = xUNT$TrueLongitude$f
+csLaunchlat = xUNT$CosTrueLat$f
+ 
+range = (Game$Time - xUNT$TimeLaunched$F) * $Hours$per$Minute *
+         Xcmc$AvgSpeed$i
+bearing = xUNT$TrueCourse$f + $PI
+call ang2pi (bearing)
+ 
+call RRB2LL(launch_lat, launch_lon, range, bearing, 0.0, csLaunchlat)
+ 
+NTCS = 0                                    #initialize TCS to 0
+ 
+NTPTR = 0                                   #initialize target to 0
+ 
+LESM = $NO                                  #flag no ESM detection
+ 
+CMC$SEEKERTYPE$I = XCMC$SEEKERTYPE$I        #get seeker type
+ 
+CMC$TARGSEL$I = XCMC$TARGSEL$I              #get select protocol
+ 
+XRNG = 0.                                   #set min range for test
+ 
+if(CMC$TARGSEL$I == $NEAR$CODE)             #if protocol is near
+{
+    XRNG = 100000.                           #set max range for test
+}                                         #end if near protocol
+ 
+#$% for each unit entry
+for(UNT2$POINTER$FIRST;still_ok(UNT2);UNT2$POINTER$NEXT)  # 9/26/88
+{
+    if(unt2$Pointer == UNT$Pointer) NEXT    #               8/8/85
+    if(Xunt2$Status$i == $BeingDeleted$code) next
+ 
+    #$% if unit is hiding, get next one
+    if (xunt2$HideStatus$I == $CurrentlyHiding) next           #KHC 9/92
+ 
+    #$% if the unit is a Hide Site, then get next one
+    if (xUNT2$type$I == $Site$Code & xUNT2$SubType$I == $HideSite$SubCode) #khc 9/92
+        NEXT
+ 
+    #$% get range from missile launch position to target
+    call RLL2RB(Launch_lat,
+                Launch_lon,
+                csLaunchlat,
+                Xunt2$TrueLatitude$f,
+                Xunt2$TrueLongitude$f,
+                Xunt2$CosTrueLat$f,
+                rng_from_launch,
+                brng)
+ 
+    if (rng_from_launch < Xcmc$MinEngageRange$i) next
+ 
+ 
+    UNT2$TYPE$I = XUNT2$TYPE$I               #get target type
+ 
+    ICAN = $NO                               #               8/8/85
+    SWITCH (unt2$TYPE$I)
+    {
+        case $air$code:
+            if (Xcmc$TargAircraft$i != $NO) ican = $YES   #       7/8/85
+ 
+        case $CruiseMissile$CODE:
+        {
+            #$% find blue/orange allegiance of both missiles..
+            call whside(xUNT$view$i,iside1)              #       8/9/85
+            call whside(Xunt2$view$i,iside2)             #       8/9/85
+            #$% if both missiles on the same side,
+            if (iside1 == iside2) NEXT   #MUST NOT BE CONSIDERED 8/9/85
+            else if (Xcmc$TargCruise$i != $NO)   ican = $YES     #7/8/85
+        }
+ 
+        # added shorebase SMM 4/99 (E2077)
+        case $SURFACE$CODE,$SUB$CODE,$Shorebase$Code :  # $SURFACEWITHAC$CODE,
+            if (Xcmc$TargShip$i != $NO) ican = $YES       #       7/8/85
+    }
+ 
+ 
+    if (ican != $NO)                                 #       7/8/85
+    {
+        if (unt2$type$i == $sub$code )        # if target IS sub, 4/7/83
+        {
+            SHC$Pointer = xunt2$SHCpntr$i       #  below KEEL depth..3/27/89
+            if (Xunt2$truealtdepth$i > Xshc$KEELDEPTH$i) #Ifso, SKIP 3/27/89
+                NEXT
+        }
+ 
+        #$% get range and bearing to target
+        unt2$TRUELATITUDE$F  = xunt2$TRUELATITUDE$F
+        unt2$TRUELONGITUDE$F = xunt2$TRUELONGITUDE$F
+        unt2$COSTRUELAT$F    = xunt2$COSTRUELAT$F
+ 
+        call proxim(_
+                      unt2$TRUELATITUDE$F,
+                      unt2$TRUELONGITUDE$F,
+                      unt2$COSTRUELAT$F,
+                      RNG,                      #receive range
+                      BRNG)                     #receive true bearing
+ 
+        if (rng < 0.0)  next                  #skip if too far away
+ 
+        if (rng > cmc$RBL$TargetRadius$i)  next  # Outside circle
+ 
+        #$% get range from missile to target
+        call RLL2RB(xUNT$TrueLatitude$f,
+                    xUNT$TrueLongitude$f,
+                    xUNT$CosTrueLat$f,
+                    unt2$TrueLatitude$f,
+                    unt2$TrueLongitude$f,
+                    unt2$CosTrueLat$f,
+                    rng_from_missile,
+                    brng)
+ 
+        diff = brng - xUNT$truecourse$f
+ 
+        $angpi(diff)
+ 
+        diff = ABS(diff)
+        # See if Target is behind cruise missile
+        if (diff > $PI/2.)    NEXT
+ 
+        #$% test cruise missile target
+        call CMTSEL(_                         #select best target
+               UNT$Pointer,                     #pass missile pointer
+               cmc$pointer,                     #pass missile char pointer
+               UNT2$POINTER,                    #pass possible target pointer
+               RNG,                             #pass possible target range
+               BRNG,                            #pass true bearing to possible target     # clk 12/31/92
+               CMC$TARGSEL$I,                   #pass select protocol
+               XRNG,                            #pass/receive target test range
+               NTCS,                            #pass/receive TCS status
+               LESM,                            #pass/receive ESM flag
+               NTPTR)                           #receive target pointer
+ 
+        if(xUNT$Status$i == $BeingDeleted$code) BREAK
+        if(xUNT$AssignedTarget$i != 0) BREAK
+    }
+}                                         #end for all units
+ 
+if (LESM == 0)                            # Used Radar for targeting
+{
+    if (land_target(UNT$Pointer, CMC$Pointer) == $yes)  # if the missile acquired land
+    {                                              # impact it - joa 11/95 (E1422)
+        putUNT$AssignedTarget$I (Missile$Engaging$Land)
+        putUNT$TimeTerm$F (Game$Time - Time$step)    # JOA UFL04
+        ntptr = 0
+ 
+        IF  (trace$engage$exe != $no)
+        {
+            call echor
+            call echov ("! CM.....")
+            call echohn (xUNT$Name$C, $$MaxLit)
+            call echov (" Attacking Land ")
+            call echor
+        }
+    } # end of if the missile is over land
+}
+ 
+if(NTPTR != 0)                              #if a target was selected
+{
+    UNT2$POINTER = NTPTR                     #restore target pointer
+ 
+    PUTUNT2$UNDERATTACK$I ($YES)
+ 
+    UNT$ASSIGNEDTARGET$I = UNT2$POINTER$INDEX #insert assigned tgt index
+    putUNT$ASSIGNEDTARGET$I
+ 
+    UNT$status$i = $proceeding$code
+    putUNT$status$i
+ 
+    UNT$ATTACKINDX$I = UNT$assignedtarget$i  #insert tgt as attack guide
+    putUNT$ATTACKINDX$I
+ 
+    UNT$ATTACKRANGE$F = 0.0                  #attack range zero
+    putUNT$ATTACKRANGE$F
+ 
+    if (trace$engage$exe != $no)
+    {
+        call echor
+        call echoV  ('!')                      # jb E2144 (echoV)        8/2/00
+        call echov (" CM target select....")   # jb E2144 (pass string) 5/22/00
+        call echoi (UNT$Pointer$index)
+        call echov (" Attacking ")             # jb E2144 (pass string) 5/22/00
+        call echohn (xunt2$name$c,$$MaxLit)
+    }
+}                                         #end if target selected
+else
+{
+ 
+    #$% get range from missile to to center of acquisition circle
+    call RLL2RB(pim$PTS$Latitude$f,
+                pim$PTS$Longitude$f,
+                cos(pim$PTS$Latitude$f),
+                xUNT$TrueLatitude$f,
+                xUNT$TrueLongitude$f,
+                xUNT$CosTrueLat$f,
+                rng,
+                brng)
+ 
+    # Destroy missile at acq circle center if no target
+    destruct_delay = rng / Float (xCMC$AvgSpeed$I) * $Minutes$Per$Hour
+    UNT$TimeTerm$F = min(destruct_delay + Game$Time,    # joa 8/98 (E2026) - cm hanging over target
+                         xUNT$TimeLaunched$F + Float(xCMC$MaxFlightDur$I))
+    putUNT$TimeTerm$F
+}
+ 
+return
+end    # End CMFIND_RBL
+ 
+
+subroutine cmtsel(_                    #
+                  UNT$Pointer,         # Receive missile (UNUSED)
+                  cmc$pointer,         # receive missile char pointer
+                  unt2$pointer,        # receive possible target pointer
+                  rng,                 # receive possible target range
+                  brng,                # receive bearing to possible target   # clk 12/31/92
+                  cmc$targsel$i,       # receive select protocol
+                  xrng,                # receive/return current selected target range
+                  ntcs,                # receive/return current selected tcs status
+                  lesm,                # receive/return esm target status
+                  ntptr)               # return selected target ptr
+ 
+# clk 12/31/92:  Removed cmc$seekertype$i and added bearing in argument list.
+ 
+########################################################
+#$%
+#$% Purpose:   CMTSEL determines the best available
+#$%            surface target for a cruise missile
+#$%            which has lost the previous target.
+#$%
+#$% Called By: CMFIND
+#$%
+#$% Calls:     None
+#$%
+#$% Tables:    UNT        CMC        ACC
+#$%            RAD        SHC
+#$%
+#$% Date:      JAN 81
+#$%
+#$% Author:    Gary Thoma
+#$%
+#$% Modified:  Carol Kropp 12/31/92
+#$%            Joe Bryant's fix to obtain the cross section
+#$%            from the appropriate characteristic table,
+#$%            based on the target type.  Previously the value
+#$%            was pulled from the SHC table, no matter what
+#$%            the target type was.  Also added the update of
+#$%            XRNG, so that the distance to the previous
+#$%            selected target is known for the near protocol.
+#$%
+#$%            Jim Allen - 11/95 (E1422)
+#$%            When the swath is over land, the active seeker
+#$%            will acquire and impact the ground.
+#$%
+#$%            Jim Allen - 12/97 (E1864)
+#$%            Near/Far protocol now only used to discriminate
+#$%            targets with equal cross section
+#$%            Target must pass minimum cross section test
+#$%            RCS in target selection now optional
+#$%
+#$%            Susan Miller - 4/99 (E2077)
+#$%            Remove cross section limitation if the target
+#$%            is a shorebase.
+########################################################
+BBcommon
+ENcommon
+ 
+real     bearing, relative_bearing      # clk 12/31/92
+ 
+REAL UNT2$Truecourse$F, XRNG,RNG,BRNG            # jb E2145 5/18/00
+Integer UNT$Pointer, UNT2$Pointer, UNT2$Type$I,  # jb E2145 5/18/00
+    ACC$Pointer, ACC$CRS$Index,                  # jb E2145 5/18/00
+    CMC$Pointer,CMC$Seekertype$I,CMC$Usercsinselection$I,   # jb E2145 5/18/00
+    CMC$ASP$Index,CMC$RE$Index,CMC$RE$indx$I,CMC$Targsel$I, # jb E2145 5/18/00
+    SHC$Pointer, RAD$Pointer, DEQ$Pointer                   # jb E2145 5/18/00
+Integer LR,LM,NBLIP,I_SWITCH_1,IHOLD_POINTER,               # jb E2145 5/18/00
+        IUPI,NRADX,LESM,NTCS,NTPTR,NTEST                    # jb E2145 5/18/00
+integer  cross_section                  # clk 12/31/92
+integer  cmc$MinSeekerRCS$i             # SMM 4/99 (E2077)
+ 
+LR = $NO                                        #flag no pure radar target
+LM = $NO                                        #flag no emitter match
+NBLIP = $NO                                     #flag no blip enhancement
+ 
+#$% Addition to obtained target cross-section       12/31/92
+UNT2$Type$I = xUNT2$Type$I
+switch (UNT2$Type$I)
+  {
+   case $Air$Code:
+     {
+     if (Xunt2$ASMDactive$i == 1)       # ASMD added  jms 4/20/93
+        {
+        iUPI = unt2$pointer$index
+        for_deq_chain (iUPI)
+           {
+           if (Xdeq$ident$i == $ASMD$code) cross_section = xDEQ$CrossSect$i
+           }
+        }
+     else
+        {
+        ACC$Pointer = xUNT2$AccPntr$I
+        if (xACC$VrblXS$I == $yes)   # if target has a variable cross-section
+          {                          # compute the cross-section index
+           bearing = brng + $pi      # adjust bearing from target to radar
+           if (bearing >= $twopi)
+             bearing = bearing - $twopi  # adjust to <= 360 degrees
+ 
+           UNT2$TrueCourse$F = xUNT2$TrueCourse$F
+           relative_bearing = bearing - UNT2$TrueCourse$F
+           $angpi (relative_bearing)
+           if (relative_bearing < 0.0)
+                                # make sure relative brng is between 0 and PI
+             relative_bearing = relative_bearing * -1.0
+ 
+           ACC$CRS$Index = 1.5 + (6.0 * relative_bearing / $pi)
+           ACC$CRS$Index = MIN (ACC$CRS$Index, ACC$CRS$Slots)
+          }   # end of if a/c target has a variable cross-section
+        else  # target has a single cross-section
+           ACC$CRS$Index = 1
+ 
+        cross_section = xACC$CRS$Sect$I  # db with respect to 1 sq. meter
+        }
+     }  # end of aircraft type
+ 
+   case $CruiseMissile$Code:
+     {
+      ihold_pointer = CMC$Pointer      # save the attacking CM CMC pointer
+      CMC$Pointer = xUNT2$CmcPntr$I    # target CM pointer
+ 
+      if (xCMC$VrblXS$I == $yes)       # if target has a variable cross-section
+        {                              # compute the cross-section index
+         bearing = brng + $pi          # adjust bearing from target to radar
+         if (bearing >= $twopi)
+           bearing = bearing - $twopi  # adjust to <= 360 degrees
+ 
+         UNT2$TrueCourse$F = xUNT2$TrueCourse$F
+         relative_bearing = bearing - UNT2$TrueCourse$F
+         $angpi (relative_bearing)
+         if (relative_bearing < 0.0)   # make sure relative brng is between 0 and PI
+           relative_bearing = relative_bearing * -1.0
+ 
+         CMC$ASP$Index = 1.5 + (6.0 * relative_bearing / $pi)
+         CMC$ASP$Index = MIN (CMC$ASP$Index, CMC$ASP$Slots)
+        }   # end of if cruise missile target has a variable cross-section
+      else  # target has a single cross-section
+         CMC$ASP$Index = 1
+ 
+      cross_section = xCMC$ASP$CrossSect$I
+      CMC$Pointer = ihold_pointer      # restore attacking CM CMC pointer
+     }  # end of cruise missile type
+ 
+   default:   # UNT2$Type$i == $Surface$Code | $Sub$Code | $Shorebase$Code
+     {
+      SHC$Pointer = xUNT2$ShcPntr$I
+      cross_section = xSHC$CrossSect$I
+     }  # end of default case
+  }     # end of target type case statement
+#$% End of fix to obtain correct cross-section      12/31/92
+ 
+cmc$MinSeekerRCS$i = Xcmc$MinSeekerRCS$i
+if ((cross_section < Xcmc$MinSeekerRCS$i)  &   # Missile seeker cannot detect target
+    (UNT2$Type$I != $ShoreBase$Code))  # exclude this test for shorebase
+    return                             # target SMM 4/99 (E2077)
+ 
+#$% for each equipment entry
+iUPI = UNT2$Pointer$index               # jb                        3/28/89
+for_DEQ_CHAIN (iUPI)                    # jb                        3/28/89
+   {
+    if(Xdeq$IDENT$I == $BLIP$CODE &    #if ship has blip enhance jb 3/28/89
+       Xdeq$ON$I == $YES)              #and it is active         jb 3/28/89
+       {
+        NBLIP = $YES                            #flag blip enhancement
+        break
+       }
+   }
+ 
+cmc$UseRCSInSelection$i = Xcmc$UseRCSInSelection$i
+ 
+CMC$SeekerType$I = xCMC$SeekerType$I    # 12/31/92:  removed from parameter list
+if (CMC$SEEKERTYPE$I == $RADESM$CODE |          #if seeker has ESM
+    CMC$SEEKERTYPE$I == $ESM$CODE     )
+   {
+    #$% for each equipment entry in link list
+    for_DEQ_CHAIN (iUPI)
+       {
+        #$% if equipment is not radar, get next
+        if (Xdeq$IDENT$I != $RADAR$CODE) next
+        #$% if equipment not active, get next
+        if (Xdeq$ON$I != $YES) next
+ 
+        if (xDEQ$TimeWhenUse$F > Game$Time)   # if equipment cannot be used
+          next                                  # 12/31/92
+ 
+        RAD$POINTER = Xdeq$PNTR$I
+        NRADX = RAD$POINTER$INDEX               #get radar index
+ 
+                                                #search emitter list
+        for (CMC$RE$INDEX=1; CMC$RE$index$ok; cmc$re$index=cmc$re$index+1)
+           {
+            CMC$RE$INDX$I = Xcmc$re$indx$i
+ 
+            if (CMC$RE$INDX$I == 0) break       #out of emitters?
+ 
+            if (CMC$RE$INDX$I != NRADX) next    #if emitter not found
+ 
+            LM = $YES                           # set emitter flag to YES
+            break 2
+           }
+       }
+ 
+    if (LM == $YES)                             #if emitter found
+       {
+        if (LESM == $NO)                        #if no previous emitter
+           {
+            NTCS = cross_section                #save target cross section
+ 
+            if(NBLIP == $YES)                   #if blip enhance active
+                NTCS = 1000000                  #cross section to maximum
+ 
+            NTPTR = UNT2$POINTER                #save selected target pointer
+            XRNG = RNG                          #save target range
+            LESM = $YES                         #flag ESM target selected
+           }
+       }
+    else
+       {
+        if (LESM == $NO                    &    #if no ESM target selected
+            CMC$SEEKERTYPE$I == $RADESM$CODE)   #and cm has radar
+           {
+            LR = $YES                           #flag radar targeting
+           }
+       }
+   }
+else
+   {
+    LR = $YES                                   #flag radar targeting
+   }
+ 
+NTEST = $NO                                     #flag no protocoltest
+ 
+if (LR == $YES)                                 #if radar targeting
+   {
+    if (cmc$UseRCSInSelection$i == $NO)
+        {
+        if(RNG < XRNG)                      #if closer target
+            {
+            NTPTR = UNT2$POINTER            #save target pointer
+            XRNG = RNG                      # save the new selected target range   # clk 1/5/93
+            }
+        }
+ 
+    else
+        {
+        if(NBLIP == $YES)                           #if blip enhanced
+           {
+            if(NTCS == 1000000)                     #if another was enhanced
+               NTEST = $YES                         #flag protocol test
+            else
+               {
+                NTPTR = UNT2$POINTER                #save target pointer
+                NTCS = 1000000                      #cross section to max
+               }
+           }
+        else    # possible target is not blip enhanced
+           {
+            if (cross_section >= NTCS)              #if larger or equal target
+               NTEST = $YES                         #flag protocol test
+           }
+ 
+        if (NTEST == $YES)                          #if protocol test required
+           {
+            if (cross_section == NTCS)
+                {
+                if (CMC$TARGSEL$I == $NEAR$CODE)        #if near protocol
+                   {
+                    if(RNG < XRNG)                      #if closer target
+                       {
+                        NTPTR = UNT2$POINTER            #save target pointer
+                        NTCS = cross_section            #save target cross section
+                        XRNG = RNG                      # save the new selected target range   # clk 1/5/93
+                       }
+                   }
+                else    # far protocol
+                   {
+                    if(RNG > XRNG)                      #if farther target
+                       {
+                        NTPTR = UNT2$POINTER            #save target pointer
+                        NTCS = cross_section            #save target cross section
+                        XRNG = RNG                      # save the new selected target range   # clk 1/5/93
+                       }
+                   }
+                }
+            else                                # Larger cross section
+                {
+                NTPTR = UNT2$POINTER            #save target pointer
+                NTCS = cross_section            #save target cross section
+                XRNG = RNG                      # save the new selected target range   # clk 1/5/93
+                }
+ 
+           }
+        }
+   }
+ 
+return
+end    #  End CMTSEL
+ 
+
+Subroutine CMHIT(_              #
+           UNT$POINTER,         # receive attacking missile's  pointer
+           UNT2$POINTER)        #receive target pointer
+########################################################
+#$%
+#$% Purpose:   CMHIT determines the probability of
+#$%            a cruise missile hitting a target.
+#$%            If the target is hit, damage effects
+#$%            are set up for later evaluation.
+#$%            Countermeasure effects are also
+#$%            evaluated.
+#$%
+#$% Called By: CMEPRO
+#$%
+#$% Calls:     DEQ_JAMTST
+#$%
+#$% Tables:    UNT        CMC        DEQ
+#$%            RAD
+#$%
+#$% Date:      JAN 81
+#$%
+#$% Author:    Dana Wills
+#$%
+#$% Modified:  Carol Kropp - 12/93
+#$%            Added for cruise missiles engaging ALSP
+#$%            ghosts.  Moved code for computing ph and
+#$%            processing a hit to separate routines,
+#$%            so that the code could be reused.
+#$%
+#$%            Carol Kropp - 10/95 (E1455)
+#$%            When the target is a "shared" base, an ALSP
+#$%            interaction message needs to be sent as well
+#$%            as damage assessment to the RESA version of
+#$%            the base.
+#$%
+#$%            Jonathan Richardson - 6/96 (E1084)
+#$%            Defined msg & msg_len to send a message to
+#$%            the player view when a unit is hit by a
+#$%            nuclear cruise missile.
+#$%
+#$%            Jim Allen - 2/98 (E1864)
+#$%            Use CM fire mode to determine type of CM fire
+#$%            Missile is always marked for deletion
+#$%
+########################################################
+BBcommon
+NUcommon        # holds variables needed by SEND_DETON  4/2/85
+ENcommon
+ 
+LITERAL  CSTRIP8                                     # jb E2145 5/18/00
+Real*4   Rand_Num
+real     mburange      # function to determine MBU range - jhm 3/98 (E1947)
+REAL  UNT$Truelatitude$F, UNT$Truelongitude$F,   # jb E2145 5/18/00
+      RANDOM, RANGE_TO_MBU, PH                   # jb E2145 5/18/00
+integer SHC$Pointer, UNT2$Pointer, UNT$Pointer, CMC$Pointer
+Integer UNT$View$I, UNT$Targettype$I,            # jb E2145 5/18/00
+    UNT2$Misshits$I, UNT2$Hits$I                 # jb E2145 5/18/00
+Integer X, IEPUS, IDUMMY                         # jb E2145 5/18/00
+Integer*4 CounterMeasureType
+integer     msg_len
+character   msg[ARB]
+ 
+# SMM 4/94 delete the missile so that an attacking SAM will not try to destroy
+# it when it has already hit a target.
+putUNT$Status$I ($BeingDeleted$Code)
+ 
+IF  (xUNT$hits$i >= 1)
+    RETURN     # This crsmsl has been intercepted..
+ 
+CMC$Pointer = xUNT$CMCPntr$I
+ 
+if (xUNT$CMFireMode$i == $CMPos$code)  # it was fired on a position
+{
+    UNT$TrueLatitude$F = xUNT$TrueLatitude$F
+    UNT$TrueLongitude$F = xUNT$TrueLongitude$F
+    UNT$TargetType$I = xUNT$TargetType$I
+ 
+    # note - this routine will only send a msg if ALSP is active
+    call ALSP_Send_Posit_Engage (UNT$Pointer, $CruiseMissile$Code,
+                                 CMC$Pointer, 1,
+                                 UNT$TrueLatitude$F, UNT$TrueLongitude$F,
+                                 UNT$TargetType$I)
+ 
+    iepus = INT ((xCMC$Weight$I * 0.01) + 0.5)
+    call Log_Posit_Eng (UNT$Pointer, CMC$Pointer,
+                        UNT$TrueLatitude$F, UNT$TrueLongitude$F,
+                        0, 1, 1, iepus)   # zero range, one hit, one fired
+ 
+    # since the cm is impacting and the status is set to
+    # being deleted, go ahead and clear the BTT info
+    call Clear_BTT_Info (UNT$Pointer)   # clk 6/95 (E1419)
+ 
+    return
+}
+ 
+else if (xUNT2$GhostedUnit$I == $yes &      # if an ALSP ghost - clk 12/93
+    ALSP$Active == $yes)
+  {
+   UNT$TargetType$I = xUNT$TargetType$I
+   call ALSP_Send_CM_Engage (UNT$Pointer, UNT2$Pointer, UNT$TargetType$I)
+   call Log_ALSP_Engagement_Engdata (UNT$Pointer,UNT2$Pointer,
+                             xCMC$Type$C, 0, 1)
+   putUNT$Hits$I (100) # remove crsmsl attacking other than aircraft
+   return
+  }
+else if (xUNT2$Type$I == $ShoreBase$Code)    # clk 10/95 (E1455)
+  {
+   SHC$Pointer = xUNT2$SHCpntr$I
+   if (xSHC$ALSPSharedBase$I == $yes & ALSP$Active == $yes)
+     {
+      UNT$TargetType$I = xUNT$TargetType$I
+      call ALSP_Send_CM_Engage (UNT$Pointer, UNT2$Pointer, UNT$TargetType$I)
+      call Log_ALSP_Engagement_engdata (UNT$Pointer,UNT2$Pointer,
+                                        xCMC$Type$C, 0, 1)
+     }
+  }
+ 
+call Get_CM_PH (CMC$Pointer, UNT2$Pointer,UNT$Pointer,
+                ph, countermeasuretype)
+ 
+IF  (trace$engage$exe != $no)
+    {
+    call echor
+    call echov ("! CM.....")
+    call echohn (xUNT$Name$C, $$MaxLit)
+    call echov (" Attacking ")
+    call echohn (xunt2$name$c,$$MaxLit)
+    call echov (" PH = ")
+    call echof (ph, 0703)
+    }
+ 
+iYIELD = Xcmc$Yield$i     ## <<<>>> Added 4/2/85 for attacking cruisemissile nuclear..
+IF  (iYIELD >0 & Nuclear$Capable !=$NO & xUNT$Nuclear$i !=$NO)
+                    # attacking cruisemsl NUCLEAR.4/25/85
+    {
+    # Set up variables in NUcommon for call to SEND_DETON subroutine:
+    IntcptFlag = 0  #    NOT intercepted..
+    FLAT = Xunt2$TrueLatitude$F   ##..whose position is this.. (jb 3/27/89)
+    FLON = Xunt2$TrueLongitude$F
+    nPH  = PH*100 +0.5            #..with this Ph to define missdist...
+    UNT$VIEW$I = xUNT$VIEW$I
+    IF  (UNT$VIEW$I > $LastBlue$View)
+        kside = 2
+    ELSE IF (UNT$VIEW$I > $Neutral$View)
+        kside = 1
+    ELSE
+        kside = 0
+ 
+    iBURST  = Xcmc$BurstType$i
+    iDEPTH = 1                    # Irrelevant.. NOT subsurface..
+    IF  (iBURST == $SubSurface$Code)
+        iDEPTH = Xcmc$BurstDepth$I +1 # add 1 to this flag for convenience
+            #of NUCDAM processing..which expects 1 or 2 vice 0 or 1
+ 
+    IF  (xUNT2$TYPE$I == $ShoreBase$Code)    # jb Since NUCDAM gives 10/21/86
+        {                            # no damage VS shorebases, this 10/21/86
+        UNT2$HITS$I = XUNT2$HITS$I          # insertion is made to  10/21/86
+        UNT2$HITS$I = max(UNT2$HITS$I,77)   # cause some to occur   10/21/86
+        putUNT2$HITS$I                      #  by bringing the      10/21/86
+        UNT2$MissHITS$I = XUNT2$MissHITS$I  #  conventional damage  10/21/86
+        UNT2$MissHITS$I = max(UNT2$MissHITS$I,77) # model
+        putUNT2$MissHITS$I                  #  into play...         10/21/86
+        }
+ 
+    msg_len = 0        # jfr - (E1084)
+    call smovhn (xUNT2$Name$C, $$MaxLit, msg, msg_len)
+    call smovv  (" DAMAGED BY NUCLEAR CRUISE MISSILE", msg, msg_len)
+    call send_   (xUNT2$View$I, 0, msg_len, msg)
+ 
+    call SEND_DETON
+    }   ##  <<<>>> End of 4/2/85 addition for attacking crsmsl nuclear..
+ELSE            ###  attacking cruisemissile NOT nuclear  4/4/85
+    {
+    Rand_Num = RANDOM(X)
+ 
+    IF  (PH >= Rand_Num)                           #if target gets hit
+        {
+         IF  (log$engage != $no)             # if engagement log desired
+           {
+            call engdata (UNT$Pointer, UNT2$Pointer)
+            putENG$Weapon$C (xCMC$Type$C)
+            if (UNT2$Pointer$Valid)      #JHM 12/01  BOL does not have valid UNT2 (E2248)
+               {                         # (E2248)
+                range_to_mbu = MBURange (UNT2$Pointer)
+                putENG$Mburange$F (range_to_mbu)
+               }
+             else
+               {
+                 putENG$Mburange$F (0.0)
+                 putENG$Range$F (0.0)
+               }
+ 
+            putENG$Result$I (ENG$Hit$Code)
+            call write_eng_rec               # write the record
+           }
+ 
+ 
+         call Process_CM_Hit (UNT$Pointer, CMC$Pointer, UNT2$Pointer, idummy)
+        }                #end if target gets hit
+    ELSE         #target not hit
+        {
+         IF  (log$engage != $no)             # if engagement log desired
+            {
+             call engdata (UNT$Pointer, UNT2$Pointer)
+             putENG$Weapon$C (xCMC$Type$C)
+             if (UNT2$Pointer$Valid) # JHM 12/01 must check for valid UNT2 first (E2248)
+                {                    # (E2248)
+                  range_to_mbu = MBURange (UNT2$Pointer)
+                  putENG$Mburange$F (range_to_mbu)
+                }
+             else
+               {
+                 putENG$Mburange$F (0.0)
+                 putENG$Range$F (0.0)
+                }
+ 
+             putENG$Result$I (ENG$Miss$Code)
+             putENG$ResultPh$F (PH * 100.0)
+             call write_eng_rec                    # write the record
+            }  ## END <RG> 8/85
+        }  # end target is not hit
+    }      #end ELSE if attacking crsmsl is NOT nuclear
+ 
+# since the cm has been processes and the status is being
+# set to being deleted, go ahead and clear the BTT info
+call Clear_BTT_Info (UNT$Pointer)   # clk 6/95 (E1419)
+ 
+putUNT$HITS$I (100) # remove crsmsl attacking other than aircraft
+ 
+return
+end  # of CMHIT
+ 
+
+Subroutine Get_CM_PH (_
+           CMC$Pointer,         # in: Attacking missile characterictics pointer
+           UNT2$Pointer,        # in: Target UNT pointer
+           UNT$Pointer,         # in: CM unt pointer
+           prob_hit,            # out: Computed ph
+           CounterMeasureType)  # out: Type of counter measure deployed
+########################################################
+#$%
+#$% Purpose:   Get_CM_PH determines the probability of
+#$%            a cruise missile hitting a target.
+#$%
+#$% Called By: CMHIT
+#$%
+#$% Calls:     ECHO..
+#$%            DEQ_JAMTST
+#$%            AMAX1
+#$%
+#$% Tables:    UNT        CMC        DEQ
+#$%            RAD
+#$%
+#$% Date:      December 1993
+#$%
+#$% Author:    Code moved from CMHIT (clk)
+#$%
+#$% Modified:  SMM 9/95 Added use of JECEWSI factors for
+#$%            1996 ALSP confed PER E1460
+#$%
+#$%            Carol Kropp - 9/96 (New RTU Engagements)
+#$%            Allow for cases when the cruise missile is not
+#$%            ghosted by RESA (the UNT$Pointer will not be valid).
+#$%
+#$%            Jim Allen - 2/98 (E1864)
+#$%            Adjust ph is target to beyond recommended range or speed
+#$%            Removed the DEQ_Pointer argument, was only
+#$%            setting it if EMI$IntraPlatform != $no - a
+#$%            holdback from BEES.
+#$%
+#$%            Susan Miller 5/98 (E1989)
+#$%            Removed small boat prob hit degradation.
+#$%
+#$%            Susan Miller 11/98 (E2045)
+#$%            PHRangeFactor and PHSpeedFactor not calculating
+#$%            PH reduction as intended.
+########################################################
+BBcommon
+ENcommon
+ 
+REAL CMC$Effectjam$F,RAD$CH$frequency$F,EFFECTCHAFF, # jb E2145 5/18/00
+     P, TIME_TO_COMPLETE_PIM, RNG_FROM_LAUNCH,XSECT  # jb E2145 5/18/00
+REAL    DEQ2$TimeWhenUse$F                           # jb E2145 5/18/00
+real     prob_hit
+real*4   j_factor
+real     temp_ph # SMM 11/98 (E2045)
+integer  CMC$Pointer, UNT2$Pointer, UNT$Pointer
+integer  CounterMeasureType
+Integer UNT2$Type$I,                                 # jb E2145 5/18/00
+    CMC$RBL$Index, CMC$Seekertype$I,                 # jb E2145 5/18/00
+    DEQ$Pointer, DEQ$EM$Index,                       # jb E2145 5/18/00
+    RAD$Pointer, RAD$CH$Index,                       # jb E2145 5/18/00
+    DEQ2$Pointer,DEQ2$On$I,DEQ2$Ident$I,DEQ2$Remaining$I, # jb E2145 5/18/00
+    ACC$Pointer, SHC$Pointer, JEW$Pointer            # jb E2145 5/18/00
+Integer NBLIP,NDECM,NRBOC,NJAM,NJPF                  # jb E2145 5/18/00
+ 
+ 
+Eng$ProbHits
+Eng$ProbIndx
+ 
+# Determine the weapons index into the probability of hit matrix
+W_Indx = Xcmc$WeaponIndex$i
+ 
+# Determine the target index into the probability of hit matrix
+UNT2$TYPE$I = XUNT2$TYPE$I
+IF  (UNT2$TYPE$I == $CruiseMissile$CODE) # CruiseMissile TARGET..
+    {
+    cmc$Pointer = Xunt2$CmcPntr$I
+    T_Indx = Xcmc$TargetIndex$i
+    }
+ELSE IF  (UNT2$TYPE$I == $AIR$CODE)      # an Aircraft target..
+    {
+    acc$pointer = Xunt2$accPntr$i
+    T_Indx = Xacc$TargetIndex$i
+    }
+ELSE                                     # Ship or Shore tgt..
+    {
+    shc$pointer = xUNT2$shcPntr$i
+    T_Indx = Xshc$TargetIndex$i
+    }
+ 
+IF  (T_indx < 1 | W_indx < 1)
+    PROB_HIT = 0.5
+ELSE
+    PROB_HIT = eph[T_indx,W_indx] / 100.0
+ 
+IF  (UNT2$TYPE$I != $SHOREBASE$CODE)             #if not shore base
+    {
+    NBLIP = $NO                                 #flag no blip enhance
+    NDECM = $NO                                 #flag no DECM active
+    NRBOC = $NO                                 #flag no RBOC active
+    NJAM  = $NO                           #flag no ship jammer active
+    CounterMeasureType       = 0
+ 
+    for_DEQ2_CHAIN      # Search the targets equipment for countermeasures
+        {
+        DEQ2$ON$I = XDEQ2$ON$I              # get equipment status
+        IF  (DEQ2$ON$I != $YES) next        # if it is not on
+ 
+        DEQ2$IDENT$I = XDEQ2$IDENT$I        # get equipment identification
+        IF  (DEQ2$IDENT$I == $BLIP$CODE)    # if ship has blip enhance
+            {
+            NBLIP = $YES
+            }
+        ELSE IF (DEQ2$IDENT$I == $DECM$CODE)  #if ship has DECM
+            {
+            NDECM = $YES
+            }
+        ELSE IF (DEQ2$IDENT$I == $RBOC$CODE)   #if ship is RBOC equipped
+            {                                       # jb OLD model???!!!
+            DEQ2$REMAINING$I = XDEQ2$REMAINING$I
+            IF  (DEQ2$Remaining$I <= 0)   ## tpa 8/9/83
+                putDEQ2$On$I ($no)               ## turn RBOC off
+            ELSE
+                {
+                DEQ2$TimeWhenUse$F = xDEQ2$TimeWhenUse$F
+                IF  (DEQ2$TimeWhenUse$F > Game$Time)
+                    NRBOC = $NO
+                ELSE
+                    {
+                    NRBOC = $YES
+                    }
+                IF  (DEQ2$TimeWhenUse$F < Game$Time)
+                    {
+                    DEQ2$REMAINING$I = max(0, DEQ2$REMAINING$I-XDEQ2$LIMIT$I)
+                    putDEQ2$REMAINING$I
+                    putDEQ2$TimeWhenUse$F (Game$Time)
+                    }
+                } # End if DEQ2$remaining > 0
+            }     # end if ship has RBOC
+        ELSE IF ((DEQ2$IDENT$I == $JAMMER$CODE  |    # if this is a jammer,
+                  DEQ2$Ident$I == $RadarJammer$Code |
+                  DEQ2$Ident$I == $RadComJammer$Code) &
+                  NJAM == $NO )                      # and NJAM is still OFF
+            {
+            RAD$POINTER = XCMC$RDRPNTR$I        #get pointer to CM radar
+            RAD$CH$Index = 1         # Default radar channel number
+            for_DEQ_CHAIN            # jb 11/1/89: See if a channel has been
+                {                    #             selected for the CrsMsl's radar..
+                IF  (Xdeq$PNTR$i + EQ$BASE  == RAD$POINTER)
+                    {
+                    FOR (deq$EM$index=1;DEQ$EM$index$ok;
+                                            DEQ$EM$index=DEQ$EM$index+1)
+                        {
+                        IF  (Xdeq$EM$Band$I == $ON) # If Channel selected,
+                            {
+                            RAD$CH$Index = DEQ$EM$index # Set index and the
+                            NJAM = $ON            # ship-jammer flag  11/2/89
+                            BREAK 2        # jb  Leave the DEQ_CHAIN  11/1/89
+                            }
+                        }
+                    }
+                   BREAK # jb (This is the only DEQ slot of interest)    11/2/89
+                }
+            RAD$CH$FREQUENCY$F = XRAD$CH$FREQUENCY$F # jb $F/2lines 1/18/91
+ 
+            call DEQ_JAMTST (DEQ2$POINTER,  # send DEQ2 slot for SHIP's Jam-
+                             RAD$CH$FREQUENCY$F, # mer; & CRSMSL radar frequency
+                             NJAM,   # send 'ship' flag;/ receive jammed/not jammed
+                             NJPF)               # receive jammer Perform. Factor
+            }   #end if jammer and njam = $no
+        }    # end for equipment list
+ 
+    XSect = float(Xshc$crossSect$i)
+    CounterMeasureType = 0
+ 
+    P = 1.1                             # vice -1.0               6/27/84
+    IF  (NBLIP == $YES)                           #if blip enhance active
+        {
+        IF  (XCMC$EFFECTBLIP$F < P)
+            {
+            P = XCMC$EFFECTBLIP$F   #save the LOWER probability 6/18/84
+            CounterMeasureType = $Blip$EMIType
+            }
+        }
+ 
+    IF  (NDECM == $YES)                           #if DECM active
+        {
+        IF  (XCMC$EFFECTDECPT$F < P)
+            {
+            P = XCMC$EFFECTDECPT$F   #save the LOWER probability 6/18/84
+            CounterMeasureType = $Decm$EMIType
+            }
+        }
+ 
+    IF  (NRBOC == $YES) #if RBOC may affect P... (jb - case changed 2/89)
+        {
+        EFFECTCHAFF = XCMC$EFFECTCHAFF$F # jb EFFECTCHAFF vice cmc$...  2/89
+        cmc$seekertype$i = xcmc$seekertype$i
+ 
+        #if anti-rad seeker; or target not surface ship
+        IF  (cmc$seekertype$i == $radesm$code | cmc$seekertype$i ==
+             $esm$code | (unt2$Type$i != $Surface$Code ))
+            {    #...then EFFECTCHAFF is unchanged) (This leaves a bit of
+            }    # a 'hole', since RADESM might seek in RADAR mode.)
+        ELSE # determine CROSS-SECTION FACTOR to degrade EFFECTCHAFF..  2/89
+            {
+            IF (Xsect <=15.)
+                EFFECTCHAFF = EFFECTCHAFF *0.1
+            ELSE IF (Xsect <=47.)           # ( Xsect exceeds 15. but does NOT exceed 47.)
+                EFFECTCHAFF = ((Xsect * Xsect)/2250.) * EFFECTCHAFF #    2/21/89
+            }
+ 
+        IF  (EFFECTCHAFF < P)
+            {
+            P = EFFECTCHAFF       #save the LOWER probability 6/18/84
+            CounterMeasureType = $Rboc$EMIType
+            }
+        }
+ 
+    IF  (NJAM == $YES)                            #if jammer active
+        {
+         CMC$EffectJam$F = xCMC$EffectJam$F
+         If (jecewsi$game != $no) # SMM 9/95 PER E1460
+            {
+             # set JEW pointer to same slot as shooter UNT
+             if (UNT$Pointer$Valid)
+               {
+                JEW$Pointer$To (UNT$Pointer$Index)
+ 
+                # add up all the sector values
+                j_factor = xJEW$SpjFactor1$f + xJEW$SpjFactor2$f
+                j_factor = j_factor + xJEW$SpjFactor3$f + xJEW$SpjFactor4$f
+                j_factor = j_factor + xJEW$SpjFactor5$f + xJEW$SpjFactor6$f
+                j_factor = j_factor + xJEW$SpjFactor7$f + xJEW$SpjFactor8$f
+                j_factor = j_factor / 8.0  # get the average
+ 
+                CMC$EFFECTJam$F = CMC$EFFECTJam$F * j_factor
+               }
+ 
+            If (CMC$EFFECTJam$F < P)
+               {
+               P = CMC$EffectJam$F   #save the LOWER probability 6/18/84
+               CounterMeasureType = $Jamr$EMIType
+               }
+            }   # end of if the missile is a unit
+        }  # end if jammer is active
+ 
+    IF  (P < 1.0)
+        prob_hit = P
+ 
+    cmc$RBL$index = xUNT$CMRBLIndx$i
+ 
+    if (cmc$RBL$index > 0)
+    {
+        if (Xunt2$TrueSpeed$f > Xcmc$RBL$TargetSpeed$i)
+        {
+            temp_ph = prob_hit * Xcmc$PHSpeedFactor$f  # SMM 11/98 (E2045)
+            prob_hit = prob_hit - temp_ph
+        }
+ 
+        call pimtim_begin_end (xUNT$Pimindx$i, time_to_complete_pim)
+ 
+        rng_from_launch = Xcmc$AvgSpeed$i * time_to_complete_pim *
+                          $Hours$Per$Minute
+ 
+        if (rng_from_launch > Xcmc$RBL$FireRange$i)
+        {
+            temp_ph = prob_hit * Xcmc$PHRangeFactor$f  # SMM 11/98 (E2045)
+            prob_hit = prob_hit - temp_ph
+        }
+    }
+ 
+    IF  (trace$engage$exe != $no)
+       {
+         call echor
+         call echov (" CMC$EffectJam$F = ")
+         call echof (CMC$EFFECTJam$F,0703)
+         call echov (" and prob_hit = ")
+         call echof (prob_hit,0703)
+       }
+ 
+    IF  (trace$engage$exe != $no)                # Display Counter Measures
+        {
+        call echo ($LParen)
+        if (NBLIP == $YES) call echo ($LitB)
+        if (NDECM == $YES) call echo ($LitD)
+        if (NRBOC == $YES) call echo ($LitR)
+        if (NJAM == $YES ) call echo ($LitJ)
+        call echo ($RParen)
+        }
+    }      #end if not shorebase
+ 
+return
+end
+
+ 
+Subroutine Process_CM_Hit (_
+           UNT$Pointer,     # in: Attacking missile UNT pointer
+           CMC$Pointer,     # in: Attacking missile characteristic pointer
+           UNT2$Pointer,    # in: Target UNT pointer
+           AML$Pointer)     # out: Hit a/c AML pointer, or 0
+########################################################
+#$%
+#$% Purpose:   Process_CM_Hit assesses the results of a
+#$%            cruise missile hit and logs the engagement.
+#$%
+#$% Called By: CMHIT
+#$%
+#$% Calls:     MBURange
+#$%            Write_Eng_Rec
+#$%            SMOV..
+#$%            ECHO..
+#$%            Update_Destroyed_Aircraft
+#$%            Update_DAC_CM_BDA            <lbcommn.rat>
+#$%
+#$% Tables:    UNT        CMC
+#$%
+#$% Date:      December 1993
+#$%
+#$% Author:    Code moved from CMHIT (clk)
+#$%
+#$% Modified:  Susan Miller - 6/9/94
+#$%            Added the test for what type of weapon was fired to
+#$%            include the NewSAM$Code, since it is in the CMC table.
+#$%
+#$%            Carol Kropp - 2/95 (C2 interface)
+#$%            Added call to Record_C2_Air_Ground_Eng
+#$%            when the launcher is an aircraft.
+#$%
+#$%            Susan Miller - 3/24/95
+#$%            Added code to handle if the target is a ghosted unit.
+#$%
+#$%            Carol Kropp - 7/95 (E1419)
+#$%            Replaced code added in 2/95 with call to
+#$%            Record_Ground_Unit_Attack, which handles C2 and TMS.
+#$%
+#$%            JFR (E1104) Added in a new variable that is sent
+#$%            as a new parameter to Update_Destroyed_Aircraft.
+#$%
+#$%            SMM 2/96 (E1104) Added handling of cruise missile target.
+#$%
+#$%            Jonathan Richardson - 6/96 (E1084)
+#$%            Defined msg & msg_len to send a message to
+#$%            the player view when a unit is hit by a CM.
+#$%
+#$%            Carol Kropp - 9/96 (New RTU Engagements)
+#$%            Allow for cases when the cruise missile is not
+#$%            ghosted by RESA (the UNT$Pointer will not be valid).
+#$%
+#$%
+#$%            Jim Allen - 6/03 (E2346)
+#$%            Use cmc pointer for sam instead of erroneous aml pointer
+#$%
+########################################################
+BBcommon
+ENcommon
+ 
+LITERAL  CSTRIP8                                         # jb E2145 5/18/00
+REAL   UNT$Timeterm$F                                    # jb E2145 5/18/00
+integer  UNT$Pointer, CMC$Pointer, UNT2$Pointer, AML$Pointer,
+    AML2$Pointer, AML2$Nextindx$I,AML2$Status$I,         # jb E2145 5/18/00
+    UNT2$Hits$I,  CMC$Weight$I                           # jb E2145 5/18/00
+integer cmc2$pointer
+integer  number_ac
+integer  CMC$Cat$I, weapon_type
+integer  i_epus
+integer  UNT2$Type$I
+integer  BDA_Nbr_Fired #nbr of CM's fired during engagement -- JFR 9/24/93
+ 
+integer     msg_len
+character   msg[ARB]
+ 
+  AML$Pointer = 0           # initialize the pointer to null
+  BDA_Nbr_Fired = 1 # JFR (E1104)
+ 
+# E2358 JOA UFL03 - This code can cause CM to live forever
+#  If (xUNT2$GhostedUnit$I == $yes)  # target is a ghosted unit SMM 3/24/95
+#    {
+#     if (UNT$Pointer$Valid)
+#       {
+#        UNT$TimeTerm$F = Game$Minute + 1
+#        putUNT$TimeTerm$F
+#       }
+#     return
+#    }
+ 
+  UNT2$Type$I = xUNT2$Type$I
+  If (UNT2$TYPE$I == $AIR$CODE)        # if target is A/C flight 8/20/85
+     {
+      number_ac = 0
+ 
+      # loop through the flight chain for a non-dead a/c - clk 12/93
+      # AML2$Pointer is used as the looping pointer
+      # AML$Pointer is set to point to an InFlight a/c
+      AML2$NextIndx$I = xUNT2$AmlIndx$I
+      while (AML2$NextIndx$I != 0)
+        {
+         AML2$Pointer$To  (AML2$NextIndx$I)
+         AML2$NextIndx$I = xAML2$NextIndx$I
+         AML2$Status$I = xAML2$Status$I
+         if (AML2$Status$I != $Destroyed$code)
+           {
+            AML$Pointer = AML2$Pointer
+            number_ac = number_ac + 1
+           }
+        }
+ 
+      unt2$hits$i = Xunt2$hits$i + 1          # add new kills to other kills
+      PUTunt2$hits$i
+      PUTunt2$MissHits$i (Xunt2$MissHits$i + 1)
+ 
+      if (AML$Pointer != 0)
+        {
+         #$% get the type of missile SMM 6/9/94
+         CMC$Cat$I = xCMC$Cat$I
+         if (CMC$Cat$I == $NewSAM$Code) weapon_type = $SurftoAirMissile$Code
+         else weapon_type = $AirToAirMissile$Code
+ 
+         #$% Enter data into the DAC table.       clk 3/92
+         call Update_Destroyed_Aircraft (UNT2$Pointer, UNT$Pointer,
+                                         weapon_type,
+                                         xCMC$Type$C, AML$Pointer,
+                                         BDA_Nbr_Fired) # JFR 4/5/94 (E1104)
+ 
+         IF  (log$engage != $no)              # if engagement log desired
+          {                                            # (E2257)
+           call engdata (UNT$Pointer, UNT2$Pointer)    #ejhm 12/01  Want Lat/Long for splash (E2247)
+           call Generate_eng_rec ("SPLASH  ","ENGAGE  ",xaml$SideNumber$c)
+          }
+         PUTaml$status$i ($destroyed$code)
+ 
+         IF  (trace$engage$exe != $no)
+            {
+             call echov ("  [")  # jb E2144 (pass string) 5/22/00
+             call echohn (xaml$SideNumber$c, $$MaxLit)
+             call echov (" down]") # jb E2144 (pass string) 5/22/00
+            }
+        }   # end of aircraft left to kill
+ 
+      if (number_ac <= 1)   # if there are now no a/c left
+        {
+         putUNT2$Status$I ($BeingDeleted$Code)
+         if (trace$engage$exe != $no)
+           {
+             call echov  ("  [")
+             call echohn (xUNT2$Name$C, $$MaxLit)
+             call echov  (" destroyed  - Grand Slam]")
+            }
+        }   # end of if/else AML$Pointer != 0
+ 
+# E2358  JOA UFL03 if (UNT$Pointer$Valid)
+#        {
+#         UNT$TimeTerm$F = Game$Time + 1            #       8/19/85
+#         putUNT$TimeTerm$F                         #       8/19/85
+#        }
+      return                                    #       8/19/85
+     }      # end of if target is a flight of aircraft
+  ELSE IF (UNT2$TYPE$I == $CruiseMissile$Code)  #       8/20/85
+      {
+      CMC2$Pointer = xUNT2$CMCpntr$I     # Get the characteristics pointer
+      PUTUNT2$HITS$I (100)      # remove the target crsmsl
+      if (log$engage != $no)    # if engagement log desired
+          {                                            # (E2257)
+           call engdata (UNT$Pointer, UNT2$Pointer)    #jhm 12/01  Want Lat/Long for splash (E2247)
+           call Generate_eng_rec ("SPLASH  ", "ENGAGE  ", xCMC2$Type$C)
+          }
+ 
+      #$% get the type of missile
+      CMC$Cat$I = xCMC$Cat$I
+      if (CMC$Cat$I == $NewSAM$Code) weapon_type = $SurftoAirMissile$Code
+      else weapon_type = $AirToAirMissile$Code
+ 
+      call Update_DAC_CM_BDA (UNT$Pointer, UNT2$Pointer, weapon_type,
+                              xCMC$Type$C, BDA_Nbr_Fired)
+      }
+  ELSE        # NOT Aircraft or Cruise Missile
+      {
+      CMC$WEIGHT$I = XCMC$WEIGHT$I
+      UNT2$HITS$I = XUNT2$HITS$I + CMC$WEIGHT$I #add pounds TNT delivered
+      PUTUNT2$HITS$I
+      putUNT2$MissHITS$I (XUNT2$MissHITS$I + CMC$WEIGHT$I) #add lbs TNT deliv
+ 
+      IF  (trace$engage$exe != $no)
+          {
+          call echov (" Hit(")   # jb E2144 (pass string) 5/22/00
+          call echoi (CMC$WEIGHT$I/100)
+          call echo ($RParen)
+          }
+ 
+      if (UNT2$Type$I == $Shorebase$Code)    # clk 7/95 (E1419)
+        {
+         i_epus = INT ((CMC$Weight$I * 0.01) + 0.5)
+         call Record_Ground_Unit_Attack (UNT$Pointer, UNT2$Pointer,
+                                         xUNT2$TrueLatitude$F, xUNT2$TrueLongitude$F,
+                                         CMC$Pointer, 1, i_epus)
+        }   # end if target is a ground unit
+      }   # end target is not a cm or an ac
+ 
+  msg_len = 0        # jfr - (E1084)
+  call smovhn (xUNT2$Name$C, $$MaxLit, msg, msg_len)
+  call smovv  (" DAMAGED BY CRUISE MISSILE", msg, msg_len)
+  call send_   (xUNT2$View$I, 0, msg_len, msg)
+ 
+return
+end # Process_CM_Hit

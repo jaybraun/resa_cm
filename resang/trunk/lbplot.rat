@@ -1,0 +1,2738 @@
+include "bbcode.inc"         
+include "ptmain.inc"         
+include "bbrad.inc"         
+include "bbacc.inc"             # joa 7/96 (E1602)
+include "bbshc.inc"             # joa 7/96 (E1602)
+include "bbtrp.inc"             # joa 7/96 (E1602)
+include "bbctm.inc"             # joa 7/96 (E1602)
+include "bbicn.inc"             # joa 7/96 (E1602)
+include "icons.inc"             # joa 7/96 (E1602)
+
+# Modified:  James Allen - 7/69 (E1602)
+#            The following routines were added (obtained from BEES)
+#            to plot alternative icon styles (regular NTDS, top view and
+#            side view):  check_load_symbology, load_symbology, open_symbol_file,
+#                         setup_icon, get_ICNIndex, rotate_points, reflect_points,
+#                         modify_points, draw_arrow_init, draw_arrow_get_tail,
+#                         Get_Arrowhead_Points, get_points, draw_TextBlock_init,
+#                         tb_Find_Lines, and tb_Find_corners.
+
+
+Subroutine Binset(_
+            VLAT,                               #receive center latitude
+            VLON,                               #receive center longitude
+            IRADUS)                             #receive display radius
+
+##########################################################
+ #$%
+ #$% Purpose:   BINSET computes the latitude and
+ #$%            longitude bins for the given
+ #$%            position.
+ #$%
+ #$% Called By: PLOT_UP
+ #$%
+ #$% Calls:     ABS        FLOAT      QCOS
+ #$%            INT
+ #$%
+ #$% Tables:    None
+ #$%
+ #$% Date:      May 83
+ #$%
+ #$% Author:    Adamos T.
+ #$%
+ ##########################################################
+ implicit none
+ PLOTcommon
+#data current_geo_symbology / -99 /      # joa 7/96 (E1602)
+
+
+ real*4	 RADIUS, VLAT, PLAT, VLON
+ integer IRADUS
+
+ RADIUS = FLOAT(IRADUS) * 1.25                 #get expanded radius in floating
+
+ if(ABS(VLAT) > 1.396263401)                    #if center above 80 degrees
+   {
+    PLAT = 1.396263401                          #set center to 80 degrees
+
+    if(VLAT < 0.0)                              #if south
+      {
+       PLAT = -1.396263401                      #make negative
+      }                                         #end if south
+
+    VLAT = PLAT                                 #return cntr within 80 degrees
+   }                                            #end if center above 80 deg
+
+ DLAT = $DEGMILE * RADIUS                       #compute latitude bin
+
+ if((ABS(VLAT) + DLAT) > 1.413716693)           #if radius beyond 81 degrees
+   {
+    RADIUS = (1.413716693 - ABS(VLAT))/$DEGMILE #compute radius within 81 deg
+
+    DLAT = $DEGMILE * RADIUS                    #recompute latitude bin
+   }                                            #end if radius beyond 81 deg
+
+ DLON = $DEGMILE / COS(VLAT) * RADIUS          #compute longitude bin
+
+ IRADUS = INT(RADIUS * .8)                      #restore plot radius
+
+ QLAT = VLAT                                    #save latitude center
+ QLON = VLON                                    #save longitude center
+
+ return
+ end
+
+
+
+
+
+Integer Function BINCK (TLAT, TLON)
+
+##########################################################
+ #$%
+ #$% Purpose:   BINCK determines if the given position
+ #$%            coordinates are within the display
+ #$%            area,
+ #$%
+ #$% Called By: 
+ #$%
+ #$% Calls:     ABS
+ #$%
+ #$% Tables:    None
+ #$%
+ #$% Date:      May 83
+ #$%
+ #$% Author:    Adamos T.
+ #$%
+ ##########################################################
+implicit none
+
+PLOTcommon
+real*4  DIFLON, TLON, TLAT
+
+if (using_newgui==YES) {
+   BINCK = YES
+   return 
+}
+
+BINCK = NO                                     #flag not in bin
+
+DIFLON = ABS(TLON - QLON)                      #get delta longitude
+
+if (DIFLON > $PI)                               #if grenwich line crossed
+   {
+   DIFLON = $TWOPI - DIFLON                    #adjust for crossing
+   }                                            #end if grenwich line crossed
+
+if (ABS(TLAT - QLAT) <= DLAT & DIFLON <= DLON)  #if within bin
+   {
+   BINCK = YES                                 #flag in bin
+   }                                            #end if within bin
+
+return
+end
+
+
+# The following macros are for a Track storage array for use with hooking
+# Tracks with the mouse....
+# As each symbol is drawn via the DRAW_UNIT routine, an entry is recorded
+# with the known information....
+#
+# All IDs must be unique. 
+#
+# Positive IDs:
+#   1                       .. UNT$Slots  ==> True Unit (or base)
+#   UNT$SLOTS + 1           .. OWN$SLOTS  ==> OWN Unit
+#   UNT$SLOTS+OWN$SLOTS + 1 .. RMT$SLOTS  ==> RMT Track
+#   UNT$Slots+OWN$Slots+RMT$Slots + 1..SSR$Slots ==> Satellite Detections
+#   UNT$Slots+OWN$Slots+RMT$Slots+SSR$Slots + 1..HFD$Slots ==> HFDF Detections
+#   UNT$Slots+OWN$Slots+RMT$Slots+SSR$Slots+HFD$Slots + 1..SWD$Slots ==> SWABS Detections
+#   UNT$Slots+OWN$Slots+RMT$Slots+SSR$Slots+HFD$Slots+SWD$Slots + 1..SOS$Slots ==> Sosus Detections
+#   UNT$Slots+OWN$Slots+RMT$Slots+SSR$Slots+HFD$Slots+SWD$Slots+SOS$Slots + 1..AGD$Slots ==> ALSP Ground Data (AGD Table)
+#   UNT$Slots+OWN$Slots+RMT$Slots+SSR$Slots+HFD$Slots+SWD$Slots+SOS$Slots+AGD$Slots + 1..L16$Slots ==> L16 Detections
+#   UNT$Slots+OWN$Slots+RMT$Slots+SSR$Slots+HFD$Slots+SWD$Slots+SOS$Slots+AGD$Slots+L16$Slots + 1..
+#
+# Negative IDs are associated with specific text strings.  The calling
+# program should call GET_HOOK_ID first, and pass it to:
+#
+#   ADD_HOOK        which records the X/Y location with the ID
+#   ADD_HOOK_LINE   which records a starting X/Y and ending X/Y with the ID
+#   ADD_HOOK_BOX    which records a UL X/Y and LR X/Y with the ID
+#   ADD_HOOK_INFO   which records the Text with the ID
+#
+
+Define ($Max$Hooks,6000)
+Define ($Max$Hook_Info,1000)
+Define ($Max$Sorted$Hooks,24)
+Define ($Close$Limit,20)
+Define ($Far$Limit,200)
+Define ($Close$Line,10)
+Define ($Close$Box,2)
+
+Define ($Hook$Point,1)
+Define ($Hook$Line ,2)
+Define ($Hook$Box  ,3)
+Define ($Hook$Max  ,6)
+
+define($swap$select$record,
+   {Select_Temp_ID = Select_ID[@1]
+    Select_Temp_Dist = Select_Dist[@1]
+    Select_ID[@1] = Select_ID[@2]
+    Select_Dist[@1] = Select_Dist[@2]
+    Select_ID[@2] = Select_Temp_ID
+    Select_Dist[@2] = Select_Temp_Dist}
+)    
+
+define (Hook$Common,
+
+integer*4 Hook_ID[$Max$Hooks]                      # UNT/OWN/RMT/SSR/HFD/SWD/SOS/AGD/L16/CEC index
+integer*4 Hook_X[$Max$Hooks], Hook_Y[$Max$Hooks]   # Location of plotted symbol
+integer*4 Hook_X2[$Max$Hooks], Hook_Y2[$Max$Hooks] # end point of line
+byte      Hook_type[$Max$Hooks]                    # Type of hook Point/Line/Box
+
+integer*4       Hook_Info_ID[$Max$Hook_Info]       # Hook link index
+vaxcharacter*100    Hook_Info_Text [$Max$Hook_Info]
+
+integer*4 Select_ID[ arith(1,+,$max$sorted$hooks) ]   # UNT/OWN/RMT/SSR/HFD/SWD/SOS/AGD/L16/CEC index
+integer*4 Select_Dist[ arith(1,+,$max$sorted$hooks) ] # Distance from requested X/Y
+
+integer*4       Select_Temp_ID                     # UNT/OWN/RMT/SSR/HFD/SWD/SOS/AGD/L16/CEC index
+integer*4       Select_Temp_Dist                   # Distance from requested X/Y
+
+integer*4    Hook_Count, Select_Count, Hook_Info_Count
+integer*4    Hook_Type_Count[$hook$Max]
+integer*4    Prior_Hook_Id
+
+    common / Hook_Common / Hook_Count,
+                           Hook_ID,
+                           Hook_X, Hook_Y,
+                           Hook_X2, Hook_Y2,
+                           Hook_type,
+                           Hook_Info_Count,
+                           Hook_Info_ID,
+                           Hook_Info_Text,
+                           Select_Count,
+                           Select_ID,
+                           Select_Dist,
+                           Select_Temp_ID,
+                           Select_Temp_Dist,
+                           Prior_Hook_Id, Hook_Type_Count
+    ) 
+             
+ 
+
+subroutine Clear_Hooks      # this should be called by DRAW_CENTER
+implicit none
+hook$common
+integer*4   k
+
+Hook_Count = 0
+Hook_Info_Count = 0
+Select_Count = 0
+Prior_Hook_Id = -30000
+
+for (k = 1; k <= $hook$Max; k = k + 1) Hook_Type_Count[k] = 0
+
+end
+
+
+subroutine Get_Hook_Id (id) # This should be called by anyone needing a TEXT ID
+implicit none
+hook$common
+
+Integer*4   id
+
+Prior_Hook_Id = Prior_Hook_Id - 1
+
+Id = Prior_Hook_Id
+
+end
+
+
+subroutine Add_Hook (id, ix, iy)  # This should be called by DRAW_UNIT
+implicit none
+hook$common
+
+integer*4       id, ix, iy
+
+if (Hook_Count < $Max$Hooks)        # Room for more Hookable tracks ?
+    {
+    Hook_Count = Hook_Count + 1
+    Hook_id[Hook_Count] = id      # Save the minimum info for HOOKing
+    Hook_x[Hook_Count]  = ix
+    Hook_y[Hook_Count]  = iy
+    Hook_x2[Hook_Count] = 0
+    Hook_y2[Hook_Count] = 0
+    Hook_type[Hook_Count] = $hook$point
+
+    Hook_Type_Count[$hook$point] = Hook_Type_Count[$hook$point] + 1
+    }
+
+end
+
+subroutine Add_Hook_Line (id, ix, iy, jx, jy)  # This should be called by ???
+implicit none
+hook$common
+
+integer*4       id, ix, iy, jx, jy
+
+if (Hook_Count < $Max$Hooks)        # Room for more Hookable tracks ?
+    {
+    if (ix == jx & iy == jy) return
+
+    Hook_Count = Hook_Count + 1
+    Hook_id[Hook_Count] = id      # Save the minimum info for HOOKing
+    Hook_x[Hook_Count] = ix
+    Hook_y[Hook_Count] = iy
+    Hook_x2[Hook_Count] = jx
+    Hook_y2[Hook_Count] = jy
+    Hook_type[Hook_Count] = $hook$line
+
+    Hook_Type_Count[$hook$line] = Hook_Type_Count[$hook$line] + 1
+    }
+
+end
+
+subroutine Add_Hook_Box (id, ix, iy, jx, jy)
+implicit none
+hook$common
+
+integer*4       id, ix, iy, jx, jy
+
+if (Hook_Count < $Max$Hooks)        # Room for more Hookable tracks ?
+    {
+    if (ix == jx & iy == jy) return
+
+    Hook_Count = Hook_Count + 1
+    Hook_id[Hook_Count] = id      # Save the minimum info for HOOKing
+    Hook_x[Hook_Count] = min(ix,jx)  # lowest point
+    Hook_y[Hook_Count] = min(iy,jy)
+    Hook_x2[Hook_Count] = max(jx,ix)  # highest point
+    Hook_y2[Hook_Count] = max(jy,ix)
+    Hook_type[Hook_Count] = $hook$box
+
+    Hook_Type_Count[$hook$box] = Hook_Type_Count[$hook$box] + 1
+    }
+
+end
+
+subroutine Add_Hook_Info (id, A_Line) 
+implicit none
+hook$common
+
+integer*4           id
+vaxcharacter*(*)    a_line
+
+if (Hook_Info_Count < $Max$Hook_Info) #Room for more Hookable info
+    {
+    Hook_Info_Count = Hook_Info_Count + 1
+    Hook_Info_id[Hook_Info_Count] = id    # Save the minimum info for HOOKing
+    Hook_Info_text[Hook_Info_Count] = a_line
+    }
+
+end
+
+
+Subroutine  Check_Hook_Info (id,      # (In) Flag of recorded symbol
+                             text)    # (out) Text recorded with ID
+implicit none
+hook$common
+integer*4           id
+vaxcharacter*(*)    text
+integer*4           n
+
+for (n = 1; n <= Hook_Info_Count; n=n+1)
+    {
+    if (abs( Hook_Info_id[n] ) != abs(id) ) next
+
+    text = Hook_Info_text[n] 
+    return
+    }
+
+text = ""
+
+end
+
+
+subroutine  check_hook (ix, iy, # (Input)  X/Y location of the mouse click
+                        id)     # (In/Out) Flag of recorded symbol
+implicit none
+hook$common
+
+#---------------------------------------------------------------------------
+# This routine scans the hookable list for N "closest" items to the X&Y given.
+# "Close" is defined as within +/- N units from the input X/Y
+#
+# When called with ID == 0, a list of close IDs is prepared, and
+# sorted according to the distance from the given X/Y. The first ID
+# is returned.
+#
+# When ID != 0, the ID after the one specified is returned.
+#
+# If No more ID's remain (or there were none) an ID of 0 is returned.
+#---------------------------------------------------------------------------
+
+integer*4       ix, iy, id
+integer*4       n, id_input, limit
+integer         boxes,lines,points
+
+points = 1      # These set the order of these objects in the list (same range)
+lines  = 2
+boxes  = 0
+
+goto 6001                                                   # E2143 dew 10/99
+    {
+    # Only scan Boxes...
+
+    entry check_box_hook (ix, iy, # (Input)  X/Y location of the mouse click
+                          id)     # (In/Out) Flag of recorded symbol
+    boxes  = 1  # only
+    lines  = 0  # No
+    points = 0  # No
+    }
+goto 6001                                                   # E2143 dew 10/99
+    {
+    # Only scan Lines...
+
+    entry check_line_hook (ix, iy, # (Input)  X/Y location of the mouse click
+                           id)     # (In/Out) Flag of recorded symbol
+    boxes  = 0
+    lines  = 1
+    points = 0
+    }
+6001                                                        # E2143 dew 10/99
+
+id_input = id
+id = 0
+
+#------------------------------------------------------------
+# If we have a list ready, use it
+
+if (id_input != 0 & Select_count != 0)
+    {
+    for (n = 1; n <= Select_count; n = n + 1)
+        {
+        if (Select_id[n] != id_input) next
+
+        id = Select_id[n+1]    # return next in the list
+
+        break
+        }    
+    }
+
+#------------------------------------------------------------
+# Lets make a list...
+
+else         
+    {
+    Select_count = 0
+    limit = $close$limit
+
+    for (n = 1; n <= 6; n = n + 1)
+        {
+        if (n == points) call append_point_hooks (ix,iy, limit) 
+        if (n == lines)  call append_line_hooks  (ix,iy, limit) 
+        if (n == boxes)  call append_box_hooks   (ix,iy, limit) 
+        }
+
+    # if nothing was close, try again at a wider limit
+    # But only return it if the closest hook is 50% closer than the 2nd
+    if (select_count == 0)  
+        {
+        limit = $far$limit
+
+        for (n = 1; n <= 6; n = n + 1)
+            {
+            if (n == points) call append_point_hooks (ix,iy, limit) 
+            if (n == lines)  call append_line_hooks  (ix,iy, limit) 
+            if (n == boxes)  call append_box_hooks   (ix,iy, limit) 
+            }
+
+        if (select_count == 1)      # best condition
+            {
+            continue
+            }
+        else if ( select_dist[ 1 ] <= (select_dist[ 2 ] * 0.50) )
+            {
+            select_count = 1
+            select_id[ 2 ] = 0
+            }
+        else 
+            {
+            select_count = 0
+            select_id[ 1 ] = 0
+            }
+        }
+
+    id = select_id[ 1 ]       # return the first ID
+    }
+
+end
+
+
+subroutine  append_point_hooks (ix,iy, # (In)  X/Y location of the mouse click
+                                limit) # (In)  How close the click must be
+implicit none
+hook$common
+
+integer*4       ix, iy, limit
+
+integer*4       dx, dy, d, n
+
+
+if (Hook_Type_Count[$hook$Point] == 0 ) return
+
+#--------------------------------------------------
+# build a list of closest ID's (single points)
+
+for (n = 1; n <= Hook_count; n = n + 1)
+    {
+    if ( Hook_type[n] != $hook$point) next
+    
+    dx = iabs (hook_x[n] - ix)
+    dy = iabs (hook_y[n] - iy) 
+
+    if (dx > limit |
+        dy > limit) next
+
+    d = sqrt( float( dx * dx + dy * dy ) ) + 0.5
+
+    if (d > limit ) next
+
+    # use an insertion sort to insert it at the end, 
+    # prior to more distant items
+
+    call append_1_hook (hook_id[n] ,d)
+    }    
+
+end
+
+
+subroutine  append_line_hooks (ix, iy, # (In)  X/Y location of the mouse click
+                               limit)  # (In)  How close the click must be
+implicit none
+hook$common
+
+integer*4       ix, iy, limit
+
+integer*4       dx, dy, d, n
+
+Real*4          Slope, B
+
+
+if (Hook_Type_Count[$hook$Line] == 0 ) return
+
+#------------------------------------------------------------
+# build a list of closest ID's (on a line)
+
+for (n = 1; n <= Hook_count; n = n + 1)
+    {
+    if ( Hook_type[n] != $hook$line) next     # skip single points
+
+    #----------------------------------------
+    # Is the point within the box (x1,y1) .. (x2,y2) [+/- limit]
+
+    if (ix < min(hook_x[n], hook_x2[n] ) - $close$line ) next
+    if (ix > max(hook_x[n], hook_x2[n] ) + $close$line ) next
+    if (iy < min(hook_y[n], hook_y2[n] ) - $close$line ) next
+    if (iy > max(hook_y[n], hook_y2[n] ) + $close$line ) next
+
+    #----------------------------------------
+    # Compute the slope of the line as Rise/Run
+
+    dx = hook_x[n] - hook_x2[n]  
+    dy = hook_y[n] - hook_y2[n]  
+
+    if (dx != 0) 
+        {
+        Slope = float(dy) / float(dx)
+
+        #----------------------------------------
+        # Solve for B, in the equation Y = mX + b
+        #  i.e.  B = Y - mX
+
+        B = hook_y[n] - (slope * hook_x[n])
+
+        #----------------------------------------
+        # compute the perpindicular distance from the point IX,IY to
+        # the line thru X,Y and X2,Y2
+
+        d = (slope * ix - iy + b) / sqrt(slope*slope+1) 
+        }
+    else    # vertical line
+        {
+        d = ix - hook_x[n]
+        }
+
+    d = abs(d)
+
+    if (d > $close$line ) next
+
+    # use an insertion sort to insert it at the end, 
+    # prior to more distant items
+
+    call append_1_hook (hook_id[n] ,d + (limit/2)) # at end of list
+    }    
+
+end
+
+
+subroutine  append_box_hooks (ix, iy, # (In)  X/Y location of the mouse click
+                              limit) # (In)  How close the click must be
+implicit none
+hook$common
+
+integer*4       ix, iy, limit
+
+integer*4       d, n
+
+
+if (Hook_Type_Count[$hook$Box] == 0 ) return
+
+#------------------------------------------------------------
+# build a list of closest ID's (in a box)
+
+for (n = 1; n <= Hook_count; n = n + 1)
+    {
+    if ( Hook_type[n] != $hook$box) next     # only boxes
+
+    #----------------------------------------
+    # Is the point within the box (x,y) .. (x2,y2) [+/- limit]
+
+    if (ix < hook_x[n]  - $close$box ) next
+    if (ix > hook_x2[n] + $close$box ) next
+    if (iy < hook_y[n]  - $close$box ) next
+    if (iy > hook_y2[n] + $close$box ) next
+
+    d = 1
+
+    if (d > limit ) next
+
+    # use an insertion sort to insert it at the end, 
+    # prior to more distant items
+
+    call append_1_hook (hook_id[n] ,d)
+    }
+
+end
+
+
+subroutine append_1_hook (id,dist)
+implicit none
+hook$common # jb (Not used: HOOK and records Select, Select_Temp   4/3/00
+
+integer*4   id, dist
+
+integer*4       pnt1, pnt2
+logical*1       noflip, duped
+
+#------------------------------------------------------------
+# Make sure the ID is unique, or... keep the closest
+
+duped = .false.
+for (pnt1 = 1; pnt1 <= select_count; pnt1 = pnt1 + 1)
+    {
+    if (select_id[pnt1] != id) next           # no match
+
+    if (select_dist[pnt1] < dist) return      # ignore this one
+
+    select_dist[pnt1] = dist
+    duped = .true.
+    break
+    }
+
+#------------------------------------------------------------
+# Use an insertion sort to insert it at the end, prior to more distant items
+
+if (duped)
+    {
+    # select_dist[pnt1] = dist        # do nothing, did it already
+    }
+else if (select_count >= $max$sorted$hooks )    # table full
+    {
+    if ( dist < select_dist[select_count] )   # keep it if closer
+        {
+        select_id[select_count]   = id
+        select_dist[select_count] = dist
+        }
+    else                                        # this point is farther
+        {
+        return
+        }
+    }
+else # if (select_count < $max$sorted$hooks ) 
+    {
+    select_count = select_count + 1
+    select_id[select_count]   = id
+    select_dist[select_count] = dist
+    }
+
+#------------------------------------------------------------
+# sort the selected ID's in ascending sequence 
+
+repeat
+    {
+    noflip = .true.
+    for (pnt1 = select_count; pnt1 > 1; pnt1 = pnt1 - 1)
+        {
+        pnt2 = pnt1 - 1
+
+        if (select_dist[pnt1] >= select_dist[pnt2] ) next
+
+        $swap$select$record(pnt1, pnt2)
+        noflip = .false.
+        }
+    } until (noflip)
+
+select_id[select_count+1] = 0     # set flag for END of List
+
+end
+
+
+include "ascii.inc"         
+include "macros.inc"         
+include "ptcolor.inc"         
+include "ptgraph.inc"         
+include "ptwand.inc"         
+
+include "bbctl.inc"                             # used in MENUIN and VERIFY subroutines
+include "bbunt.inc"                             # used in VERIFY/HOOK_TRUE subroutine  # 3/23/89 was bbdup.inc
+include "bbown.inc"                             # used in HOOK_ASSUMED subroutine
+include "bbrmt.inc"                             # used in HOOK_ASSUMED subroutine
+include "bbrvu.inc"                             # used in HOOK_ASSUMED subroutine
+include "bbsta.inc"                             # used in HOOK_UNIT subroutine
+include "bbssr.inc"                             # used in Puck_hook_request subroutine #5/93, khc
+include "bbhfd.inc"                             # used in Puck_hook_request subroutine #5/93, khc
+include "bbswd.inc"                             # used in Puck_hook_request subroutine #5/93, khc
+include "bbsos.inc"                             # used in Puck_hook_request subroutine #5/93, khc
+include "bbagd.inc"                             # used in Puck_hook_request - clk 9/95 (E1456)
+include "bbmc.inc"                              # used in Puck_hook_request - clk 9/95 (E1456)
+include "alsp.inc"                              # used in Puck_hook_request - clk 9/95 (E1456)
+include "bbl16.inc"                             # used in Puck_hook_request subroutine # clk 12/95 (E1469)
+include "lk16_track_convert.rin"                # clk 1/97 (E1737)
+                                                # if file is missing, copy
+                                                # stub_lk16_track_convert.rin
+
+
+#______________________________________________________________________
+#
+# Lat/Lon arguments are in REAL*4 Degrees (Deg <==> Radians * (180/$pi))
+#                                       
+#______________________________________________________________________
+
+
+
+define (BBImplicit,
+    Implicit None
+    )
+
+subroutine Puck_hook_request (x_in,y_in)
+###############################################################################
+#
+# Purpose:      Puck_hook_request is a routine which processes data read 
+#               from some tablet/mouse device. This routine is invoked by
+#               an AST routine to process the X/Y data.
+#
+# Called by:    
+#
+# Calls:        
+#
+# Author:     D WILLS 
+#
+# Date:       10 August 1989
+#
+# Modified:   Kir Chang - 5/93
+#             Added code for hooking HFDF, SATELLITE, SOSUS, and SWABS tracks.
+#             Previously this routine only dealt with the UNT, OWN, and RMT tables,
+#             but the wide area surveillence tracks are contained in the HFD, SSR,
+#             SOS, and SWD tables, respectfully.
+#
+#             Susan Miller 1/94 added new unit type $SAMissile$Code that 
+#             requires displaying the altitude like aircraft.
+#
+#             Carol Kropp - 9/95 (E1456)
+#             Added for hooking of "Ghosted" ALSP Ground Units (AGD Table).
+#
+#             Jim Allen - 11/95 (E1422)
+#             Added unit elevation to display if non-zero.
+#
+#             Susan Miller - 7/96 (E1624)
+#             Pull out the appropriate weapon or radar name when hooking a 
+#             ghosted ground unit.
+#
+#             Carol Kropp - 11/96 (E1695)
+#             Added for hooking of CEC Model Tracks.
+#
+#             Carol Kropp - 1/97 (E1737)
+#             Added call Get_L16_Track_Literal to convert the track
+#             number to the proper display pattern.
+#
+#             Susan Miller - 3/99 (E2052)
+#             Changed display so that altitude of 2,000,000 can be 
+#             displayed on GEO.
+#
+#             Carol Kropp - 3/99 (E2061)
+#             Added IR satellite detections to the track number coding for
+#             hooking survsat detections.
+#
+###############################################################################
+
+BBCommon
+plotcommon
+
+integer         X_In, Y_In
+integer         curr_ix, curr_iy
+integer         last_ix / -1 /
+integer         last_iy / -1 /
+integer         id      / 0  /
+
+BBDeclare(sta$PlotInput$V)
+integer         unt$pointer, own$pointer, rmt$pointer, rvu$pointer
+integer         unt3$pointer, mc$pointer
+integer         unt$type$i, own$type$i
+integer         rmt$DetectionType$i, rmt$Detector$i, rmt$LastDetType$i
+integer         sta$pointer
+integer         icourse, ispeed, ialt, idepth, ilen, isource, ibear
+integer         ielevation
+integer*4       n_line, n, len_Line
+literal         htype, cstrip8, name, cstrip, n_source, n_type, n_emit
+integer         unt2$pointer,ssr$pointer,hfd$pointer,swd$pointer,sos$pointer         #khc, 5/93
+literal         site1, site2                                                         #khc, 5/93
+integer*4       indx_unt, indx_own, indx_rmt, indx_ssr, indx_hfd, indx_swd, indx_sos #khc, 5/93
+integer         rad$pointer, ssr$dettype$i, unt$view$i                               #khc, 5/93
+
+integer*4       indx_agd, AGD$Pointer, AGD$ALSPClass$I
+literal         agd_type, agd_alspid
+integer*4       indx_l16, L16$Pointer
+
+character       msg[32]
+vaxcharacter    a_line*100, b_line*48
+
+integer         sta$PlotInputRequest$i
+
+integer         kk          #5/93,khc
+
+literal  literal_track_number    # clk 1/97 (E1737)
+
+#data            iclsch [ $air$code     ] / "A" /
+#data            iclsch [ $surface$code ] / "S" /
+#data            iclsch [ $sub$code     ] / "U" /
+#data            iclsch [ $null$code    ] / " " /
+
+
+curr_ix = x_in
+curr_iy = y_in
+
+# Erase text lines for last hooked unit
+kk = 0
+call smovv("                  ",msg,kk)
+call smov(EOS,msg,kk)
+call draw_text_c ($Line$Hook_1 ,msg,$color$text)
+call draw_text_c ($Line$Hook_2 ,msg,$color$text)
+call draw_text_c ($Line$Hook_3 ,msg,$color$text)
+call draw_text_c ($Line$Hook_4 ,msg,$color$text)
+call draw_text_c ($Line$Hook_5 ,msg,$color$text)
+call draw_text_c ($Line$Hook_6 ,msg,$color$text)
+
+# Test for out of range data ; cannot really see why I want to but the old code
+# did it and it's reasonably cheap (probably want to remove this at some time) 
+
+
+if (iabs(last_ix - curr_ix) > 2 | 
+    iabs(last_iy - curr_iy) > 2  ) 
+    {
+    id = 0
+
+    last_ix = curr_ix 
+    last_iy = curr_iy 
+    }
+
+call check_hook (last_ix, last_iy, id)
+
+#$% if a text string is associated with this ID
+if (id < 0)
+    {
+    call check_hook_info (id, a_line)   # any text recorded with the ID?
+
+    if (a_line != " ")
+        {
+        n_line = $line$hook_1
+        n = 0
+
+        repeat
+            {
+            b_line = ""        
+            call str_element (b_line, n, ";", a_line)
+            if (b_line == "") break
+            n = n + 1
+                
+            call str_trim(b_line, b_line, len_line)
+
+            ilen = 0
+            call smovv (b_line[1:len_line],msg,ilen)
+            call smov  (EOS,msg,ilen)
+            call draw_text_c (n_line,msg,$color$text)
+            n_line = n_line + ($line$hook_2 - $line$hook_1)
+            }
+        }    # end if text recorded....
+    }
+else if (id > 0)    # got something
+    {
+    n_line = $line$hook_1
+    ialt   = 0
+    ielevation = 0
+    idepth = 0
+    icourse = -1
+    ispeed  = -1
+    ibear   = -1
+    isource = -1
+    n_source= $BLANKLIT
+    n_type  = $BLANKLIT
+    n_emit  = $BLANKLIT
+    site1   = $BLANKLIT      # khc 5/93 - for HFDF tracks
+    site2   = $BLANKLIT      # khc 5/93 - for HFDF tracks
+
+    agd_type  = $Blank_Literal
+    agd_alspid  = $Blank_Literal
+
+    indx_unt = id
+    indx_own = indx_unt - UNT$Slots
+    indx_rmt = indx_own - OWN$Slots
+    indx_ssr = indx_rmt - RMT$Slots   # khc 5/93
+    indx_hfd = indx_ssr - SSR$Slots   # khc 5/93
+    indx_swd = indx_hfd - HFD$Slots   # khc 5/93
+    indx_sos = indx_swd - SWD$Slots   # khc 5/93
+    indx_agd = indx_sos - SOS$Slots   # clk 9/95 (E1456)
+    indx_l16 = indx_agd - AGD$Slots   # clk 12/95 (E1469)
+
+    if (indx_unt <= unt$slots)
+        {
+        unt$pointer$to indx_unt
+      
+        name = xUNT$Name$C
+
+        UNT$Type$I = xUNT$Type$I 
+
+        if (UNT$Type$I != $Shorebase$Code) 
+            {
+            icourse = xUNT$TrueCourse$F * 180.0 / $Pi
+            ispeed  = xUNT$TrueSpeed$F + 0.5
+            }
+
+        if (UNT$Type$I == $Shorebase$Code     |    # extract the elevation from
+            UNT$Type$I == $Surface$Code       |    # TrueAltDepth (E1422)
+            UNT$Type$I == $SurfaceWithAC$Code |
+            UNT$Type$I == $AirBase$Code       |
+            UNT$Type$I == $PIM$Code           |
+            UNT$Type$I == $LandingZone$Code)
+          {
+           ielevation = Xunt$TrueAltDepth$I
+          }
+
+        if ((UNT$Type$I == $Air$Code) | (UNT$Type$I == $SAMissile$Code) |
+            (UNT$Type$I == $CruiseMissile$Code))    
+                ialt   = xUNT$TrueAltDepth$I
+        else if (UNT$Type$I == $Sub$Code) idepth = xUNT$TrueAltDepth$I
+
+        htype = 'FORCE'
+        }
+    else if (indx_own <= OWN$Slots)
+        {
+        OWN$pointer$to indx_own
+        UNT$Pointer$To xOWN$Unit$I
+
+        name    = xUNT$Name$C 
+        icourse = xOWN$Course$I
+        ispeed  = xOWN$Speed$I
+
+        OWN$Type$I = xOWN$Type$I 
+        if      ((OWN$Type$I == $Air$Code) | (OWN$Type$I == $SAMissile$Code))
+                ialt   = xOWN$Altitude$I *100
+        else if (OWN$Type$I == $Sub$Code) idepth = xOWN$Depth$I 
+
+        htype = 'FORCE'
+        }
+    else if (indx_rmt <= RMT$Slots)
+        {
+        RMT$Pointer$to indx_rmt
+
+        call make_track_num (rmt$pointer, name)
+
+        rmt$DetectionType$i = Xrmt$DetectionType$i 
+
+        rmt$Detector$I = Xrmt$Detector$I
+        UNT3$Pointer$To rmt$Detector$I
+        n_source = xUNT3$Name$C 
+        ibear = Xrmt$bearing$I
+
+        if (rmt$DetectionType$i == $PassiveSonar$code)
+            {
+            n_type = '(SON)'
+            isource = 1
+
+            htype = 'BEAR'
+            }
+        else if (rmt$DetectionType$i == $ESM$code)
+            {
+            n_type = '(ESM)'
+            isource = 1
+            n_emit = Xrmt$EmitterName$c
+
+            htype = 'BEAR'
+            }
+        else
+            {
+            rmt$LastDetType$i = Xrmt$LastDetType$i
+            if      (rmt$LastDetType$i == $Radar$Type  ) n_type = '(RAD)'
+            else if (rmt$LastDetType$i == $Sonar$Type  ) n_type = '(SON)'
+            else if (rmt$LastDetType$i == $Mad$Type    ) n_type = '(MAD)'
+            else if (rmt$LastDetType$i == $Visual$Type ) n_type = '(VIS)'
+            else if (rmt$LastDetType$i == $Lidar$Type  ) n_type = '(LID)'
+            else                                         n_type = $BLANKLIT
+
+            icourse = xRMT$Course$I
+            ispeed  = xRMT$Speed$I
+
+            if  (xRMT$Class$I == $Air$Code)
+                ialt = xRMT$Altitude$I *100
+
+            htype = 'TRACK'
+            }
+        }
+    else if (indx_ssr <= SSR$Slots)     # khc - 5/93
+        {                               # Satellite detection track
+        SSR$Pointer$to indx_ssr
+
+        kk = 0
+        RVU$Pointer$To (xSSR$ReporteeView$I)
+        call smov (xRVU$TrackCode$C, name, kk)
+        SSR$DetType$I = xSSR$DetType$I
+        if      (SSR$DetType$I == $Null$Code)       call smovv ('E', name, kk)
+        else if (SSR$DetType$I == $Air$Code)        call smovv ('A', name, kk)
+        else if (SSR$DetType$I == $Surface$Code)    call smovv ('S', name, kk)
+        else if (SSR$DetType$I == $SatIr$code)      call smovv ('I', name, kk)   # clk 3/99 (E2061)
+        else                                        call smovv ('U', name, kk)
+        call smoviz (xSSR$TrackNumber$I,3,name,kk)
+        call smov   (EOS,                 name,kk)
+        n_type = '(SAT)'
+        htype = 'TRACK'
+        RAD$Pointer$To (xSSR$EmitterIndx$I)
+        n_emit = xRAD$Type$C
+        }
+    else if (indx_hfd <= HFD$Slots)     # khc - 5/93
+        {                               # HFDF detection track
+        HFD$Pointer$to indx_hfd
+
+        Unt$Pointer$To (xHFD$Detector1$I)
+        Unt2$Pointer$To (xHFD$Detector2$I)
+        Unt$View$I = xUnt$View$I
+        kk = 0
+        if (UNT$View$I < $FirstOrange$View & UNT$View$I >= $FirstBlue$View)
+          call smovv("BH",name,kk)
+        else
+          call smovv("OH",name,kk)
+        call smoviz (xHFD$SequenceNmbr$I,3,name,kk)
+        call smov   (EOS,                  name,kk)
+        n_type = '(HFD)'
+
+        site1 = xUnt$Name$C
+        ibear = xHFD$AppBearing$I
+        if (ibear > 0)
+            htype = 'BEAR'
+        else
+            htype = 'TRACK'
+
+        if (xHFD$ElpsExists$I  == $yes)
+            site2 = xUnt2$Name$C
+        }
+    else if (indx_swd <= SWD$Slots)     # khc - 5/93
+        {                               # SWABS detection track
+        SWD$Pointer$To indx_swd
+
+        kk = 0
+        if (xSWD$DetectorSide$I == $Blue$Code)
+          call smovv("BT",name,kk)
+        else
+          call smovv("OT",name,kk)
+        call smoviz(xSWD$SequenceNmbr$I,3,name,kk)
+        call smov(EOS,name,kk)
+        n_type = '(SWB)'
+        icourse = xSWD$Course$I
+        ispeed  = xSWD$Speed$I
+        htype = 'TRACK'
+        }
+    else if (indx_sos <= SOS$Slots)     # khc - 5/93
+        {                               # SOSUS detection track
+        SOS$Pointer$to indx_SOS
+
+        kk = 0
+        call smovv("BZ",name,kk)
+        call smoviz(xSOS$SequenceNmbr$I,3,name,kk)
+        call smov(EOS,name,kk)
+        n_type = '(SOS)'
+        icourse = xSOS$Course$I
+        ispeed  = xSOS$Speed$I
+        htype = 'TRACK'
+        }
+    else if (indx_agd <= AGD$Slots)     # clk 9/95 (E1456)
+      {                                 # "Ghosted" ALSP Ground Data
+       AGD$Pointer$To  (indx_agd)
+
+       name = $Blank_Literal
+       kk = 0
+       call smovhn (xAGD$Name$C, $$MaxLit, name, kk)
+
+       kk = 0
+       AGD$ALSPClass$I = xAGD$ALSPClass$I
+       if (AGD$ALSPClass$I == $alsp_class_ground_maneuver_radar)
+         {
+          RAD$Pointer = xAGD$RADPntr$I         # SMM 7/18/96 PER #E1624
+          if (RAD$Pointer$Valid)
+             call smovhn (xRAD$Type$C, $$MaxLit, agd_type, kk)
+          else 
+             call smovv ("RADAR", agd_type, kk)
+         }
+        else if (AGD$ALSPClass$I == $alsp_class_ground_maneuver_allrad |
+                 AGD$ALSPClass$I == $alsp_class_ground_maneuver_himad)
+         {
+          MC$Pointer = xAGD$MCPntr$I         # SMM 7/18/96 PER #E1624
+          if (MC$Pointer$Valid)
+             call smovhn (xMC$Name$C, $$MaxLit, agd_type, kk)
+          else 
+             call smovv ("SAM SITE", agd_type, kk) # jb E2144 (smovv) 4/3/00
+         }
+        else if (AGD$ALSPClass$I == $alsp_class_ground_maneuver_combat)
+             call smovv ("COMBAT", agd_type, kk)
+        else if (AGD$ALSPClass$I == $alsp_class_ground_maneuver_support_convoy)
+             call smovv ("CONVOY", agd_type, kk)
+        else if(AGD$ALSPClass$I == $alsp_class_ground_maneuver_support_unit |
+                AGD$ALSPClass$I == $alsp_class_ground_maneuver_support_unit_tcu)
+             call smovv ("SUP UNIT", agd_type, kk)
+
+        # Add alsp id
+        kk = 0
+        call smovi (xAGD$ALSPId$I, agd_alspid, kk)
+
+        icourse = INT ((xAGD$TrueCourse$F * 180.0 / $Pi) + 0.5)
+        ispeed  = INT (xAGD$TrueSpeed$F + 0.5)
+        htype = 'GROUND'
+      }
+
+
+    ilen = 0                            ## identification of unit
+    call smovv  ('ID:  ',       msg,ilen)
+    call smovhn (name,   $$MaxLit,msg,ilen)
+    call smovv   (' ',             msg,ilen)
+    call smovhn (n_type, $$MaxLit,msg,ilen)
+    call smov   (EOS,             msg,ilen)
+
+    call draw_text_c (n_Line,msg,$color$text)
+    n_line = n_line + ($line$hook_2 - $line$hook_1)
+
+
+#   if (dw_widget_based != $YES) 
+    if (kstation > 0)
+        {
+        STA$Pointer$To kstation                     ## get STA from PLOTCOMMON
+
+        if ( xSTA$PlotInputCapable$I == $No)        # is a GEO input Ok?
+            putSTA$PlotInputCapable$I ($YES)        # it should be
+
+        STA$PlotInputRequest$i = xSTA$PlotInputRequest$i
+
+        if (  STA$PlotInputRequest$i == $PIR$Unit                          |
+            ( STA$PlotInputRequest$i == $PIR$Force & htype == 'FORCE' ) |
+            ( STA$PlotInputRequest$i == $PIR$Ground& htype == 'GROUND' ) |
+            ( STA$PlotInputRequest$i == $PIR$Track & htype == 'TRACK' )  )
+            {
+            ilen = 0
+            if (STA$PlotInputRequest$i != $PIR$Unit)
+                call smovh (htype, 7,msg,ilen)
+            if (htype == 'GROUND')
+                call smovhn (agd_alspid,  $$MaxLit,msg,ilen)
+            else
+                call smovhn (name,  $$MaxLit,msg,ilen)
+            call smovv (" ",     msg,ilen)
+            call smov  (EOS,     msg,ilen)
+
+   	    	sta$PlotInput$V  = " "
+    		kk = 0
+    		call vmovh (msg,  ilen, sta$PlotInput$V, kk)    
+        	PUTsta$PlotInput$V
+     	    PUTsta$PlotInputReady$I ($YES)
+            }
+        }
+
+    if (agd_type != $Blank_Literal)     # clk - 9/95 (E1456)
+      {
+       ilen = 0
+       call smovv  ("       ", msg, ilen)
+       call smovhn (agd_type, $$MaxLit, msg, ilen)
+       call smov   (EOS, msg, ilen)
+       call draw_text_c (n_line, msg, $Color$Text)
+       n_line = n_line + ($line$hook_2 - $line$hook_1)
+      }
+
+    if (agd_alspid != $Blank_Literal)     # clk - 9/95 (E1456)
+      {
+       ilen = 0
+       call smovv  ("ALSPID:", msg, ilen)
+       call smovhn (agd_alspid, $$MaxLit, msg, ilen)
+       call smov   (EOS, msg, ilen)
+       call draw_text_c (n_line, msg, $Color$Text)
+       n_line = n_line + ($line$hook_2 - $line$hook_1)
+      }
+
+    if (site1 != $BLANKLIT)                                # khc - 5/93, displayed hfdf detection sites
+        {
+         ilen = 0 
+         if (site2 != $BLANKLIT)
+            {
+            call smovv ('SITE1: ',msg,ilen)
+            call smovhn(site1,$$MaxLit,msg,ilen)
+            call smov(EOS,msg,ilen)
+            call draw_text_c (n_Line,msg,$color$text)
+            n_line = n_line + ($line$hook_2 - $line$hook_1)
+
+            ilen = 0
+            call smovv ('SITE2: ',msg,ilen)
+            call smovhn(site2,$$MaxLit,msg,ilen)
+            }
+        else
+            {
+            call smovv ('BRG:   ',msg,ilen)
+            call smoviz(ibear,    3,msg,ilen)
+            call smov(EOS,msg,ilen)
+            call draw_text_c (n_Line,msg,$color$text)
+            n_line = n_line + ($line$hook_2 - $line$hook_1)
+
+            ilen = 0
+            call smovv ('SITE1: ',msg,ilen)
+            call smovhn(site1,$$MaxLit,msg,ilen)
+            }
+        call smov(EOS,msg,ilen)
+        call draw_text_c (n_Line,msg,$color$text)
+        n_line = n_line + ($line$hook_2 - $line$hook_1)
+        }
+
+    if (isource >= 0)
+        {
+        ilen = 0
+        call smovv ('BRG:   ',msg,ilen)
+        call smoviz(ibear,    3,msg,ilen)
+        call smov(EOS,msg,ilen)
+        call draw_text_c (n_Line,msg,$color$text)
+        n_line = n_line + ($line$hook_2 - $line$hook_1)
+
+        ilen = 0
+        call smovv ('FROM:  ',msg,ilen)
+        call smovhn(n_source,$$MaxLit,msg,ilen)
+        call smov(EOS,msg,ilen)
+        call draw_text_c (n_Line,msg,$color$text)
+        n_line = n_line + ($line$hook_2 - $line$hook_1)
+        }
+
+    if (n_emit != $BLANKLIT)
+        {
+        ilen = 0                            ## course of unit
+        call smovv ('EMIT:  ',msg,ilen)
+        call smovhn(n_emit,$$MaxLit,msg,ilen)
+        call smov(EOS,msg,ilen)
+        call draw_text_c (n_Line,msg,$color$text)
+        n_line = n_line + ($line$hook_2 - $line$hook_1)
+        }
+
+    if (icourse >= 0)
+        {
+        ilen = 0                            ## course of unit
+        call smovv ('CRS:   ',msg,ilen)
+        call smoviz(icourse,  3,msg,ilen)
+        call smov(EOS,msg,ilen)
+        call draw_text_c (n_Line,msg,$color$text)
+        n_line = n_line + ($line$hook_2 - $line$hook_1)
+        }
+
+    if (ispeed >= 0)
+        {
+        ilen = 0                            ## speed of unit
+        call smovv ('SPD:  ',msg,ilen)
+        call smovib(ispeed,  4,msg,ilen)
+        call smov(EOS,msg,ilen)
+        call draw_text_c (n_Line,msg,$color$text)
+        n_line = n_line + ($line$hook_2 - $line$hook_1)
+        }
+
+    if (ielevation > 0)       # If unit has an elevation, display it
+        {
+        ilen = 0                                # elevation of unit
+        call smovv  ('ELV: ',msg,ilen)
+        call smovib (ielevation,   6,msg,ilen)
+        call smov   (EOS,msg,ilen)
+        call draw_text_c (n_Line,msg,$color$text)
+        n_line = n_line + ($line$hook_2 - $line$hook_1)
+        }
+
+    if (ialt > 0)       # If unit has an altitude, display it
+        {
+        ilen = 0                                # altitude of unit
+        call smovv ('ALT: ',msg,ilen)
+        call smovib(ialt,   7,msg,ilen) # SMM 3/99 (E2052) changed 6 to 7
+        call smov(EOS,msg,ilen)
+        call draw_text_c (n_Line,msg,$color$text)
+        n_line = n_line + ($line$hook_2 - $line$hook_1)
+        }
+
+    else if (idepth > 0)       # If unit has a depth compute it
+        {
+        ilen = 0                                # altitude of unit
+        call smovv ('DEP: ',msg,ilen)
+        call smovib(idepth,   5,msg,ilen)
+        call smov(EOS,msg,ilen)
+        call draw_text_c (n_Line,msg,$color$text)
+        n_line = n_line + ($line$hook_2 - $line$hook_1)
+        }
+
+kk = 0
+call smovv("------------------",msg,kk) #SMM 8/23/14
+call draw_text_c (n_line,msg,$color$text)
+    #call draw_text_v (n_Line,"------------------",$color$text)
+    n_line = n_line + ($line$hook_2 - $line$hook_1)
+    }
+
+call draw_text_done     # refresh Text window
+
+end
+
+
+define($LL$ArraySize,3*ARB)
+
+subroutine cvt_range_to_LL( CTR_Latitude,            # in, radians
+                            CTR_Longitude,           # in, radians
+                            radius,                  # in, nm array
+                            points_plotted,          # in, number of range points
+                            PLAT,                    # out, degrees
+                            PLON,                    # out, degrees
+                            LL_Index)                # out, number of LL to plot
+
+implicit none
+
+real*4      CTR_Latitude
+real*4      CTR_Longitude
+real*4      radius [ $LL$ArraySize ]
+integer*4   points_plotted
+real        PLAT[ $LL$ArraySize ], PLON[ $LL$ArraySize ]
+integer*4   LL_Index
+
+integer*4   i
+real*4      LAT_Save
+real*4      LONG_save
+real*4      old_radius
+real*4      old_bearing
+real        cos, LATF, LONF, bearing, tcos
+
+LAT_Save  = CTR_Latitude 
+LONG_Save = CTR_Longitude
+
+LL_index    = 0
+old_radius  = radius [ 1 ]
+old_bearing = 0.0
+
+#$% for all points to be plotted
+FOR (i = 1; i <= points_plotted; i = i + 1)
+    {
+    bearing = i * $Twopi / Points_Plotted    # delta bearing in radians
+
+    #$% if new LL point required for this this time slice 
+    IF ( radius [ i ] > old_radius )
+        {
+        # when radius changes, plot an extra point to the new radius, 
+        # in the direction of the center lat/long
+
+        #$% build a new LAT/LONG entry
+        LL_Index = LL_Index + 1
+
+        LATF = LAT_Save                             # reset to center point
+        LONF = LONG_Save
+
+        tcos = cos(LATF) 
+
+        #$% get new lat/long based on current lat/long and bearing
+        call Rrb2ll(_                               # get second point for line
+                     LATF,                          # in/out latitude, deg
+                     LONF,                          # in/out longitude, deg
+                     old_radius,                    # in 
+                     bearing,                       # in
+                     0.0,                           # heading
+                     tcos)                          # in
+
+        plat[ LL_index ] = LATF * 180/$pi             # convert center LAT to deg
+        plon[ LL_index ] = LONF * 180/$pi             # convert center LAT to deg
+
+        }# if new LL point required for this this time slice 
+    else IF ( radius [ i ] < old_radius )
+        {
+        # when radius changes, plot an extra point to the new radius, 
+        # in the direction of the center lat/long
+
+        #$% build a new LAT/LONG entry
+        LL_Index = LL_Index + 1
+
+        LATF = LAT_Save                             # reset to center point
+        LONF = LONG_Save
+
+        tcos = cos(LATF) 
+
+        #$% get new lat/long based on current lat/long and bearing
+        call Rrb2ll(_                               # get second point for line
+                     LATF,                          # in/out latitude, deg
+                     LONF,                          # in/out longitude, deg
+                     radius [ i ],                  # in 
+                     old_bearing,                   # in
+                     0.0,                           # heading
+                     tcos)                          # in
+
+        plat[ LL_index ] = LATF * 180/$pi             # convert center LAT to deg
+        plon[ LL_index ] = LONF * 180/$pi             # convert center LAT to deg
+
+        }# if new LL point required for this this time slice 
+
+    LL_index = LL_index + 1
+
+    LATF = LAT_Save                             # reset to center point
+    LONF = LONG_Save
+
+    tcos = cos(LATF) 
+
+    #$% get new lat/long based on current lat/long and bearing
+    Call Rrb2ll(_                               # Get Second Point For Line
+                 Latf,                          # In/Out Latitude, Deg
+                 Lonf,                          # In/Out Longitude, Deg
+                 Radius [ I ],                  # In 
+                 Bearing,                       # In
+                 0.0,                           # Heading
+                 Tcos)                          # In
+
+    Plat[ Ll_Index ] = Latf * 180/$Pi             # Convert Center Lat To Deg
+    Plon[ Ll_Index ] = Lonf * 180/$Pi             # Convert Center Lat To Deg
+
+
+    #$% set up for next iteration
+    Old_Radius  = Radius [ I ]
+    Old_Bearing = Bearing
+
+    } #$% end for all points to be plotted
+
+return 
+end
+
+# This is a dummy routine for the library if TK/CP/etc does not have it
+Integer*4 Function Draw_Line_Id (lat1,lon1,
+                                 lat2,lon2,
+                                 color,
+                                 id)
+
+implicit none
+Integer*4   Draw_Line_c, Color, id  # jb Note: id is a not-used argument) 4/3/00
+Real*4      Lat1, Lon1
+Real*4      Lat2, Lon2
+
+Draw_Line_Id = Draw_Line_c (Lat1,Lon1,
+                          Lat2,Lon2,
+                          Color)
+
+end
+
+
+
+#$% load new symbology if required
+subroutine check_load_symbology(new_symbology)
+implicit none
+PlotCommon
+
+integer*4   new_Symbology
+integer*4   status
+
+#$% if the object symbology for station has not been changed or called from a 
+#$% high level routine that is not dealing with alternate symbology
+if ( new_Symbology == current_geo_symbology |
+     new_symbology == 0 )
+    {
+    return
+    }
+
+#$% Since we maintain an array consisting of either top or side view 
+#$% symbology, we may need to reload the array from file when the symbology
+#$% is changed. The NTDS symbology is loaded only once and is maintained 
+#$% while the station is active.
+if (new_Symbology == $TopView$Symbology )
+    {
+    call load_symbology ('MMI$TOPVIEW',status)
+    }
+else if (new_Symbology == $SideView$Symbology)
+    {
+    call load_symbology ('MMI$SIDEVIEW',status)
+    }
+
+#$% set global variable
+#$% indicate we don't need to load symbology file unless user changes symbology
+current_geo_symbology = new_Symbology
+
+if (status != $no)
+    {
+    
+    }
+
+return
+end
+
+define ($Icon_LFC,17)
+undefine err
+undefine read
+
+
+Subroutine load_symbology (File_Name,status)
+
+###########################################################################
+#$%
+#$% Purpose:    SYMOPN makes the character set defined in the given file
+#$%             available for the SYMBOL and SYMTXT subroutines.  Up to
+#$%             three character sets may be opened at one time.  The opened
+#$%             character set becomes the current character set.  The first
+#$%             character set opened is character set 1, the second set
+#$%             opened is character set 2, etc.  Each symbol is defined as
+#$%             a Wand subroutine.  The subroutine is a set of short relative
+#$%             moves and draws.
+#$%
+#$% Called by:  INIT
+#$%
+#$% Date:       3/5/92
+##############################################################################
+BBCommon
+
+vaxcharacter*(*)    file_name
+integer*4   status
+
+ICON$Common
+
+vaxcharacter*(80)   line
+vaxcharacter        cmd
+integer*4   ctoi
+external    ctoi
+Real*4      Drawing_Scale, ctof
+integer*2   dx,dy
+vaxcharacter*(5)  field
+integer*4   field_len
+integer*4   ICN$Pointer
+integer*4   ierr
+integer     i
+integer*4   Icon_found
+integer     k, kk
+integer     nbytes
+integer*4   pos
+integer*4   str_pos
+integer*4   sign
+integer     length_trimmed
+vaxcharacter    vstrip   * $$MaxLit
+external        vstrip
+
+call open_symbol_file($Icon_LFC,            # in
+                      File_name,            # in
+                      status)               # out
+
+if (status != $yes)
+    {
+    return
+    }
+
+#$% clear index arrays from previous symbology
+for (i=1; i<=$maxIcons; i=i+1) Icon_Index_Into_First_Data[i] = 0
+#call OTS$MOVE5(%%VAL(0),
+#               0,
+#               %%VAL(0),
+#               %%VAL(sizeof (Icon_Index_Into_First_Data)),
+#               Icon_Index_Into_First_Data )
+
+for (i=1; i<=$maxIcons; i=i+1) Icon_Index_First_Data[i] = 0
+#call OTS$MOVE5(%%VAL(0),
+#               0,
+#               %%VAL(0),
+#               %%VAL(sizeof (Icon_Index_First_Data)),
+#               Icon_Index_First_Data )
+
+for (i=1; i<=$MaxDefault$Icons; i=i+1) Icon_Default_Indx[i] = 0
+#call OTS$MOVE5(%%VAL(0),
+#               0,
+#               %%VAL(0),
+#               %%VAL(sizeof (Icon_Default_Indx)),
+#               Icon_Default_Indx )
+
+status = $yes
+
+Icon_Num_Icons = 1
+Icon_Tot_Data_Pts  = 1
+Icon_Index_First_Data[Icon_Num_Icons] = Icon_Tot_Data_Pts
+
+#$% default drawing scale
+Drawing_Scale = 1.0
+
+# get the character set
+repeat
+    {
+    line = ""
+    nbytes = 0
+    read ($Icon_LFC,9001,end=8002,err=8002) line
+9001 format (A)
+
+    goto 6001
+        {
+8002    nbytes = EOF
+        }
+    6001
+
+    nbytes = length_trimmed (line)
+    if (nbytes == EOF) break
+
+    cmd = line[1:i]
+
+    if (cmd == "M" |
+        cmd == "D"  )
+        {
+        field = ""
+        call parse_field(_
+                       line,            # in, string
+                       " ",             # in, delimeter char
+                       2,               # in, find field number (starting at 1)
+                       field,           # out, field
+                       field_len,       # out, field length
+                       str_pos)         # out, position in input string field found
+
+        ierr = $yes
+
+        if (field_len != 0)
+            {
+            #$% if dealing with negative #
+            if ( field [1:1] == "-" )
+                {
+                sign = -1
+                pos = 2
+                }
+            else
+                {
+                sign = 1               
+                pos = 1
+                }
+
+            k = 1;
+            dx = ctoi (%%REF(field[pos:field_len]),k) * sign
+            ierr = $no
+            }
+
+        field = ""
+        call parse_field(_
+                       line,            # in, string
+                       " ",             # in, delimeter char
+                       3,               # in, find field number (starting at 1)
+                       field,           # out, field
+                       field_len,       # out, field length
+                       str_pos)         # out, position in input string field found
+
+        if (field_len != 0)
+            {
+            #$% if dealing with negative #
+            if ( field [1:1] == "-" )
+                {
+                sign = -1
+                pos = 2
+                }
+            else
+                {
+                sign = 1               
+                pos = 1
+                }
+
+            k = 1; 
+            dy = ctoi (%%REF(field[pos:field_len]),k) * -1 * sign # reverse movement
+            ierr = $no
+            }
+        } # end if move or draw
+    else if (cmd == "N")
+        {
+        field = ""
+        call parse_field(_
+                       line,            # in, string
+                       " ",             # in, delimeter char
+                       2,               # in, find field number (starting at 1)
+                       field,           # out, field
+                       field_len,       # out, field length
+                       str_pos)         # out, position in input string field found
+
+        if (field_len != 0)
+            {
+            Icon_found = .false.
+            for ( ICN$Pointer$First; ICN$Pointer$OK; ICN$Pointer$Next)
+                {
+                if ( field[1:field_len] == xICN$Name$v)
+                    {
+                    #$% build the link into icon points
+                    Icon_Index_Into_First_Data [ ICN$Pointer$Index ] =
+                        Icon_Num_Icons
+                    
+                    Icon_found = .true.
+                    break 
+                    }
+                }
+
+            #$% check to see if name is one of the default types
+            if ( field[1:field_len] == "SHIP" )
+                {
+                Icon_Default_Indx[ $Ship$DefaultIndex ] = Icon_Num_Icons
+                }
+            else if ( field[1:field_len] == "JET" )
+                {
+                Icon_Default_Indx[ $Jet$DefaultIndex ] = Icon_Num_Icons
+                }
+            else if ( field[1:field_len] == "HELO" )
+                {
+                Icon_Default_Indx[ $Helo$DefaultIndex ] = Icon_Num_Icons
+                }
+            else if ( field[1:field_len] == "PROP" )
+                {
+                Icon_Default_Indx[ $Propellor$DefaultIndex ] = Icon_Num_Icons
+                }
+            else if ( field[1:field_len] == "CRUIS" )
+                {
+                Icon_Default_Indx[ $Cruise$DefaultIndex ] = Icon_Num_Icons
+                }
+            else if ( field[1:field_len] == "SS" )
+                {
+                Icon_Default_Indx[ $Sub$DefaultIndex ] = Icon_Num_Icons
+                }
+            else if ( field[1:field_len] == "TORP" )
+                {
+                Icon_Default_Indx[ $Torpedo$DefaultIndex ] = Icon_Num_Icons
+                }
+            else if ( field[1:field_len] == "CTRM"  )
+                {
+                Icon_Default_Indx[ $CtrMeasure$DefaultIndex ] = Icon_Num_Icons
+                }
+            } # end if valid icon name from file
+        #$% else if invalid name
+        else
+            {
+            next
+            }
+        next
+        }
+    #$% else if this is a scaling factor
+    else if (cmd == "HS")
+        {
+        field = ""
+
+        #$% get the scaling factor
+        call parse_field(_
+                       line,            # in, string
+                       " ",             # in, delimeter char
+                       2,               # in, find field number (starting at 1)
+                       field,           # out, field
+                       field_len,       # out, field length
+                       str_pos)         # out, position in input string field found
+
+        if (field_len != 0)
+            {
+
+            kk = 1; Drawing_Scale = ctof(field, kk)
+            }
+        next
+        }
+    else if (cmd == "E")
+        {
+        dx = 0
+        dy = 0
+        }
+    #$% else blank or comment line ...
+    else
+        {
+        next
+        }
+
+    #$% if error resolving data pts in line
+    if ( ierr == $yes )
+        {
+        next
+        }
+
+    Icon_x  [Icon_Tot_Data_Pts] = dx
+    Icon_y  [Icon_Tot_Data_Pts] = dy
+    Icon_pen[Icon_Tot_Data_Pts] = cmd
+
+    Icon_Tot_Data_Pts = Icon_Tot_Data_Pts + 1
+
+    if (cmd =='E')
+        {
+        Icon_Drawing_Scale[Icon_Num_Icons] = Drawing_Scale
+        Icon_Num_Icons = Icon_Num_Icons + 1
+        Icon_Index_First_Data[Icon_Num_Icons] = Icon_Tot_Data_Pts
+
+        #$% reset default drawing scale for next icon
+        Drawing_Scale = 1.0
+        }
+
+    if (Icon_Tot_Data_Pts >= $Icon_Data_Pts) break
+    }
+
+Icon_x  [Icon_Tot_Data_Pts] = 0
+Icon_y  [Icon_Tot_Data_Pts] = 0
+Icon_pen[Icon_Tot_Data_Pts] = "E"
+
+close ($Icon_LFC)
+
+#------------------------------------------------------------
+# Now tell PS what the symbols are.... currently operative for DECW only
+
+#call load_PS_Symbols
+
+return
+end
+
+
+subroutine open_symbol_file(_
+                        LFC,                  # in, may be a constant
+                        File_name,            # in
+                        Status)               # out
+implicit none
+
+integer*4   LFC
+VaxCharacter*(*)    File_name
+integer*4   status
+
+integer*4   io_status
+
+
+open (Unit            = LFC,
+      File            = file_name,
+      Status          = "OLD",
+      Access          = "Sequential",
+      Form            = "Formatted",
+#      RecordType      = "Variable",
+#      CarriageControl = "NONE",
+      iostat          = io_status,
+      err             = 8001)
+#      readonly, shared)
+
+goto 6001
+    {
+    8001
+    print *,"Problem opening Symbol file ",File_name, ", IOS=",io_status
+
+    stop "Can't open ICON symbols."
+    }
+6001
+
+status = $yes
+return
+end
+
+
+subroutine setup_icon (_
+                      ID,               # in, unit index
+                      NTDS,             # in, ntds index
+                      ICNIndx,          # out, icon index, NTDS,top,side ...
+                      Symbology )       # out
+BBCommon
+PLOTCommon
+integer*4   ID
+integer*4   NTDS
+integer*4   ICNIndx
+integer*4   Symbology
+
+integer*4   UNT$Pointer
+
+#$% set up default
+ICNIndx = NTDS
+
+Symbology = Current_Geo_Symbology
+
+UNT$Pointer$To ID
+
+if ( ! UNT$Pointer$OK )
+    {
+    symbology = $NTDS$Symbology
+    return
+    }
+
+if ( xUNT$Type$i == $Shorebase$Code )
+    {
+    symbology = $NTDS$Symbology
+    }
+
+#$% if selected station symbology is not NDTS
+if ( Symbology != $NTDS$Symbology )
+    {
+    #$% get user-defined icon name index, associated with game object in BUILD
+    call get_ICNIndex ( ID,                 # in, unit index
+                        ICNIndx )           # out, zero if Icon not found for unit
+      
+    #$% if no user-defined or default icon
+    if ( ICNIndx == 0 )
+        {
+        ICNIndx = NTDS
+        #$% this will force the draw routine to use NTDS
+        Symbology = $NTDS$Symbology
+        }
+    }
+
+return
+end
+
+
+#$% get user-defined icon, default icon, or no icon index
+subroutine get_ICNIndex ( UNT_Index,          # in
+                          ICNIndx )           # out, zero if Icon not found for unit
+BBCommon
+
+ICON$Common
+
+integer*4   UNT_Index
+integer*4   ICNIndx
+
+integer*4   ACC$Category$i
+integer*4   ACC$Pointer
+integer*4   CTM$Pointer
+integer*4   SHC$Pointer
+integer*4   TRP$Pointer
+integer*4   UNT$type$i
+integer*4   UNT$Pointer
+integer*4   UNT$SuperType$i
+
+ICNIndx = 0
+
+UNT$Pointer$to (UNT_Index)
+
+UNT$type$i = xUNT$type$i
+UNT$SuperType$i = xUNT$SuperType$i
+
+if ( UNT$type$i == $Air$Code )
+    {
+    ACC$Pointer = xUNT$ACCPntr$i
+    ICNIndx = xACC$ICNIndx$i 
+    }
+else if ( UNT$type$i == $Surface$Code |
+#          UNT$type$i == $Shorebase$Code |
+          UNT$SuperType$i == $Submarine$SuperCode)
+    {
+    SHC$Pointer = xUNT$SHCPntr$i
+    ICNIndx = xSHC$ICNIndx$i 
+    }
+else if ( UNT$SuperType$i == $Torpedo$SuperCode )
+    {
+    TRP$Pointer = xUNT$TRPPntr$i
+    ICNIndx = xTRP$ICNIndx$i 
+    }
+else if ( UNT$SuperType$i == $CtrMeasure$SuperCode )
+    {
+    CTM$Pointer = xUNT$CTMPntr$i
+#    ICNIndx = xTMP$ICNIndx$i 
+    }
+
+#$% if user defined an icon name in BUILD and icon file had corresponding name
+if (ICNIndx != 0)
+    {
+    ICNIndx = Icon_Index_Into_First_Data [ ICNIndx ]
+    }
+
+#$% if no user-defined icon found for this unit, get the default icon
+if (ICNIndx == 0) 
+    {
+    #$% check for defaults
+    if ( UNT$type$i == $Air$Code )
+        {
+        ACC$Pointer = xUNT$ACCPntr$i
+
+        ACC$Category$i = xACC$Category$i 
+    
+        #$% get the pointer to the first data related to ...
+        ICNIndx = Icon_Default_Indx[ $Jet$DefaultIndex ]
+        if (ACC$Category$i == $Helo$Code)
+            {
+            ICNIndx = Icon_Default_Indx[ $Helo$DefaultIndex ]
+            }
+        else if (ACC$Category$i == $Jet$Code)
+            {
+            ICNIndx = Icon_Default_Indx[ $Jet$DefaultIndex ]
+            }
+        else if (ACC$Category$i == $Prop$Code)
+            {
+            ICNIndx = Icon_Default_Indx[ $Propellor$DefaultIndex ]
+            }
+        }
+    else if ( UNT$type$i == $CruiseMissile$Code )
+        {
+        ICNIndx = Icon_Default_Indx[ $Cruise$DefaultIndex ]
+        }
+    else if ( UNT$type$i == $Surface$Code )
+        {
+        ICNIndx = Icon_Default_Indx[ $Ship$DefaultIndex ]
+        }
+    else if ( UNT$SuperType$i == $Submarine$SuperCode )
+        {
+        ICNIndx = Icon_Default_Indx[ $Sub$DefaultIndex ]
+        }
+    else if ( UNT$SuperType$i == $Torpedo$SuperCode )
+        {
+        ICNIndx = Icon_Default_Indx[ $Torpedo$DefaultIndex ]
+        }
+    else if ( UNT$SuperType$i == $CtrMeasure$SuperCode )
+        {
+        ICNIndx = Icon_Default_Indx[ $CtrMeasure$DefaultIndex ]
+        }
+    }
+
+
+return
+end
+
+
+
+#$% using DECW/Motif coord system, rotate a series of points around a center pt
+subroutine rotate_points ( center_x,              # in, pixel, rotation pt.
+                           center_y,              # in, pixel, rotation pt.
+                           orientation,           # in, radians
+                           Pnt_count,             # in, number of points
+                           In_Pnts_x$w_gpnt_x,    # in, points to rotate
+                           In_Pnts_x$w_gpnt_y,
+                           Out_Pnts_x$w_gpnt_x,   # out, points after rotation
+                           Out_Pnts_x$w_gpnt_y)
+implicit none
+
+integer*4   center_x
+integer*4   center_y
+real*4      orientation
+integer*4   Pnt_count
+#RECORD /x$point/ In_Pnts[Pnt_Count], Out_Pnts[Pnt_Count] 
+integer*2   In_Pnts_x$w_gpnt_x [ Pnt_Count ]
+integer*2   In_Pnts_x$w_gpnt_y [ Pnt_Count ]
+
+integer*2   Out_Pnts_x$w_gpnt_x [ Pnt_Count ]
+integer*2   Out_Pnts_x$w_gpnt_y [ Pnt_Count ]
+
+real*4      angle
+integer*4   i
+real        h
+real*4      slope
+real*4      vect_len
+real        w
+
+for (i = 1; i <= Pnt_count; i = i + 1)
+    {
+    w = in_Pnts_X$W_GPNT_x[i] - center_x
+    h = center_y - in_Pnts_X$W_GPNT_y[i]
+
+    #$% get length from center to current point
+    vect_len = SQRT(( h*h) + (w*w))
+
+    slope = 0
+
+    if (h != 0.0)
+        {
+        slope = w/h
+        }
+    
+    #$% get angle from center point to this point
+    angle = ATAN ( slope )
+
+    if ( h < 0.0 )
+        {
+        angle = angle + $Pi
+        }
+    else if ( h == 0 )
+        {
+        if ( w > 0 )
+            {
+            angle = $Pi / 2
+            }
+        else
+            {
+            angle = $pi + $Pi / 2
+            }
+        }
+
+    angle =  angle + orientation
+
+    $ang2pi (angle)
+    
+    out_pnts_X$W_GPNT_x[i] = Center_x + SIN (angle) * vect_len
+    out_pnts_X$W_GPNT_y[i] = Center_y - COS (angle) * vect_len
+    }
+
+return
+end
+
+
+
+subroutine reflect_points (center_x,              # in, pixel, rotation pt.
+                           center_y,              # in, pixel, rotation pt.
+                           axis_flag,             # in, flag
+                           Pnt_count,             # in, number of points
+                           Pnts_x$w_gpnt_x,       # in/out, points to reflect
+                           Pnts_x$w_gpnt_y)
+implicit none
+
+integer*4   center_x
+integer*4   center_y
+vaxcharacter*(2)     axis_flag
+integer*4   Pnt_count
+#RECORD /x$point/ Pnts[Pnt_Count]
+integer*2   Pnts_x$w_gpnt_x [ Pnt_Count ]
+integer*2   Pnts_x$w_gpnt_y [ Pnt_Count ]
+
+integer*4   i
+
+if (axis_flag == "EW")
+    {
+    for (i = 1; i <= Pnt_count; i = i + 1)
+        {
+        #$% get mirror image using E/W reference
+        pnts_X$W_GPNT_x[i] = Center_x + (Center_x - pnts_X$W_GPNT_x[i])
+        }
+    }
+else if (axis_flag == "NS")
+    {
+    for (i = 1; i <= Pnt_count; i = i + 1)
+        {
+        #$% get mirror image using N/S reference
+        pnts_X$W_GPNT_y[i] = Center_y + (Center_y - pnts_X$W_GPNT_y[i])
+        }
+    }
+
+return
+end
+
+
+subroutine modify_points(_
+                     perspective_code,      # in
+                     center_x,              # in, center x
+                     center_y,              # in, center y
+                     orientation,           # in, course of platform
+                     Pnt_count,             # in, number of points
+                     In_Pnts_x$w_gpnt_x,
+                     In_Pnts_x$w_gpnt_y,
+                     Out_Pnts_x$w_gpnt_x,
+                     Out_Pnts_x$w_gpnt_y,
+                     Array_Addr_x,
+                     Array_Addr_y)            # out, if used
+implicit none
+
+integer*4   perspective_code
+integer*4   center_x
+integer*4   center_y
+real*4      orientation
+integer*4   Pnt_count
+
+#RECORD /x$point/ In_Pnts[Pnt_Count], Out_Pnts[Pnt_Count] 
+integer*2   In_Pnts_x$w_gpnt_x [ Pnt_Count ]
+integer*2   In_Pnts_x$w_gpnt_y [ Pnt_Count ]
+
+integer*2   Out_Pnts_x$w_gpnt_x [ Pnt_Count ]
+integer*2   Out_Pnts_x$w_gpnt_y [ Pnt_Count ]
+
+Integer*4   Array_Addr_x, Array_Addr_y
+
+if ( perspective_code == $TopView$Symbology )
+    {
+    call rotate_points (_
+                 center_x,           # in, center x
+                 center_y,           # in, center y
+                 orientation,        # in
+                 Pnt_count,          # in, number of points
+                 In_Pnts_x$w_gpnt_x,
+                 In_Pnts_x$w_gpnt_y,
+                 Out_Pnts_x$w_gpnt_x,
+                 Out_Pnts_x$w_gpnt_y)
+
+    #$% this is used later to indicate which point array to draw
+    array_addr_x = %%LOC(Out_Pnts_x$w_gpnt_x)
+    array_addr_y = %%LOC(Out_Pnts_x$w_gpnt_y)
+    }
+else if ( perspective_code == $SideView$Symbology )
+    {
+    #$% if heading eastward
+    if ( orientation > 0.0 &
+          orientation < $PI )
+        {
+        #$% create East-West mirror image
+        call reflect_points (_
+                             center_x,            # in, center x
+                             center_y,            # in, center y
+                             "EW",                # in, flag
+                             Pnt_count,           # in, number of points
+                             In_Pnts_x$w_gpnt_x,  # in/out, points to reflect
+                             In_Pnts_x$w_gpnt_y)
+        }
+    }
+
+return
+end
+
+subroutine draw_arrow_init(argument, value)
+implicit none
+
+Arrow$common
+
+vaxcharacter*(*)    argument
+integer*4           value
+
+if      (argument == "style"     )  Ac_Style        = value
+else if (argument == "thickness" )  Ac_Thickness    = value
+else if (argument == "headlength")  Ac_Head_Length  = value
+else if (argument == "linelength")  Ac_Line_Length  = value
+else if (argument == "headoffset")  Ac_Head_Offset  = value
+else if (argument == "tailoffset")  Ac_Tail_Offset  = value
+else if (argument == "pattern"   )  Ac_Pattern      = value
+else if (argument == "pixmap"    )  Ac_Pixmap       = value
+
+end
+
+subroutine draw_arrow_get_tail (x,y)
+implicit none
+
+Arrow$common
+data Ac_Style        / 1 /   #
+data Ac_Head_Length  / 10 /  # Pixels
+data Ac_Line_Length  / 25 /  # Pixels
+data Ac_Head_Offset  / 6 /   # Distance From Point To Tip Of Arrow
+data Ac_Tail_Offset  / 6 /   # Distance From Butt To Computed Point
+data Ac_Pattern      / 0 /   # code (solid fill)
+data Ac_Pixmap       / 0 /   
+               
+
+integer*4       x,y
+
+x = Ac_tail_x
+y = Ac_tail_y
+
+end
+
+################################################################################
+#
+# GET_ARROWHEAD_POINTS
+#
+# purpose: this subroutine returns arrow points for the arrow head
+#
+# author : R. Hundt
+#
+# date   : 7/91
+################################################################################
+
+define ($arrow$1,1)
+define ($arrow$2,2)
+define ($arrow$3,3)
+define ($arrow$4,4)
+define ($arrow$5,5)
+define ($HalfArrowDegrees,25.0)
+
+subroutine Get_Arrowhead_Points (_
+                        Center_x,               # in, plot coord, pixel
+                        Center_y,               # in, plot coord, pixel
+                        line_orientation,       # in, radians
+                        arrow_style,            # in, code
+                        head_length,            # in, pixels
+                        line_length,            # in, pixels
+                        line_width,             # in, pixels
+                        num_points,             # out, number of points
+                        XPoints_x$w_gpnt_x,     # out, x,y points
+                        XPoints_x$w_gpnt_y,
+                        Point_Offset,           # in, pixels
+                        Tail_Offset,            # in, pixels
+                        Tail_x,                 # out, pixels
+                        Tail_y)                 # out, pixels
+
+implicit none
+
+integer*2   center_x
+integer*2   center_y
+real*4      line_orientation
+integer*4   arrow_style
+integer*4   head_length
+integer*4   line_length
+integer*4   line_width
+integer*4   num_points
+
+#RECORD /X$POINT/ XPoints  [ $max$arrowhead$points ]        # pixel point array
+integer*2   XPoints_x$w_gpnt_x [ $max$arrowhead$points ] 
+integer*2   XPoints_x$w_gpnt_y [ $max$arrowhead$points ] 
+
+integer*2   Point_Offset
+integer*2   Tail_Offset
+integer*4   Tail_x
+integer*4   Tail_y
+
+real*4      angle_1
+integer*4   arrow_head_length
+real*4      H_1
+integer*4   half_line_width
+integer*4   L_1
+real*4      line_angle
+integer*2   Point_x
+integer*2   Point_y
+real*4      radius
+integer*4   sign_flag
+real*4      W_1
+
+num_points = 0
+
+arrow_head_length = head_length
+
+# adjust the start point so that it is not sitting right on top of the center point
+point_x = center_x - nint(Point_Offset * sin(line_orientation))
+point_y = center_y + nint(Point_Offset * cos(line_orientation))
+
+#$% get x,y point, using offset from tail
+tail_x = center_x - nint((Point_Offset + Tail_Offset + Line_Length) * sin(line_orientation))
+tail_y = center_y + nint((Point_Offset + Tail_Offset + Line_Length) * cos(line_orientation))
+
+half_line_width =  NINT(line_width / 2.0)
+
+#$% get reciprocal of line orientation
+line_angle = line_orientation + $PI
+
+$ANG2PI (line_angle)
+
+XPoints_X$W_GPNT_X[ 1 ] = point_x
+XPoints_X$W_GPNT_Y[ 1 ] = point_y
+
+#$% if arrow is drawn with seven points
+if (arrow_style == $Arrow$2 |
+    arrow_style == $Arrow$4 |
+    arrow_style == $Arrow$5 )
+    {
+    num_points = 7
+
+    #$% if wide head arrow
+    if ( arrow_style == $Arrow$2 |
+         line_width >= 8 )
+        {
+        #$% set the width of the arrow head
+        L_1 = arrow_head_length
+        }
+    else #$% else if narrow head arrow
+        {
+        arrow_head_length = head_length * 1.6
+
+        radius = arrow_head_length / COS(($PI*$HalfArrowDegrees)/180)
+
+        #$% get the width of the arrow head for narrow arrow head
+        L_1 = NINT( SQRT((radius * radius) -
+                         (arrow_head_length*arrow_head_length )))
+        }
+
+    sign_flag = -1
+
+    call get_points ( arrow_head_length,  # in, length of arrow head, pixels
+                      L_1,                # in, width of arrow head, pixels
+                      Line_angle,         # in, angle of line
+                      point_x,            # in, pixel relative position
+                      point_y,            # in, pixel relative position
+                      Sign_flag,          # in, sign indicator
+                      XPoints_X$W_GPNT_X[ 2 ],     # out
+                      XPoints_X$W_GPNT_Y[ 2 ])     # out
+
+    sign_flag = 1
+
+    call get_points ( arrow_head_length,  # in, length in one plane
+                      L_1,                # in, length in perpendicular plane
+                      Line_angle,         # in, angle of line
+                      point_x,            # in, pixel relative position
+                      point_y,            # in, pixel relative position
+                      Sign_flag,          # in, sign indicator
+                      XPoints_X$W_GPNT_X[ 7 ],     # out
+                      XPoints_X$W_GPNT_Y[ 7 ])     # out
+
+    if (arrow_style == $Arrow$5 )
+        {
+        L_1 = 0.66 * arrow_head_length
+        }
+    else
+        {
+        L_1 = arrow_head_length
+        }
+
+    sign_flag = -1
+
+    call get_points ( L_1,              # in, length in one plane
+                      half_line_width,  # in, length in perpendicular plane
+                      Line_angle,       # in, angle of line
+                      point_x,          # in, pixel relative position
+                      point_y,          # in, pixel relative position
+                      Sign_flag,        # in, sign indicator
+                      XPoints_X$W_GPNT_X[ 3 ],     # out
+                      XPoints_X$W_GPNT_Y[ 3 ])     # out
+
+    sign_flag = 1
+
+    call get_points ( L_1,              # in, length in one plane
+                      half_line_width,  # in, length in perpendicular plane
+                      Line_angle,       # in, angle of line
+                      point_x,          # in, pixel relative position
+                      point_y,          # in, pixel relative position
+                      Sign_flag,        # in, sign indicator
+                      XPoints_X$W_GPNT_X[ 6 ],     # out
+                      XPoints_X$W_GPNT_Y[ 6 ])     # out
+
+    L_1 = line_length
+
+    sign_flag = -1
+
+    call get_points ( L_1,              # in, length in one plane
+                      half_line_width,  # in, length in perpendicular plane
+                      Line_angle,       # in, angle of line
+                      point_x,          # in, pixel relative position
+                      point_y,          # in, pixel relative position
+                      Sign_flag,        # in, sign indicator
+                      XPoints_X$W_GPNT_X[ 4 ],     # out
+                      XPoints_X$W_GPNT_Y[ 4 ])     # out
+
+    sign_flag = 1
+
+    call get_points ( L_1,              # in, length in one plane
+                      half_line_width,  # in, length in perpendicular plane
+                      Line_angle,       # in, angle of line
+                      point_x,         # in, pixel relative position
+                      point_y,         # in, pixel relative position
+                      Sign_flag,        # in, sign indicator
+                      XPoints_X$W_GPNT_X[ 5 ],     # out
+                      XPoints_X$W_GPNT_Y[ 5 ])     # out
+
+    } #$ end if arrow is drawn with seven points
+#$% else if arrow is drawn with nine points
+else if (arrow_style == $Arrow$1 |
+         arrow_style == $Arrow$3 )
+    {
+    num_points = 9
+
+    #$% if wide head arrow
+    if ( arrow_style == $Arrow$1 |
+         line_width >= 8 )
+        {
+        #$% set the width of the arrow head
+        L_1 = arrow_head_length
+        }
+    else #$% else if narrow head arrow
+        {
+        arrow_head_length = head_length * 1.6
+
+        radius = arrow_head_length / COS(($PI*$HalfArrowDegrees)/180)
+
+        #$% get the width of the arrow head for narrow arrow head
+        L_1 = NINT( SQRT((radius * radius) -
+                         (arrow_head_length*arrow_head_length )))
+        }
+
+    sign_flag = -1
+
+    call get_points ( arrow_head_length,  # in, length of arrow head, pixels
+                      L_1,                # in, width of arrow head, pixels
+                      Line_angle,         # in, angle of line
+                      point_x,            # in, pixel relative position
+                      point_y,            # in, pixel relative position
+                      Sign_flag,          # in, sign indicator
+                      XPoints_X$W_GPNT_X[ 2 ],     # out
+                      XPoints_X$W_GPNT_Y[ 2 ])     # out
+
+    sign_flag = 1
+
+    call get_points ( arrow_head_length,  # in, length in one plane
+                      L_1,                # in, length in perpendicular plane
+                      Line_angle,         # in, angle of line
+                      point_x,            # in, pixel relative position
+                      point_y,            # in, pixel relative position
+                      Sign_flag,          # in, sign indicator
+                      XPoints_X$W_GPNT_X[ 9 ],     # out
+                      XPoints_X$W_GPNT_Y[ 9 ])     # out
+
+    if ( arrow_style == $Arrow$1 )
+        {
+        angle_1 = line_angle + $PI / 4
+        }
+    else if ( arrow_style == $Arrow$3 )
+        {
+        angle_1 = line_angle + ($PI / 2)-(($PI*$HalfArrowDegrees)/180)
+        }
+
+    $ang2pi ( angle_1)
+
+    XPoints_X$W_GPNT_X[ 3 ] = XPoints_X$W_GPNT_X[ 2 ] +
+                              NINT(line_width * SIN (angle_1))
+    XPoints_X$W_GPNT_Y[ 3 ] = XPoints_X$W_GPNT_Y[ 2 ] -
+                              NINT(line_width * COS (angle_1))
+
+
+    if ( arrow_style == $Arrow$1 )
+        {
+        angle_1 = line_angle - $PI / 4
+        }
+    else if ( arrow_style == $Arrow$3 )
+        {
+        angle_1 = line_angle - (($PI / 2)-(($PI*$HalfArrowDegrees)/180))
+        }
+
+    $ang2pi ( angle_1)
+
+    XPoints_X$W_GPNT_X[ 8 ] = XPoints_X$W_GPNT_X[ 9 ] +
+                              NINT(line_width * SIN (angle_1))
+    XPoints_X$W_GPNT_Y[ 8 ] = XPoints_X$W_GPNT_Y[ 9 ] -
+                              NINT(line_width * COS (angle_1))
+
+    if ( arrow_style == $Arrow$1 )
+        {
+        angle_1 = $PI / 4
+        }
+    else if ( arrow_style == $Arrow$3 )
+        {
+        angle_1 = ($PI*$HalfArrowDegrees)/180.0
+        }
+
+    W_1 = Line_width * TAN ( angle_1 )
+
+    H_1 = SQRT ((W_1 * W_1) + (Line_width * Line_width))
+
+    W_1 = Line_Width / 2.0 + H_1
+
+    L_1 = NINT(W_1 / TAN ( angle_1 ))
+
+    sign_flag = -1
+
+    call get_points ( L_1,              # in, length in one plane
+                      half_line_width,  # in, length in perpendicular plane
+                      Line_angle,       # in, angle of line
+                      point_x,          # in, pixel relative position
+                      point_y,          # in, pixel relative position
+                      Sign_flag,        # in, sign indicator
+                      XPoints_X$W_GPNT_X[ 4 ],     # out
+                      XPoints_X$W_GPNT_Y[ 4 ])     # out
+
+    sign_flag = 1
+
+    call get_points ( L_1,              # in, length in one plane
+                      half_line_width,  # in, length in perpendicular plane
+                      Line_angle,       # in, angle of line
+                      point_x,          # in, pixel relative position
+                      point_y,          # in, pixel relative position
+                      Sign_flag,        # in, sign indicator
+                      XPoints_X$W_GPNT_X[ 7 ],     # out
+                      XPoints_X$W_GPNT_Y[ 7 ])     # out
+
+    L_1 = line_length
+
+    sign_flag = -1
+
+    call get_points ( L_1,              # in, length in one plane
+                      half_line_width,  # in, length in perpendicular plane
+                      Line_angle,       # in, angle of line
+                      point_x,          # in, pixel relative position
+                      point_y,          # in, pixel relative position
+                      Sign_flag,        # in, sign indicator
+                      XPoints_X$W_GPNT_X[ 5 ],     # out
+                      XPoints_X$W_GPNT_Y[ 5 ])     # out
+
+    sign_flag = 1
+
+    call get_points ( L_1,              # in, length in one plane
+                      half_line_width,  # in, length in perpendicular plane
+                      Line_angle,       # in, angle of line
+                      point_x,         # in, pixel relative position
+                      point_y,         # in, pixel relative position
+                      Sign_flag,        # in, sign indicator
+                      XPoints_X$W_GPNT_X[ 6 ],     # out
+                      XPoints_X$W_GPNT_Y[ 6 ])     # out
+
+    }
+
+end
+
+################################################################################
+#
+# GET_POINTS
+#
+# purpose: get x and y coords from a relative position using a vectoring method
+#
+# author : R. Hundt
+#
+# date   : 7/91
+################################################################################
+#subroutine get_points ( L_1,              # in, length in one plane
+#                       L_2,              # in, length in perpendicular plane
+#                       In_angle,         # in, angle of line
+#                        Center_x,         # in, pixel relative position
+#                        Center_y,         # in, pixel relative position
+#                        Sign_flag,        # in, sign indicator
+#                        X,                # out
+#                        Y)                # out
+
+#implicit none
+
+#integer*4   L_1
+#integer*4   L_2
+#real*4      In_angle
+#integer*2   Center_x
+#integer*2   Center_y
+#integer*4   Sign_flag
+#integer*2   X
+#integer*2   Y
+
+#Real*4      angle_1
+#Real*4      angle_offset
+#Real*4      radius
+
+#Radius = SQRT(float( L_2 * L_2 ) + float( L_1 * L_1))
+
+#$% get the angle from the arrow point to the third point
+#angle_offset = ACOS( L_1 / radius )
+
+#angle_offset = ATAN ( float(L_2)/L_1)
+
+#angle_1 = In_angle + (sign_flag * Angle_Offset)
+
+#$ang2pi (angle_1)
+
+#X = center_x + NINT(radius * SIN ( angle_1 ))
+#Y = center_y - NINT(radius * COS ( angle_1 ))
+
+#return
+#end
+
+#subroutine draw_TextBlock_init(argument, value)
+#implicit none
+
+#TextBlock$common
+#data   tbc_font         / 2  /   # 1=small, 2=medium, 3=Big
+#data   tbc_box_color    / $color$text /   #
+#data   tbc_pixmap       / 0 /             #
+               
+
+#vaxcharacter*(*)    argument
+#integer*4           value
+
+#if      (argument == "font"      )  tbc_font        = value
+#else if (argument == "boxcolor"  )  tbc_box_color   = value
+#else if (argument == "pixmap"    )  tbc_Pixmap      = value
+
+#end
+
+#subroutine tb_Find_Lines (Text, Width, N_Lines, Longest_Line, Pos_S, Pos_E)
+
+# Use the text & width to determine the number of lines, and...
+# compute number of characters on the longest line.
+
+#implicit none
+
+#VaxCharacter*(*)    text            # with newlines
+#integer*4           width           # text width (wrap)
+#integer*4           n_lines, longest_line
+#integer*4           pos_s[$tb_max$lines], pos_e[$tb_max$lines]
+
+#integer*4           space, p, mx
+
+#space = 0
+#mx = $tb_max$Line_Len
+#if (width > 0) mx = min(mx, width)
+
+#longest_line = 1
+#n_lines = 1
+#pos_s[n_lines] = 1
+
+#for (p = 1; p <= len(text); p = p + 1 )
+#    {
+#    if (text[p:p] == "") space = p
+
+#    if (text[p:p] == char($linefeed) )
+#        {
+#        pos_e[n_lines] = p - 1
+#        longest_line = max(longest_line, pos_e[n_lines] - pos_s[n_lines] + 1)
+#        n_lines = N_Lines + 1
+#        pos_s[n_lines] = p + 1
+#        space = 0
+#        }
+
+#    else if (p-pos_s[n_lines]+1 > mx)
+#        {
+#        if (space != 0) pos_e[n_lines] = space - 1
+#        else            pos_e[n_lines] = p - 1
+
+#        p = pos_e[n_lines] + 1
+#        longest_line = max(longest_line, pos_e[n_lines] - pos_s[n_lines] + 1)
+#        n_lines = N_Lines + 1
+#        pos_s[n_lines] = p + 1
+#        space = 0
+#        }
+#    }
+
+#pos_e[n_lines] = len(text)
+#longest_line = max(longest_line, pos_e[n_lines] - pos_s[n_lines] + 1)
+
+
+#end
+
+#subroutine tb_Find_corners (x,y, angle, height, width,   # input
+#                            UL_X, UL_Y, LR_X, LR_Y)      # output
+
+# . determine anchor point from relative angle
+#   * possible anchor points are:
+#       top-left, top-center, top-right, right-center,
+#       left-center, bottom-left, bottom-center, bottom-right
+# . Compute x,y for opposite corners for the Box
+#
+# Given an Angle,
+#
+#                      |    |       |     |
+#                      |    |       |     |
+#                      |    |       |     |
+#                ______|    |_______|     |__________
+#                       3       4        5
+#                      135     180     225
+#                         \     |     /
+#                          \    |    /
+#                           \   |   /
+#         ______             \  v  /              ______
+#              |                                  |
+#              | 2 90 ------>   *   <------ 270 6 |
+#         _____|                                  |_____
+#                            /  ^  \
+#                           /   |   \
+#                          /    |    \
+#                         /     |     \
+#                       45      0      315
+#                       1       0       7
+#               ________    _________    _______
+#                      |    |       |    |
+#                      |    |       |    |
+#                      |    |       |    |
+#
+
+#implicit none
+
+
+#integer*4       x,y,angle,height,width
+#integer*4       UL_X, UL_Y, LR_X, LR_Y
+
+#integer*4       k, I_switch_1
+
+#k = (abs(angle) + 22.5) / 45.0
+#k = mod(k, 8)
+
+#switch (k)
+#    {
+#    case 0,4:   UL_X = X - (width/2)
+#    case 1-3:   UL_X = X -  width
+#    case 5-7:   UL_X = X 
+#    }
+#switch (k)
+#    {
+#    case 0,1,7: UL_Y = Y
+#    case 3-5:   UL_Y = Y -  height
+#    case 2,6:   UL_Y = Y - (height/2)
+#    }
+
+#LR_X = UL_X + Width
+#LR_Y = UL_Y + Height
+
+#end

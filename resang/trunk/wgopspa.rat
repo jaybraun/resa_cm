@@ -1,0 +1,364 @@
+# October 1991
+# This file is for the Submarine Patrol Area define and delete commands.
+ 
+include "ascii.inc"
+include "orders.inc"             # $LEX$ definitions...
+include "bbcode.inc"             #def for blackboard & miscellaneous constants
+include "bbctl.inc"              #def for basic blackboard parameters
+include "bbord.inc"              #def for ORDERs
+include "bbspa.inc"              #def for SPAs
+ 
+define (BBImplicit, Implicit None)
+ 
+Subroutine OSPA (nord,           # input - order number
+                 iview,          # input - view number
+                 nargs,          # input - number of elements in args
+                 args)           # input - the input string of the order
+ 
+################################################################
+#$%
+#$% Purpose:   OSPA does order-processing for DEFINE SPA and
+#$%            DELETE SPA commands.
+#$%
+#$% Called By: EXEORD
+#$%
+#$% Calls:     None
+#$%
+#$% Tables:    None
+#$%
+#$% Date:      October 1991
+#$%
+#$% Author:    Carol L. Kropp
+#$%
+################################################################
+BBcommon
+ 
+integer  nord, iview, nargs
+literal  args[20]
+ 
+  if (nord == DefineSpa$Order)
+    call Define_SPA (nord, iview, nargs, args)
+  else    # DELETE SPA command
+    call Delete_SPA (nord, iview, nargs, args)
+ 
+return
+end
+ 
+
+ 
+Subroutine Define_SPA (nord,           # input - order number
+                       iview,          # input - view number
+                       nargs,          # input - number of elements in args
+                       args)           # input - the input string of the order
+ 
+################################################################
+#$%
+#$% Purpose:   Define_SPA processes the DEFINE SPA command.
+#$%
+#$% Called By: OSPA
+#$%
+#$% Calls:     SMOVV    SMOVHN   SMOVI     SEND
+#$%
+#$% Tables:    SPA
+#$%
+#$% Date:      October 1991
+#$%
+#$% Author:    Carol L. Kropp
+#$%
+#$% Modified:  Carol Kropp - 7/96 (E1621)
+#$%            When the zulu time is in the past and before
+#$%            zulu start time, a negative game minute value
+#$%            was stored in the effective time.  When this
+#$%            occurs a msg is sent and the time set to the
+#$%            start time.
+#$%
+################################################################
+BBCommon
+ 
+integer  nord, iview, nargs
+literal  args[20], cstrip8
+ 
+integer   Game_DTG     # function to convert a game minute to a DTG
+ 
+integer   dview, index
+integer   game_time
+integer   ilen
+integer   NAMslot, MTslot, litcmp
+integer   slotcount    #JHM UFL05
+character msg1[ARB]
+literal   SPA$Name$C
+integer   SPA$Pointer, SPA$View$I, SPA$POS$Index, SPA$NumPoints$I
+real*4    spa$EffectiveTime$f
+real*4    SPA$POS$Latitude$F, SPA$POS$Longitude$F
+ 
+real*4    DMS2RAD
+ 
+# DEFINE order:
+# From a Blue or Orange station
+#  [1] $lex$DEFINE$
+#  [2] $lex$SPA$
+#  [3] Name
+#  [4] Latitude                           [5] Longitude
+#  [6] Latitude                           [7] Longitude
+#  [8] Latitude                           [9] Longitude
+# [10]  | $lex$EFFECTIVE$ | Latitude     [11] Time | Longitude
+# [12]  | $lex$EFFECTIVE$ | Latitude     [13] Time | Longitude
+# [14]  | $lex$EFFECTIVE$ | Latitude     [15] Time | Longitude
+# [16]  | $lex$EFFECTIVE$                [17] Time
+#
+# From the CONTROL station
+#  [1] $lex$DEFINE$
+#  [2] $lex$SPA$
+#  [3] Name
+#  [4] $lex$BLUE$ | $lex$ORANGE$
+#  [5] View Number
+#  [6] Latitude                           [7] Longitude
+#  [8] Latitude                           [9] Longitude
+# [10] Latitude                          [11] Longitude
+# [12]  | $lex$EFFECTIVE$ | Latitude     [13] Time | Longitude
+# [14]  | $lex$EFFECTIVE$ | Latitude     [15] Time | Longitude
+# [16]  | $lex$EFFECTIVE$ | Latitude     [17] Time | Longitude
+# [18]  | $lex$EFFECTIVE$                [19] Time
+#
+ 
+  if (iview == $Neutral$View)      # If the order came from control, check
+    {                            # to see what view the SPA is intended for
+     if (args[4] == $Lex$BLUE$)  # if the SPA intended for BLUE
+       {
+        dview = $FirstBlue$View - 1 + args[5]    # compute the view number
+ 
+        if (dview < $FirstBlue$View | dview > $LastBlue$View)
+          dview = $LastOrange$View + 1
+       } # end of if (...$Lex$BLUE$)
+     else                         # The SPA is intended for ORANGE
+       {
+        dview = $FirstOrange$View - 1 + args[5]  # compute the view number
+ 
+        if (dview < $FirstOrange$View | dview > $LastOrange$View)
+          dview = $LastOrange$View + 1
+       } # end of if (...$Lex$ORANGE$)
+ 
+     if (dview > $LastOrange$View)  # if the view specified was invalid
+       {
+        ilen = 0
+        call smovv  (" Invalid view specification for SPA ", msg1, ilen)
+        call smovhn (args[3], $$MAXLit, msg1, ilen)
+        call send_   (iview, 0, ilen, msg1)
+        return
+       }
+      index = 6          # the boundry points start at args[6]
+    } # end of if (iview == 0)
+  else
+    {
+     dview = iview
+     index = 4           # the boundry points start at6 args[4]
+    }
+ 
+  SPA$Name$C = args[3]
+  ## Check limit on SPA slots for Orange and Blue (50 each, should bump to 100 each after UFL)  UFL05 JHM 8/22/05
+     slotcount = 0
+ 
+     if (dview >= $FirstBlue$View & dview <= $LastBlue$View) # if blue view
+       {
+         for (SPA$Pointer$First; SPA$Pointer$Valid; SPA$Pointer$Next) # count used blue slots
+          {
+            SPA$View$I = xSPA$View$I
+            if (xSPA$InUse$I > 0 & (SPA$View$I >= $FirstBlue$View & SPA$View$I <= $LastBlue$View) ) #if slot is taken and blue
+               slotcount = slotcount+1
+          }
+       }    # end count for blue slots
+     else
+       {
+         for (SPA$Pointer$First; SPA$Pointer$Valid; SPA$Pointer$Next) # count used orange slots
+          {
+            SPA$View$I = xSPA$View$I
+            if (xSPA$InUse$I > 0 & (xSPA$View$I >= $FirstOrange$View & SPA$View$I <= $LastOrange$View) )#if slot is taken and orange
+               slotcount = slotcount+1
+          }
+ 
+       }
+ 
+if (slotcount >= SPA$Slots/2 )   # half table size for orange and blue
+    {
+     ilen = 0
+     call smovv (" Table full:  No room for new SPA", msg1, ilen)
+     call send_ (iview, 0, ilen, msg1)
+     return
+    }                                                   ### end block for check on view size  UFL05 JHM 8/22/05
+ 
+ 
+  #$% Find an empty slot for the new SPA
+  NAMslot = 0
+  MTslot = 0
+  for (SPA$Pointer$First; SPA$Pointer$Valid; SPA$Pointer$Next)
+    {
+    If (litcmp(XSPA$Name$c, SPA$Name$C) == 0)  # Check for unique SPA name
+        {
+            NAMslot = SPA$Pointer$Index
+            BREAK
+        }
+    if (xSPA$InUse$I == $no & MTslot == 0)    # Remember first available slot
+        {
+            MTslot = SPA$Pointer$Index
+        }
+    }
+ 
+ 
+if (NAMslot > 0)
+    {
+    ilen = 0
+    call smovv(" SPA with name ",msg1,ilen)
+    call smovhn(SPA$Name$C,$$MaxName,msg1,ilen)
+    call smovv(" already in use by some view.",msg1,ilen)
+    call send_(iview,0,ilen,msg1)
+    return
+    }
+ 
+  if (MTslot == 0)   # if there are no empty slots
+    {
+     ilen = 0
+     call smovv (" Table full:  No room for new SPA", msg1, ilen)
+     call send_ (iview, 0, ilen, msg1)
+     return
+    }
+ 
+  spa$pointer$to MTslot
+ 
+  putSPA$Name$C
+ 
+  SPA$View$I = dview
+  putSPA$View$I
+ 
+  SPA$POS$Index = 1
+  while (index <= nargs)
+    {
+     if (args [index] == $lex$EFFECTIVE$) break     # joa 6/04
+     SPA$POS$Latitude$F  = DMS2rad (args[index])
+     putSPA$POS$Latitude$F
+     SPA$POS$Longitude$F = DMS2rad (args[index+1])
+     putSPA$POS$Longitude$F
+ 
+     index = index + 2
+     SPA$POS$Index = SPA$POS$Index + 1
+    }
+ 
+  SPA$NumPoints$I = SPA$POS$Index - 1
+  putSPA$NumPoints$I
+ 
+  if (index > nargs)    # if no effective time specified use current game time
+    spa$EffectiveTime$f = Game$Time
+  else
+    {
+     game_time = args [index+1]
+     call convert_to_gm (game_time, SPA$EffectiveTime$F)
+     if (SPA$EffectiveTime$F <= 0.0)        # if the zulu time is before
+       {                                    # the start of the game, set
+        SPA$EffectiveTime$F = 1.0           # effective time to the game
+        ilen = 0                            # start time - clk 7/96 (E1621)
+        call smovv  ("Warning:  DTG for SPA ", msg1, ilen)
+        call smovhn (args[3], $$MAXLit, msg1, ilen)
+        call smovv  (" is before the scenario start time...", msg1, ilen)
+        call smovv  ("effective time set to ", msg1, ilen)
+        call smoviz (Game_DTG(SPA$EffectiveTime$F), 6, msg1, ilen)
+        call smovv  ("Z", msg1, ilen)
+        call smov   ($Bell, msg1, ilen)
+        call send_   (iview, 0, ilen, msg1)
+       }   # end of if the time is too far in the past
+    }
+ 
+  putspa$EffectiveTime$f
+ 
+return
+end
+
+ 
+ 
+Subroutine Delete_SPA (nord,           # input - order number
+                       iview,          # input - view number
+                       nargs,          # input - number of elements in args
+                       args)           # input - the input string of the order
+ 
+################################################################
+#$%
+#$% Purpose:   Delete_SPA processes the DELETE SPA command.
+#$%
+#$% Called By: OSPA
+#$%
+#$% Calls:     WGOERR
+#$%
+#$% Tables:    SPA
+#$%
+#$% Date:      October 1991
+#$%
+#$% Author:    Carol L. Kropp
+#$%
+################################################################
+BBCommon
+ 
+integer  nord, iview, nargs
+literal  args[20]
+ 
+literal   spa_name
+integer   game_time
+integer   spa_found     # boolean
+integer   SPA$Pointer
+real*4    game_minute
+ 
+literal   CSTRIP8
+ 
+# DELETE order:
+#  [1] $lex$DELETE$
+#  [2] $lex$SPA$
+#  [3] Name
+#  [4] $lex$EFFECTIVE$ | $lex$ALL$
+#  [5] Game_Time   (if [4] $lex$EFFECTIVE$)
+#
+ 
+  spa_found = $no
+  spa_name = args[3]
+ 
+  for (SPA$Pointer$First; SPA$Pointer$Valid; SPA$Pointer$Next)
+    {
+     if (xSPA$InUse$I == $no)         # if the slot is not in use
+       next
+ 
+     if (xSPA$Name$C != spa_name)     # if the name does not match
+       next
+ 
+     if (iview != $Neutral$View &     # the view is not control and
+         xSPA$View$I != iview)        # not the owning view of the spa
+       next
+ 
+     if (args[4] == $lex$EFFECTIVE$)  # if deleting a specific spa
+       {
+        game_time = args[5]
+        call convert_to_gm (game_time, game_minute)
+        if (xspa$EffectiveTime$f == game_minute)
+          {
+           spa_found = $yes
+           # Delete the entry from the SPA table and exit the loop
+           SPA$Zero
+           putSPA$Modified$i ($YES)                   #        10/23/91
+           break
+          }
+       }
+     else           # deleting all SPA's with the given name
+       {
+        SPA$Zero    # delete the entry from the SPA table
+        putSPA$Modified$i ($YES)                   #        10/23/91
+        spa_found = $yes
+       }
+    }
+ 
+  if (spa_found == $no)     # if the NAME was not found
+    {
+     if (args[4] == $lex$ALL$)
+       call wgoerr (iview, 0, nord, nargs, args,
+                    "Cannot locate SPA of that name for your view.")
+     else   # delete a specific SPA
+       call wgoerr (iview, 0, nord, nargs, args,
+                    "Cannot locate SPA with that name and effective time.")
+    }
+ 
+return
+end

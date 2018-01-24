@@ -1,0 +1,2989 @@
+####    WGMDCOMJAM Package
+####
+####    Modifications:
+####        2/15/91   trs  modified sui$ch$frequency$i to sui$ch$frequency$f
+####
+####
+####    The WGMDCOMJAM Package contains the implementation of the
+####    Communications Jammer.
+####
+####    PACKAGE ENTRY POINTS:
+####
+####    This package contains five entry points of interest outside the
+####    package:
+####
+####        ADD_JAMMER_HFDF_ENTRIES  -  Invoked at the end of the Communications
+####                                    to enter potential detections into the
+####                                    HFT table to allow HFDF detections.
+####
+####        ADD_POTENTIAL_JAMMER     -  Invoked when any unit is added to the
+####                                    UNT blackboard table, whether or not
+####                                    the unit is actually carrying any
+####                                    communications jammers.  May only be
+####                                    invoked once for any given new unit.
+####
+####        DELETE_POTENTIAL_JAMMER  -  Invoked when any unit is deleted from
+####                                    the UNT blackboard table, whether or
+####                                    not the unit is actually carrying any
+####                                    communications jammers.  May be invoked
+####                                    any number of times for any given unit.
+####
+####        ESTABLISH_COMMS_JAMMERS  -  Invoked at the start of the game to add
+####                                    the communications jammers which exist
+####                                    at game startup.
+####
+####        INITIALIZE_COMMS_JAMMERS -  Invoked prior to communications model
+####                                    processing to initialize the communica-
+####                                    tions jamming model data structures.
+####
+####        INTER_NODE_ADVANCE       -  Invoked to determine if delay will be
+####                                    incurred in processing a message
+####                                    between communication nodes.
+####
+####    PACKAGE MODULES:
+####
+####    The modules in this package include:
+####
+####        ADD_JAMMER_HFDF_ENTRIES
+####        ADD_POTENTIAL_JAMMER
+####        BUILD_INDICES
+####        COLLAPSE_JCT
+####        DELETE_POTENTIAL_JAMMER
+####        ESTABLISH_COMMS_JAMMERS
+####        GENERATE_JCT_ENTRIES
+####        INITIALIZE_COMMS_JAMMERS
+####        INTER_NODE_ADVANCE
+####        MU_RHO_VALUE
+####        RANGE_AND_BEARING
+####        RETURN_INDICES
+####        SET_JAMMERS_ACTIVE
+####        SHELL_SORT
+####
+####    These modules appear within this package in alphabetical order by
+####    module name (i.e., regardless of whether a module is a SUBROUTINE
+####    or FUNCTION).
+####
+####    PACKAGE CALL TREES:
+####
+####        ADD_JAMMER_HFDF_ENTRIES
+####
+####        ADD_POTENTIAL_JAMMER
+####            INITIALIZE_COMMS_JAMMERS           (WGMDCOMJAM)
+####
+####        DELETE_POTENTIAL_JAMMER
+####            INITIALIZE_COMMS_JAMMERS           (WGMDCOMJAM)
+####
+####        ESTABLISH_COMMS_JAMMERS
+####            ADD_POTENTIAL_JAMMER               (WGMDCOMJAM)
+####            INITIALIZE_COMMS_JAMMERS           (WGMDCOMJAM)
+####
+####        INITIALIZE_COMMS_JAMMERS
+####            BUILD_INDICES                      (WGMDCOMJAM)
+####                SHELL_SORT                     (WGMDCOMJAM)
+####            COLLAPSE_JCT                       (WGMDCOMJAM)
+####            GENERATE_JCT_ENTRIES               (WGMDCOMJAM)
+####            ECHOHN                             (LBECHO)
+####            ECHOH                              (LBECHO)
+####            ECHOR                              (LBECHO)
+####            RETURN_INDICES                     (WGMDCOMJAM)
+####            SET_JAMMERS_ACTIVE                 (WGMDCOMJAM)
+####
+####        INTER_NODE_ADVANCE
+####            MU_RHO_VALUE                       (WGMDCOMJAM)
+####            RANDOM                             (LBMATH)
+####            RANGE_AND_BEARING                  (WGMDCOMJAM)
+####                RLL2RB                         (LBMATH)
+####            RETURN_INDICES                     (WGMDCOMJAM)
+####
+####    PACKAGE LOCAL DATA STRUCTURES:
+####
+####    Prior to presenting the description of the WGMDCOMJAM local data
+####    structures, the following example is provided.  This example will
+####    be used for illustration purposes within the description of the
+####    data structures.
+####
+####    At a given game minute, there are three units which carry communica-
+####    tions jamming equipment.  The unit indices and operating frequencies
+####    of their onboard jammers is given in the following table:
+####
+####            UNT_INDEX        FREQUENCIES
+####
+####                 1                1000
+####                                  2000
+####                                  3000
+####                                  5000
+####                                  7000
+####
+####                 2                3000
+####
+####                 3                1000
+####                                  2000
+####
+####    Although the frequencies within this table are ordered within ordered
+####    unit index, this state is not reflected in the UNT or CJC tables of
+####    the blackboard.  The data structures, descibed herein, were designed
+####    to provide the ordering by unit index and frequency needed to reduce
+####    the compuational cost of executing the Communications Jamming Model.
+####
+####    The primary data structure used by the Communications Jamming Model
+####    is the Jammer Control Table (JCT$$).  The two data items in JCT$$ are:
+####
+####        JCT_COUNT - the number of entries currently in JCT$$.
+####
+####        JCT -       an array of records of jammer control data.  The JCT
+####                    record contains the following data items of interest:
+####
+####            UNT_INDEX - an index into the UNT table which identifies a
+####                        unit which carries a communications jammer.
+####
+####            FREQUENCY - the frequency on which the communications jammer
+####                        operates.  In the event that a jammer is defined
+####                        as a frequency follower, FREQUENCY is set to zero.
+####
+####    The general format of JCT$$ (in tier chart format) is:
+####
+####        JCT$$
+####            JCT_COUNT
+####
+####            JCT
+####                UNT_INDEX  \
+####                FREQUENCY   \
+####                    :        \  repeated up to MAXIMUM_JCT_ENTRIES$$
+####                UNT_INDEX    /  times (currently 800)
+####                FREQUENCY   /
+####                    :      /
+####
+####    For the example given above, JCT$$ will contain the following data:
+####
+####    JCT$$
+####        JCT_COUNT                   8
+####
+####        JCT [ 1 ] . UNT_INDEX       1
+####        JCT [ 1 ] . FREQUENCY    2000
+####        JCT [ 2 ] . UNT_INDEX       1
+####        JCT [ 2 ] . FREQUENCY    1000
+####        JCT [ 3 ] . UNT_INDEX       1
+####        JCT [ 3 ] . FREQUENCY    5000
+####        JCT [ 4 ] . UNT_INDEX       1
+####        JCT [ 4 ] . FREQUENCY    7000
+####        JCT [ 5 ] . UNT_INDEX       1
+####        JCT [ 5 ] . FREQUENCY    3000
+####        JCT [ 6 ] . UNT_INDEX       3
+####        JCT [ 6 ] . FREQUENCY    2000
+####        JCT [ 7 ] . UNT_INDEX       3
+####        JCT [ 7 ] . FREQUENCY    1000
+####        JCT [ 8 ] . UNT_INDEX       2
+####        JCT [ 8 ] . FREQUENCY    3000
+####
+####    Units are always added to JCT$$ at the end of JCT$$.  Except when
+####    adding units to or deleting units from JCT$$, JCT$$ is accessed
+####    through auxiliary tables: one pair for UNT_INDEX and one pair for
+####    FREQUENCY.
+####
+####    IJU$$ and IJF$$ are pointer arrays into JCT$$ based upon UNT_INDEX
+####    and FREQUENCY, respectively.  Given the values of JCT$$, above,
+####    IJU$$ and IJF$$ will have eight meaningful elements which could
+####    contain the following values:
+####
+####     Element        IJU$$        IJF$$
+####     Number         Values       Values
+####
+####        1             2            7
+####        2             4            2
+####        3             3            1
+####        4             1            6
+####        5             5            8
+####        6             8            5
+####        7             6            3
+####        8             7            4
+####
+####    Because the Shell sort, used to generate the IJU$$ and IJF$$ arrays,
+####    is not stable, the indices into JCT$$ for any given UNT_INDEX or
+####    FREQUENCY may appear out of order.  However each group of UNT_INDEX
+####    pointers for a given UNT_INDEX and FREQUENCY pointers for a given
+####    FREQUENCY will be contiguous within IJU$$ and IJF$$, respectively.
+####
+####    Within this example IJU$$, the unit with UNT_INDEX equal to 1 is
+####    accessed through IJU$$ [ 1 ] through IJU$$ [ 5 ], inclusive; the
+####    unit with UNT_INDEX equal to 2 is accessed through IJU$$ [ 6 ]; and
+####    the unit with UNT_INDEX equal to 3 is accessed through IJU$$ [ 7 ]
+####    through IJU$$ [ 8 ], inclusive.  These indices into IJU$$, combined
+####    with the UNT_INDEX, constitute the JUN$$ accessing table.  The two
+####    data items in JUN$$ are:
+####
+####        JUN_COUNT - the number of entries currently in JUN$$.
+####
+####        JUN -       an array of records of unit control data.  Included
+####                    within the JUN record are the following data items:
+####
+####            UNT_INDEX - a unique UNT_INDEX appearing in JCT$$.
+####
+####            LOWER_INDEX - the lower index into IJU$$ which in turn points
+####                        to an entry with the same UNT_INDEX in JCT$$.
+####
+####            UPPER_INDEX - the upper index into IJU$$ which in turn points
+####                        to an entry with the same UNT_INDEX in JCT$$.
+####
+####    For the example JCT$$ and IJU$$, above, the contents of JUN$$ will be:
+####
+####    JUN$$
+####        JUN_COUNT                   3
+####
+####        JUN [ 1 ] . UNT_INDEX       1
+####        JUN [ 1 ] . LOWER_INDEX     1
+####        JUN [ 1 ] . UPPER_INDEX     5
+####        JUN [ 2 ] . UNT_INDEX       2
+####        JUN [ 2 ] . LOWER_INDEX     6
+####        JUN [ 2 ] . UPPER_INDEX     6
+####        JUN [ 3 ] . UNT_INDEX       3
+####        JUN [ 3 ] . LOWER_INDEX     7
+####        JUN [ 3 ] . UPPER_INDEX     8
+####
+####    Because JUN$$ contains strictly ascending UNT_INDEX, we may use JUN$$
+####    to determine if a given UNT_INDEX is in JCT$$ and, if found, retrieve
+####    the range of IJU$$ indices which in turn point to the actual JCT$$
+####    entries.
+####
+####    Within this example IJF$$ (see above), the unit with FREQUENCY equal
+####    to 1000 is accessed through IJF$$ [ 1 ] through IJF$$ [ 2 ], inclusive;
+####    the unit with FREQUENCY equal to 2000 is accessed through IJF$$ [ 3 ]
+####    through IJF$$ [ 4 ], inclusive; the unit with FREQUENCY equal to 3000
+####    is accessed through IJF$$ [ 5 ] through IJF$$ [ 6 ], inclusive; the
+####    unit with FREQUENCY equal to 5000 is accessed through IJF$$ [ 7 ];
+####    and the unit with FREQUENCY equal to 7000 is accessed through
+####    IJF$$ [ 8 ].  As earlier, these indices into IJF$$, combined
+####    with the FREQUENCY, constitute the JFQ$$ accessing table.  The two
+####    data items in JFQ$$ are:
+####
+####        JFQ_COUNT - the number of entries currently in JFQ$$.
+####
+####        JFQ -       an array of records of unit control data.  Included
+####                    within the JFQ record are the following data items:
+####
+####            FREQUENCY - a unique FREQUENCY appearing in JCT$$.
+####
+####            LOWER_INDEX - the lower index into IJF$$ which in turn points
+####                        to an entry with the same FREQUENCY in JCT$$.
+####
+####            UPPER_INDEX - the upper index into IJF$$ which in turn points
+####                        to an entry with the same FREQUENCY in JCT$$.
+####
+####    For the example JCT$$ and IJF$$, above, the contents of JFQ$$ will be:
+####
+####    JFQ$$
+####        JFQ_COUNT                     5
+####
+####        JFQ [ 1 ] . FREQUENCY      1000
+####        JFQ [ 1 ] . LOWER_INDEX       1
+####        JFQ [ 1 ] . UPPER_INDEX       2
+####        JFQ [ 2 ] . FREQUENCY      2000
+####        JFQ [ 2 ] . LOWER_INDEX       3
+####        JFQ [ 2 ] . UPPER_INDEX       4
+####        JFQ [ 3 ] . FREQUENCY      3000
+####        JFQ [ 3 ] . LOWER_INDEX       5
+####        JFQ [ 3 ] . UPPER_INDEX       6
+####        JFQ [ 4 ] . FREQUENCY      5000
+####        JFQ [ 4 ] . LOWER_INDEX       7
+####        JFQ [ 4 ] . UPPER_INDEX       7
+####        JFQ [ 5 ] . FREQUENCY      7000
+####        JFQ [ 5 ] . LOWER_INDEX       8
+####        JFQ [ 5 ] . UPPER_INDEX       8
+####
+####    Because JFQ$$ contains strictly ascending FREQUENCY, we may use JFQ$$
+####    to determine if a given FREQUENCY is in JCT$$ and, if found, retrieve
+####    the range of IJF$$ indices which in turn point to the actual JCT$$
+####    entries.
+####
+####    To determine if a given UNT_INDEX or FREQUENCY is within JCT$$, the
+####    subprogram RETURN_INDICES is invoked.  If the FOUND argument is
+####    returned TRUE then the UNT_INDEX or FREQUENCY is in JCT$$ and JCT$$
+####    can be accessed through the IJU$$ or IJF$$ pointer arrays.
+####
+####    Programmer Modifications :
+####    REH 4/89 Modified code to use UNT and DEQ tables versus the old
+####    DYN, UNT, POS
+####
+
+INCLUDE "bbctl.inc"
+INCLUDE "bbcode.inc"
+INCLUDE "bbboy.inc"
+INCLUDE "bbcjc.inc"
+INCLUDE "bbdeq.inc"
+INCLUDE "bbhft.inc"
+INCLUDE "bbmrv.inc"
+INCLUDE "bbpai.inc"
+INCLUDE "bbsui.inc"
+INCLUDE "bbunt.inc"
+INCLUDE "wgmdcomjam.inc"
+ 
+DEFINE ( BBImplicit, IMPLICIT NONE )
+
+###    Name: ADD_JAMMER_HFDF_ENTRIES
+###
+###    Usage:
+###
+###        CALL add_jammer_hfdf_entries
+###
+###    Purpose:
+###
+###        Invoked upon the conclusion of Communications Jammer processing
+###        to add Jammer frequencies to the HFT Blackboard table.
+###
+###    Arguments:
+###
+###        Input: None.
+###
+###        Input/Output: None.
+###
+###        Output: None.
+###
+###        Function Result: None.
+###
+###        COMMON:
+###
+###            Name            Source                   Use
+###
+###            BBoard          BBCommon                 Input
+###            IJF$$           $$IJF$$                  Output
+###            JCT$$           $$JCT$$                  Output
+###            JFQ$$           $$JFQ$$                  Output
+###
+###    Limitations: None.
+###
+###    Warnings:
+###
+###        Follower jammers are not processed by this subprogram.  The
+###        effect is that follower jammers are not detectable by HFDF
+###        networks.
+###
+###    Notes: None.
+###
+###    Author:
+###
+###        G. G. Gustafson
+###        Computer Sciences Corporation
+###        4045 Hancock Street
+###        San Diego CA 92110
+###
+###        (619) 225-8401
+###
+###    Customer:
+###
+###        Naval Ocean Systems Center
+###        Code 413
+###        San Diego CA 92152-5000
+###
+###        (619) 553-3972
+###
+###    Subprograms Required: None.
+###
+###    Tables Required:
+###
+###        HFT
+###
+###    Algorithm:
+###
+###        FOR all jammers in 3 - 30 MHz range
+###            IF jammer is active
+###                add data to HFT table
+###            END IF
+###        END FOR
+###
+###    Date Developed: May 10, 1988.
+###
+###    Record of Modifications:
+###
+###        Programmer          Date        Modification
+###
+###    Waivers: None.
+
+SUBROUTINE add_jammer_hfdf_entries
+ 
+BBcommon
+ 
+$$IJF$$
+ 
+$$JCT$$
+ 
+$$JFQ$$
+ 
+LOGICAL*1    finished
+INTEGER*4    HFT$Pointer
+INTEGER*2    jct_index
+INTEGER*2    jfq_index
+ 
+#                                        Begin Executable Code
+ 
+finished = .FALSE.
+FOR ( jfq_index = 1;
+      jfq_index <= jfq$$_jfq_count & ! finished;
+      jfq_index = jfq_index + 1 )
+    {
+    finished = ( jfq$$_jfq_frequency [ jfq_index ] > 30 )
+    IF ( ! finished & jfq$$_jfq_frequency [ jfq_index ] >= 3 )
+        {
+        FOR ( jct_index = jfq$$_jfq_lower_index [ jfq_index ];
+              jct_index <= jfq$$_jfq_upper_index [ jfq_index ] &
+                  ! finished;
+              jct_index = jct_index + 1 )
+            {
+            HFT$Pointer = HFT$Last + 1
+            finished = ( ! HFT$Pointer$Valid )
+            IF ( ! finished )
+                {
+                IF ( jct$$_jct_active [ ijf$$ [ jct_index ] ] )
+                    {
+                    putHFT$SenderIndx$I (
+                        jct$$_jct_UNT_index [ ijf$$ [ jct_index ] ] )
+                    putHFT$LowRisk$I ( $NO )
+ 
+#                                        HFT$Frequency in KHz
+#                                        JCT frequency in MHz
+ 
+                    putHFT$Frequency$I (
+                        1000 * jct$$_jct_frequency [ ijf$$ [ jct_index ] ] )
+                    HFT$Pointer$Next
+                    HFT$Last$To HFT$Pointer - 1
+                    }
+                }
+            }
+        }
+    }
+END
+
+###    Name: ADD_POTENTIAL_JAMMER
+###
+###    Usage:
+###
+###        CALL add_potential_jammer ( UNT_index )
+###
+###    Purpose:
+###
+###        Insert the given UNT_index into the ADD_STACK$$ stack.
+###
+###    Arguments:
+###
+###        Input:
+###
+###            UNT_index - INTEGER*4 variable containing the index into
+###                        the UNT table which is to be pushed onto the
+###                        ADD_STACK$$ stack.  To be acceptable, the
+###                        value contained in UNT_index must be greater
+###                        than zero and less than or equal to the value
+###                        UNT$SLOTS.
+###
+###        Input/Output: None.
+###
+###        Output: None.
+###
+###        Function Result: None.
+###
+###        COMMON:
+###
+###            Name            Source Macro             Use
+###
+###            BBoard          BBCommon                 Input
+###            ADD_STACK$$     $$ADD_STACK$$            Input/Output
+###
+###    Limitations: None.
+###
+###    Warnings:
+###
+###        1.  No test is made by ADD_POTENTIAL_JAMMER to ensure the
+###            uniqueness of any given UNT_index (i.e., already exists
+###            in the ADD_STACK$$ stack or in the JCT$$ jammer control
+###            table).  If a UNT_index is not unique, later processing
+###            by INITIALIZE_COMMS_JAMMERS will detect and report the
+###            duplication.
+###
+###    Notes:
+###
+###        1.  If more than UNT$SLOTS UNT_index values are attempted to
+###            be pushed onto the ADD_STACK$$ stack, the attempt triggers an
+###            invocation of INITIALIZE_COMMS_JAMMERS.
+###
+###        2.  If a UNT_index, outside the acceptable range of one through
+###            UNT$SLOTS, inclusive, is attempted to be pushed onto
+###            the ADD_STACK$$ stack, the attempt is ignored without warning.
+###
+###        3.  ADD_POTENTIAL_JAMMER should be invoked by any WARGAME routine
+###            which adds (or causes the future addition of) an entry in
+###            the UNT table.  However, ADD_POTENTIAL_JAMMER must be invoked
+###            only once for any given UNT_index.
+###
+###    Author:
+###
+###        G. G. Gustafson
+###        Computer Sciences Corporation
+###        4045 Hancock Street
+###        San Diego CA 92110
+###
+###        (619) 225-8401
+###
+###    Customer:
+###
+###        Naval Ocean Systems Center
+###        Code 413
+###        San Diego CA 92152-5000
+###
+###        (619) 553-3972
+###
+###    Subprograms Required:
+###
+###        INITIALIZE_COMMS_JAMMERS
+###
+###    Tables Required:
+###
+###        CODE
+###        UNT
+###
+###    Algorithm:
+###
+###        IF communications jamming enabled
+###            IF UNT_index within the accepted range
+###                push UNT_index onto ADD_STACK$$ stack
+###                IF stack size reached
+###                    invoke INITIALIZE_COMMS_JAMMERS
+###                END IF
+###            END IF
+###        END IF
+###
+###    Date Developed: February 11, 1988
+###
+###    Record of Modifications:
+###
+###        Programmer          Date            Modification
+###
+###    Waivers: None.
+
+SUBROUTINE add_potential_jammer ( UNT_index )
+ 
+BBCommon
+ 
+$$ADD_STACK$$
+ 
+EXTERNAL     initialize_comms_jammers
+INTEGER*4    UNT_index
+ 
+#                                        Begin Executable Code
+ 
+IF ( ( UNT_index > 0 ) & ( UNT_index <= UNT$Slots ) )
+    {
+    add_stack$$_top = add_stack$$_top + 1
+    add_stack$$_UNT_index [ add_stack$$_top ] = UNT_index
+    IF ( add_stack$$_top == UNT$Slots )
+        {
+        CALL initialize_comms_jammers
+        }
+    }
+END
+
+###    Name: BUILD_INDICES
+###
+###    Usage:
+###
+###        IF ( jct_count > 0 )
+###            {
+###            CALL build_indices ( jct_count,
+###                                 sort_component,
+###                                 pointers,
+###                                 index_count_component,
+###                                 first_jct_indices_table_component )
+###            }
+###
+###    Purpose:
+###
+###        BUILD_INDICES revises the POINTERS into JCT$$ based upon
+###        the given SORT_COMPONENT and then uses the revised POINTERS
+###        to regenerate the associated JCT_INDICES_TABLE_COMPONENT and
+###        INDEX_COUNT_COMPONENT of the given JCT_INDICES table.  See
+###        the discussion of local data structures in the Package Comments
+###        at the beginning of this file.
+###
+###    Arguments:
+###
+###        Input:
+###
+###            JCT_COUNT - INTEGER*2 variable which contains the current
+###                        number of JCT entries in JCT$$.  The currently
+###                        acceptable value is JCT$$ . JCT_COUNT.
+###
+###            SORT_COMPONENT - The sort component of the first element in JCT
+###                        of JCT$$.  The currently acceptable values are:
+###
+###                            JCT$$ . JCT [ 1 ] . UNT_INDEX or
+###                            JCT$$ . JCT [ 1 ] . FREQUENCY
+###
+###                        The first (UNT_INDEX) should be used with JUN$$ and
+###                        IJU$$, while the second (FREQUENCY) should be used
+###                        with JFQ$$ and IJF$$.
+###
+###        Input/Output: None.
+###
+###        Output:
+###
+###            POINTERS -  INTEGER*2 array which will contain the indices of
+###                        JCT$$ in ascending order by either UNT_INDEX or
+###                        FREQUENCY.  Depending upon which of these components
+###                        of JCT$$ is passed as the SORT_COMPONENT, then IJU$$
+###                        or IJF$$, respectively should be passed as POINTERS.
+###
+###            INDEX_COUNT - INTEGER*2 count component of the applicable
+###                        JCT_INDICES.  Currently acceptable values are:
+###
+###                            JFQ$$ . JFQ_COUNT
+###                            JUN$$ . JUN_COUNT
+###
+###                        Which of these two arguments is passed depends
+###                        upon the argument passed as SORT_COMPONENT.
+###
+###            JCT_INDICES - Either JFQ$$ . JFQ [ 1 ] or JUN$$ . JUN [ 1 ]
+###                        depending upon the argument passed as SORT_COMPONENT.
+###
+###        Function Result: None.
+###
+###        COMMON: None.
+###
+###    Limitations:
+###
+###        1.  At the time of BUILD_INDICES invocation, the value of
+###            JCT_COUNT must be greater than zero.  This restriction is
+###            imposed by the use of adjustable array size declarations
+###            within BUILD_INDICES.  IF JCT_COUNT is zero or less,
+###            BUILD_INDICES will abort with a traceback.  To avoid
+###            this difficulty, the value of JCT_COUNT must be tested
+###            prior to invocation of BUILD_INDICES, as exemplified in
+###            the Usage example.
+###
+###    Warnings: None.
+###
+###    Notes:
+###
+###        1.  BUILD_INDICES is a generalized subprogram which builds
+###            either the JFQ$$ and IJF$$ or JUN$$ and IJU$$ data struc-
+###            tures.  As a result, care must be taken to provide the
+###            correct arguments to BUILD_INDICES.
+###
+###    Author:
+###
+###        G. G. Gustafson
+###        Computer Sciences Corporation
+###        4045 Hancock Street
+###        San Diego CA 92110
+###
+###        (619) 225-8401
+###
+###    Customer:
+###
+###        Naval Ocean Systems Center
+###        Code 413
+###        San Diego CA 92152-5000
+###
+###        (619) 553-3972
+###
+###    Subprograms Required:
+###
+###        SHELL_SORT
+###
+###    Tables Required: None.
+###
+###    Algorithm:
+###
+###        initialize INDEX_COUNT to zero
+###        perform a Shell sort of JCT into POINTERS
+###        initialize comparison datum
+###        initialize lower index
+###        FOR all datum in JCT
+###            find first datum not equal to comparison datum
+###            fill JCT_INDICES with datum, lower index, and upper index
+###            reinitialize comparison datum
+###            reinitialize lower index
+###        END FOR
+###
+###    Date Developed: February 11, 1988
+###
+###    Record of Modifications:
+###
+###        Programmer          Date            Modification
+###
+###    Waivers: None.
+
+SUBROUTINE build_indices ( jct_count,
+                           jct,
+                           pointers,
+                           index_count,
+                           jct_indices_frequency,
+                           jct_indices_lower_index,
+                           jct_indices_upper_index)
+ 
+IMPLICIT NONE
+ 
+ 
+INTEGER*2    data_item
+LOGICAL*1    finished
+LOGICAL*1    found
+INTEGER*2    index_count
+INTEGER*2    jct_count
+Integer*2    jct [ jct_count ]
+INTEGER*2    jct_index
+INTEGER*2    jct_indices_frequency [ jct_count ]
+INTEGER*2    jct_indices_lower_index [ jct_count ]
+INTEGER*2    jct_indices_upper_index [ jct_count ]
+INTEGER*2    lower_index
+INTEGER*2    pointers [ jct_count ]
+EXTERNAL     shell_sort
+ 
+#                                        Begin Executable Code
+ 
+index_count = 0
+CALL shell_sort ( jct_count,
+                  jct,
+                  pointers )
+jct_index = 1
+lower_index = jct_index
+data_item = jct [ pointers [ lower_index ] ]
+finished = .FALSE.
+WHILE ( ! finished )
+    {
+    found = .FALSE.
+    WHILE ( ! ( finished | found ) )
+        {
+        jct_index = jct_index + 1
+        finished = ( jct_index > jct_count )
+        IF ( ! finished )
+            {
+            found = ( jct [ pointers [ jct_index ] ] != data_item )
+            }
+        }
+    index_count = index_count + 1
+    jct_indices_frequency [ index_count ] = data_item
+    jct_indices_lower_index [ index_count ] = lower_index
+    jct_indices_upper_index [ index_count ] = jct_index - 1
+    IF ( ! finished )
+        {
+        lower_index = jct_index
+        data_item = jct [ pointers [ lower_index ] ]
+        }
+    }
+END
+
+###    Name: COLLAPSE_JCT
+###
+###    Usage:
+###
+###        CALL collapse_jct
+###
+###    Purpose:
+###
+###        COLLAPSE_JCT removes all JCT$$ entries which have a zero
+###        in their UNT_INDEX.
+###
+###    Arguments:
+###
+###        Input: None.
+###
+###        Input/Output: None.
+###
+###        Output: None.
+###
+###        Function Result: None.
+###
+###        COMMON:
+###
+###            Name            Source Macro             Use
+###
+###            JCT$$           $$JCT$$                  Output
+###
+###    Limitations: None.
+###
+###    Warnings: None.
+###
+###    Notes:
+###
+###        1.  At the time of COLLAPSE_JCT invocation, the JCT$$ entries
+###            which are to be deleted from JCT$$ must have their UNT_index
+###            set equal to zero.
+###
+###    Author:
+###
+###        G. G. Gustafson
+###        Computer Sciences Corporation
+###        4045 Hancock Street
+###        San Diego CA 92110
+###
+###        (619) 225-8401
+###
+###    Customer:
+###
+###        Naval Ocean Systems Center
+###        Code 413
+###        San Diego CA 92152-5000
+###
+###        (619) 553-3972
+###
+###    Subprograms Required:
+###
+###        LIB$MOVC5    (Digital RTL)
+###
+###    Tables Required: None
+###
+###    Algorithm:
+###
+###        WHILE JCT$$ is not collapsed
+###            find a first UNT_INDEX of zero
+###            IF found
+###                find last contiguous UNT_INDEX of zero
+###                collapse and zero fill JCT$$
+###                revise JCT$$ . JCT_COUNT
+###            END IF
+###        END WHILE
+###
+###    Date Developed: February 11, 1988
+###
+###    Record of Modifications:
+###
+###        Programmer          Date            Modification
+###
+###    Waivers: None.
+
+SUBROUTINE collapse_jct
+ 
+IMPLICIT NONE
+ 
+$$JCT$$
+ 
+integer*4    nzero, i
+INTEGER*2    destination_length
+LOGICAL*1    finished
+LOGICAL*1    found
+INTEGER*2    jct_index
+EXTERNAL     LIB$MOVC5
+INTEGER*2    lower_index
+INTEGER*2    source_length
+ 
+#                                        Begin Executable Code
+ 
+finished = .FALSE.
+jct_index = 0
+WHILE ( ! finished )
+    {
+    found = .FALSE.
+    WHILE ( ! ( finished | found ) )
+        {
+        jct_index = jct_index + 1
+        finished = ( jct_index > jct$$_jct_count )
+        IF ( ! finished )
+            {
+            found = ( jct$$_jct_UNT_index [ jct_index ] == 0 )
+            }
+        }
+    IF ( found )
+        {
+        found = .FALSE.
+        lower_index = jct_index
+        WHILE ( ! ( finished | found ) )
+            {
+            jct_index = jct_index + 1
+            finished = ( jct_index > jct$$_jct_count )
+            IF ( ! finished )
+                {
+                found = ( jct$$_jct_UNT_index [ jct_index ] == 0 )
+                }
+            }
+ 
+        nzero = jct_index - lower_index
+        for (i = jct_index; i < min(jct_index+nzero-1,jct$$_jct_count);
+             i = i + 1)
+        {
+            $Shift_jct(i, lower_index)
+            lower_index = lower_index + 1
+        }
+        jct$$_jct_count = jct$$_jct_count - nzero
+        }
+    }
+END
+
+###    Name: DELETE_POTENTIAL_JAMMER
+###
+###    Usage:
+###
+###        CALL delete_potential_jammer ( UNT_index )
+###
+###    Purpose:
+###
+###        Insert the given UNT_index into the DELETE_STACK$$ stack.
+###
+###    Arguments:
+###
+###        Input:
+###
+###            UNT_index - INTEGER*4 variable containing the index into
+###                        the UNT table which is to be pushed onto the
+###                        DELETE_STACK$$ stack.  To be acceptable, the
+###                        value contained in UNT_index must be greater
+###                        than zero and less than or equal to the value
+###                        UNT$SLOTS.
+###
+###        Input/Output: None.
+###
+###        Output: None.
+###
+###        Function Result: None.
+###
+###        COMMON:
+###
+###            Name            Source Macro             Use
+###
+###            BBoard          BBCommon                 Input
+###            DELETE_STACK$$  $$DELETE_STACK$$         Input/Output
+###
+###    Limitations: None.
+###
+###    Warnings: None.
+###
+###    Notes:
+###
+###        1.  If more than UNT$SLOTS UNT_index values are attempted to
+###            be pushed onto the DELETE_STACK$$ stack, the attempt triggers
+###            an invocation of INITIALIZE_COMMS_JAMMERS.
+###
+###        2.  If a UNT_index, outside the acceptable range of one through
+###            UNT$SLOTS, inclusive, is attempted to be pushed onto
+###            the DELETE_STACK$$ stack, the attempt is ignored without
+###            warning.
+###
+###        3.  DELETE_POTENTIAL_JAMMER should be invoked by any WARGAME routine
+###            which deletes (or causes the future deletion of) an entry in
+###            the UNT table.
+###
+###        4.  No test is made by DELETE_POTENTIAL_JAMMER to ensure the
+###            existance of the given UNT_index (i.e., either already in
+###            the DELETE_STACK$$ stack or in the JCT$$ jammer control
+###            table).  If a UNT_index is not unique, or if, during
+###            later processing by INITIALIZE_COMMS_JAMMERS, the UNT_index
+###            is not found in JCT$$, no action is taken or reported.  This
+###            processing allows a WARGAME routine to invoke DELETE_POTEN-
+###            TIAL_JAMMER whenever a unit is deleted from the UNT table.
+###            Note that this action differs from that which occurs during
+###            the addition of units.
+###
+###    Author:
+###
+###        G. G. Gustafson
+###        Computer Sciences Corporation
+###        4045 Hancock Street
+###        San Diego CA 92110
+###
+###        (619) 225-8401
+###
+###    Customer:
+###
+###        Naval Ocean Systems Center
+###        Code 413
+###        San Diego CA 92152-5000
+###
+###        (619) 553-3972
+###
+###    Subprograms Required:
+###
+###        INITIALIZE_COMMS_JAMMERS
+###
+###    Tables Required:
+###
+###        CODE
+###        UNT
+###
+###    Algorithm:
+###
+###        IF communications jamming enabled
+###            IF UNT_index within the accepted range
+###                push UNT_index onto DELETE_STACK$$ stack
+###                IF stack size reached
+###                    invoke INITIALIZE_COMMS_JAMMERS
+###                END IF
+###            END IF
+###        END IF
+###
+###    Date Developed: February 11, 1988
+###
+###    Record of Modifications:
+###
+###        Programmer          Date            Modification
+###
+###    Waivers: None.
+
+SUBROUTINE delete_potential_jammer ( UNT_index )
+ 
+BBCommon
+ 
+$$DELETE_STACK$$
+ 
+EXTERNAL     initialize_comms_jammers
+INTEGER*4    UNT_index
+ 
+#                                        Begin Executable Code
+ 
+IF ( ( UNT_index > 0 ) &  ( UNT_index <= UNT$Slots ) )
+    {
+    delete_stack$$_top = delete_stack$$_top + 1
+    delete_stack$$_UNT_index [ delete_stack$$_top ] = UNT_index
+    IF ( delete_stack$$_top == UNT$Slots )
+        {
+        CALL initialize_comms_jammers
+        }
+    }
+END
+
+###    Name: ESTABLISH_COMMS_JAMMERS
+###
+###    Usage:
+###
+###        CALL establish_comms_jammers
+###
+###    Purpose:
+###
+###        Insert the all UNT_index at start of game into the ADD_STACK$$ stack.
+###
+###    Arguments:
+###
+###        Input: None.
+###
+###        Input/Output: None.
+###
+###        Output: None.
+###
+###        Function Result: None.
+###
+###        COMMON:
+###
+###            Name            Source Macro             Use
+###
+###            BBoard          BBCommon                 Input
+###            ADD_STACK$$     $$ADD_STACK$$            Input/Output
+###
+###    Limitations: None.
+###
+###    Warnings: None.
+###
+###    Notes: None.
+###
+###    Author:
+###
+###        G. G. Gustafson
+###        Computer Sciences Corporation
+###        4045 Hancock Street
+###        San Diego CA 92110
+###
+###        (619) 225-8401
+###
+###    Customer:
+###
+###        Naval Ocean Systems Center
+###        Code 413
+###        San Diego CA 92152-5000
+###
+###        (619) 553-3972
+###
+###    Subprograms Required:
+###
+###        ADD_POTENTIAL_JAMMER
+###        INITIALIZE_COMMS_JAMMERS
+###
+###    Tables Required:
+###
+###        CODE
+###        UNT
+###
+###    Algorithm:
+###
+###        IF communications jamming enabled
+###            FOR all current UNT_index
+###                invoke ADD_POTENTIAL_JAMMER to push UNT_index
+###                    onto ADD_STACK$$ stack
+###            END FOR
+###            invoke INITIALIZE_COMMS_JAMMERS
+###        END IF
+###
+###    Date Developed: March 31, 1988
+###
+###    Record of Modifications:
+###
+###        Programmer          Date            Modification
+###
+###    Waivers: None.
+
+SUBROUTINE establish_comms_jammers
+ 
+BBCommon
+ 
+$$ADD_STACK$$
+ 
+EXTERNAL     add_potential_jammer
+EXTERNAL     initialize_comms_jammers
+INTEGER*4    UNT$Pointer
+ 
+#                                        Begin Executable Code
+ 
+FOR ( UNT$Pointer$First; still_ok(UNT) ; UNT$Pointer$Next )
+    {
+    CALL add_potential_jammer ( UNT$Pointer$Index )
+    }
+CALL initialize_comms_jammers
+END
+
+###    Name: GENERATE_JCT_ENTRIES
+###
+###    Usage:
+###
+###        CALL generate_jct_entries ( UNT_index,
+###                                    jct_overflow )
+###
+###    Purpose:
+###
+###        Given a UNT_index, extract associated Communications Jammer
+###        data, placing the extracted data into JCT$$.
+###
+###    Arguments:
+###
+###        Input:
+###
+###            UNT_index - INTEGER*4 variable containing the index into
+###                        the UNT table which is to be pushed onto the
+###                        ADD_STACK$$ stack.  To be acceptable, the
+###                        value contained in UNT_index must be greater
+###                        than zero and less than or equal to the value
+###                        UNT$SLOTS.
+###
+###        Input/Output: None.
+###
+###        Output:
+###
+###            jct_overflow - LOGICAL*1 variable to receive the status of
+###                        any JCT$$ overflow condition.
+###
+###        Function Result: None.
+###
+###        COMMON:
+###
+###            Name            Source                   Use
+###
+###            BBoard          BBCommon                 Input
+###            JCT$$           $$JCT$$                  Output
+###
+###    Limitations: None.
+###
+###    Warnings: None.
+###
+###    Notes:
+###
+###        1.  If an attempt is made to add more than MAXIMUM_FREQUENCIES$$
+###            entries to JCT$$, the attempt will cause the JCT_OVERFLOW
+###            error indicator to be set TRUE.
+###
+###    Author:
+###
+###        G. G. Gustafson
+###        Computer Sciences Corporation
+###        4045 Hancock Street
+###        San Diego CA 92110
+###
+###        (619) 225-8401
+###
+###    Customer:
+###
+###        Naval Ocean Systems Center
+###        Code 413
+###        San Diego CA 92152-5000
+###
+###        (619) 553-3972
+###
+###    Subprograms Required: None.
+###
+###    Tables Required:
+###
+###        CJC
+###        CODE
+###        DEQ
+###        UNT
+###
+###    Algorithm:
+###
+###        IF unit pointed to by UNT_index is valid
+###            FOR each piece of equipment on the unit WHILE NOT overflow
+###                IF equipment is an Communications Jammer
+###                    initialize the jct entry
+###                    IF frequency follower
+###                        set frequency to zero in jct entry
+###                        set DYN_EQ_jammer_index to zero in jct entry
+###                        place jct_entry in JCT$$
+###                    ELSE
+###                        FOR each frequency WHILE NOT overflow
+###                            extract frequency from CJC and place in jct entry
+###                            extract DYN_EQ_jammer_index from CJC and place
+###                                in jct entry
+###                            place jct_entry in JCT$$
+###                        END FOR
+###                    END IF
+###                END IF
+###            END FOR
+###        END IF
+###
+###    Date Developed: February 24, 1988
+###
+###    Record of Modifications:
+###
+###        Programmer          Date            Modification
+###
+###    Waivers: None.
+
+SUBROUTINE generate_jct_entries ( UNT_index,
+                                  jct_overflow )
+ 
+BBCommon
+ 
+$$JCT$$
+ 
+INTEGER*4    CJC$FQ$Index
+INTEGER*4    CJC$Pointer
+INTEGER*4    DEQ$Pointer
+LOGICAL*1    jct_overflow
+INTEGER*4    UNT$Pointer
+INTEGER*2    UNT_index
+ 
+#                                        Begin Executable Code
+ 
+UNT$Pointer$To UNT_index
+jct_overflow = ( jct$$_jct_count >= maximum_jct_entries$$ )
+IF ( ! jct_overflow )
+    {
+    FOR_DEQ_CHAIN
+        {
+        IF ( xDEQ$Ident$I == $CommunicationJammer$Code )
+            {
+            FOR ( CJC$FQ$index = 1;
+                  CJC$FQ$Index <= xCJC$NumberFrequencies$I & ! jct_overflow;
+                  CJC$FQ$index = CJC$FQ$index + 1 )
+                {
+                jct$$_jct_count = jct$$_jct_count + 1
+                jct_overflow = ( jct$$_jct_count >= maximum_jct_entries$$ )
+                IF ( ! jct_overflow )
+                    {
+                    CJC$Pointer = xDEQ$Pntr$I
+                    jct$$_jct_UNT_index[ jct$$_jct_count ] = UNT_index
+                    jct$$_jct_CJC_pointer[ jct$$_jct_count ] = CJC$Pointer
+                    jct$$_jct_DYN_pointer[ jct$$_jct_count ] = DEQ$Pointer
+                    jct$$_jct_range[ jct$$_jct_count ] = xCJC$MaxRange$I
+                    jct$$_jct_power[ jct$$_jct_count ] = xCJC$JammerPower$I
+                    jct$$_jct_gain[ jct$$_jct_count ] = xCJC$JammerGain$I
+                    jct$$_jct_time_delay_factor[ jct$$_jct_count ] = xCJC$TimeDelayFactor$I
+                    jct$$_jct_percent_band[ jct$$_jct_count ] = xCJC$PercentCovered$I
+                    jct$$_jct_tone[ jct$$_jct_count ] = ( xCJC$ToneJammer$I == $yes )
+                    jct$$_jct_active[ jct$$_jct_count ] = .FALSE.
+ 
+                    jct$$_jct_frequency[ jct$$_jct_count ] = MAX(1.0,xCJC$FQ$FrequencyJammed$F)
+                    jct$$_jct_performance_factor[ jct$$_jct_count ] = xCJC$FQ$PerformanceFactor$I
+                    jct$$_jct_bandwidth[ jct$$_jct_count ] = xCJC$FQ$BandWidth$I
+                    jct$$_jct_DYN_EQ_jammer_index[ jct$$_jct_count ] = CJC$FQ$Index
+                    }
+                ELSE BREAK
+                }
+            }
+        }
+    }
+END
+
+###    Name: INITIALIZE_COMMS_JAMMERS
+###
+###    Usage:
+###
+###        CALL initialize_comms_jammers
+###
+###    Purpose:
+###
+###        Prior to processing by the Communications Jamming Model,
+###        INITIALIZE_COMMS_JAMMERS ensures that:
+###
+###        1.  Up-to-the-minute (i.e., game minute) revisions are made to:
+###
+###                JCT$$ - primary jammer control table
+###                JFQ$$ - ordered frequency table
+###                IJF$$ - JCT$$ pointer array (by frequency)
+###                JUN$$ - ordered UNT index table
+###                IJU$$ - JCT$$ pointer array (by UNT index)
+###
+###            based upon the contents of ADD_STACK$$ and DELETE_STACK$$.
+###
+###        2.  Jammers which have either been destroyed, made inoperative,
+###            or ordered silent are flagged as inactive and jammers which
+###            have been activated are flagged as active.
+###
+###    Arguments:
+###
+###        Input: None.
+###
+###        Input/Output: None.
+###
+###        Output: None.
+###
+###        Function Result: None.
+###
+###        COMMON:
+###
+###            Name            Source Macro             Use
+###
+###            BBoard          BBCommon                 Input
+###            ADD_STACK$$     $$ADD_STACK$$            Input/Output
+###            DELETE_STACK$$  $$DELETE_STACK$$         Input/Output
+###            IJF$$           $$IJF$$                  Output
+###            IJU$$           $$IJU$$                  Output
+###            JCT$$           $$JCT$$                  Output
+###            JFQ$$           $$JFQ$$                  Output
+###            JUN$$           $$JUN$$                  Output
+###
+###    Limitations: None.
+###
+###    Warnings:
+###
+###        1.  The second and third arguments to RETURN_INDICES must
+###            refer to the count and table components, respectively, of
+###            the appropriate COMMON record.
+###
+###        2.  The first and second arguments to BUILD_INDICES must
+###            refer to the count and appropriate first table component,
+###            respectively, of the JCT$$ COMMON record.  The fourth and
+###            fifth arguments to BUILD_INDICES must refer to the
+###            count and table components, respectively, of the appropriate
+###            COMMON records.
+###
+###        3.  Failure to conform to Warnings 2 and 3 requirements can
+###            potentially cause undesirable overwriting of data in a
+###            wholly unexpected manner.
+###
+###    Notes:
+###
+###        1.  INITIALIZE_COMMS_JAMMERS is a preprocessing housekeeping
+###            routine which updates the various local tables used by
+###            later Communications Jamming Model processes.
+###
+###        2.  INITIALIZE_COMMS_JAMMERS must be invoked each game minute
+###            prior to processing by the Communications Jamming Model
+###            subprograms.  Failure to invoke INITIALIZE_COMMS_JAMMERS
+###            is nonfatal but will cause earlier game minute data to
+###            be erroneously processed during the current game minute.
+###
+###        3.  The processing algorithm is predicated upon the assumption
+###            that few, if any, new entries will be added to or old
+###            entries will be deleted from the UNT table from one game
+###            minute to the next.  Based upon this assumption, the only
+###            subprogram which is ALWAYS invoked is SET_JAMMERS_ACTIVE.
+###
+###        4.  If a UNT_index is contained in the ADD_STACK$$ stack and
+###            the given UNT_index is also found in JUN$$, the attempt to
+###            duplicate the UNT_index in JCT$$ is ignored without warning.
+###
+###        5.  If a UNT_index is contained in the DELETE_STACK$$ stack and
+###            the given UNT_index is not found in JUN$$, the given UNT_index
+###            is simply ignored.
+###
+###        6.  If an overflow of JCT$$ would occur, a warning is sent to the
+###            war game console or to its log file.
+###
+###    Author:
+###
+###        G. G. Gustafson
+###        Computer Sciences Corporation
+###        4045 Hancock Street
+###        San Diego CA 92110
+###
+###        (619) 225-8401
+###
+###    Customer:
+###
+###        Naval Ocean Systems Center
+###        Code 413
+###        San Diego CA 92152-5000
+###
+###        (619) 553-3972
+###
+###    Subprograms Required:
+###
+###        BUILD_INDICES
+###        COLLAPSE_JCT
+###        ECHOH
+###        ECHOHN
+###        ECHOR
+###        GENERATE_JCT_ENTRIES
+###        RETURN_INDICES
+###        SET_JAMMERS_ACTIVE
+###
+###    Tables Required:
+###
+###        CODE
+###        UNT
+###
+###    Algorithm:
+###
+###        IF communications jamming enabled
+###            FOR all UNT_index in the DELETE_STACK$$
+###                find JCT$$ indices from JUN$$
+###                IF found
+###                    mark JCT$$ entries with UNT_index of zero
+###                END IF
+###            END FOR
+###            empty DELETE_STACK$$ (i.e., set TOP to zero)
+###            IF JCT$$ entries marked for deletion
+###                collapse JCT$$
+###            END IF
+###            IF JCT$$ entries were marked for deletion AND units to be added
+###                revise IJU$$ and JUN$$
+###            END IF
+###            FOR all UNT_index in the ADD_STACK$$
+###                find JCT$$ indices from JUN$$
+###                IF NOT found
+###                    generate new JCT$$ entries from UNT_index in ADD_STACK$$
+###                    IF overflow
+###                        issue warning
+###                    END IF
+###                END IF
+###            END FOR
+###            empty ADD_STACK$$ (i.e., set TOP to zero)
+###            IF units were added OR deleted
+###                revise IJF$$ and JFQ$$
+###                revise IJU$$ and JUN$$
+###            END IF
+###            set JCT$$ active flags
+###        END IF
+###
+###    Date Developed: February 11, 1988
+###
+###    Record of Modifications:
+###
+###        Programmer          Date            Modification
+###
+###    Waivers: None.
+
+SUBROUTINE initialize_comms_jammers
+ 
+BBCommon
+ 
+$$JAMMER_CONTROL
+ 
+EXTERNAL     build_indices
+EXTERNAL     collapse_jct
+LITERAL      CSTRIP, CSTRIP8
+EXTERNAL     CSTRIP, CSTRIP8
+EXTERNAL     ECHOH
+EXTERNAL     ECHOHN
+EXTERNAL     ECHOR
+LOGICAL*1    found
+EXTERNAL     generate_jct_entries
+INTEGER*2    index
+INTEGER*2    jct_index
+LOGICAL*1    jct_overflow
+INTEGER*2    lower_index
+EXTERNAL     return_indices
+EXTERNAL     set_jammers_active
+LOGICAL*1    units_added
+LOGICAL*1    units_deleted
+INTEGER*4    UNT$Pointer
+INTEGER*2    upper_index
+ 
+#                                        Begin Executable Code
+ 
+units_added = .FALSE.
+units_deleted = .FALSE.
+IF ( ( delete_stack$$_top > 0 ) & ( jun$$_jun_count > 0 ) )
+    {
+    DO index = 1, delete_stack$$_top
+        {
+        found = .FALSE.
+        IF ( jun$$_jun_count > 0 )
+            {
+            CALL return_indices ( delete_stack$$_UNT_index [ index ],
+                                  jun$$_jun_count,
+                                  jun$$_jun_frequency [ 1 ],
+                                  jun$$_jun_lower_index [ 1 ],
+                                  jun$$_jun_upper_index [ 1 ],
+                                  found,
+                                  lower_index,
+                                  upper_index )
+            }
+        IF ( found )
+            {
+            units_deleted = .TRUE.
+            DO jct_index = lower_index, upper_index
+                {
+                jct$$_jct_UNT_index [ iju$$ [ jct_index ] ] = 0
+                }
+            }
+        }
+    IF ( units_deleted )
+        {
+        CALL collapse_jct
+        }
+    }
+delete_stack$$_top = 0
+IF ( ( add_stack$$_top != 0 ) & units_deleted & ( jct$$_jct_count > 0 ) )
+    {
+    CALL build_indices ( jct$$_jct_count,
+                         jct$$_jct_UNT_index [ 1 ],
+                         iju$$,
+                         jun$$_jun_count,
+                         jun$$_jun_frequency [ 1 ],
+                         jun$$_jun_lower_index [ 1 ],
+                         jun$$_jun_upper_index [ 1 ])
+    }
+jct_overflow = .FALSE.
+FOR ( index = 1; index <= add_stack$$_top & ! jct_overflow;
+      index = index + 1 )
+    {
+    found = .FALSE.
+    IF ( jun$$_jun_count > 0 )
+         {
+         CALL return_indices ( add_stack$$_UNT_index [ index ],
+                              jun$$_jun_count,
+                              jun$$_jun_frequency [ 1 ],
+                              jun$$_jun_lower_index [ 1 ],
+                              jun$$_jun_upper_index [ 1 ],
+                              found,
+                              lower_index,
+                              upper_index )
+        }
+    IF ( ! found )
+        {
+        units_added = .TRUE.
+        CALL generate_jct_entries ( add_stack$$_UNT_index [ index ],
+                                    jct_overflow )
+        IF ( jct_overflow )
+            {
+            UNT$Pointer$To add_stack$$_UNT_index [ index ]
+            CALL ECHOR
+            CALL ECHOHN ( xUNT$Name$C, $$MaxLit )
+            CALL ECHOV (' causes Comm Jammer Table overflow - ')
+            CALL ECHOV ('Addition Ignored')
+            }
+        }
+    }
+add_stack$$_top = 0
+IF ( units_added | units_deleted )
+    {
+    IF ( jct$$_jct_count > 0 )
+        {
+        CALL build_indices ( jct$$_jct_count,
+                             jct$$_jct_frequency [ 1 ],
+                             ijf$$,
+                             jfq$$_jfq_count,
+                             jfq$$_jfq_frequency [ 1 ],
+                             jfq$$_jfq_lower_index [ 1 ],
+                             jfq$$_jfq_upper_index [ 1 ])
+        CALL build_indices ( jct$$_jct_count,
+                             jct$$_jct_UNT_index [ 1 ],
+                             iju$$,
+                             jun$$_jun_count,
+                             jun$$_jun_frequency [ 1 ],
+                             jun$$_jun_lower_index [ 1 ],
+                             jun$$_jun_upper_index [ 1 ])
+        }
+    ELSE
+        {
+        jfq$$_jfq_count = 0
+        jun$$_jun_count = 0
+        ijf$$ [ 1 ] = 0
+        iju$$ [ 1 ] = 0
+        }
+    }
+CALL set_jammers_active
+END
+
+###    Name: INTER_NODE_ADVANCE
+###
+###    Usage:
+###
+###        LOGICAL*1    inter_node_advance
+###        EXTERNAL     inter_node_advance
+###        :
+###        :
+###        PAI$Pointer$To ???
+###        IF ( inter_node_advance ( PAI$Pointer,
+###                                  receiver_pointer,
+###                                  transmitter_pointer ) )
+###            {
+###            do something with advanced message
+###            }
+###        ELSE
+###            {
+###            do something with delayed message
+###            }
+###
+###    Purpose:
+###
+###        Determines if a message can advance from one node to the next
+###        during the current game minute.
+###
+###    Arguments:
+###
+###        Input:
+###
+###            PAI$Pointer -   INTEGER*4 variable containing the blackboard
+###                            pointer which, in turn, points to the PAI
+###                            table communication pair.
+###
+###            receiver_pointer - INTEGER*4 value containing the blackboard
+###                            BOY or UNT table pointer which, in turn, points
+###                            to the communications receiver.
+###
+###            transmitter_pointer - INTEGER*4 value containing the blackboard
+###                            BOY or UNT table pointer which, in turn, points
+###                            to the communications transmitter.
+###
+###        Input/Output: None.
+###
+###        Output: None.
+###
+###        Function Result:
+###
+###            inter_node_advance - LOGICAL*1 value.  Set TRUE if the message
+###                            can advance during the current game minute;
+###                            otherwise set FALSE.
+###
+###        COMMON:
+###
+###            Name            Source                   Use
+###
+###            BBoard          BBCommon                 Input
+###            IJF$$           $$IJF$$                  Input
+###            JCT$$           $$JCT$$                  Input
+###            JFQ$$           $$JFQ$$                  Input
+###
+###    Limitations: None.
+###
+###    Warnings: None.
+###
+###    Notes: None.
+###
+###    Author:
+###
+###        G. G. Gustafson
+###        Computer Sciences Corporation
+###        4045 Hancock Street
+###        San Diego CA 92110
+###
+###        (619) 225-8401
+###
+###    Customer:
+###
+###        Naval Ocean Systems Center
+###        Code 413
+###        San Diego CA 92152-5000
+###
+###        (619) 553-3972
+###
+###    Subprograms Required:
+###
+###        MU_RHO_VALUE
+###        RANDOM (LBMATH Package)
+###        RANGE_AND_BEARING
+###        RETURN_INDICES
+###
+###    Tables Required:
+###
+###        BOY
+###        CTL
+###        PAI
+###        SUI
+###        UNT
+###
+###    Algorithm:
+###
+###        IF communications delays are not in effect
+###            return TRUE
+###        ELSE
+###            set jamming delay probability to zero
+###            FOR all jammers operating on victim receiver frequency
+###                IF jammer is active
+###                    IF jammer in range of receiver
+###                        power sum jammer signal strength contribution
+###                    END IF
+###                END IF
+###            END FOR
+###            IF power sum > zero
+###                compute jammer to signal ratio
+###                modify computed ratio by link sensitivity to jamming
+###                compute jamming delay probability
+###            END IF
+###            compute link delay probability
+###            modify link delay probability by jamming delay probability
+###            return ( uniform random variate > link delay probability )
+###        END IF
+###
+###    Date Developed: March 14, 1988
+###
+###    Record of Modifications:
+###
+###        Programmer          Date            Modification
+###
+###    Waivers: None.
+###
+###    Modifications:
+#
+# This routine was rewritten 2/25/91 by Bob Hundt to:
+#
+#     1) Calculate individual jammer contribution to Jammer signal, based
+#        on the free-space propagation loss model.
+#
+#     2) Accumulate jammer power in linear units (mWatts).
+#
+#     3) Calculate Transmitter signal strength, based on the free-space
+#     propagation loss model.
+#
+#     4) Convert Transmitter signal strength to linear units (mWatts).
+#
+#     5) Calculate Jammer to Transmitter signal strength ratio based on
+#        linear units.
+#
+#     6) Ducting factor is used only once per power calculation
+#
+#  The algorithms used in this routine are based on the basic far-field
+#  free space propagation loss model. This model assumes that
+#  transmitter/Receiver antennas are in line-of-sight. The algorithm is
+#  slightly more complex  than used by GGG.  The model follows
+#  guidelines, set forth in Electromagnetic Interference and
+#  Compatibility, by Don White. Sonalysts used a variation of the basic
+#  signal strength equation in their document "NOSC, RESA Communications
+#  Jamming Model Description". It seem to include a refelcted wave
+#  contribution  to signal strength. Some other variances in the
+#  Sonalysts model description  are present.
+#
+#
+ 
+#$% determine if a message will pass between two nodes
+LOGICAL*1 FUNCTION inter_node_advance ( PAI$Pointer,
+                                        receiver_pointer,
+                                        transmitter_pointer,
+                                        Victim_DeqPointer )
+ 
+BBcommon
+ 
+$$IJF$$
+ 
+$$JCT$$
+ 
+ 
+$$JFQ$$
+ 
+REAL*4      speed_of_light               # in nm/usec
+PARAMETER   ( speed_of_light = 0.164 )
+ 
+INTRINSIC   ABS
+INTEGER*4   comm_pair_frequency
+REAL*4      cosine_JRT                   # of angle JRT
+REAL*4      dummy_argument               # dummy argument for RANDOM and
+                                          # RANGE_AND_BEARING bearing
+EXTERNAL    ECHOF
+EXTERNAL    ECHOH
+EXTERNAL    ECHOI
+INTRINSIC   EXP
+INTRINSIC   FLOAT
+LOGICAL*1   found
+LOGICAL*1   frequency_hopper
+REAL*4      gain_receiver_jammer
+LOGICAL*1   have_jammer_transmitter_range
+INTEGER*4   integer_random_number
+REAL*4      jammer_delay_probability
+Integer*4   jammer_frequency
+INTEGER*4   jammer_index
+REAL*4      jammer_power_dbm
+REAL*4      jammer_power_sum_mwatts
+REAL*4      jammer_receiver_range
+REAL*4      jammer_to_signal_ratio
+REAL*4      jammer_transmitter_range
+INTEGER*2   jct_index
+REAL*4      link_delay_probability
+INTEGER*2   lower_index
+REAL*4      major_axis
+INTRINSIC   MIN
+REAL*4      mu
+REAL*4      MU_RHO_VALUE
+EXTERNAL    MU_RHO_VALUE
+REAL*4      mu_times_1_minus_rho
+REAL*4      overall_probability
+INTEGER*4   PAI_index
+INTEGER*4   PAI$Pointer
+INTEGER*4   percent_band
+LOGICAL*1   process_this_jammer
+REAL*4      propagation_loss
+REAL*4      RANDOM
+EXTERNAL    RANDOM
+EXTERNAL    RANGE_AND_BEARING
+REAL*4      real_random_number
+EXTERNAL    RETURN_INDICES
+REAL*4      receiver_transmitter_range
+REAL*4      receiver_gain
+INTEGER*4   receiver_pointer
+REAL*4      rho
+INTRINSIC   SIGN
+REAL*4      signal_pulse_length
+INTEGER*4   SUI$Pointer                 # for transmitter
+INTEGER*4   SUI2$Pointer                # for receiver
+INTEGER*4   SUI$CH$Index                # jb            4/24/89
+INTEGER*4   SUI$CH$PerformanceFactor$i  # jb            4/24/89
+Real*4      Temp_Power
+REAL*4      time_delay_factor
+INTEGER*4   transmitter_pointer
+REAL*4      transmitter_signal_strength,Intra_Degradation
+Real*4      tx_signal_strength_dbm
+Real*4      tx_signal_strength_mwatts
+INTEGER*4   UNT$Pointer,UNT2$Pointer,Culprit_Deqpointer,ITX$Pointer
+INTEGER*2   upper_index
+Integer*4   Victim_DEQPointer,DEQ$Pointer,DEQ2$Pointer,Hold_Deq,Hold_Unt
+Logical     Logged_This_Minute
+Literal     cstrip8
+#                                        Begin Executable Code
+ 
+link_delay_probability = 0.0
+jammer_delay_probability = 0.0
+ 
+IF ( No$Comm$Delay == $NO )
+    {
+    mu = xPAI$ServiceRateInterval$f              # i.e. messages per interval
+    rho = FLOAT ( xPAI$PercentUtilization$I ) * .01 # how much of the time
+                                                      # the link is available
+    # mu is msgs/interval, (1.0-rho) is how much time link is down (in %)
+    link_delay_probability = EXP ( - mu * ( 1.0 - rho ) )
+    IF ( trace$comm != $no )
+        {
+        CALL ECHOR
+        CALL ECHOv ("<?>mu=")
+        CALL ECHOF ( mu, 3 )
+        CALL ECHOv ("..rho=")
+        CALL ECHOF ( rho, 3 )
+        }
+    } # end if communications delay enabled
+ 
+IF ( trace$comm != $no )
+    {
+    CALL ECHOv ("..link prob=")
+    CALL ECHOF ( link_delay_probability, 5 )
+    }
+ 
+IF ( Skip$Comms_Jamming == $no )
+    {
+    SUI$Pointer =  xPAI$SendSuitePntr$I
+    SUI2$Pointer = xPAI$RecvSuitePntr$I
+#    frequency_hopper = ( xSUI$FrequencyHopper$I == $yes ), out 4/91
+    frequency_hopper = ( xSUI$DeviceType$I == $FrequencyHopper & _
+                         xSUI$EMIFlag$i == $NonBEESProcessing )
+    IF ( frequency_hopper )
+        {
+        comm_pair_frequency = 0
+        }
+    ELSE
+        {
+        comm_pair_frequency = xPAI$Freq$I / 1000        # convert kHz to mHz
+        }
+    IF ( trace$comm != $no )
+        {
+        CALL ECHOR
+        CALL ECHOv ("<?>")
+        CALL ECHOv ("comm pair freq=")
+        CALL ECHOI ( comm_pair_frequency )
+        IF ( frequency_hopper )
+            {
+            CALL ECHOv ("..SUI is a hopper")
+            }
+        }
+    found = .FALSE.
+    IF ( jfq$$_jfq_count > 0 )
+        {
+        CALL RETURN_INDICES ( comm_pair_frequency,
+                              jfq$$_jfq_count,
+                              jfq$$_jfq_frequency [ 1 ],
+                              jfq$$_jfq_lower_index [ 1 ],
+                              jfq$$_jfq_upper_index [ 1 ],
+                              found,
+                              lower_index,
+                              upper_index )
+        }
+ 
+    #$% if any jammers active
+    IF ( found )
+        {
+        IF ( trace$comm != $no )
+            {
+            CALL ECHOR
+            CALL ECHOv ("<?>")
+            CALL ECHOI ( upper_index - lower_index + 1 )
+            CALL ECHOv (" jammers ")
+            }
+        CALL RANGE_AND_BEARING ( receiver_pointer,
+                                 transmitter_pointer,
+                                 receiver_transmitter_range,
+                                 dummy_argument )
+        IF ( trace$comm != $no )
+            {
+            CALL ECHOR
+            CALL ECHOv ("<?>Drt=")
+            CALL ECHOF ( receiver_transmitter_range, 3 )
+            }
+ 
+        #$% initialize in linear units
+        jammer_power_sum_mwatts = 0.0
+ 
+        #$% for all jammers
+        DO jct_index = lower_index, upper_index
+            {
+            have_jammer_transmitter_range = .FALSE.
+            process_this_jammer = jct$$_jct_active [ ijf$$ [ jct_index ] ]
+            IF ( process_this_jammer )
+                {
+                UNT$Pointer$To jct$$_jct_UNT_index [ ijf$$ [ jct_index ] ]
+                CALL RANGE_AND_BEARING ( UNT$Pointer,
+                                         receiver_pointer,
+                                         jammer_receiver_range,
+                                         dummy_argument )
+                IF ( trace$comm != $no )
+                    {
+                    CALL ECHOR
+                    CALL ECHOv ("<?>Drj=")
+                    CALL ECHOF ( jammer_receiver_range, 3 )
+                    }
+                process_this_jammer = _
+                    ( jammer_receiver_range <= _
+                      jct$$_jct_range [ ijf$$ [ jct_index ] ] )
+                }
+            IF ( process_this_jammer &
+                 frequency_hopper &   # 2/25/91, see CommJammer model descr.
+                 jct$$_jct_tone [ ijf$$ [ jct_index ] ] )
+                {
+                integer_random_number = _
+                    INT ( RANDOM ( dummy_argument ) * 100.0 )
+                percent_band = _
+                    jct$$_jct_percent_band [ ijf$$ [ jct_index ] ]
+                IF ( trace$comm != $no )
+                    {
+                    CALL ECHOR
+                    CALL ECHOv ("<?>Tone Prob=")
+                    CALL ECHOI ( integer_random_number )
+                    CALL ECHOv ("% Band=")
+                    CALL ECHOI ( percent_band )
+                    }
+                process_this_jammer = ( integer_random_number <= percent_band )
+                } # end if tome jammer
+ 
+            IF ( process_this_jammer & frequency_hopper )
+                {
+                             # previously xSUI$SignalPulseLength$I, modded 4/91
+                signal_pulse_length = xSUI$PulseWidth$F
+                time_delay_factor = _
+                    jct$$_jct_time_delay_factor [ ijf$$ [ jct_index ] ]
+                major_axis = receiver_transmitter_range + _
+                    speed_of_light * ( signal_pulse_length + time_delay_factor )
+                CALL RANGE_AND_BEARING ( UNT$Pointer,
+                                         transmitter_pointer,
+                                         jammer_transmitter_range,
+                                         dummy_argument )
+                IF ( trace$comm != $no )
+                    {
+                    CALL ECHOR
+                    CALL ECHOv ("<?>Djt=")
+                    CALL ECHOF ( jammer_transmitter_range, 3 )
+                    }
+                have_jammer_transmitter_range = .TRUE.
+                IF ( trace$comm != $no )
+                    {
+                    CALL ECHOR
+                    CALL ECHOv ("<?>r1+r2=")
+                    CALL ECHOF ( jammer_receiver_range +
+                                 jammer_transmitter_range, 3 )
+                    CALL ECHOv ("..majaxis=")
+                    CALL ECHOF ( major_axis, 3 )
+                    }
+                process_this_jammer = _
+                    ( jammer_receiver_range + jammer_transmitter_range <= _
+                      major_axis )
+                } # end if frequency hopper
+ 
+            IF ( process_this_jammer )
+                {
+                IF ( receiver_transmitter_range <= 0.0 )
+                    {
+                    cosine_JRT = - 1.0
+                    }
+                ELSE
+                    {
+                    IF ( jammer_receiver_range <= 0.0 )
+                        {
+                        cosine_JRT = 1.0
+                        }
+                    ELSE
+                        {
+                        IF ( ! have_jammer_transmitter_range )
+                            {
+                            CALL RANGE_AND_BEARING ( UNT$Pointer,
+                                                     transmitter_pointer,
+                                                     jammer_transmitter_range,
+                                                     dummy_argument )
+                            IF ( trace$comm != $no )
+                                {
+                                CALL ECHOR
+                                CALL ECHOv ("<?>Djt=")
+                                CALL ECHOF ( jammer_transmitter_range, 3 )
+                                }
+                            have_jammer_transmitter_range = .TRUE.
+                            }
+                        cosine_JRT = ( jammer_receiver_range ** 2 +
+                                       receiver_transmitter_range ** 2 -
+                                       jammer_transmitter_range ** 2 ) / _
+                                     ( 2.0 * jammer_receiver_range *
+                                       receiver_transmitter_range )
+                        cosine_JRT = SIGN ( MIN ( 1.0, ABS ( cosine_JRT ) ),
+                                            cosine_JRT )
+                        } # end if jam/Rx range > 0
+                    } # end if Rx/Tx range > 0
+ 
+                IF ( trace$comm != $no )
+                    {
+                    CALL ECHOR
+                    CALL ECHOv ("<?>cos JRT=")
+                    CALL ECHOF ( cosine_JRT, 5 )
+                    }
+                receiver_gain = FLOAT ( xSUI2$ReceiverGain$I )
+                IF ( trace$comm != $no )
+                    {
+                    CALL ECHOR
+                    CALL ECHOv ("<?>Gr=")
+                    CALL ECHOF ( receiver_gain, 3 )
+                    }
+                gain_receiver_jammer = receiver_gain -
+                    0.25 * receiver_gain * ( 1.0 - ( 1.0 + cosine_JRT ) / 2.0 )
+                IF ( trace$comm != $no )
+                    {
+                    CALL ECHOR
+                    CALL ECHOv ("<?>Grj=")
+                    CALL ECHOF ( gain_receiver_jammer, 3 )
+                    }
+ 
+                propagation_loss = 0
+ 
+                # far-field propagation loss
+                IF ( jammer_receiver_range > .01 )
+                    {
+                    # convert jammer_recever_range to statute miles
+                    # freq in MHz
+ 
+                    jammer_frequency =
+                        jct$$_jct_Frequency [ ijf$$ [ jct_index ] ]
+                    propagation_loss =
+                    37 + (20 * Log10 ( FLOAT ( jammer_frequency ))) +
+                    (20 * Ducting$Factor *
+                     (LOG10( (8/7) * jammer_receiver_range)))
+ 
+                    #$% don't allow prop loss to enhance signal
+                    propagation_loss = MAX (0.0, propagation_loss)
+                    }
+ 
+                #$% get jammer power at Rx
+                jammer_power_dbm = gain_receiver_jammer +
+                    jct$$_jct_performance_factor [ ijf$$ [ jct_index ] ] -
+                        77.0 - propagation_loss
+ 
+                #$% individual jammer power in milliwatts
+                Temp_Power = 10 ** ( jammer_power_dbm  / 10.0 )
+ 
+                # accumulate jammer power in mWatt units
+                jammer_power_sum_mwatts = jammer_power_sum_mwatts +
+                                               Temp_Power
+ 
+                }
+            }#$% end for all jammers
+ 
+        #$% if jamming signals potentially impact
+        IF ( jammer_power_sum_mwatts > 1.0E-12 )
+            {
+            # find SUI active channel, set the SUI$CH$Index for next extraction
+            # 4/89 reh
+            FOR (SUI$CH$Index=1;SUI$CH$Index$OK;SUI$CH$Index=SUI$CH$Index+1)
+                {
+                # active channel found
+                IF (comm_pair_frequency == INT(xSUI$CH$Frequency$f)) break
+                }
+ 
+            #$% make a default
+            if ( ! SUI$CH$Index$OK ) SUI$CH$Index = 1
+ 
+            propagation_loss = 0
+ 
+            # far-field propagation loss
+            IF ( receiver_transmitter_range > .01 )
+                {
+                # convert jammer_recever_range to statute miles, freq in MHz
+                # if frequency follower
+                IF (comm_pair_frequency == 0 )
+                    {
+                    propagation_loss =
+                        37 + (20 * Ducting$Factor * _
+                              (LOG10((8/7) * receiver_transmitter_range)))
+                    } # IF (comm_pair_frequency = 0 )
+                else
+                    {
+                    propagation_loss =
+                        37 + (20 * Log10 ( FLOAT( comm_pair_frequency ))) +
+                             (20 * Ducting$Factor * _
+                              (LOG10((8/7) * receiver_transmitter_range)) _
+                             )
+                    } # IF (comm_pair_frequency != 0 )
+ 
+                #$% don't allow prop loss to enhance signal
+                propagation_loss = MAX (0.0, propagation_loss)
+ 
+                } # receiver_transmitter_range <= .01
+ 
+            # units here are Dbm
+            tx_signal_strength_dbm = xSUI$CH$PerformanceFactor$I -77.0 +
+                             xSUI$ReceiverGain$I - propagation_loss
+ 
+            IF ( trace$comm != $no )
+                {
+                CALL ECHOR
+                CALL ECHOv ("<?>Final Tss Dbm=")
+                CALL ECHOF ( tx_signal_strength_dbm, 3 )
+                }
+ 
+            # convert transmitter signal from Dbm to mWatts
+            tx_signal_strength_mwatts = 10 ** ( tx_signal_strength_dbm / 10.0 )
+ 
+            IF ( trace$comm != $no )
+                {
+                CALL ECHOR
+                CALL ECHOv (" Jps dBm ")
+                CALL ECHOF ( 10*log10(jammer_power_sum_mwatts), 3 )
+                }
+ 
+ 
+            # when link jammer sensitivity increases, the effect of the jammer
+            #   is reduced.
+            jammer_to_signal_ratio = jammer_power_sum_Mwatts / _
+                tx_signal_strength_mwatts * xPAI$LinkJammerSensitivity$F
+            IF ( trace$comm != $no )
+                {
+                CALL ECHOR
+                CALL ECHOv ("<?>J/S=")
+                CALL ECHOF ( jammer_power_sum_mwatts / tx_signal_strength_mwatts *
+                             xPAI$LinkJammerSensitivity$F, 3 )
+                CALL ECHOv ("..Link Sens Fact=")
+                CALL ECHOF ( xPAI$LinkJammerSensitivity$F, 3 )
+                CALL ECHOv ("..J/S prime=")
+                CALL ECHOF ( jammer_to_signal_ratio, 3 )
+                }
+            mu_times_1_minus_rho = MU_RHO_VALUE ( jammer_to_signal_ratio )
+            IF ( trace$comm != $no )
+                {
+                CALL ECHOR
+                CALL ECHOv ("<?>mu(1-rho)=")
+                CALL ECHOF ( mu_times_1_minus_rho, 3 )
+                }
+            jammer_delay_probability = EXP ( - mu_times_1_minus_rho / 60.0 )
+            }
+        } # end if any jammers active
+    }# end if do comms jamming model
+ 
+real_random_number = RANDOM ( dummy_argument )
+ 
+#$% overall probability of faliure
+overall_probability = link_delay_probability +
+                      ( 1.0 - link_delay_probability ) *
+                      jammer_delay_probability
+ 
+IF ( trace$comm != $no )
+    {
+    CALL ECHOR
+    CALL ECHOv ("<?>Rn=")
+    CALL ECHOF ( real_random_number, 5 )
+    CALL ECHOv ("..link prob=")
+    CALL ECHOF ( link_delay_probability, 5 )
+    CALL ECHOv ("..jam prob=")
+    CALL ECHOF ( jammer_delay_probability, 5 )
+    CALL ECHOv (".. prob fail=")
+    CALL ECHOF ( overall_probability, 5 )
+ 
+ 
+    #$% if message would have passed without jamming
+    IF ( ( real_random_number > link_delay_probability ) &
+         ( real_random_number <= overall_probability ) )
+        {
+        CALL ECHOv ("..jammed")
+        }
+    }
+ 
+inter_node_advance = ( real_random_number > overall_probability )
+END
+ 
+
+###    Name: MU_RHO_VALUE
+###
+###    Usage:
+###
+###        real_4_variable = mu_rho_value ( js_current )
+###
+###    Purpose:
+###
+###        Given a value of jammer to signal ratio, JS_CURRENT, returns the
+###        associated value of Mu(1-Rho) from the MRV blackboard.
+###
+###    Arguments:
+###
+###        Input:
+###
+###            js_current      REAL*4 value containing the jammer to signal
+###                            ratio for which a value of Mu(1-Rho) is
+###                            desired.
+###
+###        Input/Output: None.
+###
+###        Output: None.
+###
+###        Function Result:
+###
+###            mu_rho_value    REAL*4 value of Mu(1-Rho) for the specified
+###                            jammer to signal ratio, JS_CURRENT.
+###
+###        COMMON: None.
+###
+###            Name            Source Macro             Use
+###
+###            BBoard          BBCommon                 Input
+###
+###    Limitations: None.
+###
+###    Warnings: None.
+###
+###    Notes:
+###
+###        1.  The returned value of MU_RHO_VALUE is an interpolated value.
+###
+###    Author:
+###
+###        G. G. Gustafson
+###        Computer Sciences Corporation
+###        4045 Hancock Street
+###        San Diego CA 92110
+###
+###        (619) 225-8401
+###
+###    Customer:
+###
+###        Naval Ocean Systems Center
+###        Code 413
+###        San Diego CA 92152-5000
+###
+###        (619) 553-3972
+###
+###    Subprograms Required: None.
+###
+###    Tables Required:
+###
+###        MRV
+###
+###    Algorithm:
+###
+###        IF js_current < minimum JS
+###            RETURN first value
+###        ELSE IF js_current > maximum JS
+###            RETURN last value
+###        ELSE
+###            compute appropriate indices
+###            RETURN interpolated value
+###        END IF
+###
+###    Date Developed: 1/11/88
+###
+###    Record of Modifications:
+###
+###        Programmer          Date            Modification
+###
+###    Waivers: None.
+
+REAL*4 FUNCTION mu_rho_value ( js_current )
+BBcommon
+ 
+INTRINSIC    INT
+REAL*4       js_current
+INTEGER*4    lower_index
+REAL*4       lower_value
+INTEGER*4    mrv$pointer
+INTEGER*4    mrv$val$index
+ 
+#                                        Begin Executable Code
+ 
+#                                        Verify that MRV table exists
+ 
+IF ( MRV$Size < MRV$Entry )
+    {
+    CALL ECHOR
+    CALL ECHOv ("MRV Table not loaded - Comms Jamming Cancelled")
+    CALL ECHOR
+    Skip$Comms_Jamming = $yes
+    mu_rho_value = 1000.0
+    }
+ELSE
+    {
+    MRV$Pointer$First   # This is the one and only MRV Entry
+ 
+    IF ( js_current <= xMRV$JSminimum$F )
+        {
+        MRV$VAL$index = 1
+        mu_rho_value = xMRV$VAL$MuRhoValue$F
+        }
+    ELSE IF ( js_current >= xMRV$JSmaximum$F )
+        {
+        MRV$VAL$index = xMRV$NumberValues$I
+        mu_rho_value = xMRV$VAL$MuRhoValue$F
+        }
+    ELSE
+        {
+        lower_index = INT ( ( js_current - xMRV$JSminimum$F ) / _
+                            xMRV$JSincrement$F ) + 1
+        MRV$VAL$index = lower_index
+        lower_value = xMRV$VAL$MuRhoValue$F
+        MRV$VAL$index = MRV$VAL$index + 1
+        mu_rho_value = lower_value + _
+                       ( ( xMRV$VAL$MuRhoValue$F - lower_value ) * _
+                         ( js_current - _
+                           ( xMRV$JSminimum$F + _
+                             ( lower_index - 1 ) * xMRV$JSincrement$F ) ) / _
+                           xMRV$JSincrement$F )
+        }
+    }
+END
+
+###    Name: RANGE_AND_BEARING
+###
+###    Usage:
+###
+###        CALL range_and_bearing ( from_pointer,
+###                                 to_pointer,
+###                                 range,
+###                                 bearing )
+###
+###    Purpose:
+###
+###        Returns the RANGE and BEARING from the first unit or buoy to the
+###        second unit or buoy.
+###
+###    Arguments:
+###
+###        Input:
+###
+###            FROM_POINTER -  INTEGER*4 value containing the blackboard BOY
+###                            or UNT table pointer which, in turn, points
+###                            to the desired origin for range and bearing.
+###
+###            TO_POINTER -    INTEGER*4 value containing the blackboard BOY
+###                            or UNT table pointer which, in turn, points
+###                            to the desired terminus for range and bearing.
+###
+###        Input/Output: None.
+###
+###        Output:
+###
+###            RANGE -         REAL*4 variable to receive the range between
+###                            the origin and the terminus.
+###
+###            BEARING -       REAL*4 variable to receive the bearing from
+###                            the origin to the terminus.
+###
+###        Function Result: None.
+###
+###        COMMON:
+###
+###            Name            Source                   Use
+###
+###            BBoard          BBCommon                 Input
+###
+###    Limitations: None.
+###
+###    Warnings: None.
+###
+###    Notes:
+###
+###        1.  The only acceptable table pointers for input to this subprogram
+###            are the BOY and UNT tables.  If a pointer into a table other
+###            than these two is provided, the range returned will be 1.0E38
+###            and the bearing returned will be 0.0.
+###
+###        2.  The range and bearing returned will always be from the origin
+###            to the terminus (i.e., FROM_POINTER to the TO_POINTER).
+###
+###    Author:
+###
+###        G. G. Gustafson
+###        Computer Sciences Corporation
+###        4045 Hancock Street
+###        San Diego CA 92110
+###
+###        (619) 225-8401
+###
+###    Customer:
+###
+###        Naval Ocean Systems Center
+###        Code 413
+###        San Diego CA 92152-5000
+###
+###        (619) 553-3972
+###
+###    Subprograms Required:
+###
+###        RLL2RB
+###
+###    Tables Required:
+###
+###        BOY
+###        UNT
+###
+###    Algorithm:
+###
+###        IF both pointers are valid
+###            return range and bearing
+###        ELSE
+###            return error values
+###        END IF
+###
+###    Date Developed: March 16, 1988
+###
+###    Record of Modifications:
+###
+###        Programmer          Date        Modification
+###
+###    Waivers: None.
+
+SUBROUTINE range_and_bearing ( from_pointer,
+                               to_pointer,
+                               range,
+                               bearing )
+ 
+BBCommon
+ 
+REAL*4       bearing
+INTEGER*4    BOY$Pointer
+LOGICAL*1    error_encountered
+REAL*4       from_cosine_latitude
+REAL*4       from_latitude
+REAL*4       from_longitude
+INTEGER*4    from_pointer
+REAL*4       range
+EXTERNAL     RLL2RB
+REAL*4       to_cosine_latitude
+REAL*4       to_latitude
+REAL*4       to_longitude
+INTEGER*4    to_pointer
+INTEGER*4    UNT$Pointer
+ 
+error_encountered = .FALSE.
+BOY$Pointer = from_pointer
+UNT$Pointer = from_pointer
+IF ( UNT$Pointer$Valid )
+    {
+    from_latitude = xUNT$TrueLatitude$F
+    from_longitude = xUNT$TrueLongitude$F
+    from_cosine_latitude = xUNT$CosTrueLat$F
+    }
+ELSE IF ( BOY$Pointer$Valid )
+    {
+    from_latitude = xBOY$TrueLatitude$F
+    from_longitude = xBOY$TrueLongitude$F
+    from_cosine_latitude = xBOY$CosTrueLat$F
+    }
+ELSE
+    {
+    error_encountered = .TRUE.
+    }
+BOY$Pointer = to_pointer
+UNT$Pointer = to_pointer
+IF ( UNT$Pointer$Valid )
+    {
+    to_latitude = xUNT$TrueLatitude$F
+    to_longitude = xUNT$TrueLongitude$F
+    to_cosine_latitude = xUNT$CosTrueLat$F
+    }
+ELSE IF ( BOY$Pointer$Valid )
+    {
+    to_latitude = xBOY$TrueLatitude$F
+    to_longitude = xBOY$TrueLongitude$F
+    to_cosine_latitude = xBOY$CosTrueLat$F
+    }
+ELSE
+    {
+    error_encountered = .TRUE.
+    }
+IF ( error_encountered )
+    {
+    range = 1.0E38
+    bearing = 0.0
+    }
+ELSE
+    {
+    CALL RLL2RB ( from_latitude,
+                  from_longitude,
+                  from_cosine_latitude,
+                  to_latitude,
+                  to_longitude,
+                  to_cosine_latitude,
+                  range,
+                  bearing )
+    }
+END
+
+###    Name: RETURN_INDICES
+###
+###    Usage:
+###
+###        found = .FALSE.
+###        IF ( count > 0 )
+###            CALL return_indices ( datum,
+###                                  count,
+###                                  data_array,
+###                                  found,
+###                                  lower_index,
+###                                  upper_index )
+###        END IF
+###
+###    Purpose:
+###
+###        Search DATA_ARRAY for DATUM.  If FOUND return LOWER_INDEX and
+###        UPPER_INDEX from DATA_ARRAY.
+###
+###    Arguments:
+###
+###        Input:
+###
+###            DATUM -     INTEGER*2 variable containing the desired target
+###                        of the RETURN_INDICES search.  DATUM should be
+###                        either a UNT_INDEX or a FREQUENCY.
+###
+###            COUNT -     INTEGER*2 variable containing the number of entries
+###                        in DATA_ARRAY.  COUNT should be either JUN_COUNT or
+###                        JFQ_COUNT.
+###
+###            DATA_ARRAY - array of records, each six bytes in length.
+###                        DATA_ARRAY should be either JUN$$ . JUN [ 1 ] or
+###                        JFQ$$ . JFQ [ 1 ].
+###
+###        Input/Output: None.
+###
+###        Output:
+###
+###            FOUND -     LOGICAL*1 variable to receive the reults of the
+###                        RETURN_INDICES search.  IF DATUM is found in
+###                        DATA_ARRAY, FOUND will be set to TRUE; otherwise
+###                        FOUND will be set to FALSE.  If FOUND is FALSE,
+###                        both LOWER_INDEX and UPPER_INDEX should be
+###                        ignored.
+###
+###            LOWER_INDEX - INTEGER*2 variable to receive the lower index
+###                        value associated with DATUM in the DATA_ARRAY.
+###                        LOWER_INDEX has no meaning if FOUND is FALSE.
+###
+###            UPPER_INDEX - INTEGER*2 variable to receive the upper index
+###                        value associated with DATUM in the DATA_ARRAY.
+###                        UPPER_INDEX has no meaning if FOUND is FALSE.
+###
+###        Function Result: None.
+###
+###        COMMON: None.
+###
+###    Limitations:
+###
+###        1.  At the time of RETURN_INDICES invocation, the value of
+###            COUNT must be greater than zero.  This restriction is
+###            imposed by the use of adjustable array size declarations
+###            within RETURN_INDICES.  IF COUNT is zero or less,
+###            RETURN_INDICES will abort with a traceback.  To avoid
+###            this difficulty, the value of COUNT must be tested
+###            prior to invocation of RETURN_INDICES, as exemplified in
+###            the Usage example.
+###
+###    Warnings: None.
+###
+###    Notes:
+###
+###        1.  RETURN_INDICES is a generalized subprogram which searches
+###            either the JFQ$$ or JUN$$ data structures for DATUM.  As
+###            a result, care must be taken to provide the correct argu-
+###            ments to RETURN_INDICES.
+###
+###        2.  RETURN_INDICES employs either a linear or binary search of
+###            DATA_ARRAY.  The decision as to which one is performed is
+###            dependent upon the value of COUNT.  If COUNT is less than
+###            12 a linear search is used; otherwise a binary search is used.
+###
+###    Author:
+###
+###        G. G. Gustafson
+###        Computer Sciences Corporation
+###        4045 Hancock Street
+###        San Diego CA 92110
+###
+###        (619) 225-8401
+###
+###    Customer:
+###
+###        Naval Ocean Systems Center
+###        Code 413
+###        San Diego CA 92152-5000
+###
+###        (619) 553-3972
+###
+###    Subprograms Required: None.
+###
+###    Tables Required: None.
+###
+###    Algorithm:
+###
+###        IF count is less than the split for linear/binary search
+###            use a linear search to find DATUM
+###        ELSE
+###            use a binary search to find DATUM
+###        END IF
+###        IF DATUM found
+###            return the lower and upper indices from DATA_ARRAY
+###        END IF
+###
+###    Date Developed: February 11, 1988
+###
+###    Record of Modifications:
+###
+###        Programmer          Date            Modification
+###
+###    Waivers: None.
+
+SUBROUTINE return_indices ( datum,
+                            count,
+                            data_array,
+                            data_array_lower_index,
+                            data_array_upper_index,
+                            found,
+                            lower_index,
+                            upper_index )
+ 
+IMPLICIT NONE
+ 
+ 
+INTEGER*2    linear_binary_split
+PARAMETER    ( linear_binary_split = 12 )
+ 
+INTEGER*2    count
+INTEGER*2    data_array [ count ]
+INTEGER*2    data_array_lower_index [ count ]
+INTEGER*2    data_array_upper_index [ count ]
+INTEGER*2    datum
+LOGICAL*1    finished
+LOGICAL*1    found
+INTEGER*2    high
+INTEGER*2    index
+INTEGER*2    low
+INTEGER*2    lower_index
+INTEGER*2    upper_index
+ 
+#                                        Begin Executable Code
+ 
+found = .FALSE.
+IF ( count < linear_binary_split )
+    {
+    finished = .FALSE.
+    index = 0
+    WHILE ( ! ( finished | found ) )
+        {
+        index = index + 1
+        finished = ( index > count )
+        IF ( ! finished )
+            {
+            finished = ( data_array [ index ] > datum )
+            IF ( ! finished )
+                {
+                found = ( data_array [ index ] == datum )
+                }
+            }
+        }
+    }
+ELSE
+    {
+    high = count
+    low = 1
+    WHILE ( low <= high )
+        {
+        index = ( low + high ) / 2
+        IF ( datum <= data_array [ index ] )
+            {
+            high = index - 1
+            }
+        IF ( datum >= data_array [ index ] )
+            {
+            low = index + 1
+            }
+        }
+    found = ( datum == data_array [ index ] )
+    }
+IF ( found )
+    {
+    lower_index = data_array_lower_index [ index ]
+    upper_index = data_array_upper_index  [ index ]
+    }
+END
+
+###    Name: SET_JAMMERS_ACTIVE
+###
+###    Usage:
+###
+###        CALL set_jammers_active
+###
+###    Purpose:
+###
+###        Sets each jammer active/inactive depending upon the current
+###        game state of the jammer and its carrying unit.
+###
+###    Arguments:
+###
+###        Input: None.
+###
+###        Input/Output: None.
+###
+###        Output: None.
+###
+###        Function Result: None.
+###
+###        COMMON:
+###
+###            Name            Source                   Use
+###
+###            BBoard          BBCommon                 Input
+###            JCT$$           $$JCT$$                  Output
+###
+###    Limitations: None.
+###
+###    Warnings: None.
+###
+###    Notes:
+###
+###        1.  The only effect of this subprogram is to set the ACTIVE
+###            Boolean variable in each entry of JCT$$.
+###
+###    Author:
+###
+###        G. G. Gustafson
+###        Computer Sciences Corporation
+###        4045 Hancock Street
+###        San Diego CA 92110
+###
+###        (619) 225-8401
+###
+###    Customer:
+###
+###        Naval Ocean Systems Center
+###        Code 413
+###        San Diego CA 92152-5000
+###
+###        (619) 553-3972
+###
+###    Subprograms Required: None.
+###
+###    Tables Required:
+###
+###        CTL
+###        DEQ
+###        UNT
+###
+###    Algorithm:
+###
+###        FOR each entry in JCT$$
+###            initialize ACTIVE to FALSE
+###            IF unit pointed to by UNT_index is valid
+###                IF the equipment is allowed to be used at this game minute
+###                    IF the jammer band is active
+###                        set ACTIVE to TRUE
+###                    END IF
+###                END IF
+###            END IF
+###        END FOR
+###
+###    Date Developed: February 24, 1988
+###
+###    Record of Modifications:
+###
+###        Programmer          Date            Modification
+###
+###    Waivers: None.
+
+SUBROUTINE set_jammers_active
+ 
+BBCommon
+ 
+$$JCT$$
+ 
+INTEGER*4    DEQ$EM$Index
+INTEGER*4    DEQ$Pointer
+INTEGER*4    jct_index
+INTEGER*4    UNT$Pointer
+ 
+#                                        Begin Executable Code
+ 
+DO jct_index = 1, jct$$_jct_count
+    {
+    UNT$Pointer$To jct$$_jct_UNT_index [ jct_index ]
+    DEQ$Pointer = jct$$_jct_DYN_pointer [ jct_index ]
+    DEQ$EM$Index = jct$$_jct_DYN_EQ_jammer_index [ jct_index ]
+    jct$$_jct_active [ jct_index ] = _
+        ( ( xDEQ$EM$Band$I == $yes ) &
+          ( Game$Time >= xdeq$TimeWhenUse$f ) )
+    }
+END
+
+###    Name: SHELL_SORT
+###
+###    Usage:
+###
+###        IF ( jct_count > 0 )
+###            CALL shell_sort ( jct_count,
+###                              sort_component,
+###                              pointers )
+###        END IF
+###
+###    Purpose:
+###
+###        SHELL_SORT performs a pointer Shell sort of the JCT array of
+###        records and returns the indices in POINTERS.
+###
+###    Arguments:
+###
+###        Input:
+###
+###            JCT_COUNT - INTEGER*2 variable containing the number of
+###                        entries in the JCT array of records.  JCT_COUNT
+###                        should be JCT$$ . JUN_COUNT,
+###
+###            SORT_COMPONENT - sort component of the first element of the JCT
+###                        record array contained in JCT$$.  The currently
+###                        acceptable values are:
+###
+###                            JCT$$ . JCT [ 1 ] . UNT_INDEX or
+###                            JCT$$ . JCT [ 1 ] . FREQUENCY
+###
+###                        The first (UNT_INDEX) should be used with POINTERS
+###                        referencing IJU$$ and while the second (FREQUENCY)
+###                        should be used with POINTERS referencing IJF$$.
+###
+###        Input/Output:
+###
+###        Output:
+###
+###            POINTERS -  INTEGER*2 array which will contain the indices of
+###                        JCT$$ in ascending order by either UNT_INDEX or
+###                        FREQUENCY.  Depending upon which of these components
+###                        of JCT$$ is passed as SORT_COMPONENT, , then IJU$$
+###                        or IJF$$, respectively should be passed as POINTERS.
+###
+###        Function Result: None.
+###
+###        COMMON: None.
+###
+###    Limitations:
+###
+###        1.  At the time of SHELL_SORT invocation, the value of
+###            JCT_COUNT must be greater than zero.  This restriction is
+###            imposed by the use of adjustable array size declarations
+###            within SHELL_SORT.  IF JCT_COUNT is zero or less,
+###            SHELL_SORT will abort with a traceback.  To avoid
+###            this difficulty, the value of JCT_COUNT must be tested
+###            prior to invocation of SHELL_SORT, as exemplified in
+###            the Usage example.
+###
+###    Warnings: None.
+###
+###    Notes:
+###
+###        1.  SHELL_SORT is a generalized subprogram which sorts the
+###            JCT$$ data structure by either UNT_INDEX or FREQUENCY
+###            placing the results into either IJU$$ or IJF$$ data
+###            structures, respectively.  As a result, care must be
+###            taken to provide the correct arguments to SHELL_SORT.
+###
+###    Author:
+###
+###        G. G. Gustafson
+###        Computer Sciences Corporation
+###        4045 Hancock Street
+###        San Diego CA 92110
+###
+###        (619) 225-8401
+###
+###    Customer:
+###
+###        Naval Ocean Systems Center
+###        Code 413
+###        San Diego CA 92152-5000
+###
+###        (619) 553-3972
+###
+###    Subprograms Required: None.
+###
+###    Tables Required: None.
+###
+###    Algorithm:
+###
+###        McNeil, D. R. "Interactive Data Analysis" John Wiley & Sons,
+###            New York NY, 1977
+###
+###    Date Developed: February 11, 1988
+###
+###    Record of Modifications:
+###
+###        Programmer          Date            Modification
+###
+###    Waivers: None.
+
+SUBROUTINE shell_sort ( jct_count,
+                        jct,
+                        pointers )
+ 
+IMPLICIT NONE
+ 
+ 
+INTEGER*2    jct_count
+INTEGER*2    jct [ jct_count ]
+INTEGER*2    gap
+INTEGER*2    index
+INTEGER*2    lower                             # comparison lower bound
+INTEGER*2    pointers [ jct_count ]
+INTEGER*2    saved_pointer
+ 
+#                                        Begin Executable Code
+ 
+DO index = 1, jct_count
+    {
+    pointers [ index ] =  index
+    }
+index = 1
+WHILE ( index <= jct_count )
+    {
+    index = 2 * index
+    }
+gap = ( index - 1 ) / 2
+WHILE ( gap > 0 )
+    {
+    DO index = 1, jct_count - gap
+        {
+        lower = index
+        WHILE ( lower >= 1 )
+            {
+            IF ( jct [ pointers [ lower + gap ] ] <
+                 jct [ pointers [ lower ] ] )
+                {
+                saved_pointer = pointers [ lower + gap ]
+                pointers [ lower + gap ] = pointers [ lower ]
+                pointers [ lower ] = saved_pointer
+                }
+            lower = lower - gap
+            }
+        }
+    gap = gap / 2
+    }
+END

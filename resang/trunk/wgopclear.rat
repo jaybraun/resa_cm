@@ -1,0 +1,517 @@
+#$%  File:  WGOPCLEAR.RAT
+ 
+#$%         This orders processing file does not directly process commands,
+#$%         but is used during command processing to cancel all current
+#$%         maneuver orders before issuing new command.  This is also used
+#$%         when models determine that maneuver orders need to be cleared (i.e.
+#$%         when terrain processing determines that a ship has run aground).
+ 
+ 
+include "bbcode.inc"
+include "bbctl.inc"
+include "bbasw.inc"
+include "bbbar.inc"
+include "bbord.inc"
+include "bbboy.inc"
+include "bbpim.inc"
+include "bbrte.inc"
+include "bbunt.inc"
+include "orders.inc"
+ 
+define (SaveManeuverCommon,          # Temporary storage for maneuver variables
+    real     SaveGuideBearing
+    real     SaveGuideRange
+    integer  SaveGuideTrue
+    integer  SaveGuideIndx
+    integer  SaveAssignedCap
+    integer  SaveCapAltitude
+    integer  SaveCapRange
+    real     SaveCapLatitude
+    real     SaveCapLongitude
+    integer  SaveStatus
+    integer  SaveMultipleTarget
+    integer  SaveAttackedTarget
+    integer  SaveROE        # SMM 4/99 (E1969)
+    common /SaveManeuver/ SaveGuideBearing, SaveGuideRange, SaveGuideTrue,
+                        SaveGuideIndx,
+                        SaveAssignedCap,
+                        SaveCapAltitude,
+                        SaveCapRange,
+                        SaveCapLatitude,
+                        SaveCapLongitude,
+                        SaveStatus,
+                        SaveMultipleTarget,
+                        SaveAttackedTarget,
+                        SaveROE # SMM 4/99 (E1969)
+)
+ 
+ 
+ 
+define (BBimplicit, Implicit None)
+ 
+
+ 
+subroutine clear_maneuver_all (_
+                   nord,    # Order number: In: Int
+                   id,      # Order Id: In: Int
+                   iview,   # View of entering station:In:Int
+                   UNT$Pointer) # Unit being cleared: input
+#############################################################
+#$%
+#$% Purpose:   This routine is called to clear all maneuver
+#$%            fields of a unit (prior to issuing a new
+#$%            maneuver command).  To preserve any commands
+#$%            before calling this routine - See save_station.
+#$%            To restore any commands after calling this routine -
+#$%            See restore_station.
+#$%
+#$% Called By:
+#$%
+#$% Calls:     smov..     <lbsmov.rat>
+#$%            send       <wgxsend.rat>
+#$%            canord     <wgop.rat>
+#$%
+#$% Tables:    UNT    ASW     BAR     BOY     PIM
+#$%
+#$% Date:      April 1995 (E1246,E1370)
+#$%
+#$% Author:    James Allen
+#$%
+#$% Modified:  Susan Miller - 7/6/95 (E1432)
+#$%            Added check for unit type of a/c before
+#$%            clearing aswindx.
+#$%
+#$%            James Allen - 2/96 (E1467)
+#$%            Added unit type checks before clearning
+#$%            fields, so that potential field overlaps
+#$%            would not be effected.  Also added clearning
+#$%            of new ship fuel modeling fields.
+#$%
+#$%            James Allen - 3/96 (E1467)
+#$%            Changed the terminated refueling message to
+#$%            halted when refueling from a base and
+#$%            emergency breakaway otherwise.
+#$%
+#$%            James Allen - 12/97 (E1370)
+#$%            Added the order number, order id and view
+#$%            of the unit to the argument list.
+#$%            Removed clearing of CAP POSITION fields &
+#$%            call ocancl to clear current orders/plans.
+#$%            Updated some of the command overriding and
+#$%            added for displaying the override info.
+#$%
+#$%            Susan Miller - 7/98 (E1983)
+#$%            If the unit has a barrier and the current maneuver
+#$%            order is a course, barrier, take, cover or proceed
+#$%            position, don't cancel the unit's hasbarrier flag.
+#$%            If the unit has been given a bingo order, don't
+#$%            call ocancl again (done in routine bingo)
+#$%
+#############################################################
+BBcommon
+ 
+integer    ORD$Pointer
+integer    UNT$Pointer
+Logical    maneuver_order
+literal    cstrip8
+integer    jj
+character  msg[ARB]
+integer    id
+integer    nord
+integer    iview, jview
+integer    nargs
+literal    order_arg[2]
+literal    iaddr
+integer    UNT$Status$I          # SMM 7/98 (E1983)
+ 
+  UNT$Status$I = xUNT$Status$I   # SMM 7/98 (E1983)
+ 
+  # If a unit has a barrier allow it to act on a few
+  # maneuver orders without canceling the barrier.
+  if ((xUNT$HasBarrier$I == $yes) &     # SMM 7/98 (E1983)
+      (UNT$Status$I != $LayingBarrier$Code) &
+      ((nord == COURSE$order) | (nord == COVER$order) |
+       (nord == PROCEED$order) | (nord == TAKE$order) |
+       (nord == BARRIER$order)))
+    {
+     putUNT$LastManeuverOrderCode$I (nord)  # Keep last maneuver order
+     return
+    }
+ 
+  #Terminate refuel operations
+  if (xUNT$HosesAllocatedFlag$I == $YES)    # joa 2/96 (E1467)
+    {
+     call free_fuel_transfer_equip (UNT$Pointer)
+ 
+     jj = 0
+     if (xUNT$Type$I == $Shorebase$Code)
+       {
+        call smovhn (xUNT$Name$C, $$Maxlit, msg, jj)
+        call smovv  (":Fueling halted. Maneuvering as ordered.", msg, jj)
+       }
+     else
+       {
+        call smovhn (xUNT$Name$C, $$Maxlit, msg, jj)
+        call smovv  (":Emergency Breakaway. Maneuvering as ordered.", msg, jj)
+       }
+     call send_ (xunt$view$i,0,jj,msg)
+    }
+ 
+  jview = -1                   # Suppress orders canceled message
+  nargs = 2
+  order_arg[1] = $lex$CANCEL$
+  order_arg[2] = $lex$ALL$
+  iaddr = xUNT$Name$C
+ 
+  call fndord (id, ORD$Pointer)
+ 
+  if (maneuver_order(nord) & xORD$Count$I == 1)
+    {
+     call display_maneuver_override (nord, id, iview, UNT$Pointer)
+    }
+ 
+  call save_cap_position (UNT$Pointer)
+  # If this is a bingo order, ocancl has already been called
+  if (nord != BINGO$order)             # SMM 7/98 (E1983)
+  {
+    call ocancl (nord, id, UNT$Pointer, jview, nargs, order_arg, iaddr)
+    iaddr = Xunt$ForceName$c
+    if (iaddr != 0)
+      call ocancl (nord, id, UNT$Pointer, jview, nargs, order_arg, iaddr)
+  }
+  call restore_cap_position (UNT$Pointer)
+ 
+  if (nord != NO$order)
+    {
+     # Don't override search order with sub-orders
+     if (xUNT$LastManeuverOrderCode$I == SEARCH$order)
+      {
+       if (ORD$Pointer$OK)
+         {
+          if (xORD$Count$I > 1)                 # Implies search plan
+            nord = SEARCH$order
+         }
+      }
+    putUNT$LastManeuverOrderCode$I (nord)         # Keep last maneuver order
+   }
+ 
+return
+end
+
+ 
+subroutine save_station (UNT$Pointer)
+#############################################################
+#$%
+#$% Purpose:   This routine is called to preserve guide
+#$%            information for a unit.  The guide information
+#$%            can be restored to the platform via
+#$%            restore_station.
+#$%
+#$% Called By:
+#$%
+#$% Tables:    UNT
+#$%
+#$% Date:      April 1995 (E1246,E1370)
+#$%
+#$% Author:    James Allen
+#$%
+#$% Modified:  Susan Miller 4/99 (E1969)
+#$%            Save the ROE.
+#$%
+#############################################################
+BBcommon
+SaveManeuverCommon
+ 
+integer UNT$Pointer
+ 
+  SaveGuideBearing = xUNT$GuideBearing$F
+  SaveGuideRange = xUNT$GuideRange$F
+  SaveGuideTrue = xUNT$GuideTrue$I
+  SaveGuideIndx = XUNT$GuideIndx$I
+  SaveROE = xUNT$RulesOfEngage$I
+ 
+return
+end
+
+ 
+subroutine restore_station (UNT$Pointer)
+#############################################################
+#$%
+#$% Purpose:   This routine is called to restore guide
+#$%            information saved via save_station.
+#$%
+#$% Called By:
+#$%
+#$% Tables:    UNT
+#$%
+#$% Date:      April 1995 (E1246,E1370)
+#$%
+#$% Author:    James Allen
+#$%
+#$% Modified:  Susan Miller 4/99 (E1969)
+#$%            Restore the ROE.
+#$%
+#############################################################
+BBcommon
+SaveManeuverCommon
+integer UNT$Pointer
+ 
+  putUNT$GuideBearing$F ( SaveGuideBearing )
+  putUNT$GuideRange$F   ( SaveGuideRange )
+  putUNT$GuideTrue$I    ( SaveGuideTrue )
+  PUTUNT$GuideIndx$I    ( SaveGuideIndx )
+  putUNT$RulesOfEngage$I (SaveROE)
+ 
+return
+end
+
+ 
+subroutine save_cap_position (UNT$Pointer)
+#############################################################
+#$%
+#$% Purpose:   This routine is called to preserve cap station
+#$%            information for a unit.  The cap station information
+#$%            can be restored to the platform via
+#$%            restore_cap_position.
+#$%
+#$% Called By:
+#$%
+#$% Tables:    UNT
+#$%
+#$% Date:      December 1997 (E1246,E1370)
+#$%
+#$% Author:    James Allen
+#$%
+#############################################################
+BBcommon
+SaveManeuverCommon
+ 
+integer UNT$Pointer
+ 
+  SaveAssignedCap    = XUNT$AssignedCap$I
+  SaveCapAltitude    = XUNT$CapAltitude$I
+  SaveCapRange       = XUNT$CapRange$I
+  SaveCapLatitude    = XUNT$CapLatitude$F
+  SaveCapLongitude   = XUNT$CapLongitude$F
+  SaveStatus         = XUNT$Status$I
+  SaveMultipleTarget = XUNT$MultipleTarget$I
+  SaveAttackedTarget = XUNT$AttackedTarget$I
+ 
+return
+end
+
+ 
+subroutine restore_cap_position (UNT$Pointer)
+#############################################################
+#$%
+#$% Purpose:   This routine is called to restore cap station
+#$%            information for a unit.  The cap station information
+#$%            can be saved  via
+#$%            save_cap_position.
+#$%
+#$% Called By:
+#$%
+#$% Tables:    UNT
+#$%
+#$% Date:      December 1997 (E1246,E1370)
+#$%
+#$% Author:    James Allen
+#$%
+#############################################################
+BBcommon
+SaveManeuverCommon
+ 
+integer UNT$Pointer
+ 
+  putUNT$AssignedCap$I    (SaveAssignedCap)
+  putUNT$CapAltitude$I    (SaveCapAltitude)
+  putUNT$CapRange$I       (SaveCapRange)
+  putUNT$CapLatitude$F    (SaveCapLatitude)
+  putUNT$CapLongitude$F   (SaveCapLongitude)
+  putUNT$Status$I         (SaveStatus)
+  putUNT$MultipleTarget$I (SaveMultipleTarget)
+  putUNT$AttackedTarget$I (SaveAttackedTarget)
+ 
+return
+end
+ 
+
+ 
+#Logical function maneuver_order (nord)  # Order code:I:IN
+#
+#This function moved to lbcommn.rat since it is called by expord in
+#the file (the library is included in the link last, so the reference
+#was not getting resolved).
+
+ 
+Logical function info_maneuver_order (nord)  # Order code:I:IN
+##############################################################################
+#$%
+#$% Purpose:   List of maneuver orders for which an alert message is sent to
+#$%            player if overridden
+#$%
+#$% Called By:  exeord, ocancl
+#$%
+#$% Calls:
+#$%
+#$% Tables:
+#$%
+#$% Date:      December 1997
+#$%
+#$% Author:    James Allen
+#$%
+##############################################################################
+ 
+# Returns logical true if order code is an info maneuver order
+ 
+integer nord
+ 
+  if (nord == BARRIER$order |
+      nord == PAIR$order    |
+      nord == PROCEEDROUTE$order |
+      nord == SEARCH$order  |
+      nord == STATION$order |
+      nord == STRIKE$order)
+      info_maneuver_order = .true.
+  else
+      info_maneuver_order = .false.
+ 
+return
+end
+ 
+
+ 
+Subroutine display_maneuver_override(_
+                      nord,    # Overriding Order number: In: Int
+                      id,      # Overriding Order Id: In: Int
+                      iview,   # View of entering station:In:Int
+                      UNT$Pointer) # Unit being cleared: input
+#############################################################
+#$%
+#$% Purpose:   Display message to player that maneuver order is being overridden
+#$%
+#$% Called By: clear_maneuver_all
+#$%
+#$% Tables:    UNT
+#$%
+#$% Date:      December 1997 (E1370)
+#$%
+#$% Author:    James Allen
+#$%
+#$% Modified:  Susan Miller - 7/98 (E1983)
+#$%            If the unit has a barrier and the current maneuver
+#$%            order is a course, barrier, take, cover or proceed
+#$%            position, do not abort the barrier.
+#$%
+#############################################################
+BBcommon
+ 
+literal cstrip8
+integer id, nord, iview, UNT$Pointer    # jb id is an unused argument..
+integer UNT$LastManeuverOrderCode$I
+ 
+integer ilen
+character msg1[ARB]
+ 
+  UNT$LastManeuverOrderCode$I = xUNT$LastManeuverOrderCode$I
+ 
+  # Same order being overridden
+  if (UNT$LastManeuverOrderCode$I == nord)
+     return
+ 
+  ilen = 0
+  call smovh (xUNT$Name$c, $$MAXLIT, msg1, ilen)
+ 
+  if (UNT$LastManeuverOrderCode$I == ProceedRoute$Order)
+    {
+     call smovv (" leaving route.", msg1, ilen)
+     call send_ (iview,0,ilen,msg1)
+    }
+  else if (UNT$LastManeuverOrderCode$I == Pair$Order |
+           UNT$LastManeuverOrderCode$I == Take$Order |
+           UNT$LastManeuverOrderCode$I == TakeUsingSAM$Order)
+    {
+     call smovv (" breaking engagement.", msg1, ilen)
+     call send_ (iview,0,ilen,msg1)
+    }
+  else if (UNT$LastManeuverOrderCode$I == Strike$Order)
+    {
+     call smovv (" aborting strike.", msg1, ilen)
+     call send_ (iview,0,ilen,msg1)
+    }
+  else if ((UNT$LastManeuverOrderCode$I == Barrier$Order) &    # SMM 7/98 (E1983)
+           ((nord != COURSE$order) | (nord != COVER$order) |   # some commands are ok
+            (nord != PROCEED$order) | (nord != TAKE$order)))
+    {
+     call smovv (" aborting barrier.", msg1, ilen)
+     call send_ (iview,0,ilen,msg1)
+    }
+  else if (UNT$LastManeuverOrderCode$I == Search$Order)
+    {
+     call smovv (" aborting search plan.", msg1, ilen)
+     call send_ (iview,0,ilen,msg1)
+    }
+ 
+return
+end
+ 
+
+ 
+Subroutine smovord (nord, msg, ilen)
+#############################################################
+#$%
+#$% Purpose:   Convert order number to text.
+#$%            Currently only maneuver orders are implemented.
+#$%
+#$% Called By: display_maneuver_override
+#$%
+#$% Tables:
+#$%
+#$% Date:      December 1997 (E1370)
+#$%
+#$% Author:    James Allen
+#$%
+#############################################################
+ 
+integer nord, ilen, I_SWITCH_1  # jb E2145  6/20/00
+character msg[ARB]
+ 
+  switch (nord)
+    {
+     case Attack$Order:      call smovv ("ATTACK", msg, ilen)
+     case Barrier$Order:     call smovv ("BARRIER", msg, ilen)
+     case Bingo$Order:       call smovv ("BINGO", msg, ilen)
+     case Blank$Order:       call smovv ("none", msg, ilen)
+     case Capstation$Order:  call smovv ("CAP POSITION", msg, ilen)
+     case Course$Order:      call smovv ("COURSE/TURN", msg, ilen)
+     case CourseNoSpeed$Order:call smovv ("COURSE/TURN", msg, ilen)
+     case Cover$Order:       call smovv ("COVER", msg, ilen)
+     case Detach$Order:      call smovv ("ATTACH/DETACH", msg, ilen)
+     case Fuel$Order:        call smovv ("FUEL/UNREP", msg, ilen)
+     case Hide$Order:        call smovv ("HIDE", msg, ilen)
+     case Land$Order:        call smovv ("LAND/WITHDRAW", msg, ilen)
+     case Moor$Order:        call smovv ("MOOR", msg, ilen)
+     case No$Order:          call smovv ("none", msg, ilen)
+     case Orbit$Order:       call smovv ("ORBIT", msg, ilen)
+     case Pair$Order:        call smovv ("PAIR", msg, ilen)
+     case Perform$Order:     call smovv ("PERFORM ASW", msg, ilen)
+     case Proceed$Order:     call smovv ("PROCEED", msg, ilen)
+     case ProceedRoute$Order:call smovv ("PROCEED ROUTE", msg, ilen)
+     case Recall$Order:      call smovv ("RECALL", msg, ilen)
+     case Reconn$Order:      call smovv ("RECONN", msg, ilen)
+     case Recover$Order:     call smovv ("RECOVER", msg, ilen)
+     case Refuel$Order:      call smovv ("REFUEL", msg, ilen)
+     case RefuelPos$Order:   call smovv ("REFUEL", msg, ilen)
+     case Resume$Order:      call smovv ("RESUME", msg, ilen)
+     case Search$Order:      call smovv ("SEARCH", msg, ilen)
+     case Speed$Order:       call smovv ("SPEED", msg, ilen)
+     case Station$Order:     call smovv ("STATION", msg, ilen)
+     case Take$Order:        call smovv ("TAKE", msg, ilen)
+     case Tow$Order:         call smovv ("TOW", msg, ilen)
+ 
+     default:                call smovv ("?????", msg, ilen)
+    }
+ 
+return
+end
+ 

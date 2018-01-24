@@ -1,0 +1,1142 @@
+ include "bbctl.inc"              # def for basic blackboard parameters
+ include "bbcode.inc"             # def for blackboard & miscellaneous constants
+ include "orders.inc"             # $LEX$ definitions...
+ include "bbunt.inc"              # Combines UNT/POS/DYN, less dyn$EQ   4/4/89
+ include "bbacc.inc"              # def for a/craft characteristics tokens
+ include "bbpim.inc"              # def for Pts-of-Intended-Movement    11/14/83
+ include "bbord.inc"              # def for ORDERs                      11/28/83
+ 
+ define(BBImplicit, Implicit NONE)                          # MJC 5/4/2000 (E2145)
+ 
+########################################################################
+Subroutine OPIM(_                       #                       11/22/83
+                  id,
+                  IVIEW )
+######################################################################
+#$% Purpose: OPIM does order-processing for DEFINE PIM subcommands
+#$%
+#$% Called By:  EXEORD
+#$%
+#$% Calls:     RRB2LL     COS
+#$%
+#$% Tables:    PIM        UNT           ORD
+#$%
+#$% Date:      NOVEMBER 1983
+#$%
+#$% Author:    O. J. Bryant
+#$%
+#$% Modified:  Carol Kropp - 11/93 (Variable Time Step)
+#$%
+######################################################################
+BBcommon
+ 
+Character msg1[ARB]
+ 
+real*4          lat, lon        # for initial position
+ 
+integer         ID,IDX,NAMSLOT,MTSLOT,litcmp,
+                MTUNT,ILEN,IVIEW,LOIT,
+                LTIME,K,LPOS,J,
+                ORD$Pointer,
+                ord$NbrArgs$i,
+                UNT$Pointer,
+                PIM$Pointer,
+                PIM$Nlegs$I,
+                PIM$PTS$Index,
+                PIM$PTS$speed$I                     # MJC 5/4/2000 (E2145)
+real            PIM$PTS$latitude$F,
+                PIM$PTS$longitude$F,
+                PIM$Timestart$F,
+                DMS2RAD,PTLAT,PTLONG,
+                RANGE,RELBRG,HEADG                  # MJC 5/4/2000 (E2145)
+literal         UNT$Name$C,
+                ORD$W04$C,
+                ORD$W05$C,
+                CSTRIP8                             # MJC 5/4/2000 (E2145)
+real*4          COSLAT                              # MJC 5/11/2000 (E2145)
+ 
+#$% call to find order
+call fndord (id,ord$pointer)
+if (ord$pointer == 0) RETURN
+ 
+idx = id+Xord$count$i-1         # flag all parts of the DEFINE PIM group
+call kilord (id,idx)            # to be deleted after processed.
+ 
+unt$Name$C = xORD$W03$C         # 3rd word is proposed NAME
+ 
+ 
+## Find whether the specified NAME (already?) exists.  IF SO, refuse
+## the command.  IF NOT, find the first EMPTY slot in the PIM table.
+ 
+NAMslot = 0             # Initlz. flag for name-match  slot index
+MTslot  = 0             # Initlz. vrbl for first PIM empty-slot index
+MTunt   = 0             # Initlz. vrbl for first UNT empty-slot index
+ 
+for(UNT$Pointer$FIRST; UNT$Pointer$VALID; UNT$Pointer$Next)
+ {
+   if ( MTunt > 0  &  unt$Pointer > unt$LAST )  BREAK   #       12/8/83
+   If ( litcmp(Xunt$Name$C, unt$Name$C) == 0)   # unt$name$c saved above 12/8/83
+    {
+     NAMslot = UNT$Pointer$Index
+     BREAK
+    }
+   Else if (MTunt == 0 )
+    {
+     if (xUNT$inUSE$i == 0)     MTunt = UNT$Pointer$Index
+    }
+ }      # End FOR;  search completed for NAMslot & first MTunt
+ 
+ 
+if (NAMslot > 0)
+ {
+  ilen = 0                                              #       12/14/83
+  call smovv(" Can't use duplicate name ",msg1,ilen) #       09/18/90
+  call smovhn(unt$Name$c,$$MaxLit,msg1,ilen)                    #       12/14/83
+  call send_(iview,0,ilen,msg1)                          #       12/14/83
+  return
+ }
+else if (MTunt == 0)
+ {
+  ilen = 0                                              #       12/14/83
+  call smovv(" UNT table full:  no room for new PIM",msg1,ilen)
+  call send_(iview,0,ilen,msg1)                          #       12/14/83
+  return
+ }
+else                    # Find empty PIM slot:
+ {
+  MTslot = $NO  # Initlz. flag for PIM-slot-available
+  for (PIM$Pointer$First; PIM$Pointer$VALID; PIM$Pointer$NEXT)
+   {
+    if (Xpim$untINDX$i == 0)
+     {
+      MTslot = PIM$Pointer$Index
+      BREAK
+     }
+   }                    # End FOR
+  if (MTslot == $NO)                    # No UNT slot available
+   {
+    ilen = 0                                            #       12/14/83
+    call smovv(" PIM table full:  no room for new PIM",msg1,ilen)
+    call send_(iview,0,ilen,msg1)                        #       12/14/83
+    return
+   }
+ }              # End ELSE
+ 
+PIM$Pointer$TO (MTslot)                 #       12/6/83
+UNT$Pointer$TO (MTunt)                  #       12/7/83
+ 
+ 
+ 
+##########===========================================##########
+#
+# Initial DEFINE order:
+#  [1] $lex$DEFINE$     [2]     $lex$PIM$
+#  [3]  Name            [4]     Start-LAT       [5] Start-LONg
+#  {6} $lex$LOITER$ ?   {7}     Mins delay ?
+ 
+#  PROCEED subcommands; iterated up to 8 times:
+#  [1] $lex$PROCEED$    [2]     $lex$COURSE$ or $lex$POSITION$
+#  [3] course or LAT    [4]     n.mi. or LONG          \
+#  [5] $lex$SPEED$      [6]     KTS                        \
+ 
+##---# Set PIM main-table values (see bottom of subr. for UNT fields):----
+ 
+PUTpim$LegNumber$i (1)                  # Initlz  leg-number
+PUTpim$UNTindx$i (MTunt)
+pim$Nlegs$i = xord$count$i - 1
+    ##  (Since all lines AFTER the first represent points in the PIM)
+pim$Nlegs$i = min(pim$PTS$slots-1,pim$Nlegs$i) # jb -1          2/11/87
+PUTpim$Nlegs$I
+ 
+ 
+##      --------------# FIRST point in PTS subtbl:  ----------------
+#  This first slot holds the INITIAL Lat/Long and the initial Loiter-Time.
+#  Note that the SECOND slot contains the data for the FIRST LEG of the
+#  PIM, including the Lat/Long for the END-point of the leg.  The third
+#  and subsequent slots contain data for the second and subsequent legs.
+#  As each slot is processed, the Lat/Long is saved for possible computation
+#  of the Lat/Long for the next slot (if the user supplies Cse/Dist).
+#
+ 
+pim$PTS$index =1
+ 
+ORD$W04$C = xORD$W04$C
+pim$PTS$LATITUDE$F = DMS2rad(ORD$W04$C);  PUTpim$PTS$LATITUDE$F
+lat = pim$PTS$LATITUDE$F
+ 
+ORD$W05$C = xORD$W05$C
+pim$PTS$LONGITUDE$F = DMS2rad(ORD$W05$C);  PUTpim$PTS$LONGITUDE$F
+lon = pim$PTS$LONGITUDE$F
+ 
+ptLAT  = pim$PTS$Latitude$F     # Save posit in case next PT    12/2/83
+ptLONG = pim$PTS$Longitude$F    # is defined by CSE/DIST...     12/2/83
+ 
+ord$NbrArgs$i = Xord$NbrArgs$i      # E2231 joa ufl01 8/01
+if (ord$NbrArgs$i >= 7)
+{
+    LOIT = int(xORD$W06$C)                          #               12/5/83
+    if (LOIT == $LEX$LOITER$)                       #               12/5/83
+    {
+      Ltime = int(xORD$W07$C)
+      pim$TimeStart$f = Game$time + Ltime
+      PUTpim$PTS$Delay$i (Ltime)
+    }
+}
+else pim$TimeStart$f = Game$Time
+PUTpim$TimeStart$f
+ 
+##-------------# REMAINDER of points in PTS subtable: ------------
+for (k = 1; k <= pim$Nlegs$i +0; k = k+1)       # +0    12/5/83
+ {
+  call fndord (id+k,ord$pointer)    #$% call to find order
+  if (ord$pointer != 0)
+   {
+    pim$PTS$index =pim$PTS$index +1
+ 
+    pim$PTS$Speed$I = int(xORD$W06$C)                   #       12/5/83
+    PUTpim$PTS$Speed$I
+ 
+    ord$NbrArgs$i = Xord$NbrArgs$i          # E2231 joa ufl01 8/01
+    if (ord$NbrArgs$i >= 8)
+    {
+        LOIT = int(xORD$W07$C)                              #       12/14/83
+        if (LOIT == $LEX$LOITER$)                           #       12/14/83
+         {
+          Ltime = int(xORD$W08$C)            # amount of time to loiter in min
+          PUTpim$PTS$Delay$i (Ltime)
+         }
+    }
+ 
+    LPOS = int(xORD$W02$C)                      #               12/5/83
+    if (LPOS == $lex$POSITION$)
+     {
+      pim$PTS$LATITUDE$F =DMS2rad(xORD$W03$C);  PUTpim$PTS$LATITUDE$F
+ 
+      pim$PTS$LONGITUDE$F=DMS2rad(xORD$W04$C); PUTpim$PTS$LONGITUDE$F
+ 
+      ptLAT  = pim$PTS$Latitude$F  # Save posit in case next PT 12/2/83
+      ptLONG = pim$PTS$Longitude$F # is defined by CSE/DIST...  12/2/83
+     }
+ 
+    else if (LPOS == $lex$COURSE$)      # Must find NEXT LAT/LON
+     {
+ 
+      RANGE  = xORD$W04$C               # Distance
+      RELBRG = 0.0                      # (course is true)
+      HEADg  = xORD$W03$C * $PI/180.    # true Course
+      COSLAT = cos(ptLAT)               # cosine of latitude
+ 
+      # update ptLAT and ptLONG, for use in NEXT pim$pts slot:
+      Call RRB2LL( _           #Rhumb line Range/Bearing to Lat/Lon
+                   ptLAT,        #latitude (input & OUTPUT)
+                   ptLONG,       #longitude (input & OUTPUT)
+                   RANGE,        #range (input)
+                   RELBRG,       #relative bearing (input)
+                   HEADg,        #heading (input)
+                   COSLAT)       #cosine of latitude (input & output)
+ 
+                # NOTE:  This puts the end-point of the leg in ptLAT
+                # & ptLONG, in case NEXT leg is defined by CSE/DIST
+ 
+        PUTpim$PTS$LATITUDE$F (ptLAT)
+        PUTpim$PTS$LONGITUDE$F (ptLONG)
+ 
+     }  # End ELSE
+ 
+   }    # End if ord$pointer != 0
+  else  # ord$pointer was 0???
+   {
+    ilen = 0                                            #       12/14/83
+    call smovv(" PIM definition terminated after ",msg1,ilen)
+    j = k -1                                            #       12/14/83
+    call smovi(j,ilen,msg1)                             #       12/14/83
+    call smovv(" points.",msg1,ilen)
+    call send_(iview,0,ilen,msg1)                        #       12/14/83
+ 
+    if (pim$PTS$index == 2)     # If NO points entered
+     {
+      pim$ZERO
+      RETURN
+     }
+    BREAK
+   }                    # End else if ord$pointer was 0..
+ }              #  End FOR all Nlegs
+ 
+PUTunt$TYPE$i   ($PIM$Code)
+PUTunt$Name$C           #  saved at start of subroutine 12/8/83
+PUTunt$PIMindx$i(MTslot)
+PUTunt$VIEW$i   (iVIEW)
+PUTunt$STATUS$i ($Proceeding$Code)      #       12/6/83
+ 
+PUTunt$TrueLatitude$F      (lat)
+PUTunt$TrueLongitude$F     (lon)
+PUTunt$AssumedLatitude$F   (lat)
+PUTunt$AssumedLongitude$F  (lon)
+PUTunt$OrderedLatitude$F   ($PI)
+ 
+PUTunt$CosTrueLat$F           (cos(lat))
+ 
+PUTunt$NeverNever$I (7) # jb Never DAMAGED/TARGETED/ENGAGing 2/19/91
+ 
+if (unt$last < unt$pointer)                     #       11/30/83
+   {
+    unt$used = unt$pointer$index * unt$entry
+   }
+if (pim$last < pim$pointer)                     #       12/21/83
+   {
+    pim$used = pim$pointer$index * pim$entry
+   }
+ 
+PUTpim$modified$i (1)                           #       12/16/83
+ 
+return
+end
+
+####################################################################
+ 
+Subroutine OchPIM(_                     #                       11/22/83
+                  nord,                 #                       12/5/83
+                  iVIEW,                # Change attempted by.. 12/5/83
+                  Nargs,                # Number of arguments   12/5/83
+                  ARGS  )               # up to 20 literals
+ 
+######################################################################
+#$% Purpose: OchPIM sets up BBPIM-table slots for PIM subcommands OTHER
+### than "define":  i.e., ADD, CHANGE, or  DELETE
+#$%
+#$% Called By: EXEORD
+#$%
+#$% Calls:     RRB2LL     wgoerr
+#$%
+#$% Tables:    PIM        UNT
+#$%
+#$% Date:      NOVEMBER 1983
+#$%
+#$% Author:    O. J. Bryant
+#$%
+########################################################
+ 
+BBcommon
+ 
+Literal         pname, ARGS[20], iaddr
+Integer         pnt,            # for pim$PTS$index
+                imode,          # $lex$ADD$, $lex$CHANGE$, $lex$DELETE$
+                iPIMslot,       # flag (NOT a unit); and index to PIM table
+                NAMslot         # flag (IS a unit);   &  index to UNT table
+ 
+integer         IVIEW,NORD,NARGS,N_PTS,IPTR,
+                I_SWITCH_1,ISPEED,ILOITER,IDX,
+                UNT$Pointer, UNT$View$I,
+                UNT$Type$I, UNT$Attackindx$I,
+                UNT$Assignedtarget$I,
+                UNT2$Pointer,
+                PIM$Pointer, PIM$Nlegs$I,
+                PIM$PTS$Index, PIM$Legnumber$I,
+                PIM$PTS$delay$I,
+                PIM2$Pointer, PIM2$PTS$Index            # MJC 5/4/2000 (E2145)
+real            DMS2RAD,FLAT,FLON,RANGE,
+                RELBRG,HEADG                            # MJC 5/4/2000 (E2145)
+literal         UNT$Name$C,
+                CSTRIP8                                 # MJC 5/4/2000 (E2145)
+real*4          COSLAT
+ 
+#______________________________________________________________________
+#
+#  ADD PIM (named) <name> (point) <number> (to)
+#               [ COURSE <degrees> (distance) <nautical-miles> |
+#                 POSITION <latitude> <longitude>               ]
+#               SPEED <knots>
+#               [ LOITER  <minutes> | ];
+#
+#  CHANGE PIM (named) <name> (point) <number> (to)
+#           [ | COURSE <degrees> (distance) <nautical-miles> |
+#                POSITION <latitude> <longitude>               ]
+#           [ SPEED <knots>     | ]
+#           [ LOITER  <minutes> | ];
+#
+#  DELETE PIM (named) <name> (point) [ ALL | <number> ];
+#______________________________________________________________________
+ 
+## Note: ARGS subscripts assumed as follows:
+#         For "ADD",
+#  [1] $lex$ADD$        [2]     $lex$PIM$
+#  [3]  Name            [4]     index # of changed point
+#  [5]  $lex$COURSE or $lex$POSITION$
+#  [6]  degrees or LAT; [7]     n.mi., or LONG.
+#  [8]  $lex$SPEED$     [9]     Kts
+#  [10] $lex$TIME$      [11]    # Minutes delay before start of leg
+ 
+#         For "CHANGE",
+#  [1] $lex$CHANGE$     [2]     $lex$PIM$
+#  [3]  Name            [4]     index # of changed point
+#  [5]  $lex$COURSE or $lex$POSITION$ or $SPEED$
+#  [6]  degrees or LAT; [7]     n.mi., or LONG.
+#  [8]  $lex$SPEED$     [9]     Kts
+#  [10] $lex$TIME$      [11]    # Minutes delay before start of leg
+ 
+#         For "DELETE",
+#  [1] $lex$DELETE$     [2]     $lex$PIM$
+#  [3]  Name            [4]     $lex$ALL$ or index # of changed point
+ 
+ 
+## Find whether the specified NAME  exists:
+ 
+imode = args[1]         # $lex$ADD$, $lex$CHANGE$, $lex$DELETE$
+pname = args[3]         # Pim Name
+pnt   = args[4]         # Point number to modify...etc
+ 
+iPIMslot = 0            # (PIM index) Initlz. 2 flags,    10/15/85
+NAMslot = 0             # (UNT index)       for name-match
+for(unt$pointer$first; unt$pointer$OK; unt$pointer$next)
+    {
+        ####    Substitution    <<<>>>                  1/28/86
+     unt$Name$C = Xunt$Name$C                           # 1/30/86
+     if(unt$Name$C != pname) NEXT                       # 1/30/86
+ 
+     unt$View$i = Xunt$View$i                           # 1/29/86
+     if(unt$View$i != iVIEW     &                       # 1/28/86
+                      iVIEW != $Neutral$View)   NEXT    # 1/30/86
+ 
+     unt$type$i = Xunt$type$i                           # 1/30/86
+     if (unt$type$i != $pim$code) # NOT a PIM unit.(8)  # 1/30/86
+      {
+       iPIMslot = xUNT$PimIndx$i # flag: pim NOT a unit # 1/28/86
+       if (iPIMslot == $NO) RETURN   # No PIM to change # 1/28/86
+       BREAK                                            # 1/28/86
+      }
+     else                               # a PIM unit    # 1/28/86
+      {
+       NAMslot = UNT$Pointer$Index      # flag: PIM is a unit..
+       BREAK
+      }
+ 
+#     if (Xunt$type$i != $pim$code) # NOT a PIM unit..  # 10/15/85
+#     {
+#      unt$PimIndx$i = Xunt$PimIndx$i                   # 10/15/85
+#      if (unt$PimIndx$i == $NO ) NEXT  # no PIM guide  # 10/15/85
+#      unt2$pointer$TO (unt$PimIndx$i)                  # 10/15/85
+#      if (Xunt2$Name$C != pname) NEXT # wrong PIM guide        # 10/15/85
+#     }
+#    else       # May be a PIM 'unit'           # 10/15/85
+#     {
+#      if (Xunt$Name$C != pname    ) NEXT
+#      if (Xunt$View$i != iVIEW    ) NEXT
+#      NAMslot = UNT$Pointer$Index      # flag: PIM is a unit..
+#      BREAK
+#     }
+        ####  END Substitution  <<<>>>                  1/28/86
+ 
+    }           # Search completed for PIM in UNT
+ 
+if (NAMslot == 0 & iPIMslot == 0)       # If name-match not found 10/15/85
+    {
+    call wgoerr (iview,iaddr,nord,nargs,args,"No non-orbit PIM of that name.")
+    RETURN
+    }
+ 
+else if (NAMslot != 0)          # This PIM is a UNIT            # 10/15/85
+ {
+  unt$Pointer$to namslot
+  pim$Pointer$to Xunt$PIMindx$I
+ }
+else # if (iPIMslot != 0)       # This PIM is NOT a UNIT        # 1/30/86
+ {
+  pim$Pointer$to iPIMslot                               # jb      9/22/87
+  if ( (imode == $lex$ADD$ | imode == $lex$DELETE$) &   # jb      9/22/87
+    (Xunt$type$i == $CruiseMissile$Code | xPIM$ContinuousFlag$I !=$NO)) #/\
+   {
+    call wgoerr (iview,iaddr,nord,nargs,args,                   # 1/30/86
+     "Can't alter number of pts for an ORBITer or CruiseMissile.")
+    RETURN
+   }
+  PIM$Pointer$to iPIMslot                                       # 10/15/85
+ }
+ 
+pim2$pointer = pim$pointer
+ 
+pim$Nlegs$i = Xpim$Nlegs$i
+n_pts = pim$Nlegs$i + 1
+ 
+SWITCH (imode)  # $LEX$ADD$, $LEX$change$, or $LEX$delete$
+   {
+    #___________________________________________________________________
+    CASE $LEX$ADD$:                     #               11/22/83
+       {
+        # Assumption: that the user intends (if $LEX$POSITION$) that his
+        # specified LAT/LONG be entered IN THE ADDED pim$PTS slot.  This
+        # further implies that if he specifies $lex$COURSE$, the course
+        # and distance are FROM THE LAT/LONG SPECIFIED in the PRECEDING
+        # pim$PTS slot, from which the LAT/LONG to be entered in this ADDED
+        # slot must therefore be computed.
+        # Note:  PIM$pointer was set above, just before the SWITCH statement..
+ 
+        #  [1] $lex$ADD$        [2]     $lex$PIM$
+        #  [3]  Name            [4]     index # of added point
+        #  [5]  $lex$COURSE$ or $lex$POSITION$
+        #  [6]  degrees or LAT; [7]     n.mi., or LONG.
+        #  [8]  $lex$SPEED$     [9]     Kts
+        #  [10] $lex$LOITER$    [11]    # Minutes delay before start of leg
+ 
+        if (pim$Nlegs$i > 7)    # If PTS subtbl already full..12/5/83
+            {
+            call wgoerr (iview,iaddr,nord,nargs,args,
+                        "Maximum number of PIM legs defined.")
+            return
+            }
+ 
+        if (pnt > n_pts)        # Must connect to existing pts   12/5/83
+            {
+            call wgoerr (iview,iaddr,nord,nargs,args,
+                "Use DISPLAY PIM to see contiguous legs.")
+            return
+            }
+ 
+        ispeed = args[9]
+        if (ispeed <= 0)        # Must have some speed
+            {
+            call wgoerr (iview,iaddr,nord,nargs,args,
+                        "Speed must be at least 1 knot.")
+            return
+            }
+ 
+        if (nargs > 9)  iloiter = args[11]   # loiter time in minutes
+        else            iloiter = 0
+ 
+        #_________________________________________________________________
+        # do we need to shove any points to the back of the bus
+ 
+        idx = pnt + 1                           # PTS$index for new point
+ 
+        if (idx <= n_pts)                       # Must make room
+            {
+            n_pts = n_pts + 1                   # Increment number of points
+ 
+            for (pim2$PTS$index =  n_pts;
+                 pim2$PTS$index >  idx;
+                 pim2$PTS$index =  pim2$PTS$index-1)
+                {
+                pim$PTS$index = pim2$PTS$index - 1
+ 
+                PUTpim2$PTS$Word1$I     (Xpim$PTS$Word1$I)
+                PUTpim2$PTS$Latitude$F  (Xpim$PTS$Latitude$F) # jb 4/05/90
+                PUTpim2$PTS$Longitude$F (Xpim$PTS$Longitude$F)# jb 4/05/90
+                }
+ 
+            #______________________________________________________________
+            # if PIM is past a point after the point added, we need
+            # to add 1 to the Current-Leg indicator (did I say that right ?)
+ 
+            pim$LegNumber$I = Xpim$LegNumber$I
+            if (pim$LegNumber$I > pnt)                          # ?????
+                {
+                PUTpim$LegNumber$I (pim$LegNumber$I + 1)
+                }
+ 
+            }                                   # End IF need to shift PTS data
+ 
+        #_________________________________________________________________
+        # Now the slot for the point to be inserted should be vacant.
+ 
+#        PUTpim$Nlegs$i (N_pts - 1)             # Update number of Legs
+        PUTpim$Nlegs$i (pim$Nlegs$i +1)         # Update number of Legs
+ 
+        pim$PTS$index = idx                     # (index of the ADDed point)
+ 
+        PUTpim$PTS$Speed$i (ispeed)
+        PUTpim$PTS$Delay$i (iloiter)
+ 
+        if (ARGS[5] == $LEX$POSITION$)
+            {
+            PUTpim$PTS$Latitude$F  (DMS2rad(ARGS[6]))
+            PUTpim$PTS$LONgitude$F (DMS2rad(ARGS[7]))
+            }
+        else # if (ARGS[5] == $LEX$COURSE$)
+            {
+            pim2$PTS$index = pim$PTS$index - 1 # Need Lat/Lon from prior point
+ 
+            FLAT = Xpim2$PTS$Latitude$F
+            FLON = Xpim2$PTS$LONgitude$F
+ 
+            RANGE = ARGS[7]
+            RELBRG= 0.0         #       ( HEADg is true..)
+            HEADg = ARGS[6] * $PI/180.
+            COSLAT = cos(FLAT)
+            call RRB2LL(                #Rhumb line Range/Bearing to Lat/Lon
+                        FLAT,           #latitude (input & OUTPUT)
+                        FLON,           #longitude (input & OUTPUT)
+                        RANGE,          #range (input)
+                        RELBRG,         #relative bearing (input)
+                        HEADg,          #heading (input)
+                        COSLAT)         #cosine of latitude (input & output)
+ 
+            PUTpim$PTS$Latitude$F  (FLAT)
+            PUTpim$PTS$LONgitude$F (FLON)
+ 
+            }           # End     else if ARGS[5] == $LEX$COURSE$
+ 
+       }                # End case $LEX$ADD$
+ 
+    #______________________________________________________________________
+    CASE $LEX$CHANGE$:
+       {
+        #  CHANGE PIM (named) <name> (point) <number> (to)
+        #           [ | COURSE <degrees> (distance) <nautical-miles> |
+        #                POSITION <latitude> <longitude>               ]
+        #           [ SPEED <knots>     | ]
+        #           [ LOITER  <minutes> | ];
+        #____________________________________________________________
+        #
+        #  [1] $lex$CHANGE$     [2]     $lex$PIM$
+        #  [3]  Name            [4]     index # of changed point
+        #  [5]  $lex$COURSE or $lex$POSITION$ or $lex$SPEED$
+        #  [6]  deg. or LAT or kts; [7] n.mi., or LONG.
+        #  [8]  [$lex$SPEED$]   [9]     [Kts]
+        #  [10] $lex$TIME$      [11]    # Min delay before start of leg
+ 
+        idx = pnt + 1                   # PTS$index for point to change
+        pim$PTS$index   = idx
+ 
+        for (iptr = 5; iptr <= Nargs; )
+            {
+ 
+        #-------------------------------------------------------------
+                ### For PL3 crsmsl, or orbiting a/c, prevent moving the
+                ### coinciding first/last points of orbit:      10/16/85
+            if(args[iptr] ==$LEX$POSITION$ | args[iptr] ==$LEX$COURSE$)
+             {
+              unt$AssignedTarget$i = Xunt$AssignedTarget$i      # 1/30/86
+              UNT$ATTACKINDX$I     = xUNT$ATTACKINDX$I          # 1/30/86
+ 
+              if(Xpim$ContinuousFlag$I !=$NO | UNT$ATTACKINDX$I !=$NO |
+                                           unt$AssignedTarget$i !=$NO )
+               {                                # /\  /\        1/29/86
+                if ( idx == pim$PTS$slots   &           #       1/30/86
+                  (UNT$ATTACKINDX$I !=$NO | unt$AssignedTarget$i !=$NO))
+                   {                                    # ^ jb  3/22/89
+                    call wgoerr (iview,iaddr,nord,nargs,args,
+                        "Note: Can't move shorebase or target point.")
+                    RETURN
+                   }
+                pim$Nlegs$I = Xpim$Nlegs$I
+                if (  (pim$Nlegs$i > 6 & (idx ==5 | idx ==9) )  |
+                      (pim$Nlegs$i < 7 & (idx < 3 | idx > 5) )  )
+                 {
+                  call wgoerr (iview,iaddr,nord,nargs,args,
+                        "Note: can't move first or last orbit point.")
+                  RETURN
+                 }
+               }
+             }
+        #-------------------------------------------------------------
+ 
+            if (args[iptr] == $LEX$SPEED$)                      #       12/5/83
+                {
+                ispeed = int(ARGS[iptr +1])
+                if (ispeed < 1) ispeed = 1
+ 
+                PUTpim$PTS$Speed$i (ispeed)
+                iptr = iptr +2
+                }
+            else if (args[iptr] == $LEX$POSITION$ )
+                {
+                PUTpim$PTS$Latitude$F  (DMS2rad(ARGS[iptr +1]))
+                PUTpim$PTS$LONgitude$F (DMS2rad(ARGS[iptr +2]))
+                iptr = iptr + 3
+                }
+            else if (args[iptr] == $LEX$COURSE$ )
+                {
+                pim2$PTS$index =pim$PTS$index-1 # Need Lat/Lon from prior point
+ 
+                FLAT = Xpim2$PTS$Latitude$F
+                FLON = Xpim2$PTS$LONgitude$F
+ 
+                RANGE = args[iptr+2]
+                RELBRG= 0.0             #       ( HEADg is true..)
+                HEADg = args[iptr+1] * $PI/180.
+                COSLAT = cos(FLAT)
+                call RRB2LL(            #Rhumb line Range/Bearing to Lat/Lon
+                            FLAT,       #latitude (input & OUTPUT)
+                            FLON,       #longitude (input & OUTPUT)
+                            RANGE,      #range (input)
+                            RELBRG,     #relative bearing (input)
+                            HEADg,      #heading (input)
+                            COSLAT)     #cosine of latitude (input & output)
+ 
+                PUTpim$PTS$Latitude$F  (FLAT)
+                PUTpim$PTS$LONgitude$F (FLON)
+ 
+                iptr = iptr + 3
+                }
+            else if (args[iptr] == $LEX$LOITER$ )
+                {
+                pim$PTS$Delay$i = int(ARGS[iptr+1])  # loiter time in minutes
+                PUTpim$PTS$Delay$i
+                iptr = iptr +2
+                }
+            }           #       End FOR (iptr = 5 etc.)
+ 
+       }                #       End case $LEX$CHANGE$
+ 
+    #______________________________________________________________________
+    CASE $LEX$DELETE$:                  #               11/22/83
+       {
+        #  [1] $lex$DELETE$        [2]  $lex$PIM$
+        #  [3]  Name       [4]  $lex$ALL$ or index # of changed point
+ 
+ 
+        if (pnt         == 1 &                  # if deleting last point...
+            pim$Nlegs$i == 1 ) pnt = $lex$ALL$
+ 
+        pim$LegNumber$i = Xpim$LegNumber$i
+ 
+        if (pnt         == pim$LegNumber$i &    # PIM heading for Last point
+            pim$Nlegs$i == pim$LegNumber$i  )
+            {
+            call wgoerr (iview,iaddr,nord,nargs,args,
+                                "Last point in use.")
+            return
+            }
+ 
+        if (pnt == $lex$ALL$)
+          {
+             for(unt2$pointer$first; unt2$pointer$ok; unt2$pointer$next)
+              {
+                if (Xunt2$Inuse$i == NO   ) next
+                if (Xunt2$View$i  != iview) next
+                if (Xunt2$GuideIndx$I != NAMslot) next
+ 
+                call wgoerr (iview,iaddr,nord,nargs,args,
+                                "PIM still in use.")
+                return
+              }
+             PUTunt$Status$i ($BeingDeleted$Code)
+ 
+          }     # End delete ALL points..
+ 
+        else    # delete one point
+          {
+            idx = pnt + 1               # PTS$Index of point to be deleted
+ 
+            if (idx > n_pts)            # If index beyond last leg
+                {
+                call wgoerr (iview,iaddr,nord,nargs,args,
+                  "Use DISPLAY PIM to see valid Point numbers.")
+                return
+                }
+ 
+            #_________________________________________________________________
+            # do we need to pull any points from the back of the bus ?
+ 
+            for (pim2$PTS$index = idx;
+                 pim2$PTS$index < n_pts;
+                 pim2$PTS$index =  pim2$PTS$index+1)
+                {
+                pim$PTS$index = pim2$PTS$index + 1
+ 
+                PUTpim2$PTS$Word1$I    (Xpim$PTS$Word1$I)
+                PUTpim2$PTS$Latitude$F (Xpim$PTS$Latitude$F)    # jb  4/05/90
+                PUTpim2$PTS$Longitude$F (Xpim$PTS$Longitude$F)  # jb  4/05/90
+                }
+ 
+            pim2$PTS$index = n_pts              # Zero Out Unused point
+            PUTpim2$PTS$Word1$I     (0)
+            PUTpim2$PTS$Latitude$F  (0)        # jb                4/05/90
+            PUTpim2$PTS$Longitude$F (0)        # jb                4/05/90
+ 
+            n_pts = n_pts - 1                   # Decrement number of points
+ 
+            PUTpim$Nlegs$i (n_pts - 1)          # Update number of Legs
+ 
+            #______________________________________________________________
+            # if PIM is past a point after the point deleted, we need
+            # to subtract 1 from the Current-Leg indicator
+ 
+            pim$LegNumber$I = Xpim$LegNumber$I
+            if (pim$LegNumber$I > pnt)                          # ?????
+                {
+                PUTpim$LegNumber$I (pim$LegNumber$I - 1)
+                }
+ 
+          }                     # End ELSE delete just 1 point..
+ 
+       }        #       End case $LEX$DELETE$
+ 
+   }            #  End SWITCH                   #               11/22/83
+ 
+PUTpim$modified$i (1)
+ 
+return
+end
+
+########################################################################
+Subroutine OORBIT (_                    #                       11/14/83
+                  nord,                 #                       12/12/83
+                  UNT$POINTER,
+                  Nargs,
+                  ILEX  )
+####################################################################
+#$% Purpose: OORBIT sets up BBPIM-table slots for ORBIT
+###     commands.  CONTINUOUSflag always set.  If orbit speed
+###     is unspecified, CRUISE-speed is used for all Legs.
+#$%
+#$% Called By: EXEORD
+#$%
+#$% Calls:     RRB2LL     RLL2RB        FCOS
+#$%
+#$% Tables:    PIM        UNT
+#$%            ACC
+#$%
+#$% Date:      DECEMBER 1983
+#$%
+#$% Author:    O. J. Bryant
+#$%
+#$% Modified:  James Allen - 12/97 (E1370)
+#$%            Added call to clear_maneuver_all after
+#$%            command is validated.
+#$%
+#$%            Stephanie Paden - 5/99 (E1224)
+#$%            Save the original orbit points and radius
+#$%            in PIM table for display later.
+########################################################
+BBcommon
+ 
+integer msg1[10]                                #       12/12/83
+real CSLATa,CSLATb,CSLATc,CSLAT1,CSLAT2,CSLAT3,CSLAT4 # 12/12/83
+literal ILEX[20]                                # (Order)
+ 
+integer IUPOS,NORD,ISPEED,NARGS, iarg,
+        ILEN,ISUB,I_SWITCH_1,MTSLOT,
+        UNT$Pointer,
+        ACC$Pointer,
+        ACC$Cruisespeed$I,
+        ACC$Vectorspeed$I,
+        PIM$PTS$Index,
+        PIM$Pointer,
+        PIM$PTS$speed$I                         # MJC 5/4/2000 (E2145)
+real    FLATC,FLONC,FLATA,
+        FLONA,DMS2RAD,RNGA,
+        BRNGA,FLATB,FLONB,
+        RNGB,BRNGB,SAVLAT,
+        SAVLON,SAVCSA,RANGE,
+        FCSE1,FCSE3,BDIAG1,
+        BDIAG4,RADIUS,DIAG,
+        FLAT1,FLON1,FLAT4,
+        FLON4,BDIAG2,BDIAG3,
+        FLAT2,FLON2,FLAT3,FLON3                 # MJC 5/4/2000 (E2145)
+BBDeclare (unt$OrderedAltDepth$i)
+ 
+## Note:  ILEX subscripts assumed as follows:
+#   $LEX$ORBIT$ [1]             Lat2    [5]
+# N.Mi. Radius  [2]             Lon2    [6]
+#       Lat1    [3]         $LEX$SPEED$ [7?]
+#       Lon1    [4]             Kts     [8?]
+#                        $LEX$ALTITUDE$ [9?]
+#                               feet    [10?]
+ 
+real orig_lat_a, orig_lon_a, orig_lat_b, orig_lon_b # SMM 5/99 (e1224)
+integer pim$orbitradius$i
+ 
+ 
+iUPOS   = UNT$POINTER$INDEX
+MTslot  = 0                     # Find empty PIM-table slot:    12/12/83
+for(PIM$Pointer$FIRST; PIM$Pointer$VALID; PIM$Pointer$Next) #   11/14/83
+  {
+   If (xPIM$UNTindx$i == 0)
+    {
+     call clear_maneuver_all (nord, -1, xUNT$View$I, UNT$Pointer)
+ 
+     MTslot = PIM$Pointer$Index                 #               12/12/83
+     PUTpim$UNTindx$i           (iUPOS)         # Cross-ref. UNT and
+     PUTunt$PIMindx$i           (MTslot)        # PIM tables..  1/4/84
+ 
+     PUTpim$ContinuousFlag$i    ($YES)          # (for all ORBITs)
+     PUTpim$Nlegs$i             (5)             #               12/12/83
+ 
+     iSPEED = 0                                 #               12/12/83
+     for (iarg = 7; iarg <= Nargs; iarg = iarg + 2)
+     {
+        if (ilex[iarg] == $lex$SPEED$)  ispeed = ilex[iarg+1]
+        if (ilex[iarg] == $lex$ALTITUDE$)
+        {
+             unt$OrderedAltDepth$i = ilex[iarg+1]
+             PUTunt$OrderedAltDepth$i
+        }
+     }
+ 
+     acc$pointer =      Xunt$accPntr$i          # jb unt vs DYN    4/4/89
+     acc$CruiseSpeed$I =Xacc$CruiseSpeed$I      # Moved up      10/15/85
+ 
+     #  Neither go at zero speed nor exceed VECTORspeed:
+     if (iSPEED < 1)
+        {
+         iSPEED =             acc$CruiseSpeed$I         #       12/12/83
+        }
+     else
+        {
+         acc$VECTORSpeed$I =   Xacc$VECTORSpeed$I
+         acc$VECTORSpeed$I =max(acc$VECTORSpeed$I,100)  # <<<>>> TEMP. 4/24/84
+         iSPEED = MIN ( iSPEED,  acc$VECTORSpeed$I )    #       12/12/83
+        }
+     BREAK              # PIM slot is available ...)
+    }
+  }             # End FOR (PIM$Pointer$First..
+ 
+If (MTslot < 1)         # (No empty PIM slot available)         12/12/83
+ {
+   ilen = 0
+   call smovv(" PIM table full:  can't insert orbit.",msg1,ilen)
+   call send_(Xunt$View$i,0,ilen,msg1)
+   return
+ }
+ 
+PIM$Pointer$TO (MTslot)                         #               12/12/83
+ 
+## The first pim$PTS slot will hold the INITIAL lat/long, and the cur-
+## rent speed of the a/craft.  Data for PIM Leg1, the transit-leg to
+## the orbit starting-point, appears in the second PTS slot.  THE SAME
+## LAT/LONG WILL APPEAR IN THE SIXTH PTS SLOT, to describe  PIM Leg5--
+## the fourth and final leg of the orbit.  Legs 2 thru 5 of the PIM
+## become ORBIT-Legs 1 thru 4.
+ 
+## GENERAL PLAN is to set up a rectangular orbit around the 2 specif-
+#  ied points:  width to be twice the specified Radius, and area the
+#  same as though the ends were semicircles with the specified Radius.
+#  This results in a momentary maximum deviation from the semicircles
+#  of 0.2716 times the specified radius, occurring at the endpoints of
+#  the ORBIT legs.  At the middle of ORBIT-legs 2 and 4, the momen-
+#  tary deviation is 0.2146 times the specified radius.
+#               Of the two specified points, find which is closest
+#  to the a/c; designate this point "a", and the second point "b".
+#  Compute CSE1 from "a" to "b", and the reverse CSE3 from "b" to
+#  "a".  Compute the DIAGonals from point "b" to the 2nd and 3rd
+#  Orbit-pts and from point "a" to the 1st and 4th Orbit-pts as
+#  1.2716 * Radius.  Then with 0.90502 radians derived from the geo-
+#  metry, use DIAG and bearings of (CSE3 - .90502) and (CSE3 + .90502)
+#  to find the positions of Orbit-pt #1 and Orbit-pt #4, for a counter-
+#  clockwise racetrack orbit.  Similarly, use bearings of (CSE1-.90502)
+#  and (CSE1 + .90502) to find the positions of Orbit-pt #3 and #2.
+#  Finally, fill in slots 2 thru 6 in subtable PIM$pts with the calcu-
+#  lated Lat/Long/Speed figures, noting that the LAT/LONG for Orbit-Pt
+#  5 (the last) is the same as for Orbit-Pt #1.
+ 
+ISUB = 3                                # ILEX subscript (parameter)
+FLATc  = Xunt$ASSUMEDLATITUDE$F
+FLONc  = Xunt$ASSUMEDLONGITUDE$F
+CSLATc = cos(FLATc)
+ 
+## Enter initial-situation data into fields of the first PTS slot:
+pim$PTS$index = 1                       #               12/12/83
+PUTpim$PTS$LATITUDE$F (FLATc)           #               12/12/83
+PUTpim$PTS$LongITUDE$F (FLONc)          #               12/12/83
+pim$PTS$SPEED$i = xUNT$OrderedSpeed$F
+pim$PTS$SPEED$i = max(acc$CruiseSpeed$I,pim$PTS$SPEED$i)#12/14/83
+PUTpim$PTS$SPEED$i
+ 
+ 
+## Find range/brg from a/c to first specified point - tentatively "a".
+FLATa = DMS2rad(ILEX[ISUB])     #get latitude
+FLONa = DMS2rad(ILEX[ISUB +1])
+CSLATa = cos(FLATa)
+ 
+# Save lat/lon of first orbit point SMP 5/99 (E1224)
+orig_lat_a = flata
+orig_lon_a = flona
+ 
+call RLL2RB( _                #Rhumb line Lat/Lon to Rng/Bearing
+                   Flatc,            #latitude of aircraft (input)
+                   FLONc,            #longitude of aircraft(input)
+                   CsLATc,           #cos of lat of a/c    (input)
+                   FLATa,            #lat of point  "a"    (input)
+                   FLONa,            #long of point "a"    (input)
+                   CSLAta,           #cos lat point "a"    (input)
+                   RNGa,             #rng to point  "a"   (output)
+                   BRNGa)            #brg to point  "a"   (output)
+# $ANG2PI (BRNGa)       # n.b.: activate if you use BRNGa below!
+ 
+## Find range/brg from a/c to second specified point - tentatively "b".
+FLATb  = DMS2rad(ILEX[ISUB +2])
+FLONb  = DMS2rad(ILEX[ISUB +3])
+CSLATb = cos(FLATb)
+ 
+# Save lat/lon of second orbit point SMP 5/99 (E1224)
+orig_lat_b = flatb
+orig_lon_b = flonb
+ 
+call RLL2RB( _                #Rhumb line Lat/Lon to Rng/Bearing
+                   FlatC,            #latitude of aircraft (input)
+                   FLONC,            #longitude of aircraft(input)
+                   CsLATC,           #cos of lat of a/c    (input)
+                   FLATb,            #lat of point  "b"    (input)
+                   FLONb,            #long of point "b"    (input)
+                   CSLAtb,           #cos lat point "b"    (input)
+                   RNGb,             #rng to point  "b"   (output)
+                   BRNGb)            #brg to point  "b"   (output)
+# $ANG2PI (BRNG)        # n.b.: activate if you use BRNGa below!
+ 
+ 
+if(RNGb < RNGa)         # If second point is closer to the a/craft re-,
+ {                      # verse designations so the closer point is "a":
+  savLAT = FLATa
+  savLON = FLONa
+  savCSa = CSLATa  # 7/31/90 - hdf
+ 
+  FLATa  = FLATb
+  FLONa  = FLONb
+  CSLATa = CSLATb
+ 
+  FLATb  = savLAT
+  FLONb  = savLON
+  CSLATb = savCSa
+ }
+ 
+ 
+## Find CSE1 and RANGE from 1st Orbit-pt to 2nd Orbit-pt:
+call RLL2RB( _                #Rhumb line Lat/Lon to Rng/Bearing
+                   Flata,            #lat of point  "a" (input)
+                   FLONa,            #lon of point  "a" (input)
+                   CsLATa,           #cos lat point "a" (input)
+                   FLATb,            #lat of point  "b" (input)
+                   FLONb,            #long of point "b" (input)
+                   CSLAtb,           #cos lat point "b" (input)
+                   RANGE,            #rng & crs from 1st(output)
+                   fCSE1)            #  to 2nd orbit-pt (output)
+if (RANGE < 1.) fcse1 = $PI/4.  # 2 pts @ same location ?!      12/16/83
+ 
+fCSE3 = fCSE1 + $PI             # (reversed) CSE to 4th orbit pt
+call ANG2PI(fCSE3)              #       from 3rd orbit pt.
+Bdiag1 = fCSE3 - 0.90502        # Brg of diagonal to 1st Orbit-pt.
+call ANG2PI(Bdiag1)             #       (from point "a")
+Bdiag4 = fCSE3 + 0.90502        # Brg of diagonal to 4th Orbit-pt.
+call ANG2PI(Bdiag4)                     #       (from point "a")
+ 
+RADIUS = (ILEX[2])
+RADIUS = max(0.5,RADIUS)         # Radius at least 1/2 nmi (vs. 1 nmi - clk 5/97 (E1791))
+# DIAM   = 2.0 * RADIUS                 # Dimensions of the rec-
+#@REACH  = Range + 2.0 *(0.7854 * RADIUS) #   tangle defining the Orbit
+#       Note: (0.7854 * RADIUS) = k, from:
+#           (1/2)* PI * (RADIUS * RADIUS) = (2.0 * RADIUS) * k
+ 
+# Save the orbitradius   SMP 5/99 (e1224)
+pim$orbitradius$i= int(RADIUS)
+putpim$orbitradius$i
+ 
+DIAG   = 1.2716 * RADIUS        # Diagonal from given points to corners
+    # of the rectangle defining the Orbit -- from Pythagorus' rule and a
+    # right triangle with sides 1.0 and 0.7854 -- therefore a hypotenuse
+    # of 1.2716
+ 
+FLAT1 =  FLATa                  # Provide output variables for
+FLON1 =  FLONa                  #  call to RRB2LL
+CSLAT1 = CSLATa                 #                 (next below)
+##      Find Lat/long of 1st Orbit-pt, using the bearing and diagonal
+## distance from point "a":
+call RRB2LL(FLAT1,                      # input & output
+            FLON1,                      # input & output
+            DIAG,       # input
+            Bdiag1,     # input
+            0.0,        # input
+            CSLAT1)                     # input & output
+ 
+FLAT4 =  FLATa                  # Provide output variables for
+FLON4 =  FLONa                  #  call to RRB2LL
+CSLAT4 = CSLATa                 #                 (next below)
+##      Find Lat/long of 4th Orbit-pt, using the bearing and diagonal
+## distance from point "a":
+call RRB2LL(FLAT4,                      # input & output
+            FLON4,                      # input & output
+            DIAG,       # input
+            Bdiag4,     # input
+            0.0,        # input
+            CSLAT4)                     # input & output
+#@ ---------------------------------------------------------------
+ 
+Bdiag2 = fCSE1 + 0.90502        # Brg of diagonal to 2nd Orbit-pt.
+call ANG2PI(Bdiag2)                     #       (from point "b")
+Bdiag3 = fCSE1 - 0.90502        # Brg of diagonal to 3rd Orbit-pt.
+call ANG2PI(Bdiag3)             #       (from point "b")
+ 
+FLAT2 =  FLATb                  # Provide output variables for
+FLON2 =  FLONb                  #  call to RRB2LL
+CSLAT2 = CSLATb                 #                 (next below)
+##      Find Lat/long of 2nd Orbit-pt, using the bearing and diagonal
+## distance from point "b":
+call RRB2LL(FLAT2,                      # input & output
+            FLON2,                      # input & output
+            DIAG,       # input
+            Bdiag2,     # input
+            0.0,        # input
+            CSLAT2)                     # input & output
+ 
+FLAT3 =  FLATb                  # Provide output variables for
+FLON3 =  FLONb                  #  call to RRB2LL
+CSLAT3 = CSLATb                 #                 (next below)
+##      Find Lat/long of 3rd Orbit-pt, using the bearing and diagonal
+## distance from point "a":
+call RRB2LL(FLAT3,                      # input & output
+            FLON3,                      # input & output
+            DIAG,       # input
+            Bdiag3,     # input
+            0.0,        # input
+            CSLAT3)                     # input & output
+ 
+ 
+## Insert Speed/Latitude/Longitude into 5 slots (2 thru 6) of the
+##   pim$PTS subtable:
+ 
+# loop up to index = 9 SMM 5/99 (E1224)
+for(pim$PTS$index=2; pim$PTS$index <9; pim$PTS$index=pim$PTS$index +1)
+ {
+  PUTpim$PTS$Speed$i (iSPEED)
+ 
+  SWITCH (pim$PTS$index)
+   {
+    CASE 2:
+     {
+      PUTpim$PTS$Latitude$F  (FLAT1)
+      PUTpim$PTS$Longitude$F (FLON1)
+     }
+    CASE 3:
+     {
+      PUTpim$PTS$Latitude$F  (FLAT2)
+      PUTpim$PTS$Longitude$F (FLON2)
+     }
+    CASE 4:
+     {
+      PUTpim$PTS$Latitude$F  (FLAT3)
+      PUTpim$PTS$Longitude$F (FLON3)
+     }
+    CASE 5:
+     {
+      PUTpim$PTS$Latitude$F  (FLAT4)
+      PUTpim$PTS$Longitude$F (FLON4)
+     }
+    CASE 6:
+     {
+      PUTpim$PTS$Latitude$F  (FLAT1)
+      PUTpim$PTS$Longitude$F (FLON1)
+     }
+    # Put orbit original lats/longs in slots 7 & 8 SMP 5/99 (E1224)
+    CASE 7:
+     {
+      PUTpim$PTS$Latitude$F  (orig_lat_a)
+      PUTpim$PTS$Longitude$F (orig_lon_a)
+     }
+    CASE 8:
+     {
+      PUTpim$PTS$Latitude$F   (orig_lat_b)
+      PUTpim$PTS$Longitude$F  (orig_lon_b)
+     }
+ 
+   }            # End of SWITCH
+ }      #  End FOR
+ 
+if (pim$last < pim$pointer)                     #       12/21/83
+   {
+    pim$used = pim$pointer$index * pim$entry
+   }
+ 
+PUTpim$modified$i (1)                           #       12/16/83
+ 
+return
+end        # End  OORBIT
+#################################################################

@@ -1,0 +1,258 @@
+#$%  NOTE:  THIS FILE WILL GO AWAY WITH THE IMPLEMENTATION OF SEQUENTIAL
+#$%         ORDER EXECUTION.
+ 
+#####   version 3.1  dated-  7apr81
+###
+### mod to version 3.0          dated  1-apr-1981
+###
+### smn prog    module  comments
+### === ====    ======  =================================================
+### 002 dew     osearc  Cleaned up ord$last usage
+###
+#####   version 3.0  dated- 22dec80
+ 
+# 
+ 
+#$%     MODULE                       UTILITY                   DATA
+#$%   SUBROUTINES                  SUBROUTINES                TABLES
+#$%   ===========                  ===========                ======
+#$%
+#$%     OSEARC                       SEND                       UNT
+#$%     FNDORD <WGORDP>              SMOVHN                     ORD
+#$%     ADDORD <WGORDP>              SMOVH
+#$%
+#$%
+#$%
+#$%   NOTES
+#$%   =====
+#$%
+#$%   1.  <FILENAME> INDICATES WHERE SUBROUTINE IS LOCATED.
+#$%
+#$%   2.  UTILITY SUBROUTINES NOT SHOWN ON FLOWCHART.
+#$%
+#$%   3.  * INDICATES NO OTHER SUBROUTINES CALLED.
+#$%
+#$%
+#$%
+#$%   FLOWCHART FOR FILE OSEARC
+#$%   =========================
+#$%
+#$%   EXEORD <WGORDP> - OSEARC - FNDORD*
+#$%                            - ADDORD*
+ 
+
+ 
+undefine read
+undefine write
+undefine err
+ 
+include "macros.inc"
+include "bbctl.inc"
+include "bbcode.inc"
+include "bbunt.inc"
+include "bbord.inc"
+include "ascii.inc"
+include "plplay.inc"
+include "stationmsg.inc"             # joa 12/97 (E1852)
+ 
+define(BBImplicit, Implicit NONE)                          # MJC 5/4/2000 (E2145)
+ 
+subroutine osearc (iview,id,unt$pointer)
+ 
+########################################################
+#$%
+#$% Purpose:   OSEARC processes search commands to
+#$%            locate search plan orders in the
+#$%            Scenario Search Plan File.
+#$%
+#$% Called By: EXEORD
+#$%
+#$% Calls:     SMOVHN     SMOVH      FNDORD
+#$%            SEND       ADDORD
+#$%
+#$% Tables:    UNT        ORD
+#$%
+#$% Date:      APRIL 80
+#$%
+#$% Author:    Dana Wills
+#$%
+#$% Modified:  James Allen - 12/97 (E1852)
+#$%            Added StationMsgCommon so that the
+#$%            originating station can be sent to addord.
+#$%
+#$%            James Allen - 12/97 (E1370)
+#$%            Set the value of LastManeuverOrderCode
+#$%            after validation - since this must be
+#$%            canceled and other maneuver orders are
+#$%            restricted.
+#$%
+########################################################
+ 
+BBcommon
+StationMsgCommon
+ 
+integer iview,id,flag,plan_size
+literal rec[arith($stk$lastarg,+,1)],plans[2,50],ladd,iadd
+equivalence (rec[3],plan_size)
+ 
+integer LEN,NPLAN,IADDR,K,M,
+        ISIZE,IDISK,NID,LOSAVE,
+        NREC,ILEN,KLAST,
+        UNT$Pointer,
+        ORD$Pointer                         # MJC 5/4/2000 (E2145)
+literal CSTRIP8,
+        ORD$W02$C                           # MJC 5/4/2000 (E2145)
+ 
+character msg[100]
+data flag/-1/
+ 
+String msg1 "Cannot find Search Order. Table Fault.  "
+ 
+#$% zero length
+len = 0
+call smovhn (xunt$name$c,$$MaxLit,msg,len)
+call smovv (" cannot execute search plan ",msg,len)
+ 
+if (flag == -1)                         # if first time thru.......
+   {                                    # build table of plan names
+    flag = 0
+ 
+    #$% read search plan header
+    read ($LFC$search,rec=1,err=8010) nplan
+ 
+    iaddr = 2
+    #$% for each entry
+    for (k=1; k <= nplan; k=k+1)
+       {
+	#$% read search plan address
+	read ($LFC$search,rec=iaddr,err=8010) (rec[m],m=1,$stk$lastarg)
+ 
+	flag = flag + 1                 # increment plan count
+ 
+	if (rec[1] == 'BLUE') plans[1,flag] = iaddr    # indicate BLUE
+	else                   plans[1,flag] = -iaddr   # indicate ORANGE
+ 
+	plans[2,flag] = rec[2]          # get plan name
+	isize = plan_size               # get plan size
+ 
+	iaddr = iaddr + isize
+ 
+	if (flag >= 50) break
+       }
+   }
+ 
+8010
+ 
+#$% call to find order
+call fndord (id,ord$pointer)
+ 
+if (ord$pointer == 0)                   # can't find order in table
+   {
+    #$% call to display table full message
+    call send_ (iview,0,40,msg1)
+    return
+   }
+ord$w02$c = xord$w02$c
+call smovhn (ord$w02$c,$$MaxName,msg,len) # move in plan name # SMM 8/99 E2141
+call smovv (".    ",msg,len)
+ 
+#$% zero disk
+idisk = 0
+#$% for each entry
+for (k = 1; k <= flag; k = k+1)
+   {
+    if (iview <= $lastblue$view    & plans[1,k] < 0) next
+    if (iview >= $Firstorange$view & plans[1,k] > 0) next
+ 
+    if (ord$w02$c != plans[2,k]) next
+ 
+    idisk = abs(plans[1,k])
+    break
+   }
+ 
+#$% if disk is zero
+if (idisk == 0)
+   {
+    #$% move message to output
+    call smovv ("It does not exist.    ",msg,len)
+ 
+    call send_ (iview,0,len,msg)
+    #$% call to display message length
+    return
+   }
+ 
+ 
+#$% set next plan order and get unit name
+nid = Next$PlanOrder$Id
+Ladd = Xunt$name$c
+LOsave = ord$used         # save nbr of words used                    #smn002
+ 
+#$% read search plan disk
+read ($LFC$search,rec=idisk,err=8020) (rec[m],m=1,$stk$lastarg)
+ 
+isize = plan_size - 1
+ 
+putUNT$LastManeuverOrderCode$I (Search$Order)  # joa 12/97 (E1370)
+ 
+#$% for each entry
+for (k = 1; k <= isize; k=k+1)
+   {
+    nrec = idisk + k
+    #$% read search plan record
+    read ($LFC$search,rec=nrec,err=8020) (rec[m],m=2,$stk$lastarg+1)
+ 
+    rec[1] = game$time
+ 
+    if (k == 1) rec[3+1] = rec[3+1] + game$time - time$step   # set delay
+ 
+    ilen = rec[1+1]                     # get ord length
+    iadd = Ladd                         # put addressee
+    rec[4+1] = Ladd
+ 
+    rec[5+1] = k                        # put seq
+    rec[6+1] = isize                    # put cnt
+ 
+    klast = ord$used                    # mark pointer
+ 
+    call addord (iview,                 # insert order
+         StationMsgIndx,        # Station number entering order
+		 iadd,
+		 unt$pointer,           # given addressee pointer
+		 0,                     # given circuit
+		 0,                     # given embarked unit indx
+		 nid+k-1,
+		 ilen,
+		 rec)
+ 
+    if (Klast == ord$used)              # ord table full
+       {
+	#$% call to move message to output
+	call smovv ("Order Table full.    ",msg,len)
+ 
+	#$% set length
+ 
+	#$% call to display table full message
+	call send_ (iview,0,len,msg)
+ 
+	ord$used = LOsave               # reset nbr of words used     #smn002
+ 
+	return
+       }
+   }
+ 
+#$% set next plan order ID plus size
+Next$PlanOrder$Id = Next$PlanOrder$Id + isize
+return
+ 
+8020
+#$% call to move message to output
+call smovv ("File error.    ",msg,len)
+ 
+ 
+#$% call to display error message
+call send_ (iview,0,len,msg)
+ 
+ord$used = LOsave                      # reset last word pointer
+ 
+return
+end

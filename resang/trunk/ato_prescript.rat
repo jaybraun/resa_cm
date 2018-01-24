@@ -1,0 +1,219 @@
+ 
+define (number_args, 6)         # prescript file name, outfile, replenish flag
+define (MAXPLATFORMS, 1000)
+define (MAXLINESPERCYCLE, 20000)     # 20000 is a noop for adding wait prescript order
+ 
+undefine write   # use the standard fortran write statement
+undefine read
+undefine err
+ 
+program ATO_prescript
+#########################################################################
+#$%
+#$% Purpose:    This program inserts prescript delays, write replenish to
+#$%             initial
+#$%
+#$% Calls:      initr4         <rlib.olb>
+#$%             read_arguments
+#$%             ctoi
+#$%             remark
+#$%             exit
+#$%             smov..
+#$%             echo..
+#$%             write
+#$%             close
+#$%
+#$% Tables:     global variables
+#$%
+#$% Date:       Aug 2012
+#$%
+#$% Author:     James O. Allen
+#$%
+#########################################################################
+implicit none
+ 
+integer          arg_len[number_args]
+vaxcharacter*80  args[number_args], params
+ 
+vaxcharacter*80  ato_root
+vaxcharacter*80  atoid
+vaxcharacter*80  atoid_update
+vaxcharacter*80  infile
+vaxcharacter*80  outfile
+vaxcharacter*80  auto_replenish
+ 
+vaxcharacter*80  atoid_dir
+ 
+integer kk
+ 
+call initR4
+ 
+call Read_Arguments (number_args, args, arg_len, params)
+ 
+ato_root       = args[1][1:arg_len[1]]
+atoid          = args[2][1:arg_len[2]]
+atoid_update   = args[3][1:arg_len[3]]
+infile         = args[4][1:arg_len[4]]
+outfile        = args[5][1:arg_len[5]]
+auto_replenish = args[6][1:arg_len[6]]
+ 
+# Get ato directory
+atoid_dir = ""
+kk = 0
+call smovvn(ato_root, atoid_dir, kk)
+call smovv("/", atoid_dir, kk)
+call smovvn(atoid, atoid_dir, kk)
+call smovv("/",atoid_dir, kk)
+call smovvn(atoid_update, atoid_dir, kk)
+call smovv("/", atoid_dir, kk)
+ 
+ 
+call do_preprep (atoid_dir, infile, outfile, auto_replenish)
+ 
+End
+
+Subroutine do_preprep (atoid_dir, infile, outfile, auto_replenish)
+implicit none
+ 
+vaxcharacter*(*)  atoid_dir
+vaxcharacter*(*)  infile
+vaxcharacter*(*)  outfile
+vaxcharacter*(*)  auto_replenish
+ 
+vaxcharacter*80  prefile
+vaxcharacter*80  outprefile
+ 
+integer k, kk, i
+integer block_cnt
+integer name_len
+integer return_val
+integer t_len
+integer np
+integer mission_cnt
+ 
+vaxcharacter    a_line*140
+vaxcharacter    t_line*140
+vaxcharacter    w1*120
+vaxcharacter    w2*120
+vaxcharacter    w3*120
+vaxcharacter*8  platform_list[MAXPLATFORMS]
+ 
+prefile = ""
+kk = 0
+call smovvn(atoid_dir, prefile, kk)
+call smovvn(infile, prefile, kk)
+ 
+open(unit    =   10,                            #open input file
+     file    =   prefile,
+     status  =  'old',
+     access  =  'sequential',
+     recl    =   140,
+     iostat  =   return_val)
+ 
+if (return_val != 0)
+{
+    print *, "prescript file not found"
+    return
+}
+ 
+outprefile = ""
+kk = 0
+call smovvn(atoid_dir, outprefile, kk)
+call smovvn(outfile, outprefile, kk)
+ 
+open(unit    =   11,                            #open output file
+     file    =   outprefile,
+     status  =  'unknown',
+     access  =  'sequential',
+     recl    =   140,
+     iostat  =   return_val)
+ 
+if (return_val != 0)
+{
+    print *, "prescript output file cannot be opened"
+    return
+}
+ 
+block_cnt = 0
+np = 0
+repeat
+{
+    #read ATO summary line
+    read (10,9001,end=8002,err=8001) a_line
+    9001 format (A)
+    call Trim_Compress (a_line, t_line, kk)
+    t_len = kk
+#    call upper (%%ref(t_line))
+ 
+    block_cnt = block_cnt + 1
+    write (11,9002) t_line[1:t_len]
+9002    format(A)
+ 
+    call str_element (w1, 0, " ", t_line )
+    call str_element (w2, 1, " ", t_line )
+    call str_element (w3, 2, " ", t_line )
+ 
+    if (w1 == "BINGO" | w1 == "STOP")
+    {
+        mission_cnt = mission_cnt + 1
+        #   Insert 1 min delay every MAXLINESPERCYCLE lines after bingo order
+        if (block_cnt > MAXLINESPERCYCLE)
+        {
+            block_cnt = 0
+            write (11,9002) "* +1"
+        }
+    }
+    # Build list of unique platforms
+    if (auto_replenish[1:1] == "Y" | auto_replenish[1:1] == "y")
+    {
+        if (w1 == "FOR" & w3 == "SCRAMBLE") # FIRE TLAM shooters not replenished
+        {
+            for (i=1; i <= np; i=i+1)
+            {
+                if (w2[1:8] == platform_list[i]) break
+            }
+            if (i > np)
+            {
+                np = np + 1
+                if (np <= MAXPLATFORMS)
+                {
+                    platform_list[np] = w2[1:8]
+                }
+            }
+        }
+    }
+}
+ 
+repeat
+    {
+    break
+ 
+    8001 continue       # Comes here for ERROR on open or READ
+    }
+repeat
+    {
+    break
+ 
+    8002 continue       # Comes here for END
+    }
+ 
+# For each unique platform being processed, REPLENISH TO INITIAL
+for (i=1; i <= np; i=i+1)
+{
+    block_cnt = block_cnt + 1
+    if (block_cnt > MAXLINESPERCYCLE)
+    {
+        block_cnt = 0
+        write (11,9002) "* +1"
+    }
+    a_line = "FOR " // platform_list[i] // " REPLENISH TO INITIAL"
+    call Trim_Compress (a_line, t_line, kk)
+    write (11,9002) t_line[1:kk]
+}
+ 
+close (unit=10)
+close (unit=11)
+ 
+return
+end
+ 

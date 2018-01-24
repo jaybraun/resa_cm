@@ -1,0 +1,1770 @@
+#  File:  WGOPFUEL.RAT
+#         Processing of Fuel Consumption Model Commands.
+ 
+include "bbctl.inc"
+include "bbcode.inc"
+ 
+include "bbacc.inc"
+include "bbaml.inc"
+include "bbhwf.inc"
+include "bbord.inc"
+include "bbshc.inc"
+include "bbsta.inc"
+include "bbunt.inc"
+include "bbwet.inc"
+include "bbwvf.inc"
+ 
+include "ascii.inc"
+include "orders.inc"
+include "plplay.inc"
+ 
+define (BBImplicit, Implicit None)
+define ($FuelSpeedInterval,5)
+ 
+
+ 
+subroutine oFuelState (_
+                nord,         # in:  order number - int
+                UNT$Pointer,  # in:  UNT Table Pointer - int
+                nargs,        # in:  Number of arguments - int
+                args)         # in:  Command arguments - int array
+#############################################################
+#$%
+#$% Purpose:   Processes FOR <addressee> CONSUMPTION
+#$%                                       (of fuel) [ OFF | ON ]
+#$%            Set fuel state of an individual unit.
+#$%
+#$% Called By: xdefin    <wixdefin.rin>
+#$%
+#$% Calls:     none
+#$%
+#$% Tables:    UNT
+#$%
+#$% Date:      February 1996  (E1467)
+#$%
+#$% Author:    James Allen
+#$%
+#############################################################
+BBcommon
+ 
+integer     nord
+integer     UNT$Pointer
+integer     nargs
+literal     args[20]
+ 
+integer     i
+ 
+#      1                     2
+# CONSUMPTION (of fuel) [OFF | ON]
+ 
+  if (args[2] == $lex$ON$)
+    putUNT$FuelConsumptionFlag$I ($ON)
+  else
+    putUNT$FuelConsumptionFlag$I ($OFF)
+ 
+  i = nord            # Avoid informational
+  i = nargs           # compilation messages
+ 
+return
+end
+
+ 
+subroutine PL_predict (_                # Predict fuel usage
+                nord,         # in:  order number - int
+                unt_ptr,      # in:  UNT Table Pointer - int
+                nargs,        # in:  Number of arguments - int
+                args)         # in:  Command arguments - int array
+#############################################################
+#$%
+#$% Purpose:   Processes FOR <addressee> PREDICT
+#$%                                      [ WHEN | FUEL ] ...
+#$%            Predict the time when a platform reaches a fuel
+#$%            state or the percent of fuel remaining after the
+#$%            unit completes the specified maneuver or its
+#$%            ordered maneuver if nothing is specified.
+#$%
+#$% Called By: exeord   <wgop.rat>
+#$%
+#$% Calls:     predict_time
+#$%            predict_fuel
+#$%
+#$% Tables:    UNT
+#$%
+#$% Date:      February 1996  (E1467)
+#$%
+#$% Author:    James Allen
+#$%
+#$% Modified:  Susan Miller - 7/97 (E1635)
+#$%            If the order is given for a unit that has
+#$%            fuel consumption turned off, send a
+#$%            "cannot predict" message.
+#$%
+#############################################################
+BBcommon
+Playcommon
+ 
+integer     nord
+integer     unt_ptr
+integer     nargs
+literal     args[20]
+ 
+literal     cstrip8
+ 
+integer     UNT$Pointer
+integer     msg_len
+character   msg[ARB]
+integer     UNT$Type$I, consumption_flag, I_SWITCH_1
+ 
+  UNT$Pointer = unt_ptr
+  UNT$Type$I = xUNT$Type$I
+  switch (UNT$Type$I)
+    {
+     case $Air$Code:
+        { consumption_flag = AirFuelConsumption$Flag }
+     case $Surface$Code, $SurfaceWithAC$Code:
+        {
+         if (xUNT$SubType$I == $SmallBoat$SubCode)
+           consumption_flag = BoatFuelConsumption$Flag
+         else
+           consumption_flag = ShipFuelConsumption$Flag
+        }
+    }
+ 
+  if ((xUNT$FuelConsumptionFlag$I == $OFF) |
+      (consumption_flag == $OFF))
+    {
+     msg_len = 0
+     call smovhn (xUNT$Name$C, $$Maxlit, msg, msg_len)
+     call smovv  (": Can't predict fuel state. Not burning fuel.", msg, msg_len)
+     call send_   (xUNT$View$I, 0, msg_len, msg)
+    }
+  else if (args[2] == $lex$WHEN$)
+    {
+     call predict_time (UNT$Pointer, nargs, args)
+    }
+  else if (args[2] == $lex$FUEL$)
+    {
+     call predict_fuel (UNT$Pointer, nargs, args)
+    }
+ 
+return
+end
+ 
+
+ 
+subroutine predict_time (_
+                UNT$Pointer,  # in:  UNT Table Pointer - int
+                nargs,        # in:  Number of arguments - int
+                args)         # in:  Command arguments - int array
+#############################################################
+#$%
+#$% Purpose:   Predict the time when a platform will reach
+#$%            the specified fuel state.  The FULL state is
+#$%            to predict the time when refueling will be
+#$%            completed if refueling to 100% of capacity, so
+#$%            it is handled separately.
+#$%
+#$% Called By: PL_predict
+#$%
+#$% Calls:     predict_time_fuel_full
+#$%            Ship_Fuel_burn_rate
+#$%            smov..                 <lbsmov.rat>
+#$%            send                   <wgxsend.rat>
+#$%            min_to_dtg             <lbtime.rat>
+#$%            SmovDateTime           <lbtime.rat>
+#$%
+#$% Tables:    UNT
+#$%
+#$% Date:      February 1996  (E1467)
+#$%
+#$% Author:    James Allen
+#$%
+#############################################################
+BBcommon
+ 
+integer     UNT$Pointer
+integer     nargs
+literal     args[20]
+ 
+literal     cstrip8
+real        ship_fuel_burn_rate     # Function returning gal/min
+integer     min_to_dtg
+ 
+integer     UNT$TNK$Index
+integer     SHC$Pointer
+integer     SHC$TNK$Index
+real        SHC$TNK$Capacity$F
+real        burn_rate
+real        course
+real        gal_to_consume
+integer     i
+integer     jj
+integer     len
+character   msg[ARB]
+real        pct_fuel_now
+real        pct_fuel_tgt
+real        speed
+character   str[ARB]
+real        time_to_level
+integer     irc
+real        resultdtg[5]
+ 
+#    1     2                            3
+# PREDICT TIME (when reach fuel state)
+#                               [ FULL | LOW | ZERO ]
+#                               [ | COURSE <degrees> ]
+#                               [ | SPEED <knots> ]
+ 
+  if (args[3] == $lex$FULL$)
+    {
+     call predict_time_fuel_full (UNT$Pointer)
+     return
+    }
+ 
+  if (args[3] == $lex$LOW$)
+    pct_fuel_tgt = .25
+  else
+    pct_fuel_tgt = 0
+ 
+  course = xUNT$TrueCourse$F * DEG$PER$RAD
+  speed  = xUNT$TrueSpeed$F
+ 
+  # Substitute course and speed from command if given
+  for (i = 4; i <= nargs; i = i + 2)
+    {
+     if (args[i] == $lex$COURSE$)
+        course = args[i+1]
+     else if (args[i] == $lex$SPEED$)
+        speed = args[i+1]
+    }
+ 
+  # Compute gallons burned per minute
+  # Do not take into account crossing weater region boundaries
+  burn_rate = Ship_Fuel_burn_rate (UNT$Pointer, course, speed)
+ 
+  if (burn_rate == 0.0)
+    {
+     jj = 0
+     call smovhn (xUNT$Name$C, $$Maxlit, msg, jj)
+     call smovv  (": Can't predict fuel state. Not burning fuel.", msg, jj)
+     call send_   (xUNT$View$I, 0, jj, msg)
+     return
+    }
+ 
+  # Compute Gallons to consume to reach requested level
+  SHC$Pointer = xUNT$SHCPntr$I
+  SHC$TNK$Index = ShipFuelTank$Index
+  UNT$TNK$Index = ShipFuelTank$Index
+ 
+  SHC$TNK$Capacity$F =  xSHC$TNK$Capacity$F
+  if (SHC$TNK$Capacity$F > 0.0)
+    Pct_Fuel_now = xUNT$TNK$FuelRemaining$F / SHC$TNK$Capacity$F
+  else
+    {
+     jj = 0
+     call smovhn (xUNT$Name$C, $$Maxlit, msg, jj)
+     call smovv  (": Can't predict fuel state. No ship fuel tank.", msg, jj)
+     call send_   (xUNT$View$I, 0, jj, msg)
+     return
+    }
+ 
+  Gal_to_consume = (pct_fuel_now - pct_fuel_tgt) * SHC$TNK$Capacity$F
+ 
+  if (Gal_to_consume <= 0.0)
+    {
+     jj = 0
+     call smovhn (xUNT$Name$C, $$Maxlit, msg, jj)
+     call smovv  (": Can't predict fuel state.", msg, jj)
+     call smovv  (" Already reached given state.", msg, jj)
+     call send_   (xUNT$View$I, 0, jj, msg)
+     return
+    }
+ 
+  time_to_level = Gal_to_consume / burn_rate
+ 
+  irc = min_to_dtg (Start$Time,                # dtg of sim time - 1-year,2-mon,3-day,4-hr,5-min
+                    time_to_level + Game$Time, # minutes to be added to InitDtg:in:float:min
+                    resultdtg)                 # Resultant dtg ddhhmmss:real array: out
+ 
+  len = 0
+  call SmovDateTime (resultdtg, str, len)
+  call smov (EOS, str, len)
+ 
+  jj = 0
+  call smovhn (xUNT$Name$C, $$Maxlit, msg, jj)
+  call smovv  (" will reach ", msg, jj)
+  if (args[3] == $lex$LOW$)
+    call smovv ("LOW", msg, jj)
+  else
+    call smovv ("ZERO", msg, jj)
+  call smovv (" fuel state at time ", msg, jj)
+  call smovh (str, len, msg, jj)
+  call send_  (xUNT$View$I, 0, jj, msg)
+ 
+return
+end
+ 
+
+ 
+subroutine predict_time_fuel_full (_
+                UNT$Pointer)  # in:  UNT Table Pointer - int
+#############################################################
+#$%
+#$% Purpose:   Compute the predicted time of completion for
+#$%            the specified unit to refuel another to 100%
+#$%            fuel capacity.
+#$%
+#$% Called By: predict_time
+#$%
+#$% Calls:     smov..                 <lbsmov.rat>
+#$%            send                   <wgxsend.rat>
+#$%            min                    (fortran)
+#$%            min_to_dtg             <lbtime.rat>
+#$%            SmovDateTime           <lbtime.rat>
+#$%
+#$% Tables:    UNT
+#$%
+#$% Date:      February 1996  (E1467)
+#$%
+#$% Author:    James Allen
+#$%
+#$% Modified:  Susan Miller - 12/97 (E1660)
+#$%            The aviation fuel on the ships is entered
+#$%            in gallons now, so the conversion factor to
+#$%            determine amount in pounds is gone.
+#$%
+#############################################################
+BBcommon
+ 
+integer     unt$pointer
+ 
+literal     cstrip8
+integer     min_to_dtg
+ 
+integer     UNT$Type$I
+real        UNT$AviationRefuelAmount$F
+real        UNT$ShipRefuelAmount$F
+integer     UNT2$Pointer
+real        UNT2$TNK$FuelRemaining$F
+integer     UNT2$TNK$Index
+integer     SHC2$FuelTransferRate$I
+integer     SHC2$Pointer
+integer     SHC2$TNK$Index
+real        SHC2$TNK$Capacity$F
+ 
+real        aviation_fuel_rate
+real        fuel_reserve
+integer     jj
+integer     len
+character   msg[ARB]
+real        ship_fuel_rate
+character   str[ARB]
+real        time_remaining
+integer     irc
+real        resultdtg[5]
+ 
+  UNT$Type$I = xUNT$Type$I
+  if (UNT$Type$I != $Surface$code & UNT$Type$I != $SurfaceWithAc$code)
+    return
+ 
+  if (xUNT$Status$I != $ShipRefUEL$CODE)
+    {
+     jj = 0
+     call smovhn (xUNT$Name$C, $$Maxlit, msg, jj)
+     call smovv  (": Can't predict FULL fuel state. Not refueling.", msg, jj)
+     call send_  (xUNT$View$I, 0, jj, msg)
+     return
+    }
+ 
+  UNT2$Pointer$TO xUNT$GuideIndx$I        # Supplier
+  SHC2$Pointer = xUNT2$SHCPntr$I
+  SHC2$FuelTransferRate$I = xSHC2$FuelTransferRate$I  # Gal/hr
+ 
+  # Transfer ship fuel
+  ship_fuel_rate = SHC2$FuelTransferRate$I * $Hours$Per$Minute *
+                                             xUNT$ShipHoseRequest$I
+ 
+  # Don't allow transfer of reserves
+  UNT2$TNK$Index = ShipFuelTank$code
+  SHC2$TNK$Index = ShipFuelTank$code
+  SHC2$TNK$Capacity$F = xSHC2$TNK$Capacity$F
+  fuel_reserve = SHC2$TNK$Capacity$F * xSHC2$PctShipFuelReserve$F
+  UNT2$TNK$FuelRemaining$F = xUNT2$TNK$FuelRemaining$F
+ 
+  UNT$ShipRefuelAmount$F = xUNT$ShipRefuelAmount$F
+ 
+  UNT$ShipRefuelAmount$F = min (UNT$ShipRefuelAmount$F,
+                                (UNT2$TNK$FuelRemaining$F - fuel_reserve))
+ 
+  # Display fuel full prediction time
+  if (ship_fuel_rate > 0 & unt$ShipRefuelAmount$f > 0)
+    {
+     Time_remaining = UNT$ShipRefuelAmount$F / ship_fuel_rate
+ 
+     irc = min_to_dtg (Start$Time,                 # dtg of sim time - 1-year,2-mon,3-day,4-hr,5-min
+                       time_remaining + Game$Time, # minutes to be added to InitDtg:in:float:min
+                       resultdtg)                  # Resultant dtg ddhhmmss:real array: out
+ 
+     len = 0
+     call SmovDateTime (resultdtg, str, len)
+     call smov (EOS, str, len)
+ 
+     jj = 0
+     call smovhn (xUNT$Name$C, $$Maxlit, msg, jj)
+     call smovv  (" will complete ship fuel transfer at time ", msg, jj)
+     call smovh  (str, len, msg, jj)
+     call send_   (xUNT$View$I, 0, jj, msg)
+    }
+ 
+  # Predict when aviation fuel transfer complete
+  # aviation fuel now in gallons so removed conversion
+  # factor ($Pounds$Per$Gallon) - smm 12/97 (E1660)
+  aviation_fuel_rate = SHC2$FuelTransferRate$I * $Hours$Per$Minute *
+                        xUNT$AviationHoseRequest$I
+ 
+  UNT$AviationRefuelAmount$F = xUNT$AviationRefuelAmount$F
+ 
+  # Display fuel full prediction time
+  if (aviation_fuel_rate > 0 & unt$AviationRefuelAmount$f > 0)
+    {
+     Time_remaining = UNT$AviationRefuelAmount$F / aviation_fuel_rate
+ 
+     irc = min_to_dtg (Start$Time,                 # dtg of sim time - 1-year,2-mon,3-day,4-hr,5-min
+                       time_remaining + Game$Time, # minutes to be added to InitDtg:in:float:min
+                       resultdtg)                  # Resultant dtg ddhhmmss:real array: out
+ 
+     len = 0
+     call SmovDateTime (resultdtg, str, len)
+     call smov (EOS, str, len)
+ 
+     jj = 0
+     call smovhn (xUNT$Name$C, $$Maxlit, msg, jj)
+     call smovv  (" will complete aviation fuel transfer at time ", msg, jj)
+     call smovh  (str, len, msg, jj)
+     call send_   (xUNT$View$I, 0, jj, msg)
+    }
+ 
+return
+end
+ 
+
+ 
+subroutine predict_fuel (_                # Predict fuel usage
+                UNT$Pointer,  # in:  UNT Table Pointer - int
+                nargs,        # in:  Number of arguments - int
+                args)         # in:  Command arguments - int array
+#############################################################
+#$%
+#$% Purpose:   Predict the percentage of fuel remaining
+#$%            when the unit completes the specified maneuver
+#$%            or it's current maneuver order if nothing is
+#$%            specified in the command.
+#$%
+#$% Called By: PL_predict
+#$%
+#$% Calls:     Ship_Fuel_burn_rate
+#$%            smov..                 <lbsmov.rat>
+#$%            send                   <wgxsend.rat>
+#$%
+#$% Tables:    UNT
+#$%
+#$% Date:      February 1996  (E1467)
+#$%
+#$% Author:    James Allen
+#$%
+#############################################################
+BBcommon
+ 
+integer     unt$pointer
+integer     nargs
+literal     args[20]
+ 
+literal     cstrip8
+real        ship_fuel_burn_rate     # Function returning gal/min
+ 
+integer     UNT$TNK$Index
+integer     SHC$Pointer
+real        SHC$TNK$Capacity$F
+integer     SHC$TNK$Index
+real        burn_rate
+real        course
+real        distance
+real        fuel_remaining
+real        gal_burned
+integer     i
+integer     jj
+character   msg[ARB]
+integer     pct_remaining
+real        speed
+real        time_to_travel
+ 
+ 
+#    1     2                            3
+# PREDICT FUEL (percent remaining for maneuver)
+#                               [ | COURSE <degrees> ]
+#                               [ | SPEED <knots> ]
+#                               [ | DISTANCE <knots> ]
+ 
+ 
+  course = xUNT$TrueCourse$F * DEG$PER$RAD
+  speed  = xUNT$TrueSpeed$F
+  distance = -1.0                 # No distance assigned
+  if (xUNT$OrderedLatitude$F != $PI |
+      xUNT$AttackIndx$I != 0      |
+      xUNT$GuideIndx$I != 0)
+    distance = xUNT$RangeToNext$F
+ 
+  # Substitute course, speed and distance from command if given
+  for (i = 3; i <= nargs; i = i + 2)
+    {
+     if (args[i] == $lex$COURSE$)
+        course = args[i+1]
+     else if (args[i] == $lex$SPEED$)
+        speed = args[i+1]
+     else if (args[i] == $lex$DISTANCE$)
+        distance = args[i+1]
+  }
+ 
+  SHC$Pointer = xUNT$SHCPntr$I
+  speed = min (speed, float(xSHC$MaxSpeed$I))
+ 
+  # Compute gallons burned per minute
+  # Do not take into account crossing weather region boundaries
+  burn_rate = Ship_Fuel_burn_rate (UNT$Pointer,
+                                   course*$DEG2RAD, speed)
+ 
+  if (burn_rate == 0.0)
+    {
+     jj = 0
+     call smovhn (xUNT$Name$C, $$Maxlit, msg, jj)
+     call smovv  (": Can't predict fuel state. Not burning fuel.", msg, jj)
+     call send_   (xUNT$View$I, 0, jj, msg)
+     return
+    }
+ 
+  # Compute gallons to consume to reach requested level
+  SHC$Pointer = xUNT$SHCPntr$I
+  SHC$TNK$Index = ShipFuelTank$Index
+  UNT$TNK$Index = ShipFuelTank$Index
+ 
+  SHC$TNK$Capacity$F =  xSHC$TNK$Capacity$F
+  if (SHC$TNK$Capacity$F <= 0.0)
+    {
+     jj = 0
+     call smovhn (xUNT$Name$C, $$Maxlit, msg, jj)
+     call smovv  (": Can't predict fuel state. No ship fuel tank.", msg, jj)
+     call send_   (xUNT$View$I, 0, jj, msg)
+     return
+    }
+ 
+  if (speed <= 0.0)
+    {
+     jj = 0
+     call smovhn (xUNT$Name$C, $$Maxlit, msg, jj)
+     call smovv  (": Can't predict fuel state. No speed.", msg, jj)
+     call send_   (xUNT$View$I, 0, jj, msg)
+     return
+    }
+ 
+  if (distance < 0.0)
+    {
+     jj = 0
+     call smovhn (Xunt$name$c, $$Maxlit, msg, jj)
+     call smovv  (": Can't predict fuel state. No distance specified.", msg, jj)
+     call send_   (xUNT$View$I, 0, jj, msg)
+     return
+    }
+ 
+  time_to_travel = distance / speed * $Minutes$Per$Hour
+ 
+  gal_burned = time_to_travel * burn_rate
+ 
+  fuel_remaining = xUNT$TNK$FuelRemaining$F - gal_burned
+ 
+  pct_remaining = fuel_remaining / SHC$TNK$Capacity$F * 100 + .5
+ 
+  jj = 0
+  call smovhn (xUNT$Name$C, $$Maxlit, msg, jj)
+  call smovv  (" will have ", msg, jj)
+  call smovi  ( pct_remaining, msg, jj )
+  call smovv  ("% fuel after traveling ", msg, jj)
+  call smovi  ( int(distance+.5), msg, jj )
+  call smovv  (" nmi at ", msg, jj)
+  call smovi  ( int(speed+.5), msg, jj )
+  call smovv  (" knots on course ", msg, jj)
+  call smovi  ( int(course+.5), msg, jj )
+  call send_   (xUNT$View$I, 0, jj, msg)
+ 
+return
+end
+ 
+
+include "alsp.inc"
+ 
+Subroutine OREFUL(IONUM,
+                  UNT$POINTER,
+                  IWORD,
+                  ILEX,
+                  ID)
+ 
+########################################################
+#$%
+#$% Purpose:   OREFUL processes refuel commands
+#$%            for aircraft refueling.
+#$%
+#$% Called By: EXEORD       ALSP_Receive_Refuel_Interaction
+#$%
+#$% Calls:     FNDORD     SEND    GETRB_M   ALSP_Send_Refuel_Request
+#$%            Vector_unit_for_refuel
+#$%
+#$% Tables:    UNT      ORD     acc
+#$%
+#$% Date:      APRIL 80
+#$%
+#$% Author:    Dane Wills
+#$%
+#$% Modified:  Dane Wills 18-Dec-89, Allowed partial refueling
+#$%
+#$%----------------------------------------------------------------
+#$%
+#$%  REFUEL (from) MISSION (name) <launch-event>
+#$%                     [ | ONLOAD (amount to refuel) <number> ]
+#$%  REFUEL (from) CALLSIGN  <launch-event>
+#$%                     [ | ONLOAD (amount to refuel) <number> ]
+#$%  REFUEL (from) SIDENUMBER  <force-name>
+#$%                     [ | ONLOAD (amount to refuel) <number> ]
+#$%  REFUEL (from) <refueler-name>
+#$%                     [ | ONLOAD (amount to refuel) <number> ]
+#$%
+#$%            Susan Miller - 9/95 (E1453)
+#$%            Process a refuel request for a RESA a/c to
+#$%            a ghosted tanker a/c.  Moved code into
+#$%            subroutine Vector_unit_for_refuel so it could
+#$%            be called from ALSP_Receive_Refuel_Interaction
+#$%
+#$%            Susan Miller - 11/95 (E1493)
+#$%            Add error message for units requesting a
+#$%            tanker in a different view.
+#$%
+#$%            James Allen - 2/96 (E1467)
+#$%            Routine moved from wgopord.rat to wgopfuel.rat
+#$%            (all fuel related commands into one file).
+#$%            Declared all variables (Implicit None used).
+#$%            Changed the keyword OFFLOAD to ONLOAD.
+#$%
+#$%            Carol Kropp - 1/97 (E1734)
+#$%            When a/c is at or above max fuel, reject refuel
+#$%            request.
+#$%
+#$%            James Allen - 12/97 (E1370)
+#$%            After the command is validated, set up
+#$%            the call to clear_maneuver_all to prevent
+#$%            unit "beamings".
+#$%
+#$%            James O. Allen - 11/02 (E2313)
+#$%            Add CALLSIGN option.
+########################################################
+BBcommon
+ 
+integer     ionum
+integer     UNT$Pointer
+integer     iword
+literal     ilex[20]
+integer     id, litcmp
+ 
+literal     cstrip8
+ 
+integer     ORD$Phase$I
+integer     ORD$Pointer
+integer     UNT$Status$I
+integer     UNT2$Mission$I
+integer     UNT2$Pointer
+integer     UNT2$Type$I
+integer     UNT2$GhostedUnit$I
+integer     ACC$Pointer
+integer     fuel_to_onload
+integer     ifuelhelo
+integer     ishelo
+integer     jj
+Character   msg[ARB]
+literal     tanker_CallSign
+literal     tanker_MissionName
+literal     tanker_SideNumber
+integer     UNT$TNK$Index
+ 
+jj = ionum                              # Avoid compilation message
+ 
+unt$status$i = Xunt$status$i                    # jb            7/1/87
+call fndord (id,ord$pointer)                    # find the order in ORD
+ 
+if (ord$pointer != 0)                           # Is this a multi-phase order?
+   {                                            #   YES
+    ord$phase$i = Xord$phase$i
+    if (ord$phase$i == 0)
+       {
+        ord$phase$i = 1                         # First time thru
+        PUTord$phase$i
+       }
+    else
+       {
+        # if refuel is denied, this was a request from a ghosted
+        # ALSP tanker.  SMM 10/17/95
+        if (xUNT$ALSPRefuelStatus$I == $Refuel_Denied)
+            {
+             ord$phase$i = 0  # clear the order
+             PUTord$phase$i
+ 
+             return
+            }
+ 
+        if (unt$status$i == $AcRefuel$code) return     # Done yet.... No
+ 
+        # else
+ 
+        ord$phase$i = 0                         # Yes.....
+        PUTord$phase$i                          # clear the order
+ 
+        return
+       }
+    }
+ 
+jj = 0
+#$% move unit names to msg format for display
+call SMOVHN(Xunt$name$c,$$MaxLit,msg,jj)
+Call SMOVV(" cannot be refueled from ",msg,jj)
+ 
+tanker_CallSign     = -1
+tanker_MissionName  = -1
+tanker_SideNumber   = -1
+fuel_to_onload      = 0
+ 
+if (ilex[2] == $lex$Callsign$)
+    {
+    tanker_CallSign = ilex[3]
+ 
+    call SMOVHN(ilex[3],$$MaxName,msg,jj) # SMM E2141
+    }
+else if (ilex[2] == $lex$Mission$)
+    {
+    tanker_MissionName = ilex[3]
+ 
+    call SMOVHN(ilex[3],$$MaxName,msg,jj) # SMM E2141
+    }
+else if (ilex[2] == $lex$SideNumber$)
+    {
+    tanker_SideNumber = ilex[3]
+ 
+    call SMOVHN(ilex[3],$$MaxName,msg,jj) # SMM E2141
+    }
+else
+    {
+    tanker_CallSign = ilex[2]
+ 
+    call SMOVHN(ilex[2],$$MaxName,msg,jj) # SMM E2141
+    }
+ 
+if (ilex[iword-1] == $lex$OnLoad$)
+    {
+    fuel_to_onload = ilex[iword]
+    }
+ 
+if(XUNT$TYPE$I == $AIR$CODE)                    #if flight
+   {
+    acc$Pointer = Xunt$AccPntr$i                        # jb    3/30/89
+    if (Xacc$Category$i == $Helo$Code)  isHELO = $YES   #       5/27/86
+    else                                isHELO = $NO    #       5/27/86
+ 
+    # If the a/c is at max fuel, none will be asked for from the tanker,
+    # so send a msg to the a/c - clk 1/97 (E1734)
+    UNT$TNK$Index = AviationFuelTank$Code
+    if ((float(xACC$MaxFuel$I) - xUNT$TNK$FuelRemaining$F) <= 0.0)
+      {
+       jj = 0
+       call smovhn (xUNT$Name$C,$$MaxLit,msg,jj)
+       call smovv (" is at (or above) maximum fuel level -", msg, jj)
+       call smovv (" refueling command rejected.", msg, jj)
+       call send_  (xUNT$View$I, 0, jj, msg)
+       return
+      }
+ 
+    for(UNT2$POINTER$FIRST;UNT2$POINTER$OK;UNT2$POINTER$NEXT) #search for tkr
+       {
+        if (xUNT$View$I != xUNT2$View$I) next   # Tanker and refuelee must be in same view
+ 
+        unt2$Type$i = Xunt2$Type$i                        #     6/11/86
+ 
+        if(isHELO !=$NO & unt2$Type$i == $Surface$Code ) #     5/1/90
+                iFuelHelo = $YES                        #       5/27/86
+        else    iFuelHelo = $NO                         #       5/27/86
+ 
+        UNT2$MISSION$I = XUNT2$MISSION$I                #       10/6/86
+        UNT2$GhostedUnit$I = xUNT2$GhostedUnit$I
+ 
+        if (litcmp(XUNT2$NAME$C, Tanker_SideNumber) == 0 |        # dew 18-dec-89
+            (litcmp(XUNT2$FORCENAME$C, Tanker_MissionName) == 0 &
+             Xunt2$Mission$I == $AirTanker$code) |
+            litcmp(XUNT2$EVENT$C, Tanker_CallSign ) == 0)
+          {
+           if (((UNT2$Mission$I != $AirTanker$Code) &
+                (UNT2$Mission$I != $STtanker$Code)) &
+                (UNT2$GhostedUnit$I == $yes))
+             {
+              call smovv (".  ", msg, jj)
+              call send_ (xUNT$view$i,0,jj,msg)
+              jj = 0
+              call smovhn (xUNT2$Name$C,$$MaxLit,msg,jj)
+              call smovv (" does not have a tanker mission.  ", msg, jj)
+              break
+             }
+ 
+           else if (UNT2$MISSION$I == $AIRTANKER$CODE |
+                    iFuelHelo      != $NO             |
+                    UNT2$MISSION$I == $STTANKER$CODE)
+             {                                    ## tpa 8/31/83
+              call save_station (UNT$Pointer)    # joa 12/97 (E1370)
+              call clear_maneuver_all (ionum, id, xUNT$View$I, UNT$Pointer)
+              call restore_station (UNT$Pointer)
+ 
+              if (UNT2$GhostedUnit$I == $yes)        # clk 4/15/93
+                {
+                 call ALSP_Send_Refuel_Request(UNT$Pointer,
+                                               UNT2$Pointer,
+                                               $supporting_units_request,
+                                               fuel_to_onload)
+                 jj = 0
+                 call smovhn (xUNT$Name$C,$$MaxLit,msg,jj)
+                 call smovv (" is requesting permission", msg, jj)
+                 call smovv (" to refuel from ", msg, jj)
+                 call smovhn (xUNT2$Name$C,$$MaxLit,msg,jj)
+                 call send_ (xUNT$View$I,0,jj,msg)
+ 
+                 return   # wait for reply before maneuvering the a/c
+                }
+              else
+                {
+                 call Vector_unit_for_refuel(UNT2$Pointer,    # tanker pointer
+                                             UNT$Pointer,     # requesting unit
+                                             Fuel_to_onload)  # amt to load
+ 
+                 return                              #exit the loop
+                } # end of else, tanker is not a ghosted unit
+             } # end if mission is airtanker or sttanker
+          } # end if this unit matches name and event name
+       } # end of loop throught unt2 table
+   } # end if unit is an a/c
+ 
+#$% send msg to view for display
+call send_ (xunt$view$i,0,jj,msg) # formerly msg1
+ 
+if (ord$pointer != 0)                           # Is this a multi-phase order?
+   {                                            #   YES
+    ord$phase$i = 0
+    PUTord$phase$i
+   }
+ 
+return
+end        # End  OREFUL
+
+ 
+Subroutine OFUEL (ionum,        # in: Order number
+                  UNT$Pointer,  # in: unit undergoing fuel op
+                  iword,        # in: number of words in ilex array
+                  ilex,         # in: order array
+                  id)           # in: unique order id
+#############################################################
+#$%
+#$% Purpose:   Processes FOR <addressee> UNREP ... and
+#$%                      FOR <addressee> FUEL (fuel from base).
+#$%            Handle inport and unrep ship fuel operations.
+#$%
+#$%            UNREP (fuel from supplying ship)
+#$%                                <refueler-name>
+#$%                                [ | ONLOAD SHIP (fuel) [ | <gallons> ]
+#$%                                      [ | USING (hoses) <number> ] ]
+#$%                                [ | ONLOAD AVIATION (fuel) [ | <gallons> ]
+#$%                                      [ | USING (hoses) <number> ] ]
+#$%
+#$%            FUEL (fuel from base)
+#$%                                <base-name>
+#$%                                [ | ONLOAD SHIP (fuel) [ | <gallons> ]
+#$%                                      [ | USING (hoses) <number> ] ]
+#$%                                [ | ONLOAD AVIATION (fuel) [ | <gallons> ]
+#$%                                      [ | USING (hoses) <number> ] ]
+#$%
+#$% Called By: exeord        <wgop.rat>
+#$%
+#$% Calls:     OFUEL0
+#$%            OFUEL1
+#$%
+#$% Tables:    UNT    ORD
+#$%
+#$% Date:      February 1996  (E1467)
+#$%
+#$% Author:    James Allen
+#$%
+#############################################################
+BBcommon
+ 
+integer     ionum
+integer     UNT$Pointer
+integer     iword
+literal     ilex[20]
+integer     id
+ 
+integer     ORD$Phase$I
+integer     ORD$Pointer
+ 
+# if phase 0
+#   set phase 1
+#   set unit status to proceeding to refuel queue station
+#   vector unit to refuel queue station
+# if phase 1
+#   if at refuel queue station
+#       if fuel transfer equipment successfully allocated
+#           set phase 2
+#           set unit status to proceeding to refuel station
+#           vector unit to refuel station
+# if phase 2
+#   if at refuel station
+#       set unit status to refueling
+#       set remaining fuel to transfer
+#   transfer fuel
+#   if fuel remaining to transfer = 0
+#      make order for deletion
+#      free fuel transfer equipment
+ 
+  call fndord (id, ORD$Pointer)
+ 
+  if (ORD$Pointer != 0)
+    {
+     ORD$Phase$I = XORD$Phase$I
+ 
+     if (ORD$Phase$I == 0)
+       {
+        # Phase 0 refueling: vector to queue station
+        call OFUEL0 (ionum, UNT$Pointer, iword, ilex, ORD$Pointer)
+       }
+ 
+     ORD$Phase$I = XORD$Phase$I
+ 
+     if (ORD$Phase$I == 1)
+       {
+        # Phase 1 refueling: allocate refuel equip
+        call OFUEL1 (ionum, UNT$Pointer, iword, ilex, ORD$Pointer)
+       }
+    }   # end of if order located
+ 
+return
+end
+ 
+
+ 
+Subroutine OFUEL0 (ionum,        # in: Order number
+                   UNT$Pointer,  # in: unit undergoing fuel op
+                   iword,        # in: number of words in ilex array
+                   ilex,         # in: order array
+                   ORD$Pointer)  # in: order table pointer
+#############################################################
+#$%
+#$% Purpose:   Handle the phase 0 processing of inport and
+#$%            unrep ship fuel operations - validate the order
+#$%            and vector unit to the refuel station.
+#$%
+#$%            UNREP (fuel from supplying ship)
+#$%                                <refueler-name>
+#$%                                [ | ONLOAD SHIP (fuel) [ | <gallons> ]
+#$%                                      [ | USING (hoses) <number> ] ]
+#$%                                [ | ONLOAD AVIATION (fuel) [ | <gallons> ]
+#$%                                      [ | USING (hoses) <number> ] ]
+#$%
+#$%            FUEL (fuel from base)
+#$%                                <base-name>
+#$%                                [ | ONLOAD SHIP (fuel) [ | <gallons> ]
+#$%                                      [ | USING (hoses) <number> ] ]
+#$%                                [ | ONLOAD AVIATION (fuel) [ | <gallons> ]
+#$%                                      [ | USING (hoses) <number> ] ]
+#$%
+#$% Called By: Ofuel
+#$%
+#$% Calls:     smov..        <lbsmov.rat>
+#$%            send          <wgxsend.rat>
+#$%            getrb_m       <lbmath_proxim.rat>
+#$%
+#$% Tables:    UNT    ORD     SHC
+#$%
+#$% Date:      February 1996  (E1467)
+#$%
+#$% Author:    James Allen
+#$%
+#$% Modified:  James Allen - 3/96 (E1564)
+#$%            Nested guiding caused positioning problems.
+#$%
+#$%            James Allen - 3/96 (E1467)
+#$%            Changed in wrong port message from
+#$%            "Supplier does not match port name" to
+#$%            "Currently at port xxxxx".
+#$%
+#$%            Carol Kropp - 5/96 (E1467)
+#$%            Changed the message for UNREP to "Supplier
+#$%            is not in the same view" when side matches.
+#$%            Also changed FUEL command to allow same side
+#$%            operations.
+#$%
+#$%            James Allen - 8/96 (E1635)
+#$%            Send error message instead of a transfer complete
+#$%            message when a ship cannot receive fuel because
+#$%            of lacking refuel equipment.
+#$%
+#$%            Susan Miller - 7/97 (E1635)
+#$%            Removed setting of guideindex until after all the
+#$%            checks have been made.
+#$%
+#$%            Susan Miller - 5/97 (E1811)
+#$%            Added checks to the requested supplier to verify
+#$%            it is:  1.  a ship for the UNREP command
+#$%                    2.  a shorebase for the FUEL command
+#$%
+#$%            James Allen - 12/97 (E1370)
+#$%            Updated the call to clear_maneuver_all with
+#$%            additional parameters supplied.
+#$%
+#############################################################
+BBcommon
+ 
+integer     ionum
+integer     UNT$Pointer
+integer     iword
+literal     ilex[20]
+integer     ORD$Pointer
+ 
+literal     cstrip8             # function used in extraction black board names
+integer     GuideLevel          # function to provide level of nested guiding
+ 
+real        UNT$GuideRange$F
+real        UNT$TNK$FuelRemaining$F
+real        UNT$RangeToNext$F
+integer     UNT$TNK$Index
+integer     UNT$Type$I
+integer     UNT$View$I
+integer     UNT2$Pointer
+real        UNT2$TNK$FuelRemaining$F
+integer     UNT2$TNK$Index
+integer     SHC$Pointer
+real        SHC$TNK$Capacity$F
+integer     SHC$TNK$Index
+integer     SHC2$Pointer
+real        SHC2$TNK$Capacity$F
+integer     SHC2$TNK$Index
+real        aviation_refuel_amount
+real        brg
+real        fuel_reserve
+integer     i
+integer     jj
+character   msg[ARB]
+integer     requested_ship_fuel_hoses
+integer     requested_aviation_fuel_hoses
+real        ship_refuel_amount
+literal     supplier
+integer     UNT$GuideIndx$I     # process nested
+integer     UNT3$Pointer        # and circular guiding
+integer     unit_side, supplier_side, litcmp
+integer     original_guide_index # SMM 5/97 (E1635)
+integer     UNT2$Type$I          # SMM 5/97 (E1811)
+ 
+# if phase 0
+#   validate order
+#   set unit status to proceeding to refuel queue station
+#   vector unit to refuel queue station
+#   set phase 1
+ 
+  supplier = ilex[2]
+ 
+  jj = 0
+  call smovhn (xUNT$name$C, $$MaxLit, msg, jj)
+  Call smovv  (" cannot ", msg, jj)
+  if (ilex[1] == $lex$UNREP$)
+    call smovv ( "UNREP", msg, jj)
+  else if (ilex[1] == $lex$FUEL$)
+    call smovv ( "FUEL", msg, jj)
+  Call smovv  (" from ", msg, jj)
+  call smovhn (supplier, $$MaxLit, msg, jj)
+  Call smovv  (". ", msg ,jj)
+ 
+  UNT$Type$I = XUNT$Type$I
+  if (xUNT$Type$I != $Surface$Code & xUNT$Type$I != $SurfaceWithAC$Code)
+    {
+     call smovv ( "Consumer can not be refueled with this order.", msg, jj)
+     call send_  (xUNT$view$I, 0, jj, msg)
+     return
+    }
+ 
+  UNT$View$I = xUNT$View$I
+  call whside (UNT$View$I, unit_side)
+  if (ilex[1] == $lex$UNREP$)   # clk 5/96 (E1467)
+    {
+     for (UNT2$Pointer$First; UNT2$Pointer$OK; UNT2$Pointer$Next)
+       {
+        if (litcmp(xUNT2$Name$C, supplier) == 0)
+          {
+           if (xUNT2$View$I == UNT$View$I)
+               break
+           else
+             {
+              UNT2$Type$I = xUNT2$Type$I
+              call whside (xUNT2$View$I, supplier_side)
+              if ((unit_side == supplier_side) &
+                  (UNT2$Type$I != $Shorebase$Code)) # SMM 5/97 (E1811)
+                {
+                 call smovv ( "Supplier is not in the same view.", msg, jj)
+                 call send_  (UNT$View$I, 0, jj, msg)
+                 return
+                }   # end of if on the same side
+             }   # end of if not in the same view
+          }   # end of if the name matches
+       }   # end of loop looking for supplier
+ 
+     if (UNT2$Pointer$ok)          # make sure supplier is a ship
+       {                           # in order to UNREP # SMM 5/97 (E1811)
+        UNT2$Type$I = xUNT2$Type$I
+        if (UNT2$Type$I != $Surface$Code & UNT2$Type$I != $SurfaceWithAC$Code)
+           {
+            call smovv ( "Supplier is not a ship. Use the ", msg, jj)
+            call smovv ( "FUEL command if supplier is a shorebase.  ", msg, jj)
+            call send_  (UNT$View$I, 0, jj, msg)
+            return
+           } # end if supplier not a ship
+       }   # end of if the supplier was found
+    }   # end of if an UNREP command - need to be same view
+  else if (ilex[1] == $lex$FUEL$)     # clk 5/96 (E1467)
+    {
+     for (UNT2$Pointer$First; UNT2$Pointer$OK; UNT2$Pointer$Next)
+       {
+        if (litcmp(xUNT2$Name$C, supplier) == 0)
+          {
+           call whside (xUNT2$View$I, supplier_side)
+           if (unit_side == supplier_side)
+             break
+          }   # end of if the name matches
+       }   # end of loop looking for supplier
+ 
+     if (UNT2$Pointer$ok)                # make sure supplier is a shorebase
+       {                                 # in order to FUEL # SMM 5/97 (E1811)
+        UNT2$Type$I = xUNT2$Type$I
+        if (UNT2$Type$I != $Shorebase$Code)
+           {
+            call smovv ( "Supplier is not a shorebase. Use the ", msg, jj)
+            call smovv ( "UNREP command if supplier is a ship.  ", msg, jj)
+            call send_  (UNT$View$I, 0, jj, msg)
+            return
+           } # end if supplier not a base
+       }   # end of if the supplier was found
+    }   # end of if a FUEL command - can be same side
+ 
+  if (!UNT2$Pointer$ok)
+    {
+     call smovv ("Supplier not found.", msg, jj)
+     call send_  (UNT$View$I, 0, jj, msg)
+     return
+    }
+ 
+  UNT$GuideIndx$I = xUNT$GuideIndx$I             # joa 3/96 (E1564)
+  original_guide_index = UNT$GuideIndx$I         # SMM 5/97 (E1635)
+ 
+  # temporarily change the guide index to process circular stationing check
+  putUNT$GuideIndx$I  (UNT2$Pointer$Index)
+  if (GuideLevel (UNT$Pointer) == $CircularGuideDefinition)
+    {
+     call smovv  (" Will create circular stationing.", msg, jj)
+     call send_   (xUNT$View$I, 0, jj, msg)
+     putUNT$GuideIndx$I (original_guide_index) # SMM 5/97 (E1635)
+     return
+    }
+ 
+  putUNT$GuideIndx$I (original_guide_index) # SMM 5/97 (E1635)
+  if (xUNT2$GhostedUnit$I == $yes)
+    {
+     call smovv ("Supplier is a GHOST.", msg, jj)
+     call send_  (xUNT$View$I, 0, jj, msg)
+     return
+    }
+ 
+  # if in port, supplier must equal guide index
+  if (XUNT$status$I == $InPort$Code)
+    {
+     if (ilex[1] == $lex$FUEL$)
+       {
+        if (original_guide_index != UNT2$Pointer$Index)  # SMM 5/97 (E1635)
+          {
+           UNT3$Pointer$To  (original_guide_index)
+           call smovv  ("Currently at port ", msg, jj)
+           call smovhn (xUNT3$Name$C, $$MaxLit, msg, jj)
+           call send_   (xUNT$View$I, 0, jj, msg)
+           return
+          }
+       }
+    }
+ 
+  # if supplier is not a shore base, check for hoses, etc. (rather than for
+  if (xUNT2$Type$I != $Shorebase$Code)     # all suppliers) SMM 5/97 (E1635)
+    {
+     # Supplier must have fuel transfer equipment
+     SHC2$Pointer = XUNT2$SHCpntr$I
+     if (xSHC2$FuelHoses$I == 0)
+       {
+        call smovv ("Supplier does not have fuel transfer equipment.", msg, jj)
+        call send_  (xUNT$View$I, 0, jj, msg)
+        return
+       }
+ 
+     # Is Supplier is being supplied
+     if (xUNT2$Status$I == $ShipRefuel$Code)
+       {
+        call smovv ("Supplier is currently receiving fuel.", msg, jj)
+        call send_  (xUNT$View$I, 0, jj, msg)
+        return
+       }
+    } # end if (xUNT2$Type$I != $Shorebase$Code)
+ 
+  # Supplier must have enough transfer fuel
+  SHC$Pointer = xUNT$SHCpntr$I
+  UNT$TNK$Index = ShipFuelTank$Code
+  UNT$Tnk$FuelRemaining$F = xUNT$Tnk$FuelRemaining$F
+  SHC$TNK$Index = ShipFuelTank$Code
+ 
+  # Capacity taking into account damage
+  SHC$TNK$Capacity$F = xSHC$TNK$Capacity$F * (1. - xUNT$ShipFuelDamage$F)
+  ship_refuel_amount = max (0.0, SHC$TNK$Capacity$F - UNT$TNK$FuelRemaining$F)
+ 
+  requested_ship_fuel_hoses = xSHC$TNK$FillTubes$I
+ 
+  # Ships in port can refuel even if no refill tubes #E1635 JOA 8/24/96
+  if (ilex[1] == $lex$FUEL$ & requested_ship_fuel_hoses == 0)
+    requested_ship_fuel_hoses = 1
+ 
+  UNT$TNK$Index = AviationFuelTank$Code
+  UNT$Tnk$FuelRemaining$F = xUNT$Tnk$FuelRemaining$F
+  SHC$TNK$Index = AviationFuelTank$Code
+  SHC$TNK$Capacity$F = xSHC$TNK$Capacity$F * (1. - xUNT$AviationFuelDamage$F)
+  aviation_refuel_amount = max (0.0, SHC$TNK$Capacity$F - UNT$TNK$FuelRemaining$F)
+  requested_aviation_fuel_hoses = xSHC$TNK$FillTubes$I
+ 
+  # Ships in port can refuel even if no refill tubes #E1635 JOA 8/24/96
+  if (ilex[1] == $lex$FUEL$ & requested_aviation_fuel_hoses == 0)
+    requested_aviation_fuel_hoses = 1
+ 
+  # FUEL (fuel from base)
+  #                                <base-name>
+  #                                [ | ONLOAD SHIP (fuel) [ | <gallons> ]
+  #                                      [ | USING (hoses) <number> ] ]
+  #                                [ | ONLOAD AVIATION (fuel) [ | <gallons> ]
+  #                                      [ | USING (hoses) <number> ] ]
+ 
+  for (i = 3; i <= iword; )     # Loop thru order
+    {
+     if (ilex[i] == $lex$ONLOAD$)
+       {
+        if (ilex[i+1] == $lex$SHIP$)
+          {
+           i = i + 2
+           if (i < iword)      #E2357 JOA UFL03
+             {
+               if (ilex[i] != $lex$ONLOAD$ & ilex[i] != $lex$USING$)
+                 {
+                  ship_refuel_amount = ilex[i]          # Gallons
+                  i = i + 1
+                 }
+               if (ilex[i] == $lex$USING$)
+                 {
+                  requested_ship_fuel_hoses = min(int(ilex[i+1]), requested_ship_fuel_hoses)
+                  i = i + 2
+                 }
+             }
+          }   # end of if ship fuel specified
+        else if (ilex[i+1] == $lex$AVIATION$)
+          {
+           i = i + 2
+           if (i < iword)      #E2357 JOA UFL03
+             {
+               if (ilex[i] != $lex$ONLOAD$ & ilex[i] != $lex$USING$)
+                 {
+                  aviation_refuel_amount = ilex[i]          # gallons
+                  i = i + 1
+                 }
+               if (ilex[i] == $lex$USING$)
+                 {
+                  requested_aviation_fuel_hoses = min(int(ilex[i+1]),requested_aviation_fuel_hoses)
+                  i = i + 2
+                 }
+             }
+          }   # end of if aviation fuel was specified
+        else  # Non recognized order
+          {
+            i = i + 1
+          }
+       }   # end of if a specified amount to on load was specified
+     else   # Non recognized order
+       {
+         i = i + 1
+       }
+    }   # end of loop through command arguments
+ 
+  UNT2$TNK$Index = ShipFuelTank$Code
+  SHC2$TNK$Index = ShipFuelTank$Code
+  SHC2$TNK$Capacity$F = xSHC2$TNK$Capacity$F
+  fuel_reserve = SHC2$TNK$Capacity$F * xSHC2$PctShipFuelReserve$F
+  UNT2$Tnk$FuelRemaining$F = xUNT2$Tnk$FuelRemaining$F
+ 
+  if (UNT2$TNK$FuelRemaining$F <= fuel_reserve)
+    {
+     call smovv ("Supplier has no available fuel.", msg, jj)
+     call send_  (xUNT$View$I, 0, jj, msg)
+     return
+    }
+ 
+  if (aviation_refuel_amount == 0.0 & ship_refuel_amount == 0.0)
+    {
+     call smovv ("No specified amount of fuel to transfer.", msg, jj)
+     call send_  (xUNT$View$I, 0, jj, msg)
+     return
+    }
+ 
+  if (aviation_refuel_amount == 0.0)
+    requested_aviation_fuel_hoses = 0
+ 
+  if (ship_refuel_amount == 0.0)
+    requested_ship_fuel_hoses = 0
+ 
+  putORD$Phase$I (1)              # Order is accepted
+ 
+  putUNT$ShipHoseRequest$I      (requested_ship_fuel_hoses)
+  putUNT$AviationHoseRequest$I  (requested_aviation_fuel_hoses)
+ 
+  putUNT$ShipRefuelAmount$F     (ship_refuel_amount)
+  putUNT$AviationRefuelAmount$F (aviation_refuel_amount)
+ 
+  if (ilex[1] == $lex$FUEL$)      # Already at destination
+    {
+     if (xUNT$status$I == $InPort$Code)
+        return
+    }
+ 
+  call clear_maneuver_all (xORD$Code$I, xORD$Id$I, xORD$View$I, UNT$Pointer)   # joa 4/95 (E1246/1370)
+ 
+  if (ilex[1] == $lex$UNREP$)
+     UNT$GuideRange$F = 1.0
+  else if (ilex[1] == $lex$FUEL$)
+    {
+     UNT$GuideRange$F = 0.0
+     putUNT$Status$I  ($ReturningToBase$Code)
+    }
+  putUNT$GuideRange$F
+ 
+  putUNT$GuideIndx$I     (UNT2$Pointer$Index)
+  putUNT$GuideBearing$F  ($PI)
+  putUNT$GuideTrue$I     ($NO)
+ 
+  call GETRB_M (UNT$Pointer, UNT2$Pointer,
+                UNT$RangeToNext$F, BRG)
+  putUNT$RangeToNext$F        # (Probably NOT zero)
+ 
+  jj = ionum                       # Avoid compilation message
+ 
+return
+end        # End  OFUEL0
+
+ 
+Subroutine OFUEL1 (ionum,        # in: Order number
+                   UNT$Pointer,  # in: unit undergoing fuel op
+                   iword,        # in: number of words in ilex array
+                   ilex,         # in: order array
+                   ORD$Pointer)  # in: order table pointer
+#############################################################
+#$%
+#$% Purpose:   Handle the phase 1 processing of inport and
+#$%            unrep ship fuel operations.
+#$%            if phase 1
+#$%              if at refuel queue station
+#$%                 if fuel transfer equipment successfully allocated
+#$%                   set phase 2
+#$%                   set unit status to proceeding to refuel station
+#$%                   vector unit to refuel station
+#$%
+#$% Called By: Ofuel
+#$%
+#$% Calls:     GETRB_M     <lbmath_proxim.rat>
+#$%
+#$% Tables:    UNT    ORD     SHC
+#$%
+#$% Date:      February 1996  (E1467)
+#$%
+#$% Author:    James Allen
+#$%
+#$% Modified:  James Allen - 3/96 (E1467)
+#$%            Provide message when approaching refueler.
+#$%            Replaced reference to floating point cruise
+#$%            speed to integer value from SHC table.  Have
+#$%            units guide relative tothe refueler, not true.
+#$%            When there are no refueling hoses available
+#$%            send a message that the unit must queue.
+#$%
+#############################################################
+BBcommon
+ 
+integer     ionum
+integer     UNT$Pointer
+integer     iword
+literal     ilex[20]
+integer     ORD$Pointer
+ 
+literal     cstrip8             # function used in extraction black board names
+ 
+integer     SHC$Pointer
+integer     UNT$AviationHoseRequest$I
+real        unt$GuideBearing$f
+real        UNT$OrderedSpeed$F
+real        UNT$RangeToNext$F
+integer     UNT$ShipHoseRequest$I
+integer     UNT2$HosesAvailable$I
+integer     UNT2$Pointer
+integer     UNT2$PortrefuelCoUNT$I
+integer     UNT2$StarboardrefuelCoUNT$I
+real        brg
+integer     hoses_before_allocation
+integer     jj
+integer     lacking_hoses
+character   msg[ARB]
+integer     hoses_allocated
+ 
+  if (xUNT$RangeToNext$F > 0.0)           # Hasn't arrived at queue
+    return
+ 
+  UNT2$Pointer$To xUNT$GuideIndx$I        # Supplier
+ 
+  hoses_allocated = $yes
+ 
+  # Check for available refuel side
+  if (ilex[1] == $lex$UNREP$)
+    {
+     UNT2$PortRefuelCount$I = xUNT2$PortRefuelCount$I
+     UNT2$StarboardRefuelCount$I = xUNT2$StarboardRefuelCount$I
+ 
+     if (UNT2$PortRefuelCount$I == 0)
+       {
+        unt$GuideBearing$f = $Port$Station
+        UNT2$PortRefuelCount$I = UNT2$PortRefuelCount$I + 1
+       }
+     else if (UNT2$StarboardRefuelCount$I == 0)
+       {
+        unt$GuideBearing$f = $Starboard$Station
+        UNT2$StarboardRefuelCount$I = UNT2$StarboardRefuelCount$I + 1
+       }
+     else
+        hoses_allocated = $no
+    }   # end of if an unrep command
+ 
+  # See if requested hoses are available
+  UNT2$HosesAvailable$I = xUNT2$HosesAvailable$I
+  if (UNT2$HosesAvailable$I == 0)
+    hoses_allocated = $no
+ 
+  if (hoses_allocated == $yes)
+    {
+     UNT$ShipHoseRequest$I = xUNT$ShipHoseRequest$I
+     UNT$AviationHoseRequest$I = xUNT$AviationHoseRequest$I
+     if (UNT2$HosesAvailable$I < (UNT$ShipHoseRequest$I +
+                                  UNT$AviationHoseRequest$I) )
+       {
+        if (UNT$ShipHoseRequest$I > 0 & UNT$AviationHoseRequest$I > 0)
+          {               # Reduce requested hoses to number available
+           lacking_hoses = (UNT$ShipHoseRequest$I + UNT$AviationHoseRequest$I) -
+                            UNT2$HosesAvailable$I
+           UNT$ShipHoseRequest$I = xUNT$ShipHoseRequest$I - lacking_hoses/2
+           UNT$ShipHoseRequest$I = max (1, UNT$ShipHoseRequest$I)
+           putUNT$ShipHoseRequest$I
+ 
+           UNT$AviationHoseRequest$I = UNT2$HosesAvailable$I -
+                                       UNT$ShipHoseRequest$I
+           putUNT$AviationHoseRequest$I
+          }
+        else if (UNT$ShipHoseRequest$I > 0)
+          {
+           putUNT$ShipHoseRequest$I (UNT2$HosesAvailable$I)
+          }
+        else if (xUNT$AviationHoseRequest$I > 0)
+          {
+           putUNT$AviationHoseRequest$I (UNT2$HosesAvailable$I)
+          }
+        else
+           hoses_allocated = $no
+       }   # end of if not enough hoses available
+    }   # end of if there are hoses to allocate for the refueling
+ 
+  if (hoses_allocated == $no)                 # if there are no hoses to allocate
+    {
+     if (xUNT$AtStationThisCycle$I == $yes)   # only send the message once
+       {
+        jj = 0
+        call smovhn (xUNT$Name$C, $$Maxlit, msg, jj)
+        call smovv  ( " cannot ", msg, jj)
+        if (ilex[1] == $lex$FUEL$)
+           call smovv ("FUEL from ", msg, jj)
+        else
+           call smovv ("UNREP from ", msg, jj)
+        call smovhn (xUNT2$Name$C, $$Maxlit, msg, jj)
+        call smovv  ( " until other ships are complete. Waiting in queue.", msg, jj)
+        call send_   (xUNT$View$I, 0, jj, msg)
+       }  # end of if the unit made it to station this cycle
+     return
+    }   # end of if there are no hoses to allocate
+ 
+  # Place consumer at available refueling station
+  putORD$Phase$I (0)      # Remove order
+ 
+  # Allocate hoses
+  Hoses_before_allocation = UNT2$HosesAvailable$I
+  UNT2$HosesAvailable$I = UNT2$HosesAvailable$I - (xUNT$ShipHoseRequest$I +
+                                                   xUNT$AviationHoseRequest$I)
+  putUNT2$HosesAvailable$I
+  putUNT$HosesAllocatedFlag$I ($YES)
+ 
+  # Zero refuel amount if no hoses allocated
+  if (xUNT$ShipHoseRequest$I == 0)
+    putUNT$ShipRefuelAmount$F (0.0)
+  if (xUNT$AviationHoseRequest$I == 0)
+    putUNT$AviationRefuelAmount$F (0.0)
+ 
+  putUNT$Status$I ($ShipReFuel$Code)
+ 
+  if (ilex[1] == $lex$FUEL$)      # Already at destination
+    {
+     return
+    }
+ 
+  jj = 0
+  call smovhn (xUNT$Name$C, $$Maxlit, msg, jj)
+  call smovv  ( " is making its approach on the ", msg, jj)
+  call smovhn (xUNT2$Name$C, $$Maxlit, msg, jj)
+  call send_   (XUNT$View$I, 0, jj,msg)
+ 
+  # Allocate fueling station
+  putUNT2$PortRefuelCount$I
+  putUNT2$StarboardRefuelCount$I
+  putUNT$GuideBearing$f
+ 
+  putUNT$Status$I          ($Proceeding$Code)  # Can't do clear because will
+                                               # Free hoses
+ 
+  putUNT$GuideIndx$I       (UNT2$Pointer$Index)
+ 
+  putUNT$GuideRange$F      (0.1)
+  putUNT$GuideTrue$I       ($no)
+ 
+  call GETRB_M (UNT$Pointer, UNT2$Pointer,
+                UNT$RangeToNext$F, BRG)
+  putUNT$RangeToNext$F        # (Probably NOT zero)
+ 
+  SHC$Pointer = xUNT$SHCpntr$I
+  UNT$OrderedSpeed$F = FLOAT (min(xSHC$CruiseSpeed$I, xUNT$Speed$I))
+ 
+  putUNT$OrderedSpeed$F                       # put unit's new speed
+ 
+  putUNT$Status$I ($ShipReFuel$Code)
+ 
+  jj = ionum                      # Avoid compilation message
+ 
+return
+end
+ 
+
+ 
+real function Ship_Fuel_Burn_Rate (_
+                   UNT$Pointer,   # in: unit table pointer
+                   course,        # in: unit course - rad
+                   speed)         # in: unit speed - knots
+#############################################################
+#$%
+#$% Purpose:   Compute the amount of fuel the unit will burn
+#$%            (gallons per minute).
+#$%
+#$% Called By: predict_time
+#$%            predict_fuel
+#$%
+#$% Calls:     fndwet    <lbcommn.rat>
+#$%
+#$% Tables:    UNT    SHC     WET     WVF     HWF
+#$%
+#$% Date:      February 1996  (E1467)
+#$%
+#$% Author:    James Allen
+#$%
+#$% Modified:  Carol Kropp -4/96 (E1467)
+#$%            When a unit is in port and has reached
+#$%            speed of zero, no fuel should be expended.
+#$%
+#$% Modified:  Jim Allen - 8/98 (E1964)
+#$%            Guarantee HWF$HDG$Index within limits
+#$%
+#############################################################
+BBcommon
+ 
+integer UNT$Pointer
+real    course
+real    speed
+ 
+integer SHC$Pointer
+integer SHC$BRN$Index
+real    SHC$BRN$rate$F
+integer WET$Pointer
+integer WVF$Pointer
+real    WVF$WaveFuelFactor$F
+integer HWF$Pointer
+integer HWF$HDG$Index
+real    HWF$HDG$FuelFactor$F
+ 
+integer base_index
+real    burn_rate
+real    burn_rate_hi
+real    burn_rate_lo
+real    crsdif
+integer indx_wvf
+real    ratio
+ 
+  # Get burn rate
+  SHC$Pointer = xUNT$SHCpntr$I
+  SHC$BRN$Index = NINT(speed/$FuelSpeedInterval + 1.0)
+  SHC$BRN$Index = max( 1, SHC$BRN$Index )
+  SHC$BRN$Index = min( SHC$BRN$slots, SHC$BRN$Index )
+  base_index = SHC$BRN$Index
+ 
+  SHC$BRN$Rate$F = xSHC$BRN$Rate$F
+ 
+  if (SHC$BRN$Index == SHC$BRN$Slots)     # Need to extrapolate
+    {
+     burn_rate_lo = SHC$BRN$Rate$F
+     SHC$BRN$Index = SHC$BRN$Slots - 1
+     burn_rate_hi = xSHC$BRN$Rate$F
+    }
+  else
+    {
+     burn_rate_lo = SHC$BRN$Rate$F
+     SHC$BRN$Index = SHC$BRN$Index + 1
+     burn_rate_hi = xSHC$BRN$Rate$F
+    }
+ 
+  ratio = ABS (burn_rate_hi - burn_rate_lo) / $FuelSpeedInterval
+ 
+  # compute gallons per hour
+  if (xUNT$Status$I == $InPort$Code &    # if in port and stopped
+      speed < 0.0001)                    # expend no fuel
+    {
+     burn_rate = 0.0
+    }   # end of if no fuel to be expended
+  else
+    {
+     burn_rate = ratio * (speed - (base_index - 1) * $FuelSpeedInterval) + burn_rate_lo
+ 
+     # Get Wave Height Factor
+     call fndwet (xUNT$TrueLatitude$F, xUNT$TrueLongitude$F, WET$Pointer)
+ 
+     # Constant 6 is convert wave height ranging from 0 to 50 to index from 1 to 10
+     indx_wvf = xWET$WaveHeight$I / 6 + 1
+     WVF$Pointer$To  (indx_wvf)
+     WVF$WaveFuelFactor$F = xWVF$WaveFuelFactor$F
+ 
+     # Get Heading Factor
+     if (xWET$WaveHeight$I < 4)
+       HWF$Pointer$To 1
+     else
+       HWF$Pointer$To 2
+ 
+     crsdif = xWET$WaveDirection$F - course
+     $angpi(crsdif)
+     crsdif = abs(crsdif) * Deg$Per$Rad
+     HWF$HDG$Index = int(crsdif)/45 + 1
+     # 0-45 index 1; 45-135 index 2; 135-180 index 3
+     HWF$HDG$Index = max( 1, HWF$HDG$Index )
+     HWF$HDG$Index = min( HWF$HDG$Slots, HWF$HDG$Index )    #joa 8/98 (E1964)
+     HWF$HDG$FuelFactor$F = xHWF$HDG$FuelFactor$F
+ 
+     # Adjust burn rate by using factors - gallons per minute
+     burn_rate = (burn_rate * $Hours$Per$Minute) * WVF$WaveFuelFactor$F *
+                                                   HWF$HDG$FuelFactor$F
+    }   # end of computation of burn rate
+ 
+return (burn_rate)
+end
+ 
+
+ 
+Subroutine Vector_unit_for_refuel(UNT2$Pointer,
+                                  UNT$Pointer,
+                                  Fuel_to_offload)
+########################################################
+#$%
+#$% Purpose:   Vector_unit_for_refuel sets the requesting
+#$%            a/c on a course toward the tanker.
+#$%
+#$% Called By: OReful       ALSP_Receive_Refuel_Interaction
+#$%
+#$% Calls:     GETRB_M
+#$%
+#$% Tables:    UNT  AML
+#$%
+#$% Date:      Oct. 1995
+#$%
+#$% Author:    Susan Miller - code removed from OReful
+#$%
+#$% Moved:     Carol Kropp - 2/96
+#$%            Moved from wgopord.rat to be with all
+#$%            other refueling routines.
+#$%
+########################################################
+BBcommon
+ 
+integer UNT2$Pointer, UNT$Pointer, Fuel_to_offload
+ 
+ 
+integer UNT$AttackIndx$I, UNT$RefuelAmount$I, AmlIndx
+real    UNT$AttackRange$F
+integer UNT$AssignedTarget$I
+integer AML$Pointer
+real    UNT$RangeToNext$F
+real    brg
+ 
+  # set tanker as guide
+  UNT$AttackIndx$I = UNT2$Pointer$Index
+  putUNT$AttackIndx$I
+ 
+  UNT$AttackRange$F = 0.0     # nuzzle up
+  putUNT$AttackRange$F
+ 
+  UNT$RefuelAmount$I = Fuel_to_Offload
+  putUNT$RefuelAmount$I
+ 
+  AmlIndx = xUNT$AmlIndx$I
+  AML$Pointer$To (AMLIndx)
+  if (xAML$OwnerIndx$I == xUNT$GuideIndx$I)
+    {
+     putUNT$GuideIndx$I ($NO)
+# never got put, so commented out
+#     UNT$OrderedLatitude$F = $PI  # cancel lat/long
+    }
+ 
+  call GETRB_M(_   # (approximation of dist to go)
+               UNT$Pointer,            #pass flight pointer
+               UNT2$Pointer,           #pass tnkr pointer
+               UNT$RangeToNext$F,      #rec. rng to tanker
+               BRG)                    # (brg)
+  putUNT$RangeToNext$F    # (Probably NOT zero)
+ 
+  if (xUNT$Status$I == $Bingo$Code)
+    putUNT$MarshallStatus$I ($inflight$code)
+  putUNT$Status$I ($ACREFUEL$CODE)   # status REFUEL
+ 
+  UNT$AssignedTarget$I = $NO         # remove target assignment
+  putUNT$AssignedTarget$I
+ 
+  putUNT$AltAboveGround$I (0)         # Clear relative altitude - joa 11/95 (E1422)
+ 
+return
+end # Vector_unit_for_refuel

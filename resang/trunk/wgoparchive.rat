@@ -1,0 +1,2111 @@
+# File:   WGOPARCHIVE.RAT
+# Date:   21-April-1995
+ 
+include "ascii.inc"
+include "bbcode.inc"
+include "bbacc.inc"
+include "bbamh.inc"
+include "bbaml.inc"
+include "bbcmc.inc"
+include "bbctl.inc"
+include "bbdac.inc"
+include "bbdam.inc"
+include "bbdss.inc"             # smm 12/97 (E1685)
+include "bbnam.inc"
+include "bbrvu.inc"             # smm 12/97 (E1685)
+include "bbrmt.inc"
+include "bbshc.inc"
+include "bbunt.inc"
+include "orders.inc"
+ 
+undefine write
+ 
+define (BBImplicit, Implicit None)
+
+ 
+subroutine OArchive (args)
+##############################################################################
+#$%
+#$% Purpose:   OArchive processes the ARCHIVE series of orders.
+#$%
+#$% Calls:     Archive_DAM_Table
+#$%
+#$% Tables:    None
+#$%
+#$% Date:      April 1995
+#$%
+#$% Author:    Carol L. Kropp
+#$%
+#$% Modified:  Susan Miller - 12/97 (E1685)
+#$%            Added processing of the new ARCHIVE BDA command.
+#$%
+#$%            Susan Miller - 7/99 (E2056)
+#$%            Added processing of the new ARCHIVE HISTORY command.
+#$%            Removed unused parameter nargs from call to oarchive.
+#$%
+#$%            Jim Allen - 9/01 (E2230)
+#$%            Removed archive history order processing. Can cause
+#$%            duplicate ord$id$i
+##############################################################################
+ 
+literal  args[20]
+ 
+  if (args[2] == $lex$Damage$)
+    call Archive_DAM_Table
+  else if (args[2] == $lex$BDA$)    # smm 12/97 (E1685)
+    call Archive_BDA_DSS_Table
+ 
+return
+end    # end fo OArchive
+
+ 
+define (max_line_len, 132)
+define (line_form, '(a132)')
+define (file_unit, 10)
+ 
+define (dam_view_pos,   2)
+define (dam_time_pos,  13)
+define (dam_name_pos,  25)
+define (dam_speed_pos, 38)
+define (dam_ac_pos,    48)
+define (dam_boat_pos,  56)
+define (dam_weap_pos,  64)
+define (dam_fuel_pos,  74)
+define (dam_eq_pos,    81)
+define (dam_sam_pos,   94)
+define (dam_dev_pos,   30)
+define (dam_dev2_pos,  43)
+ 
+# smm 12/97 (E1685) - BDA arcive layout (from the DSS table)
+define (dss_view_pos,       2)
+define (dss_time_pos,      12)
+define (trk_num_pos,       21)
+define (trk_name_pos,      30) # WAS 28 SMM 10/99 E2141
+define (class_pos,         40) # WAS 35 SMM 10/99 E2141
+define (tru_class_pos,     50) # WAS 50 SMM 10/99 E2141
+define (dss_lat_pos,       60) # WAS 48 SMM 10/99 E2141
+define (dss_lon_pos,       68) # WAS 55 SMM 10/99 E2141
+define (dss_atckr_pos,     78) # WAS 64 SMM 10/99 E2141
+define (dss_weap_pos,      88) # WAS 71 SMM 10/99 E2141
+define (dss_nbr_fired_pos, 98) # WAS 77 SMM 10/99 E2141
+define (dss_result_pos,   108) # WAS 87 SMM 10/99 E2141
+ 
+ 
+#          1         2         3         4         5         6         7         8         9         0
+# 1234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890
+#                                      Max                                                     SAM
+#  View       Game Time   Platform     Speed     # A/C   Boats   Weapons   Fuel   Equipment    Sites
+#  --------   ---------   --------     -----     -----   -----   -------   ----   ---------    -----
+#  Neutral    010001Z     TEST1            0         0       0      no      yes       no         no
+#
+
+ 
+subroutine Archive_DAM_Table
+##############################################################################
+#$%
+#$% Purpose:   Archive_DAM_Table will map the global section, store the
+#$%            DAM table information to the file archive.dam and then
+#$%            clear the table.
+#$%
+#$% Called by: OArchive
+#$%
+#$% Calls:     echo..
+#$%            send
+#$%            open
+#$%            DAM_Archive_Title
+#$%            DAM_Archive_Info
+#$%            close
+#$%
+#$% Tables:    DAM
+#$%
+#$% Date:      April 1995
+#$%
+#$% Author:    Carol L. Kropp
+#$%
+#$% Modified:  Susan Miller - 12/97 (E1685)
+#$%            Added call to Archive_BDA_DSS_Table to clear DSS table
+#$%            when the damage table is being archived.
+#$%
+##############################################################################
+BBcommon
+ 
+integer   DAM$Pointer
+ 
+character   msg[80]
+integer   msg_len
+ 
+  open (unit            = file_unit,
+        file            = 'archive.dam',
+        status          = 'unknown',
+        form            = 'formatted')
+ 
+  msg_len = 0
+  call smovv ("Writing damage table information to archive.dam.",
+              msg, msg_len)
+  call send_ ($Neutral$View, 0 , msg_len, msg)
+  call echoh (msg, msg_len)
+  call echor
+ 
+  call DAM_Archive_Title ()
+ 
+  for (dam$pointer$first; dam$pointer$ok; dam$pointer$next)
+    {
+     call DAM_Archive_Info (DAM$Pointer)
+    }  # end of loop through the DAM table
+ 
+  close (file_unit)
+ 
+  msg_len = 0
+  call smovv ("Damage table is now archived.", msg, msg_len)
+  call send_ ($Neutral$View, 0 , msg_len, msg)
+  call echoh (msg, msg_len)
+  call echor
+ 
+  call Archive_BDA_DSS_Table     # SMM 212/97 (E1685)
+ 
+return
+end
+
+ 
+subroutine DAM_Archive_Title
+##############################################################################
+#$%
+#$% Purpose:   DAM_Archive_Title write the title information to the
+#$%            file.
+#$%
+#$% Calls:     smov..
+#$%            write
+#$%
+#$% Tables:    None
+#$%
+#$% Date:      April 1995
+#$%
+#$% Author:    Carol L. Kropp
+#$%
+##############################################################################
+BBCommon
+ 
+integer   Game_DTG    # integer function
+ 
+integer     line_len, i
+vaxcharacter*max_line_len  vline
+character   line[max_line_len]
+Equivalence (vline, line)
+ 
+  for (i = 1; i <= max_line_len; i = i + 1)
+     line[i] = $SPACE
+ 
+  line_len = 38
+  call smovv  ("Damage Table Archive - ", line, line_len)
+  call smoviz (Game_DTG (Game$Time), 6, line, line_len)
+  call smovv  ("Z", line, line_len)
+  write (file_unit, line_form) vline
+  write (file_unit, line_form) ' '
+ 
+  for (i = 1; i <= max_line_len; i = i + 1)
+     line[i] = $SPACE
+  line_len = dam_speed_pos
+  call smovv ("Max", line, line_len)
+  line_len = dam_sam_pos
+  call smovv ("SAM", line, line_len)
+  write (file_unit, line_form) vline
+ 
+  for (i = 1; i <= max_line_len; i = i + 1)
+     line[i] = $SPACE
+  line_len = dam_view_pos
+  call smovv ("View", line, line_len)
+  line_len = dam_time_pos
+  call smovv ("Game Time", line, line_len)
+  line_len = dam_name_pos
+  call smovv ("Platform", line, line_len)
+  line_len = dam_speed_pos
+  call smovv ("Speed", line, line_len)
+  line_len = dam_ac_pos
+  call smovv ("# A/C", line, line_len)
+  line_len = dam_boat_pos
+  call smovv ("Boats", line, line_len)
+  line_len = dam_weap_pos
+  call smovv ("Weapons", line, line_len)
+  line_len = dam_fuel_pos
+  call smovv ("Fuel", line, line_len)
+  line_len = 81
+  call smovv ("Equipment", line, line_len)
+  line_len = 94
+  call smovv ("Sites", line, line_len)
+  write (file_unit, line_form) vline
+ 
+  for (i = 1; i <= max_line_len; i = i + 1)
+     line[i] = $SPACE
+  line_len = dam_view_pos
+  call smovv ("--------", line, line_len)
+  line_len = dam_time_pos
+  call smovv ("---------", line, line_len)
+  line_len = dam_name_pos
+  call smovv ("--------", line, line_len)
+  line_len = dam_speed_pos
+  call smovv ("-----", line, line_len)
+  line_len = dam_ac_pos
+  call smovv ("-----", line, line_len)
+  line_len = dam_boat_pos
+  call smovv ("-----", line, line_len)
+  line_len = dam_weap_pos
+  call smovv ("-------", line, line_len)
+  line_len = dam_fuel_pos
+  call smovv ("----", line, line_len)
+  line_len = 81
+  call smovv ("---------", line, line_len)
+  line_len = 94
+  call smovv ("-----", line, line_len)
+  write (file_unit, line_form) vline
+ 
+return
+end
+
+ 
+subroutine DAM_Archive_Info (DAM$Pointer)
+##############################################################################
+#$%
+#$% Purpose:   DAM_Archive_Info writes the information from the damage entry
+#$%            to the file.
+#$%
+#$% Calls:     smov..
+#$%            write
+#$%
+#$% Tables:    DAM     NAM
+#$%
+#$% Date:      April 1995
+#$%
+#$% Author:    Carol L. Kropp
+#$%
+##############################################################################
+BBCommon
+ 
+ 
+integer   DAM$Pointer
+ 
+literal   cstrip8     # literal function
+integer   Game_DTG    # integer function
+ 
+integer     line_len
+vaxcharacter*max_line_len  vline
+character   line[max_line_len]
+Equivalence (vline, line)
+ 
+integer   i
+real      DAM$Time$F
+integer   DAM$AirCraft$I, DAM$NbrDevices$I
+integer   DAM$NameIndx$I, DAM$Speed$I, DAM$View$I
+integer   DAM$Base$I, DAM$Fuel$I, DAM$Stores$I
+integer   DAM$SamSites$I, DAM$Sinking$I
+integer   DAM$WeaponSystems$I, DAM$SmBoats$I
+integer   DAM$Dev$Index
+literal   DAM$Dev$Name$C
+ 
+integer   NAM$Pointer
+literal   NAM$Name$C
+ 
+PUTDam$Archived$i ($YES)
+ 
+  for (i = 1; i <= max_line_len; i = i + 1)
+     line[i] = $SPACE
+ 
+  line_len = dam_view_pos
+  DAM$View$I = xDAM$View$I
+  if (DAM$View$I == $Neutral$View)
+    {
+     call smovv ("Neutral", line, line_len)
+    }
+  else if (DAM$View$I < $FirstOrange$View)
+    {
+     call smovv ("Blue ", line, line_len)
+     call smovi ((DAM$View$I - $FirstBlue$View + 1), line, line_len)
+    }
+  else
+    {
+     call smovv ("Orange ", line, line_len)
+     call smovi ((DAM$View$I - $FirstOrange$View + 1), line, line_len)
+    }
+ 
+  DAM$Time$F = xDAM$Time$F
+  line_len = dam_time_pos
+  call smoviz (Game_DTG (DAM$Time$F), 6, line, line_len)
+  call smovv  ("Z", line, line_len)
+ 
+  DAM$NameIndx$I = xDAM$NameIndx$I
+  NAM$Pointer$To (DAM$NameIndx$I)
+  NAM$Name$C = xNAM$Name$C
+  line_len = dam_name_pos
+  call smovhn (NAM$Name$C, $$MaxLit, line, line_len)
+ 
+  DAM$Base$I = xDAM$Base$I
+  DAM$Sinking$I = xDAM$Sinking$I
+  if (DAM$Base$I == $no &
+      DAM$Sinking$I == $yes)
+    {
+     line_len = dam_speed_pos
+     call smovv  ("SINKING", line, line_len)
+     write (file_unit, line_form) vline
+    }
+  else   # the platform is not sinking
+    {
+     DAM$Speed$I = xDAM$Speed$I
+     line_len = dam_speed_pos
+     call smovib (DAM$Speed$I, 5, line, line_len)
+ 
+     DAM$AirCraft$I = xDAM$AirCraft$I
+     line_len = dam_ac_pos
+     call smovib (DAM$AirCraft$I, 5, line, line_len)
+ 
+     DAM$SmBoats$I = xDAM$SmBoats$I
+     line_len = dam_boat_pos
+     call smovib (DAM$SmBoats$I, 5, line, line_len)
+ 
+     DAM$WeaponSystems$I = xDAM$WeaponSystems$I
+     line_len = dam_weap_pos
+     if (DAM$WeaponSystems$I == $no)
+       call smovv ("   no", line, line_len)
+     else
+       call smovv ("  yes", line, line_len)
+ 
+     line_len = dam_fuel_pos
+     DAM$Fuel$I = xDAM$Fuel$I
+     if (DAM$Fuel$I == $no)
+       call smovv ("  no", line, line_len)
+     else
+       call smovv (" yes", line, line_len)
+ 
+     line_len = dam_eq_pos
+     DAM$Stores$I = xDAM$Stores$I
+     if (DAM$Stores$I == $no)
+       call smovv ("    no", line, line_len)
+     else
+       call smovv ("   yes", line, line_len)
+ 
+     line_len = dam_sam_pos
+     DAM$SamSites$I = xDAM$SamSites$I
+     if (DAM$SamSites$I == $no)
+       call smovv ("  no", line, line_len)
+     else
+       call smovv (" yes", line, line_len)
+ 
+     write (file_unit, line_form) vline
+ 
+     DAM$NbrDevices$I = xDAM$NbrDevices$I
+     if (DAM$NbrDevices$I > 0)
+       {
+        for (i = 1; i <= max_line_len; i = i + 1)
+          line[i] = $SPACE
+ 
+        line_len = dam_dev_pos
+        call smovv ("Devices:", line, line_len)
+ 
+        line_len = dam_dev2_pos
+        for (DAM$DEV$Index = 1; DAM$DEV$Index <= DAM$NbrDevices$I;
+                                DAM$DEV$Index = DAM$DEV$Index + 1)
+          {
+           DAM$DEV$Name$C = xDAM$DEV$Name$C
+           call smovhn (DAM$DEV$Name$C, $$MaxLit, line, line_len)
+           call smovv  ("     ", line, line_len)
+           if (line_len >= (100 - ($$MaxLit + 5)))   # don't go past position 100
+             {
+              write (file_unit, line_form) vline
+              for (i = 1; i <= max_line_len; i = i + 1)
+                line[i] = $SPACE
+              line_len = dam_dev2_pos
+             }   # end of if time to write line
+          }   # end of loop through damaged items
+ 
+        if (line_len > dam_dev2_pos)
+          write (file_unit, line_form) vline
+       }   # end of if damage entry include device information
+    }   # end of it unit is not sinking
+ 
+return
+end
+
+ 
+subroutine Archive_BDA_DSS_Table
+##############################################################################
+#$%
+#$% Purpose:   Archive_BDA_DSS_Table will map the global section, store the
+#$%            DSS table information to the file archive.dss and then
+#$%            clear the table.
+#$%
+#$% Called by: OArchive
+#$%
+#$% Calls:     echo..
+#$%            smov..
+#$%            send
+#$%            open
+#$%            DSS_Archive_Header
+#$%            DSS_Archive_Surf_and_Shore
+#$%            DSS_Surface_and_Shore_info
+#$%            close
+#$%
+#$% Tables:    DSS
+#$%
+#$% Date:      December 1997 (E1685)
+#$%
+#$% Author:    Susan Miller
+#$%
+#$%            James Allen 9/02 (E2301)
+#$%            Add automatic archive when table is full.
+#$%            Rewrite over oldest entries rather than clearing table
+#$%            Add neutral side
+#$%
+#$%            James Allen 8/04 UFL04
+#$%            Do not clear DAM table
+##############################################################################
+BBcommon
+ 
+integer   DSS$Pointer,dss2$pointer,dss3$pointer
+ 
+character   msg[80]
+integer   msg_len
+integer   dss_side
+integer   DSS$Type$I
+integer   iside
+integer   isideseq[3]
+integer   nsideseq
+integer   i
+integer   DSSEntryHold[DSS$Entry]
+ 
+data isideseq/$Blue$code, $Orange$code, $Neutral$code/
+data nsideseq/3/
+ 
+if (dss$used == 0)      # Nothing to write
+{
+    msg_len = 0
+    call smovv ("No BDA information to archive.",
+              msg, msg_len)
+    call send_ ($Neutral$View, 0 , msg_len, msg)
+    call echoh (msg, msg_len)
+    call echor
+    return
+}
+ 
+  open (unit            = file_unit,
+        file            = 'archive.dss',
+        status          = 'unknown',
+        form            = 'formatted')
+ 
+  msg_len = 0
+  call smovv ("Writing battle damage table (DSS) information to archive.dss.",
+              msg, msg_len)
+  call send_ ($Neutral$View, 0 , msg_len, msg)
+  call echoh (msg, msg_len)
+  call echor
+ 
+  call DSS_Archive_Header ()
+ 
+  # get the surface data and separate by side
+  for (i = 1; i <= nsideseq; i = i + 1)
+  {
+    dss_side = isideseq[i]
+    call DSS_Archive_Surf_and_Shore($surface$code, dss_side)
+    # Traverse from last to first (latest to earliest)
+    for (dss$pointer = dss$base + dss$used - dss$entry; dss$pointer$OK;
+         dss$pointer = dss$pointer - dss$entry)
+    {
+        call whside(XDSS$AttackersView$i, iside)
+        if (iside != dss_side) next
+        DSS$Type$I = xDSS$Type$I
+        if (DSS$Type$I == $surface$code |
+            DSS$Type$I == $sub$code |
+            DSS$Type$I == $smallboat$supercode)
+        {
+            # display the information
+            call DSS_Surface_and_Shore_info(DSS$Pointer, DSS$Type$I)
+        } # end if a ship targets
+    } # end for loop through dss table looking for ship targets
+  } # End side loop
+ 
+  write (file_unit, line_form) ' '
+ 
+  # get the shorebase data and separate by side
+  for (i = 1; i <= nsideseq; i = i + 1)
+  {
+    dss_side = isideseq[i]
+    call DSS_Archive_Surf_and_Shore($shorebase$code, dss_side)
+    # Traverse from last to first (latest to earliest)
+    for (dss$pointer = dss$base + dss$used - dss$entry; dss$pointer$OK;
+         dss$pointer = dss$pointer - dss$entry)
+    {
+        call whside(XDSS$AttackersView$i, iside)
+        if (iside != dss_side) next
+        DSS$Type$I = xDSS$Type$I
+        if (DSS$Type$I == $Shorebase$code)
+        {
+            # display the information
+            call DSS_Surface_and_Shore_info(DSS$Pointer, DSS$Type$I)
+        } # end if shorebase target
+    } # end for loop through dss table looking for shorebase targets
+  } # End side loop
+ 
+  write (file_unit, line_form) ' '
+  write (file_unit, line_form) ' '
+  close (file_unit)
+ 
+# Move used section of table to end of table and preserve table entries.
+if (dss$used < dss$size)       # No need to move if table is full
+{
+    dss3$pointer$first
+    for (i = 1; i <= dss$used/dss$entry; i = i +  1)
+    {
+        # Copy entry to temporary hold entry
+        call LIB$MOVC3(DSS$Entry*4,iBB[DSS3$Pointer],DSSEntryHold)
+ 
+        #Shuffle table
+        for (dss$pointer$first; dss$pointer < dss$base + dss$size - dss$entry;
+             dss$pointer$next)
+        {
+            dss2$pointer = dss$pointer
+            dss2$pointer$next
+            dss$Duplicate$dss2
+        }
+ 
+        # Copy temporary hold entry to last valid entry
+        call LIB$MOVC3(DSS$Entry*4,DSSEntryHold,iBB[DSS2$Pointer])
+    }
+}
+ 
+dss$used = 0            # Start overlaying oldest entries
+ 
+  msg_len = 0
+  call smovv ("Battle Damage Table (DSS) is now archived.", msg, msg_len)
+  call send_ ($Neutral$View, 0 , msg_len, msg)
+  call echoh (msg, msg_len)
+  call echor
+ 
+return
+end
+
+subroutine DSS_Archive_Header
+##############################################################################
+#$%
+#$% Purpose:   DSS_Archive_Header writes the header title information to the
+#$%            file.
+#$%
+#$% Calls:     smov..
+#$%            write
+#$%
+#$% Tables:    None
+#$%
+#$% Date:      December 1997 (E1685)
+#$%
+#$% Author:    Susan Miller
+#$%
+##############################################################################
+BBCommon
+ 
+integer   Game_DTG    # integer function
+ 
+integer     line_len, i
+vaxcharacter*max_line_len  vline
+character   line[max_line_len]
+Equivalence (vline, line)
+ 
+  for (i = 1; i <= max_line_len; i = i + 1)
+     line[i] = $SPACE
+ 
+  line_len = 23
+  write (file_unit, line_form) ' '
+  write (file_unit, line_form) ' '
+  call smovv  ("Battle Damage Table (DSS) Archive - ", line, line_len)
+  call smoviz (Game_DTG (Game$Time), 6, line, line_len)
+  call smovv  ("Z", line, line_len)
+  write (file_unit, line_form) vline
+  write (file_unit, line_form) ' '
+ 
+return
+end
+
+ 
+subroutine DSS_Archive_Surf_and_Shore(first_dss, dss_side)
+##############################################################################
+#$%
+#$% Purpose:   DSS_Archive_Surf_and_Shore writes the title information to the
+#$%            file for surface and shore targets
+#$%
+#$% Calls:     smov..
+#$%            write
+#$%
+#$% Tables:    None
+#$%
+#$% Date:      December 1997 (E1685)
+#$%
+#$% Author:    Susan Miller
+#$%
+##############################################################################
+BBCommon
+ 
+integer   first_dss, dss_side
+ 
+integer     line_len, i, offset
+vaxcharacter*max_line_len  vline
+character   line[max_line_len]
+Equivalence (vline, line)
+ 
+  if (first_dss == $surface$code)
+       offset = 0
+  else offset = 24
+ 
+  if (first_dss == $surface$code | first_dss == $shorebase$code)
+    {
+     for (i = 1; i <= max_line_len; i = i + 1)
+         line[i] = $SPACE
+     line_len = tru_class_pos - offset
+     if (dss_side == $blue$code)
+       {
+        if (first_dss == $surface$code)
+             call smovv ("Blue Ship Targets", line, line_len)
+        else call smovv ("Blue Base Targets", line, line_len)
+       }
+     else if (dss_side == $orange$code)
+       {
+        if (first_dss == $surface$code)
+             call smovv ("Orange Ship Targets", line, line_len)
+        else call smovv ("Orange Base Targets", line, line_len)
+       }
+     else       #Neutral
+       {
+        if (first_dss == $surface$code)
+             call smovv ("Neutral Ship Targets", line, line_len)
+        else call smovv ("Neutral Base Targets", line, line_len)
+       }
+ 
+     write (file_unit, line_form) ' '
+     write (file_unit, line_form) vline
+     write (file_unit, line_form) ' '
+    }
+ 
+  if (first_dss != $surface$code) offset = 37
+ 
+  for (i = 1; i <= max_line_len; i = i + 1)
+     line[i] = $SPACE
+  if (first_dss == $surface$code)
+     {
+      line_len = trk_num_pos
+      call smovv ("Track", line, line_len)
+      line_len = trk_name_pos
+      call smovv ("Track", line, line_len)
+      line_len = tru_class_pos
+      call smovv ("True", line, line_len)
+     }
+  line_len = dss_atckr_pos - offset
+  call smovv ("----- HOW DAMAGED -----", line, line_len)
+  write (file_unit, line_form) vline
+ 
+  for (i = 1; i <= max_line_len; i = i + 1)
+     line[i] = $SPACE
+  line_len = dss_view_pos
+  call smovv ("View", line, line_len)
+  line_len = dss_time_pos
+  call smovv ("Time", line, line_len)
+  line_len = trk_num_pos
+  if (first_dss == $surface$code)
+     {
+      call smovv ("Numbr", line, line_len)
+      line_len = trk_name_pos
+      call smovv ("Name", line, line_len)
+      line_len = class_pos
+      call smovv ("Class", line, line_len)
+      line_len = tru_class_pos
+      call smovv ("Class", line, line_len)
+      line_len = dss_lat_pos
+      call smovv (" Lat ", line, line_len)
+      line_len = dss_lon_pos
+      call smovv (" Lon ", line, line_len)
+     }
+  if (first_dss == $shorebase$code)
+     {
+      call smovv ("Base", line, line_len)
+     }
+  line_len = dss_atckr_pos - offset
+  call smovv ("Atckr", line, line_len)
+  line_len = dss_weap_pos - offset
+  call smovv ("Weapn", line, line_len)
+  line_len = dss_nbr_fired_pos - offset
+  call smovv ("Nbr Fired", line, line_len)
+  line_len = dss_result_pos - offset
+  call smovv ("Result", line, line_len)
+  write (file_unit, line_form) vline
+ 
+  for (i = 1; i <= max_line_len; i = i + 1)
+     line[i] = $SPACE
+  line_len = dss_view_pos
+  call smovv ("--------", line, line_len)
+  line_len = dss_time_pos
+  call smovv ("-------", line, line_len)
+  line_len = trk_num_pos
+  call smovv ("--------", line, line_len) # SMM 10/99 E2141
+  if (first_dss == $surface$code)
+     {
+      line_len = trk_name_pos
+      call smovv ("--------", line, line_len) # SMM 10/99 E2141
+      line_len = class_pos
+      call smovv ("--------", line, line_len) # SMM 10/99 E2141
+      line_len = tru_class_pos
+      call smovv ("--------", line, line_len)
+      line_len = dss_lat_pos
+      call smovv ("------", line, line_len)
+      line_len = dss_lon_pos
+      call smovv ("-------", line, line_len)
+     }
+  line_len = dss_atckr_pos - offset
+  call smovv ("--------", line, line_len) # SMM 10/99 E2141
+  line_len = dss_weap_pos - offset
+  call smovv ("--------", line, line_len) # SMM 10/99 E2141
+  line_len = dss_nbr_fired_pos - offset
+  call smovv ("---------", line, line_len)
+  line_len = dss_result_pos - offset
+  call smovv ("--------", line, line_len)
+  write (file_unit, line_form) vline
+ 
+return
+end
+
+ 
+subroutine DSS_Surface_and_Shore_info (DSS$Pointer, DSS$Type$I)
+##############################################################################
+#$%
+#$% Purpose:   DSS_Surface_and_Shore_info writes the surface and shorebase
+#$%            target information from the DSS entry to the file.
+#$%
+#$% Calls:     smov..
+#$%            write
+#$%
+#$% Tables:    DSS  RVU
+#$%
+#$% Date:      December 1997 (E1685)
+#$%
+#$% Author:    Susan Miller
+#$%
+##############################################################################
+BBCommon
+ 
+integer   DSS$Pointer, DSS$Type$I
+ 
+literal   cstrip8     # literal function
+literal   cstrip      # literal function
+integer   Game_DTG
+ 
+integer     line_len
+vaxcharacter*max_line_len  vline
+character   line[max_line_len]
+Equivalence (vline, line)
+ 
+integer   i, kpoint_rvu
+integer   DSS$AttackersView$I
+integer   DSS$Result$I
+integer   offset
+literal   RVU$trackcode$c
+LitCharEquiv(iclsch,0:5)
+LitCharEquiv(outcome,7)
+ 
+integer   DSS$TrackNumber$I
+ 
+Data OutcomeC /'MINOR','MODERATE','MAJOR','SEVERE','SUNK','DESTROY','UNKNOWN'/
+ 
+data iclschC[$null$code    ]/ "        " /
+data iclschC[$air$code     ]/ "A       " /
+data iclschC[$sub$code     ]/ "U       " /
+data iclschC[$surface$code ]/ "S       " /
+data iclschC[$BDA$ESMcode  ]/ "E       " /
+data iclschC[$BDA$Sonarcode]/ "P       " /
+ 
+  for (i = 1; i <= max_line_len; i = i + 1)
+     line[i] = $SPACE
+ 
+  line_len = dss_view_pos
+  DSS$AttackersView$I = xDSS$AttackersView$I
+  if (DSS$AttackersView$I == $Neutral$View)
+    {
+     call smovv ("Neutral", line, line_len)
+    }
+  else if (DSS$AttackersView$I < $FirstOrange$View)
+    {
+     call smovv ("Blue ", line, line_len)
+     call smovi ((DSS$AttackersView$I - $FirstBlue$View + 1), line, line_len)
+    }
+  else
+    {
+     call smovv ("Orange ", line, line_len)
+     call smovi ((DSS$AttackersView$I - $FirstOrange$View + 1), line, line_len)
+    }
+ 
+  line_len = dss_time_pos
+  call smoviz (Game_DTG(xDSS$TimeDamaged$F), 6, line, line_len)
+  call smovv  ("Z", line, line_len)
+ 
+  line_len = trk_num_pos
+  if (DSS$Type$I != $Shorebase$code)
+    {
+     offset = 0
+     # set RVU pointer; set track code
+     RVU$Pointer$To DSS$AttackersView$I
+     RVU$TrackCode$C = xRVU$TrackCode$C       # this is track code for the view
+ 
+     DSS$TrackNumber$I = xDSS$TrackNumber$I
+     if (DSS$TrackNumber$I > 0)
+        {
+         call smovhn (RVU$TrackCode$C, 1, line, line_len)
+         # get class code (A, S, U = sub, E = ESM, P = Passive)
+         call smovhn (ICLSCH[xDSS$ClassId$I], 1, line, line_len)
+         call smoviz (xDSS$TrackNumber$I, 3, line, line_len)
+        }
+     else
+        call smovv  ("LOCAL", line, line_len)
+ 
+     line_len = trk_name_pos
+     call smovhn(xDSS$Name$C,$$MaxName, line, line_len) # SMM 9/99 E2141
+ 
+     line_len = class_pos
+     call smovhn(xDSS$Classification$C,$$MaxName, line, line_len) # SMM 9/99 E2141
+ 
+     line_len = tru_class_pos
+     call smovhn(xDSS$TrueClassOfTarget$C,$$MaxName, line, line_len) # SMM 9/99 E2141
+ 
+     line_len = dss_lat_pos
+     call smovll(xDSS$LatitudeDamaged$f,"NS", line, line_len)
+ 
+     line_len = dss_lon_pos
+     call smovll(xDSS$LongitudeDamaged$f,"EW", line, line_len)
+    }
+ 
+  if (DSS$Type$I == $Shorebase$code)
+    {
+     offset = 37
+     call smovhn(xDSS$Name$C,$$MaxName, line, line_len) # SMM 9/99 E2141
+    }
+ 
+  line_len = dss_atckr_pos - offset
+  call smovHn(xDSS$WhoDamagedIt$C, $$MaxName, line, line_len) # SMM 9/99 E2141
+ 
+  line_len = dss_weap_pos - offset
+  call smovHn(xDSS$WpnTypThatGotIt$C, $$MaxName, line, line_len) # SMM 9/99 E2141
+ 
+  line_len = dss_nbr_fired_pos + 3 - offset
+  call smoviz(xDSS$NbrFired$i, 3, line, line_len)
+ 
+  line_len = dss_result_pos - offset
+  DSS$Result$I = xDSS$Result$I
+  if (DSS$Result$I >= $MinorBDA$Code &
+      DSS$Result$I <= $DestroyedBDA$Code)
+      call SMOVHn(Outcome[DSS$Result$I], $$MaxLit, line, line_len) # SMM 9/99 E2141
+  else
+      # default to unknown damage
+      call SMOVHn(Outcome[7], $$MaxLit, line, line_len) # SMM 9/99 E2141
+ 
+  write (file_unit, line_form) vline
+ 
+return
+end
+
+ 
+Subroutine Update_Naval_Unit_BDA (_
+                    BDA_Pointer,            # Receive damaged naval UNT pointer.
+                    Attacker_Pointer,       # Receive attacker's pointer.
+                    IHowDamaged,            # Receive how Damaged code.
+                    BDA_RESULT,             # Receive the result of the attack
+                    BDA_HULL,               # hull damage after weapon hit
+                    BDA_Tracknumber,        # Receive track number.
+                    BDA_Class,              # track classification if any
+                    BDA_classid,            # ID for tracknumber
+                    BDA_Nbr_Fired,          # Receive number of weapon fired
+                    Weapon_Name,            # Receive weapon name
+                    deferred,               # Receive whether damage is deferred
+                    deferred_time)          # Receive deferred time of damage
+#################################################################
+#$%
+#$% Purpose:    Update_Naval_Unit_BDA adds ship, sub and
+#$%             shore base damage data to the DSS table
+#$%
+#$% Called By:  AIRASM           AIRBOMB      TORP_HIT
+#$%             AIRTOR           SURTOR       GUNENG
+#$%
+#$% Calls:      Get_Free_DSS
+#$%
+#$% Tables:     SHC       DSS        UNT
+#$%
+#$% Date:       June 1993
+#$%
+#$% Author:     John F. Richardson
+#$%             Reused code from AWSIM {modified to the needs of surface units}
+#$%             file: lbcommn.rat   routine: UPD_DAC
+#$%             Modified to incorporate correct RESA tables and
+#$%             store the owning platform of the attacker a/c if
+#$%             the damage was inflicted by air power
+#$%             rather than the attacker.
+#$%              Note:  Used dummy names for UNT table pointers,
+#$%              as 0 could be sent in the call and when the
+#$%              $Pointer$To is used the program crashes
+#$%
+#$% Modified:   Susan Miller 12/97 (E1888)
+#$%             Adjusted code to set DSS$Used when the orange
+#$%             slots are being filled since they start at slot
+#$%             200 and DSS$Used is used to display the data on
+#$%             the BDA astabs.
+#$%
+#$%             Susan Miller 12/97 (E1697)
+#$%             Removed entry point by adding two parameters.
+#$%
+#$%             Jim Allen 9/02 (E2301)
+#$%             Add neutral side to BDA
+#$%
+#################################################################
+BBCommon
+ 
+integer*4  BDA_Pointer, Attacker_Pointer, IHowDamaged
+integer*4  BDA_Nbr_Fired,  BDA_Tracknumber, BDA_Result, BDA_classid
+literal    Weapon_Name , BDA_Class
+ 
+integer*4  UNT$Pointer, UNT2$Pointer, DSS$Pointer
+real*4     deferred_time
+integer*4  deferred, torp_pntr
+real*4     BDA_HULL, DSS$LatitudeDamaged$F, DSS$LongitudeDamaged$F
+real*4     DSS$HullDamage$F
+literal    DSS$Name$C, cstrip8, DSS$Classification$C, DSS$WhoDamagedIt$C
+literal    DSS$WpnTypThatGotIt$C, DSS$TrueClassofTarget$C
+integer    DSS$Type$I, DSS$AttackersView$I
+real       DSS$TimeDamaged$F
+integer    DSS$Tracknumber$I, DSS$ClassId$I, DSS$NbrFired$I
+integer    DSS$Result$I
+integer*4  SHC$Pointer
+ 
+UNT2$Pointer = BDA_pointer      # target pointer
+UNT$Pointer = Attacker_pointer  # attacker pointer
+ 
+call Get_Free_DSS(DSS$POINTER)  # get an unused slot or overwrite old slot
+ 
+if (DSS$POINTER == 0) # there is something really wrong here
+   {
+    call echov("Problem with DSS table...") # send message about DSS problem
+    call echor                              # display message by dumping buffer
+    return
+   }
+ 
+DSS$Name$C = xUNT2$Name$c
+putDSS$Name$C
+ 
+DSS$Type$I = xUNT2$Type$I         # get type of target
+putDSS$Type$I                    # put target type into DSS table
+ 
+SHC$Pointer = xUNT2$SHCPntr$I # set the ship characteristics pointer
+DSS$TrueClassofTarget$C = xSHC$Type$C
+putDSS$TrueClassofTarget$C
+ 
+#$% Enter how the naval unit was damaged (passed from calling routine).
+putDSS$HowDamaged$I (IHowDamaged)
+ 
+# time naval unit damaged
+if (deferred == $no)
+    DSS$TimeDamaged$F = Game$Time
+else
+    DSS$TimeDamaged$F = deferred_time
+putDSS$TimeDamaged$F
+ 
+# tracknumber of victim & classification if any
+DSS$Tracknumber$I = BDA_Tracknumber
+putDSS$Tracknumber$I
+DSS$Classification$C = BDA_Class
+putDSS$Classification$C
+DSS$ClassId$I = BDA_classid # need this to display tracknumber in
+                            # view code/class code/sequence format
+                            # familiar to users on status boards
+putDSS$ClassId$I
+ 
+# amount of the weapon that damaged unit that were fired at unit
+DSS$NbrFired$I = BDA_Nbr_Fired
+putDSS$NbrFired$I
+ 
+# get result
+DSS$Result$I = BDA_RESULT
+putDSS$Result$I
+ 
+#$% Get and put the naval unit's latitude, longitude, and altitude
+DSS$LatitudeDamaged$F = xUNT2$TrueLatitude$F
+if (DSS$LatitudeDamaged$F == 0)
+   DSS$LatitudeDamaged$F = xUNT2$AssumedLatitude$F
+putDSS$LatitudeDamaged$F
+ 
+DSS$LongitudeDamaged$F = xUNT2$TrueLongitude$f
+if (DSS$LongitudeDamaged$f == 0)
+   DSS$LongitudeDamaged$F = xUNT2$AssumedLongitude$F
+putDSS$LongitudeDamaged$F
+ 
+#$% Get and put the attacker's name and the type weapon
+if (IHowDamaged == $AirToAirMissile$Code     |
+    IHowDamaged == $CloseInWeaponSystem$Code |
+    IHowDamaged == $DamagedByGunfire$Code    |
+    IHowDamaged == $SurfToAirMissile$Code    |
+    IHowDamaged == $AirToSurfMissile$Code    |
+    IHowDamaged == $AirBomb$Code             |
+    IHowDamaged == $NavalMine$Code           |
+    IHowDamaged == $NavalTorpedo$Code        |
+    IHowDamaged == $SurfToSurfMissile$Code   )
+  {
+   torp_pntr = 0
+   if (xUNT$SuperType$i == $Torpedo$SuperCode) # if attacker is a torpedo
+      { # first store the unit pointer since it will have to be substituted
+       torp_pntr = unt$pointer
+       unt$pointer$to (xunt$LaunchIndx$I) # index to ship that launched this torp
+      }
+ 
+   DSS$WhoDamagedIt$C = xUNT$Name$C # name of the unit or name of the
+   putDSS$WhoDamagedIt$C            # unit that fired a torpedo
+ 
+   #$% Get and put the view (ownership) of attacking unit
+   DSS$AttackersView$I = xUNT$View$I
+   putDSS$AttackersView$I
+ 
+   # now restore the pointer
+   if (torp_pntr != 0)
+      {
+       unt$pointer = torp_pntr
+       torp_pntr = 0
+      }
+ 
+   DSS$WpnTypThatGotIt$C = Weapon_Name
+   putDSS$WpnTypThatGotIt$C
+  }
+ 
+putDSS$Modified$I ($yes)
+# put the hull damage due to weapon effects of this hit
+DSS$HullDamage$f= BDA_HULL
+putDSS$HullDamage$f
+ 
+ 
+return
+end  # Update_Naval_unit_BDA
+ 
+
+ 
+Subroutine Get_Free_DSS(DSS$POINTER)    # out
+#################################################################
+#$%
+#$% Purpose:    Get_Free_DSS gets an unused slot or overwrites old slot
+#$%             of the DSS table used for Battle Damage Assessment
+#$%             (BDA) ASTABS.
+#$%             Actually, it doesn't overwite. IT zero's a slot and
+#$%             then shuffles the other slots down and puts the new
+#$%             information at the end. This is necessary since the
+#$%             Astab routines don't sort.
+#$%             Also: Mines and torpedos don't reach target for several
+#$%                   minutes.
+#$%
+#$% Called By:  Update_Naval_Unit_BDA
+#$%
+#$% Calls:      WHSIDE
+#$5%
+#$% Tables:     DSS
+#$%
+#$% Date:       June 1993
+#$%
+#$% Author:     John F. Richardson
+#$%
+#$% Modified:   Susan Miller - Added an offset for the orange DSS slots
+#$%             since the table is limited to 400, 200 per side.
+#$%
+#$%             Carol Kropp - 2/96 (E1104)
+#$%             When this routine was called, it caused the
+#$%             entries of the BML table (which immediately follows)
+#$%             to be shifted by 16 words.  First_Slot and Last_Slot
+#$%             were computed incorrectly (using MaxDSSslots$per$view
+#$%             added to DSS$Base - one is an ibb address, the other
+#$%             a number of entries).  The loop was using
+#$%             DSS$Pointer$To (first_slot), but when it was blue
+#$%             first_was a ptr value & using last_slot as if it was
+#$%             a ptr value (which it was, but not computed correctly).
+#$%             When moving the DSS entries, no check was made regarding
+#$%             the split for the two sides (just if $Pointer$Valid).
+#$%             For whatever reason, it was decided to maintain this
+#$%             table in sorted order.
+#$%
+#$%             Basically rewrote routine, but maintained the sorting.
+#$%
+#$%             Jim Allen 9/02 (E2301)
+#$%             Add neutral view to BDA by eliminating partition and adding
+#$%               view for each entry.
+#$%             Add automatic archive when table is full.
+#$%
+#################################################################
+BBCommon
+ 
+integer*4 DSS$POINTER
+ 
+DSS$Pointer = DSS$Base + DSS$used       # Next available slot
+if (!DSS$pointer$Valid)
+{
+    call Archive_BDA_DSS_Table
+    dss$pointer$first
+}
+DSS$zero       # ensure that the slots is clear
+dss$last$to dss$pointer + dss$entry - 1
+ 
+return
+end # Get_Free_DSS
+
+ 
+subroutine GET_DSS_DATA(UNT2$POINTER,    # now get the values for input to update routine
+                        UNT$POINTER,     # ATTACKER
+                        BDA_epu,         # imput the epus from the weapon damage
+                        BDA_Result_code, # return damage result
+                        BDA_Hull,        # return hull damage after weapon hit
+                        BDA_tracknumber, # return tracknumber
+                        BDA_class,       # return classification (Alphanumeric)
+                        BDA_classid)     # return classid for tracknumber
+#################################################################
+#$%
+#$% Purpose:    Get_DSS_DATA gets damage values used as input to
+#$%             the BDA update routine which updates the DSS table.
+#$%
+#$% Called By:  AIRASM         AIRBOMB          TORP_HIT
+#$%             GUNENG         AIRTOR           SURTOR
+#$%
+#$% Calls:      None
+#$%
+#$% Tables:     UNT         RMT
+#$%
+#$% Date:       June 1993
+#$%
+#$% Author:     John F. Richardson
+#$%
+#$% Modified:   Susan Miller - 12/97 (E1685)
+#$%             When looking for a RMT Detectee match, the RMT
+#$%             Detector doesn't have to match for the view.
+#$%             This eliminates the excess display of LOCAL track
+#$%             displayed on ASTABS for the track number.
+#$%
+#################################################################
+BBCommon
+ 
+integer*4 UNT2$POINTER, rmt$detectee$i, rmt$detector$i
+integer*4 rmt$pointer, rvu$pointer, UNT$POINTER, torp_pntr, SHC$Pointer
+Integer*4 BDA_tracknumber, BDA_Result_code
+integer*4 BDA_epu, BDA_classid
+Literal   BDA_class, RMT$UserClass$C, CSTRIP8
+LitCharEquiv(Class_list,8)
+real*4    BDA_Hull, RMSTORES, RMHULL
+integer*4 UNT$View$I, RMT$Classified$I, UNT2$Type$I
+integer*4 iHULLepu, iLASTO, LSTRMT
+integer   first_RMT_match, RMT$DetectionType$I
+ 
+# list for classification -- JFR 7/26/93
+Data Class_listC/"AIR  ","SUB  ","SURF ","     ","     ","     ","BASE ","    "/
+ 
+first_RMT_match = $no   #SMM 2/96
+ 
+# now figure out the result (% hull damage for ships
+# or L/A for stores in the case of shore bases)
+# see PER#E1104  --- JFR 6/16/93
+if (xUNT2$Type$I == $Surface$code |
+    xUNT2$Type$I == $Sub$code |
+    xUNT2$Type$I == $Shorebase$code)
+   { # find % of hull damage {plagarized from damage model}
+     # Note: hull damage for BDA calculated here just for the
+     #       hit by the one cruise missile
+    if(xUNT2$SuperType$i == $SmallBoat$SuperCode &
+       BDA_RESULT_Code != $damagedbyGunfire$code)
+      { # almost anything will sink it
+       BDA_Result_code = $SunkBDA$Code
+      }
+    else
+     { # calculate BDA results for ships/subs/bases or gun results for boats - JFR 6/22/93
+     iHULLepu = 0
+     iLASTO = 0
+     call find_hull_dam(unt2$pointer,BDA_Hull)
+     if (xUNT2$TYPE$I == $shorebase$code)
+        {
+         rmstores = 1.0 - BDA_Hull
+         #$% compute amount of stores OK after hits:
+         iLASTO = INT((BDA_epu)/100 + .5)
+        }
+     else
+        {
+         rmhull = 1.0 - BDA_Hull  #$% amount of hull OK before hits
+         #$% compute amount of hull OK after hits:
+         iHULLepu = INT((BDA_epu)/100 + .5)
+        }
+ 
+     if (iHULLepu > 0 | # if hulldamage (for ships) or
+         iLASTO > 0   | # stores damage (for bases) or
+         BDA_epu >0 )   # could be a small epu that doesn't do damage SMM 1/96
+        {
+         SHC$POINTER = xUNT2$shcpntr$I # set the ship characteristics pointer
+         if (xUNT2$TYPE$I == $shorebase$code)
+            { #unt$storedamage$f = 1.0 - rmstor * (1.0 - xunt$storedamage$f)
+             rmstores = rmstores * exp(-iLASTO * xshc$lethalareastores$f)
+             if (rmstores > .9)
+                BDA_Result_code = $MinorBDA$Code
+             else
+                 if (rmstores >= .5 & rmstores <= .9)
+                    BDA_Result_code = $ModerateBDA$Code
+             else
+                 if (rmstores >  .2 & rmstores <  .5)
+                    BDA_Result_code = $MajorBDA$Code
+             else
+                if (rmstores >= .1 & rmstores <= .2)
+                    BDA_Result_code = $SevereBDA$Code
+             else if (rmstores <  .1)
+                    BDA_Result_code = $DestroyedBDA$Code
+             BDA_Hull = 1.0 - rmstores # adjust stores damage for deposit into dss table
+            }
+         else
+            {
+             rmhull = rmhull *  exp(-iHULLepu * xshc$ProbSink$f)
+             if (rmhull >  .9)
+                BDA_Result_code = $MinorBDA$Code
+             else
+                if (rmhull >= .5 & rmhull <= .9)
+                    BDA_Result_code = $ModerateBDA$Code
+             else
+                if (rmhull >  .2 & rmhull <  .5)
+                    BDA_Result_code = $MajorBDA$Code
+             else
+                if (rmhull <  .2)
+                    BDA_Result_code = $SunkBDA$Code
+             BDA_Hull = 1.0 - rmhull # adjust hull damage for deposit into dss table
+            }
+        }
+     }
+     # now get the tracknumber
+     BDA_tracknumber = 0 # initialize the tracknumber
+     BDA_class = 0
+     BDA_classid = 0
+ 
+     # before we search the rmt table see if it is a torpedo
+     # if it is a torpedo then we have to look for a track held by the
+     # unit shooting the torpedo
+ 
+     torp_pntr = 0
+     if (xUNT$SuperType$i == $Torpedo$SuperCode) # if attacker is a torpedo
+        { # first store the unit pointer since it will have to be substituted
+         torp_pntr = unt$pointer
+         unt$pointer$to (xunt$LaunchIndx$I) # index to ship that launched this torp
+        }
+ 
+     #$% set RVU pointer
+     UNT$View$I = xUNT$View$I # view of attacker (if torpedo then view of launcher)
+     RVU$pointer$to UNT$View$I
+ 
+     #$% set RMT pointer
+     rmt$pointer$to xRVU$LastRmtIndx$i
+     lstrmt = rmt$pointer
+ 
+     #$% search RMT table of attacker to try to match up track held by attacker
+     # of the victim
+     for (rmt$pointer$to xRVU$FirstRmtIndx$i;rmt$pointer<=lstrmt;rmt$pointer$next)
+        {
+         #$% if slot not in use, get next
+         if (xRMT$InUse$I == $NO) next
+ 
+         RMT$Detectee$I = xRMT$Detectee$I
+         RMT$Detector$I = xRMT$Detector$I
+ 
+         # Remove requirement for RMT$Detector match to eliminate LOCAL
+         # on ASTAB for track number   # smm 12/97 (E1685)
+         if (UNT2$Pointer$Index == RMT$Detectee$I)
+             {
+              if (first_rmt_match == $no)
+                  first_rmt_match = RMT$Pointer$Index
+ 
+              RMT$DetectionType$I = xRMT$DetectionType$I
+ 
+              # if it is an active visual or nonvisual detection, stop right here
+              if (RMT$DetectionType$I == $ActiveVisual$code |
+                  RMT$DetectionType$I == $ActiveNonVisual$code)
+                 {
+                  first_rmt_match = RMT$Pointer$Index
+                  break
+                 }
+             }
+        } # end loop through RMT table
+ 
+      if (first_rmt_match != $no)
+        {
+         RMT$Pointer$To first_rmt_match
+ 
+         #$% get info on whether track classified or not
+         RMT$Classified$I = xRMT$Classified$I
+ 
+         #$% if classification has been made
+         if (RMT$Classified$I != $NO)
+           #$%  get name from ship slot
+           BDA_class = xRMT$SHCName$C
+ 
+         #$% check to see if detectee is user classified.
+         RMT$UserClass$C = xRMT$UserClass$C
+         if (RMT$UserClass$C > 0)
+           BDA_class = RMT$UserClass$C
+ 
+         if (Xrmt$VisualClass$i == $YES & BDA_class == 0)
+           # use default classification if still no class info
+           # but a visual detection has occured
+           BDA_class = Class_list(xrmt$class$I)
+ 
+         if (xRMT$DetectionType$I != $ESM$Code &
+             xRMT$DetectionType$I != $PassiveSonar$Code)
+            # RMT$Class$I is only for active tracks
+            BDA_ClassID = xRMT$Class$I # for tracknumber display # JFR 7/12/93
+         else if (xRMT$DetectionType$I == $ESM$Code)
+            # ESM track so put special code into DAC table for use by astab
+            BDA_ClassID = $BDA$ESMcode
+         else if (xrmt$detectiontype$i == $PassiveSonar$Code)
+            # ESM track so put special code into DAC table for use by astab
+            BDA_ClassID = $BDA$SonarCode
+ 
+         if (BDA_ClassID == 0)
+           { # just in case we missed something
+            UNT2$Type$I = xUNT2$Type$I
+            if (UNT2$Type$I == $SUB$CODE)
+               BDA_ClassID = $SUB$CODE
+            else if (UNT2$Type$I == $AIR$CODE)
+               BDA_ClassID = $AIR$CODE
+            else if (UNT2$Type$I == $SURFACE$CODE)
+               BDA_ClassID = $SURFACE$CODE
+           }
+ 
+         BDA_TrackNumber = xRMT$TrackNumber$I   # get the tracknumber
+        }
+ 
+     if (torp_pntr != 0) # was the attacker a torpedo
+        {
+         UNT$Pointer = torp_pntr # restore the pointer to the torpedo
+        }
+   }
+ 
+return
+end # GET_DSS_DATA
+ 
+
+ 
+Subroutine  Update_Destroyed_Aircraft (_
+                    Destroyed_AC_Pointer,    # Receive destroyed a/c UNT pointer.
+                    Attackers_Pointer,       # Receive attacker's pointer.
+                    IHowDestroyed,           # Receive how destroyed code.
+                    Weapon_Name,             # Receive weapon name
+                    AML$Pointer,             # Receive aircraft pointer.
+                    nbr_fired)               # nbr of weapon type fired JFR 4/5/94
+#################################################################
+#$%
+#$% Purpose:    Update_Destroyed_Aircraft adds destroyed
+#$%             aircraft data to the DAC table and updates
+#$%             the SQN table.
+#$%
+#$% Called By:  Enhanced_Air_Fuel_Consumption
+#$%
+#$% Calls:      None
+#$%
+#$% Tables:     ACC     AML     DAC     UNT
+#$%
+#$% Date:       March 1992
+#$%
+#$% Author:     Carol Kropp
+#$%             Reused code from AWSIM
+#$%             file: lbcommn.rat   routine: UPD_DAC
+#$%             Modified to incorporate correct RESA tables and
+#$%             store the owning platform of the destoryed a/c
+#$%             rather than the attacker.  Expanded the
+#$%             $AirtoAirEngage$Code: $AirtoAirMissle$Code,
+#$%                                   $CloseInWeaponSystem$Code,
+#$%                                   $DestoryedByGunfire$Code.
+#$%              Note:  Used dummy names for UNT table pointers,
+#$%              as 0 could be sent in the call and when the
+#$%              $Pointer$To is used the program crashes
+#$%
+#$% Modified:  Carol Kropp - 10/94
+#$%            Added call to Record_C2_Single_Flight_Lost
+#$%            for update of the mission history data
+#$%            (WPC C2 Interface).
+#$%
+#$%            Carol Kropp - 12/96 (E1726)
+#$%            Record_C2_Single_AC_Lost changed to
+#$%            Record_Single_AC_Lost.
+#$%
+#################################################################
+BBCommon
+ 
+integer  Destroyed_AC_Pointer, Attackers_Pointer, IHowDestroyed, AML$Pointer
+literal  Weapon_Name
+integer*4 nbr_fired # JFR (E1104)
+ 
+integer  UNT$Pointer, UNT2$Pointer, UNT3$Pointer, ACC$Pointer, DAC$Pointer
+ 
+integer UNT2$LaunchIndx$I, detector_index, save_unt2_index
+integer move_len, DAC$CruiseMissile$I
+ 
+literal     CSTRIP8
+integer     IHOLD
+BBdeclare  (UNT2$Type$I, DAC2$Pointer,
+            DAC$Sidenumber$C, DAC$Eventname$C, DAC$Launchtime$F,
+            DAC$View$I, DAC$Owningplatform$C, DAC$Mission$I,
+            DAC$Timedestroyed$F, DAC$Type$C)
+BBdeclare  (DAC$Latitudedestroyed$F, DAC$Longitudedestroyed$F,
+            DAC$Altitudedestroyed$I, DAC$Whodestroyedit$C,
+            DAC$Attackerview$I, DAC$Wpntypthatgotit$C,
+            DAC$Attackerevent$C, DAC$Attackertype$C)
+ 
+UNT$Pointer = Destroyed_AC_pointer
+UNT2$Pointer = Attackers_pointer
+ 
+if (IHowDestroyed == $DestroyedOnGround$Code)   # If destroyed on the ground
+  ACC$Pointer = xAML$AccPntr$I    # set ACC table pointer from the AML table
+else
+  ACC$pointer = xUNT$AccPntr$I
+ 
+DAC$Pointer$To   Next$Empty$DACSlot        # Set DAC pointer
+Next$Empty$DACSlot = Next$Empty$DACSlot + 1
+ 
+if (DAC$Pointer$Valid)
+    {
+     # Calc DAC$Used - used by STACDRSTY
+     DAC$Used = DAC$Pointer$Index * DAC$Entry
+    }
+else
+    {
+     # if it is time to reuse a slot
+     # send overwriting message
+     call echor
+     call echov ("***** Overwriting oldest entry in ")
+     call echov ("AIR DESTROYED TABLE (DAC). *****")
+     call echor
+ 
+     DAC$Pointer$First  # start at first DAC entry
+     DAC2$Pointer$First
+     DAC2$Pointer$Next  # get the second DAC entry
+ 
+     # table is full so move DAC$slots - 1
+     # number of slots from second slot to first slot
+     move_len = (DAC$Slots - 1) * DAC$Entry * 4
+                         # of bytes,  source array,  destination array
+     call lib$movc3(move_len,iBB[DAC2$Pointer],iBB[DAC$Pointer])
+ 
+     # now zero the last slot
+     DAC$Pointer$To (DAC$Slots)
+     DAC$Zero
+ 
+     # reset empty slot
+     Next$Empty$DACSlot = Next$Empty$DACSlot - 1
+ 
+     # no need to change DAC$Used
+    } # end check for valid DAC pointer
+ 
+#$% Get and put the aircraft side number.
+DAC$SideNumber$C = xAML$SideNumber$C
+putDAC$SideNumber$C
+ 
+#$% Get and put the event name and launch time if not destroyed on the ground.
+if (IHowDestroyed != $DestroyedOnGround$Code)
+  {
+   DAC$EventName$C = xUNT$Event$C
+   putDAC$EventName$C
+ 
+   dac$LaunchTime$f = xunt$TimeLaunched$f
+   putdac$LaunchTime$f
+ 
+   #$% Get and put the view (ownership) of the aircraft.
+   DAC$View$I = xUNT$View$I
+   putDAC$View$I
+  }
+ else       # the aircraft was destroyed on the ground
+  {
+   #$% Get and put the view (ownership) of the aircraft.
+   UNT3$Pointer$To xAML$OwnerIndx$I     # set UNT3 to point to the owning base/ship
+   DAC$View$I = xUNT3$View$I
+   putDAC$View$I
+  }
+ 
+#$% Get and put the name of the platform which owns the aircraft
+UNT3$Pointer$To xAML$OwnerIndx$I        # set UNT3 to point to the owning base/ship
+DAC$OwningPlatform$C = xUNT3$Name$C
+putDAC$OwningPlatform$C
+ 
+#$% Get and put the mission if the a/c did not crash on takeoff
+#$% or get destroyed on the ground.
+if (IHowDestroyed != $DestroyedOnGround$Code &
+    IHowDestroyed != $CrashedOnTakeoff$Code  )
+  {
+   DAC$Mission$I = xUNT$Mission$I
+   putDAC$Mission$I
+  }
+ 
+#$% Enter how the a/c was destroyed (passed from calling routine).
+putDAC$HowDestroyed$I (IHowDestroyed)
+ 
+dac$TimeDestroyed$f = Game$Time
+putdac$TimeDestroyed$f
+ 
+#$% Get and put the destroyed aircraft type.
+DAC$Type$C = xACC$Type$C
+putDAC$Type$C
+ 
+#$% Get and put the a/c's latitude, longitude, and altitude
+#$% if the a/c did not crash on takeoff or landing and was
+#$% not destroyed on the ground.
+if (IHowDestroyed != $DestroyedOnGround$Code &
+    IHowDestroyed != $CrashedOnTakeoff$Code  &
+    IHowDestroyed != $CrashedOnLanding$Code  )
+  {
+   DAC$LatitudeDestroyed$F = xUNT$TrueLatitude$F
+   if (DAC$LatitudeDestroyed$F == 0)
+     DAC$LatitudeDestroyed$F = xUNT$AssumedLatitude$F
+   putDAC$LatitudeDestroyed$F
+ 
+   DAC$LongitudeDestroyed$F = xUNT$TrueLongitude$f
+   if (dac$LongitudeDestroyed$f == 0)
+     DAC$LongitudeDestroyed$F = xUNT$AssumedLongitude$F
+   putDAC$LongitudeDestroyed$F
+ 
+   DAC$AltitudeDestroyed$I = xUNT$TrueAltDepth$I
+   putDAC$AltitudeDestroyed$I
+  }
+else   # the aircraft was destroyed on the ground,
+  {    # so use the location of the base               (clk 4/95)
+       # UNT3 = owning base (COL may be different...check out later)
+   DAC$LatitudeDestroyed$F = xUNT3$TrueLatitude$F
+   putDAC$LatitudeDestroyed$F
+   DAC$LongitudeDestroyed$F = xUNT3$TrueLongitude$F
+   putDAC$LongitudeDestroyed$F
+  }
+ 
+# set the detector index for the future RMT table search # SMM 1/29/96
+detector_index = UNT2$Pointer$Index
+ 
+#$% Get and put the attacker's name and the type weapon
+#$% used if killed during air to air or surface to air engagement.
+if (IHowDestroyed == $AirToAirMissile$Code     |
+    IHowDestroyed == $CloseInWeaponSystem$Code |
+    IHowDestroyed == $DestroyedByGunfire$Code  |
+    IHowDestroyed == $SurfToAirMissile$Code    )
+  {
+   if (UNT2$Pointer$Valid)
+    {
+    # if the unit type is a SAMissile, then we want to search
+    # the RMT table for the firing unit as the detector.
+    UNT2$Type$I = xUNT2$Type$I      # SMM 1/29/96
+    if (UNT2$Type$I == $SAMissile$Code)
+        {
+        # save the SAMissile unit pointer
+        save_unt2_index = UNT2$Pointer$Index
+ 
+        # get the launchers unit pointer
+        UNT2$LaunchIndx$I = xUNT2$LaunchIndx$I
+ 
+        # set the detector index to the launcher
+        detector_index = UNT2$LaunchIndx$I
+        UNT2$Pointer$To UNT2$LaunchIndx$I
+ 
+        # save the name of the launcher for display
+        DAC$WhoDestroyedIt$C = xUNT2$Name$C
+ 
+        # reset to the SAMissile unit pointer
+        UNT2$Pointer$To save_unt2_index
+        }
+     else
+         DAC$WhoDestroyedIt$C = xUNT2$Name$C
+ 
+     DAC$AttackerView$I = xUNT2$View$I
+     putDAC$AttackerView$I
+    }
+   else
+     DAC$WhoDestroyedIt$C = 'N/A'
+ 
+   putDAC$WhoDestroyedIt$C
+ 
+   DAC$WpnTypThatGotIt$C = Weapon_Name
+   putDAC$WpnTypThatGotIt$C
+  }
+ 
+#$% If a/c killed during an air to air engagement or air
+#$% to surface, add attacker's event name and a/c type
+if (UNT2$Pointer$Valid)
+  {
+   if (xUNT2$Type$I == $Air$Code)
+     {
+      DAC$AttackerEvent$C = xUNT2$Event$C
+      putDAC$AttackerEvent$C
+ 
+      ihold = ACC$Pointer               # save the acc pointer to the target
+      ACC$Pointer = xUNT2$AccPntr$I     # Point to the characteristics of the attacker
+      DAC$AttackerType$C = xACC$Type$C
+      putDAC$AttackerType$C
+      ACC$Pointer = ihold               # reset the acc pointer
+     }
+  }
+ 
+DAC$CruiseMissile$I = $NO
+putDAC$CruiseMissile$I
+ 
+call Get_BDA_info(UNT2$Pointer,UNT$Pointer,
+                  detector_index,DAC$Pointer,
+                  nbr_fired)
+ 
+call Record_Single_AC_Lost (UNT$Pointer, IHowDestroyed)
+ 
+putDAC$Modified$I ($yes)
+ 
+return
+end                                     # end of Update_Destroyed_Aircraft
+
+Subroutine Record_Single_AC_Lost (_
+                    UNT$Pointer,      # in: UNT of the flight
+                    destroyed_code)   # in: DAC$HowDestroyed$I values (Table 6.38)
+##############################################################################
+#$%
+#$% Purpose:   Record_Single_AC_Lost will update the number of aircraft
+#$%            lost by one, based upon the destroyed_code.
+#$%
+#$% Called By:
+#$%
+#$% Calls:
+#$%
+#$% Tables:    AMH     UNT
+#$%
+#$% Date:      Oct. 1994
+#$%
+#$% Author:    Carol L. Kropp
+#$%
+#$% Modified:  Carol Kropp - 12/96 (E1726)
+#$%            Name changed from Record_C2_Single_AC_Lost, since data
+#$%            is going to be for more than the WPC C2 interface. Created a
+#$%            RESA Blackboard table to maintain information in rather than
+#$%            array structure (new table is AMH).
+#$%
+##############################################################################
+BBCommon
+ 
+integer  UNT$Pointer, destroyed_code
+ 
+integer  UNT$AirHistIndx$I
+integer  AMH$Pointer
+integer  AMH$NbrLostAAE$I, AMH$NbrLostSAM$I, AMH$NbrLostOnGround$I
+integer  AMH$NbrSplitOff$I, AMH$NbrLanded$I, AMH$NbrRequested$I
+ 
+  UNT$AirHistIndx$I = xUNT$AirHistIndx$I
+  AMH$Pointer$To  (UNT$AirHistIndx$I)
+ 
+  if (AMH$Pointer$Valid)
+    {
+     AMH$NbrLostAAE$I = xAMH$NbrLostAAE$I
+     AMH$NbrLostSAM$I = xAMH$NbrLostSAM$I
+     AMH$NbrLostOnGround$I = xAMH$NbrLostOnGround$I
+     AMH$NbrSplitOff$I = xAMH$NbrSplitOff$I
+     AMH$NbrLanded$I = xAMH$NbrLanded$I
+     AMH$NbrRequested$I = xAMH$NbrRequested$I
+ 
+     if (destroyed_code == $AirtoAirMissile$Code)
+       {
+        AMH$NbrLostAAE$I = AMH$NbrLostAAE$I + 1
+        putAMH$NbrLostAAE$I
+       }
+     else if (destroyed_code == $CloseInWeaponSystem$Code |
+              destroyed_code == $DestroyedByGunfire$Code  |
+              destroyed_code == $SurftoAirMissile$Code    )
+       {
+        AMH$NbrLostSAM$I = AMH$NbrLostSAM$I + 1
+        putAMH$NbrLostSAM$I
+       }
+     else
+       {
+        AMH$NbrLostOnGround$I = xAMH$NbrLostOnGround$I + 1
+        putAMH$NbrLostOnGround$I
+       }
+ 
+     if (AMH$NbrRequested$I == AMH$NbrLostAAE$I + AMH$NbrLostSAM$I +
+                               AMH$NbrLostOnGround$I + AMH$NbrSplitOff$I +
+                               AMH$NbrLanded$I)
+       {    # if all the aircraft are now accounted for
+        if (AMH$NbrLanded$I == 0)   # if completely destroyed
+          putAMH$TimeLanded$F  (Game$Time)
+ 
+        putAMH$ReadyToReport$I ($yes)
+       }   # end of if all aircraft are accounted for
+    }   # end of if unit has an AMH
+ 
+return
+end
+
+ 
+Subroutine Get_BDA_info(UNT2$Pointer, # in/attacker pointer
+                        UNT$Pointer,  # in/target pointer
+                        detector_index, #in/detector index
+                        DAC$Pointer,  # in/DAC slot to store data
+                        nbr_fired)    # in
+#################################################################
+#$%
+#$% Purpose:
+#$%
+#$% Called By:  Update_Destroyed_Aircraft
+#$%
+#$% Calls:      None
+#$%
+#$% Tables:     UNT  RVU  RMT  DAC
+#$%
+#$% Author:     JFR
+#$%
+#$% Modifed:    Removed from Update_Destroyed_Aircraft 1/96 SMM
+#$%
+#################################################################
+BBCommon
+ 
+integer  UNT2$Pointer, UNT$Pointer, detector_index, DAC$Pointer
+integer*4 nbr_fired
+ 
+integer BDA_tracknumber, BDA_classid
+literal CSTRIP8, BDA_class
+LitCharEquiv(Class_list,8)
+integer UNT2$View$I, lstrmt, rmt$detectee$i, rmt$detector$i
+integer RMT$Classified$I, DAC$Tracknumber$I, DAC$CLASSID$I
+integer DAC$NbrFired$I
+literal RMT$UserClass$C, DAC$Classification$C
+integer RVU$Pointer, RMT$Pointer, RMT$DetectionType$I
+integer first_RMT_match
+ 
+# list for classification -- JFR (E1104)
+Data Class_listC/"AIR  ","SUB  ","SURF ","     ","MISLE","     ","BASE ","    "/
+ 
+# now get the tracknumber
+BDA_tracknumber = 0     # initialize
+BDA_class = 0
+first_RMT_match = $no
+ 
+#$% set RVU pointer
+UNT2$View$I = xUNT2$View$I     # view of attacker
+RVU$pointer$to UNT2$View$I
+ 
+#$% set RMT pointer
+rmt$pointer$to xRVU$LastRmtIndx$i
+lstrmt = rmt$pointer
+ 
+# search RMT table of attacker to try to match up track held by attacker
+# of the victim
+for (rmt$pointer$to xRVU$FirstRmtIndx$i;rmt$pointer<=lstrmt;rmt$pointer$next)
+    {
+     # if slot not in use, get next
+     if (xrmt$InUse$i == $no) next
+ 
+     rmt$detectee$i = xrmt$detectee$i
+     rmt$detector$i = xrmt$detector$i
+ 
+     if (detector_index == rmt$detector$i &
+         unt$pointer$index == rmt$detectee$i)
+        {
+         if (first_rmt_match == $no)
+             first_rmt_match = RMT$Pointer$Index
+ 
+         RMT$DetectionType$I = xRMT$DetectionType$I
+ 
+         # if it is an active visual or nonvisual detection, stop right here
+         if (RMT$DetectionType$I == $ActiveVisual$code |
+             RMT$DetectionType$I == $ActiveNonVisual$code)
+            {
+             first_rmt_match = RMT$Pointer$Index
+             break
+            }
+        }
+    } # end loop through RMT table
+ 
+if (first_rmt_match != $no)
+    {
+     RMT$Pointer$To first_rmt_match
+ 
+     # get info on whether track classified or not
+     RMT$Classified$I = xRMT$Classified$I
+ 
+     # if classification has been made
+     if (RMT$Classified$I != $NO)
+       # get name from aircraft characteristics slot
+       BDA_class = xRMT$ACCName$C
+ 
+     # check to see if detectee is user classified.
+     RMT$UserClass$C = xRMT$UserClass$C
+     if (RMT$UserClass$C > 0) BDA_Class = RMT$UserClass$C
+ 
+     if (xRMT$VisualClass$I == $YES & BDA_class == 0)
+       # use default classification if still no class info
+       # but a visual detection has occured
+       BDA_Class = Class_list(xRMT$Class$I)
+ 
+     # check for cruise missile target
+     if (xUNT$Type$I == $cruisemissile$code)
+       BDA_class = Class_list($cruisemissile$code)
+ 
+     if (xRMT$DetectionType$I != $ESM$Code)
+       { # rmt$class$i is only for active tracks
+        BDA_classid = xRMT$Class$I # for tracknumber display
+       }
+     else if (xRMT$DetectionType$I == $ESM$Code)
+       { # ESM track so put special code into DAC table for use by astab
+        BDA_classid = $BDA$ESMcode
+       }
+ 
+     BDA_tracknumber = xRMT$TrackNumber$I   # get the tracknumber
+    } # found the track
+ 
+DAC$Tracknumber$I = BDA_tracknumber
+putDAC$Tracknumber$I
+ 
+DAC$Classification$C = BDA_class
+putDAC$Classification$C
+ 
+DAC$CLASSID$I = BDA_classid
+putDAC$CLASSID$I
+ 
+DAC$NbrFired$I = Nbr_Fired
+putDAC$NbrFired$I
+ 
+return
+end # routine get_bda_info
+
+ 
+Subroutine Update_DAC_CM_BDA(UNT2$Pointer, # in/attacker pointer
+                             UNT$Pointer,  # in/destroyed target pointer
+                             How_Destroyed,# in/how destroyed code
+                             Weapon_Name,  # in/weapon name
+                             nbr_fired)    # in
+#################################################################
+#$%
+#$% Purpose:    Update_DAC_CM_BDA adds BDA information to DAC table
+#$%             to be displayed on the BDA AIR ASTAB
+#$%
+#$% Called By:
+#$%
+#$% Calls:      Get_BDA_info
+#$%
+#$% Tables:     UNT  DAC
+#$%
+#$% Author:     Susan Miller 2/96 (E1104)
+#$%
+#$% Modified:   Carol Kropp - 2/96 (E1104)
+#$%             Need to handle case when attacker is not known
+#$%             (UNT2$Pointer is not valid).  Crashed when ALSP
+#$%             interation was evaluated as a hit.  When the
+#$%             attacker is not known, then it is not really
+#$%             necessary to record the BDA information.
+#$%
+#################################################################
+BBCommon
+integer UNT2$Pointer, UNT$Pointer, How_Destroyed, nbr_fired
+literal Weapon_Name
+ 
+integer move_len
+integer DAC$View$I
+real    DAC$TimeDestroyed$F
+integer DAC$HowDestroyed$I
+integer DAC$Pointer, DAC2$Pointer, detector_index
+integer DAC$CruiseMissile$I, DAC$AttackerView$I
+literal DAC$WhoDestroyedIt$C, DAC$WpnTypThatGotIt$C, DAC$SideNumber$C
+literal CSTRIP8, DAC$Type$C
+real DAC$LatitudeDestroyed$F, DAC$LongitudeDestroyed$F
+integer found_cm, used_slots, save_unt2_index
+integer UNT2$LaunchIndx$I, UNT2$Type$I, CMC$Pointer
+ 
+if (!(UNT2$Pointer$OK))    # clk 2/96 (E1104)
+  {                        # if the attacker is not known
+   return                  # don't set up a DAC record for
+  }                        # bda
+ 
+found_cm = $NO
+ 
+# if it is time to reuse a slot, loop thru the DAC table and find the
+# first entry (which is the oldest), move following DAC slots up and
+# store data in last slot.
+if (DAC$CruiseMissile$Number == Max$DAC$CruiseMissile)
+  {
+   # find first cruise missile entry stored in DAC table
+   for (DAC$Pointer$First; DAC$Pointer$Valid; DAC$Pointer$Next)
+      {
+       if (xDAC$CruiseMissile$I == $YES)
+         {
+          found_cm = $YES
+          break
+         }
+      }
+ 
+   if (found_cm == $yes)
+     {# DAC pointer is set to one that is to be overwritten
+      DAC2$Pointer$To DAC$Pointer$Index
+      DAC2$Pointer$Next # get the next DAC entry
+ 
+      # number of slots from second slot to first slot
+      used_slots = DAC$Used / DAC$Entry
+      move_len = (used_slots - 1) * DAC$Entry * 4
+                          # of bytes,  source array,  destination array
+      call lib$movc3(move_len,iBB[DAC2$Pointer],iBB[DAC$Pointer])
+ 
+      # set pointer to last used slot and zero it
+      DAC$Pointer$To (used_slots)
+      DAC$Zero
+ 
+      # send overwriting message
+      call echor
+      call echov ("***** Overwriting oldest CRUISE MISSILE entry in ")
+      call echov ("AIR DESTROYED TABLE (DAC). *****")
+      call echor
+     }
+   else
+     {
+      # send overwriting message
+      call echor
+      call echov ("***** ERROR - no CRUISE MISSILE entries to ")
+      call echov ("overwrite in AIR DESTROYED TABLE (DAC). *****")
+      call echor
+     }
+  } # maximum number of cruise missiles in DAC reached, reuse oldest slot
+else
+  {
+   DAC$Pointer$To Next$Empty$DACSlot
+   Next$Empty$DACSlot = Next$Empty$DACSlot + 1
+   DAC$CruiseMissile$Number = DAC$CruiseMissile$Number + 1
+ 
+   if (DAC$Pointer$Valid)
+     {
+      DAC$Used = DAC$Pointer$Index * DAC$Entry
+     }
+   else
+     {
+      # if it is time to reuse a slot
+      # send overwriting message
+      call echor
+      call echov ("***** Overwriting oldest entry in ")
+      call echov ("AIR DESTROYED TABLE (DAC). *****")
+      call echor
+ 
+      DAC$Pointer$First  # start at first DAC entry
+      DAC2$Pointer$First
+      DAC2$Pointer$Next  # get the second DAC entry
+ 
+      # table is full so move DAC$slots - 1
+      # number of slots from second slot to first slot
+      move_len = (DAC$Slots - 1) * DAC$Entry * 4
+                         # of bytes,  source array,  destination array
+      call lib$movc3(move_len,iBB[DAC2$Pointer],iBB[DAC$Pointer])
+ 
+      # now zero the last slot
+      DAC$Pointer$To (DAC$Slots)
+      DAC$Zero
+ 
+      # reset empty slot
+      Next$Empty$DACSlot = Next$Empty$DACSlot - 1
+ 
+      # no need to change DAC$Used
+     } # end check for valid DAC pointer
+  }
+ 
+# Get and put the view (ownership) of destroyed unit.
+DAC$View$I = xUNT$View$I
+putDAC$View$I
+ 
+DAC$SideNumber$C = xUNT$Name$C
+putDAC$SideNumber$C
+ 
+CMC$pointer = xUNT$CMCPntr$I
+DAC$Type$C = xCMC$Type$C
+putDAC$Type$C
+ 
+UNT2$Type$I = xUNT2$Type$I      # SMM 1/29/96
+if (UNT2$Type$I == $SAMissile$Code)
+    {
+     # save the SAMissile unit pointer
+     save_unt2_index = UNT2$Pointer$Index
+ 
+     # get the launchers unit pointer
+     UNT2$LaunchIndx$I = xUNT2$LaunchIndx$I
+     UNT2$Pointer$To UNT2$LaunchIndx$I
+ 
+     # save the name of the launcher for display
+     DAC$WhoDestroyedIt$C = xUNT2$Name$C
+ 
+     # reset to the SAMissile unit pointer
+     UNT2$Pointer$To save_unt2_index
+    }
+else
+    DAC$WhoDestroyedIt$C = xUNT2$Name$C
+putDAC$WhoDestroyedIt$C
+ 
+DAC$AttackerView$I = xUNT2$View$I
+putDAC$AttackerView$I
+ 
+DAC$WpnTypThatGotIt$C = Weapon_name
+putDAC$WpnTypThatGotIt$C
+ 
+DAC$TimeDestroyed$F = Game$Time
+putDAC$TimeDestroyed$F
+ 
+DAC$LatitudeDestroyed$F = xUNT$TrueLatitude$F
+putDAC$LatitudeDestroyed$F
+ 
+DAC$LongitudeDestroyed$F = xUNT$TrueLongitude$f
+putDAC$LongitudeDestroyed$F
+ 
+DAC$HowDestroyed$I = How_Destroyed
+putDAC$HowDestroyed$I
+ 
+DAC$CruiseMissile$I = $YES
+putDAC$CruiseMissile$I
+ 
+detector_index = xUNT2$LaunchIndx$I
+call Get_BDA_info(UNT2$Pointer,UNT$Pointer,
+                  detector_index,DAC$Pointer,
+                  nbr_fired)
+ 
+return
+end # routine Update_DAC_CM_BDA
+
+ 
+subroutine find_hull_dam(unt2$pointer,BDA_Hull)
+#################################################################
+#$%
+#$% Purpose:    FIND_HULL_DAMAGE gets damage values used as input to
+#$%             the BDA update routine which updates the DSS table.
+#$%
+#$% Called By:  GET_DSS_DATA
+#$%
+#$% Calls:      None
+#$%
+#$% Tables:     UNT         DSS
+#$%
+#$% Date:       July 30, 1993
+#$%
+#$% Author:     John F. Richardson
+#$%
+#################################################################
+BBCommon
+ 
+integer*4 UNT2$POINTER, DSS$POINTER
+real*4    BDA_Hull, BDA_Temp, BDA_Max
+literal   BDAName, CSTRIP8
+ 
+# search the DSS table for previous damage to hull (have to check the DSS
+# table since the unt$hulldamage$f is not computed till the damage model
+# executes
+BDA_temp = 0.0
+BDA_Hull = 0.0
+BDA_Max = 0.0
+for (dss$pointer$first ; dss$pointer$ok ; dss$pointer$next)
+    {
+     BDAName = xunt2$Name$c
+     if (xDSS$Name$c != BDAName) next # not the same unit as one we are checking up on
+     # since the DSS table is sorted with latest time last all we have
+     # to do is suck out the last match (unless time is >= game$minute
+     # which means it is deferred and so the hull damage is meaningless)
+     # I.E. the damage is sitting in the TAT queue for future processing
+     #      by the damage model
+     if (xDSS$TimeDamaged$F > Game$Time)
+        {
+         BDA_Hull = BDA_temp # return hull damage from latest minute < game$minute
+                             # if no prior occurence then return zero
+         if (BDA_Hull > BDA_Max) BDA_Max = BDA_HULL
+        }
+     else
+        { # latest occurence of hull damage in sorted table
+         BDA_Hull = xDSS$HullDamage$f # return the hull damage
+         BDA_temp = BDA_Hull          # store the last occurrence of hull damage
+                                      # for this unit prior to game$minute
+         if (BDA_Hull > BDA_Max) BDA_Max = BDA_HULL
+        }
+    }
+ 
+BDA_Hull = BDA_Max
+end # find_hull_dam

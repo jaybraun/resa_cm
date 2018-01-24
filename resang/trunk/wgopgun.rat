@@ -1,0 +1,1012 @@
+####    File:   WGOPGUN.rat
+ 
+include "alsp.inc"
+include "ascii.inc"
+include "bbctl.inc"
+include "bbcode.inc"
+include "bbdeq.inc"
+include "bbshc.inc"
+include "bbord.inc"
+include "bbrmt.inc"
+include "bbtor.inc"
+include "bbunt.inc"
+include "orders.inc"
+ 
+undefine read
+undefine write
+undefine err
+ 
+define(trace$engage$exe, istrip(trace$engage,0,M1bits)) # trace general exec
+define(trace$engage$roe, istrip(trace$engage,1,M1bits)) # trace ckroe select
+define(trace$engage$tgt, istrip(trace$engage,2,M2bits)) # trace assgnt select
+define(trace$engage$tgx, istrip(trace$engage,3,M1bits)) # trace assgnt all
+define(trace$engage$gun, istrip(trace$engage,4,M1bits)) # trace gun engagements
+define(BBImplicit, Implicit NONE)                       # MJC 5/1/2000 (E-2145)
+
+subroutine ocommenc(nord,id,unt$pointer,nargs,args)
+ 
+########################################################
+#$%
+#$% Purpose:   Ocommenc processes commence firing orders for
+#$%            all types of units with guns onboard.
+#$%
+#$% Called By: EXEORD
+#$%
+#$% Calls:     ASSIGN_GUNS  CEASE_GUNS  FNDORD  HAS_GUNS
+#$%            GTACT        WHSIDE      GUN_RANGE
+#$%            FIND_UNIT
+#$%
+#$% Tables:    UNT   DEQ  ORD  RMT
+#$%
+#$% Date:      JULY 1989
+#$%
+#$% Author:    Richard J. Schauer
+#$%
+#$% Modifed:   Carol Kropp 1/95
+#$%            Added for optional TARGET priority
+#$%            specification when firing at a POSITION
+#$%            or BASE.  Targeting is intented for ALSP.
+#$%
+#$%            Carol Kropp - 7/95 (E1419)
+#$%            Removed target_lex from parameters
+#$%            and added processing of TARGET, BE and
+#$%            TIN information.
+#$%
+########################################################
+ 
+BBcommon
+ 
+integer nord,nargs,id, litcmp
+literal args[nargs],gun_name
+integer*4 iside1,iside2,          # orange/blue/neutral sides
+          maxr,minr,              # maximum and "minimum" gun ranges
+          target,flag,            # target id, flag for position/unit
+          find_unit,
+          salvo_num
+real*4    tarlat,tarlon,tarcos,   # target position parameters
+          untlat,untlon,untcos    # unit position parameters
+logical Has_Guns,sub_surfaced,found
+ 
+character  Msg[ARB]
+ 
+integer    specified_target_type   # clk 2/94 - lex code of target or $NoTarget$TargetCode
+integer    specified_target_word_2
+integer    target_priority_code    # integer function
+integer    alsp_weapon_enumeration
+literal    be_word1, be_word2, tin    # clk 7/94 (E1419)
+ 
+integer    IUNT,IERROR,I,IBONLY,
+           ILEN,I_SWITCH_1,
+           UNT$Pointer, UNT$View$I,
+           UNT$Targettype$I,
+           UNT2$Pointer, UNT2$Truealtdepth$I,
+           ORD$Pointer, DEQ$Pointer,
+           RMT$Pointer, TOR$Pointer             # MJC 5/1/2000 (E2145)
+real       DMS2RAD,RANGE,BRNG                   # MJC 5/1/2000 (E2145)
+literal    UNT$Name$C,
+           CSTRIP8                              # MJC 5/3/2000 (E2145)
+ 
+# COMMENCE FIRING (at) BASE  <name> [| TARGET <target-type>]
+#                                   [ | BE  <be-number> [ | TIN <tin-number>] ]
+#                                   [| USING <name>]
+#                                   [| SALVOES <number>]
+# COMMENCE FIRING (at) POSITION <lat> <long> [| TARGET <target-type1> [| <target_type2>]]
+#                                            [ | BE  <be-number> [ | TIN <tin-number>] ]
+#                                            [| USING <name>]
+#                                            [| SALVOES <number>]
+# COMMENCE FIRING (at) TRACK <track-no> [| USING <name>] [| SALVOES <number>]
+ 
+             #          1         2         3         4         5
+#String Msg1  "XXXXX cannot commence firing at XXXXX                  "
+#String Msg2  "Force has no guns to fire with"
+#String Msg3  "Target out of range"
+#String Msg4  "Target is friendly force"
+#String Msg5  "Target is invalid"
+#String Msg6  "Sub not surfaced"
+#String Msg7  "Air target too close"
+#String Msg8  "XXXXX commencing to fire at XXXXX                  "
+#String Msg9  "Gun not found"
+#String Msg10 "XXXXX using gun XXXXX"
+#String msg11 "Unit is in hiding"
+             #012345678901234567890123456789012345678901234567890123
+ 
+if (order$minute != game$minute &
+    order$minute != game$minute + 1) # order$minute = game$minute or game$minute + 1 - JFR 6/2/94
+    return              # This insures execution once per cycle (at the top)
+ 
+ 
+ 
+if (args[1] == $lex$cease$)   # CEASE FIRING command
+    {
+     call cease_guns(nord,id,unt$pointer,nargs,args)
+     return
+    }
+ 
+# COMMENCE FIRING command
+be_word1 = $Blank_Literal
+be_word2 = $Blank_Literal
+tin      = $Blank_Literal
+ 
+iunt = unt$pointer$index
+if (args[3] == $lex$position$)  # if COMMENCE FIRING (at) POSITION
+    {                           # validate command, as it is multi-phased
+    call fndord(id,ord$Pointer)
+    if (ord$pointer == 0)      # if the order is non-existant,
+        return                 # get out of here
+    else if (xord$phase$i > 0) # if this is not the first execution of the order
+       {
+        found = .false.        # find the gun(s) involved in the engagement
+        for_DEQ_chain (iunt)
+           {
+            if (xdeq$guntarget$i == id &           # if the right gun and
+                xdeq$gunflag$i == $posit$guncode)  # it is assigned against a position
+               {
+                found = .true.
+                BREAK
+               }
+           }
+        if (!found)     # if the unit has no guns going against positions,
+           {            # clear the order and return
+            putord$phase$i (0)
+            RETURN
+           }
+ 
+        if (xORD$GunPositFired$I != $no)   # AV 4/20/93 (H1049) - not the 1st
+           RETURN                          # processing of the FIRE (AT) POS command
+                                           # data was setup during the 1st processing
+       }
+    }     # end of checking order phase of COMMENCE FIRING (at) POSITION
+ 
+ 
+unt$name$c = xunt$name$c
+unt$view$i = xunt$view$i
+ierror = 0
+gun_name = $Null
+salvo_num = 0                 # AV 4/23/93
+specified_target_type = $NoTarget$TargetCode
+specified_target_word_2 = $NoTarget$TargetCode
+ 
+if (trace$engage$gun != $no)
+    {
+    call echor
+    call echov ("~ ")
+    call echohn (unt$name$c,8)
+    call echov (" (#")
+    call echoi (iunt)
+    call echov (") Commencing gun fire: ")
+    }
+ 
+if (xUNT$Status$I == $Hiding$Code)   # clk 4/95 (E1393)
+    ierror = 9
+else if (!Has_Guns(unt$pointer))
+    ierror = 4
+else if (xunt$type$i == $sub$code & !sub_surfaced(unt$pointer))
+    ierror = 5
+else
+    {
+    untlat = xunt$truelatitude$f
+    untlon = xunt$truelongitude$f
+    untcos = xunt$costruelat$f
+ 
+    if (args[3] == $lex$BASE$)
+        {
+         if (nargs > 4)
+           {
+            for (i = 5; i < nargs; i = i + 2)
+              {
+               if (args[i] == $lex$Target$)
+                  specified_target_type = args[i+1]
+               else if (args[i] == $lex$Using$)
+                 {
+                  gun_name = args[i+1]
+                  if (gun_name == 'GUNS')
+                    gun_name = $NULL
+                 }
+               else if (args[i] == $lex$Salvoes$)
+                  salvo_num = args[i+1]
+               else if (args[i] == $lex$BE$)
+                 {
+                  if (args[i + 2] == $lex$TIN$    |
+                      args[i + 2] == $lex$Using$  |
+                      args[i + 2] == $lex$Salvoes$)
+                     be_word1 = args[i + 1]
+                  else
+                    {
+                     be_word1 = args[i + 1]
+                     be_word2 = args[i + 2]
+                     i = i + 1
+                    }
+                 }     # end of if keyword is BE
+               else if (args[i] == $lex$TIN$)
+                  tin = args[i + 1]
+              }   # end of loop through the remaining command arguments
+           }      # end of additional command arguments entered past <base name>
+ 
+        unt2$Pointer = Find_Unit(args[4])
+        if (unt2$pointer != 0)
+            {
+            if (xunt2$type$i == $shorebase$code)
+                {
+                call whside(unt$view$i,iside1)
+                call whside(xunt2$view$i,iside2)
+                if (iside1 != iside2)
+                    {
+                    tarlat = xunt2$truelatitude$f
+                    tarlon = xunt2$truelongitude$f
+                    tarcos = xunt2$costruelat$f
+                    }
+                else ierror = 2
+                }
+            else ierror = 3
+            }
+        else ierror = 3
+        }
+    else if (args[3] == $lex$TRACK$)
+        {
+         if (nargs > 4)     # E2231 joa 9/01
+           {
+            for (i = 5; i < nargs; i = i + 2)
+              {
+               if (args[i] == $lex$using$)
+                {
+                  gun_name = args[i+1]
+                  if (gun_name == 'GUNS')  # prevent setting gun_name to 'GUNS'
+                     gun_name = $NULL
+                }
+               else if (args[i] == $lex$salvoes$)
+                  salvo_num = args[i+1]
+              }
+            }
+        ibonly = NO
+        rmt$pointer = 0
+        call gtact(unt$view$i,args[4],rmt$pointer,ibonly)
+        if (rmt$Pointer != 0 & ibonly == NO)
+            {
+            if (xrmt$detectionage$i == $old$code)
+               ierror = 3
+            else if (xrmt$targetid$i == $friendly$code)
+                ierror = 2
+            else # set unit pointer to target
+                {
+                unt2$pointer$to xrmt$detectee$i
+                if (xunt2$type$i == $cruisemissile$code)
+                    ierror = 3
+                else
+                    {
+                    tarlat = xunt2$truelatitude$f
+                    tarlon = xunt2$truelongitude$f
+                    tarcos = xunt2$costruelat$f
+                    }
+                }
+            }
+        else ierror = 3
+        }
+    else # must be at position...
+        {
+          tarlat = dms2rad(args[4])
+          tarlon = dms2rad(args[5])
+          tarcos = cos(tarlat)
+ 
+          #$% check to see if a target was eneters and        # clk 2/94
+          #$% get gun name and salvo number if applicable     # AV 4/23/93
+          if (nargs > 5)
+            {
+              for (i = 6; i < nargs; i = i + 2)
+                {
+                  if (args[i] == $lex$Target$)
+                    {
+                     specified_target_type = args[i+1]
+                     if (specified_target_type == $lex$Bridge$)
+                       {
+                        specified_target_word_2 = args[i+2]
+                        i = i + 1    # to compensate for extra word
+                       }
+                    }
+                  else if (args[i] == $lex$Using$)
+                    {
+                     gun_name = args[i+1]
+                     if (gun_name == 'GUNS')
+                       gun_name = $NULL
+                     else if (alsp$game != $no)
+                     {
+                        call ALSP_Map_Outgoing_Weapon (gun_name, $Posit$GunCode, alsp_weapon_enumeration)
+                        if (alsp_weapon_enumeration == 0)       # No mapping
+                            ierror = 10
+                     }
+                    }
+                  else if (args[i] == $lex$Salvoes$)
+                     salvo_num = args[i+1]
+                  else if (args[i] == $lex$BE$)
+                    {
+                     if (args[i + 2] == $lex$TIN$    |
+                         args[i + 2] == $lex$Using$  |
+                         args[i + 2] == $lex$Salvoes$)
+                        be_word1 = args[i + 1]
+                     else
+                       {
+                        be_word1 = args[i + 1]
+                        be_word2 = args[i + 2]
+                        i = i + 1
+                       }
+                    }     # end of if keyword is BE
+                  else if (args[i] == $lex$TIN$)
+                     tin = args[i + 1]
+                }   # end of loop through the remaining command arguments
+            }       # end of additional command arguments entered past <long>
+        }           # end of COMMENCE FIRING (at) POSITION
+    }               # end of else (unit has guns and is not a submerged sub)
+ 
+if (salvo_num > $Hi_DEQ$SalvoNumber$I)   # AV 4/23/93
+  ierror = 8
+ 
+if (ierror == 0) # still ok...
+    {
+    if (gun_name != $NULL)
+        {
+        found = .false.
+        for_deq_chain(iunt)
+            {
+            if (xdeq$ident$i == $Gun$Code & xdeq$remaining$i > 0)
+                {
+                tor$pointer = xdeq$pntr$i
+                if (litcmp(xtor$type$c, gun_name) == 0)
+                    {
+                    found = .true.
+                    maxr = xtor$maxrange$i
+                    BREAK
+                    }
+                }
+            }
+        if (!found) ierror = 7
+        }
+    else
+        {
+        call Gun_Range(UNT$Pointer,maxr,minr)
+        }
+ 
+    if (ierror == 0)
+        {
+        call rll2rb(untlat,untlon,untcos,
+                    tarlat,tarlon,tarcos,
+                    range,brng)
+        if (args[3] != $lex$position$ &
+            xunt2$type$i == $air$code &
+            xunt$type$i != $air$code  )
+            {
+            unt2$truealtdepth$i = xunt2$truealtdepth$i
+            if (unt2$truealtdepth$i >= (6 * range * $Yds$per$Mile))
+                ierror = 6
+            else
+                range=range/abs(cos(atan(unt2$truealtdepth$i/($yds$per$mile*3*range))))
+            }
+ 
+        if (range > maxr) ierror = 1
+        }
+    }
+ 
+if (ierror != 0)
+    {
+    ilen = 0
+    call SMOVHN(unt$name$c,$$MaxLit,msg,ilen) # formerly msg1
+    Call SMOVV(" cannot commence firing at ",msg,ilen)
+    if (args[3] == $lex$position$)
+        {
+         Call SMOVV("POSITION ",msg,ilen)
+         call smovll(tarlat,"NS",msg,ilen)
+         call SMOVV(" ",msg,ilen)
+         call smovll(tarlon,"EW",msg,ilen)
+        }
+    else
+        {
+        call SMOVHN(args[4],$$MaxName,msg,ilen) # SMM 8/99 E2141
+        }
+ 
+    call send_(unt$view$i,0,ilen,msg)
+ 
+    ilen = 0
+    switch (ierror)
+        {
+        case 1:
+                 Call SMOVV("Target out of range",msg,ilen)
+                 call send_(unt$view$i,0,ilen,msg) # formerly msg3
+        case 2:
+                 Call SMOVV("Target is friendly force",msg,ilen)
+                 call send_(unt$view$i,0,ilen,msg) # formerly msg4
+        case 3:
+                 Call SMOVV("Target is invalid",msg,ilen)
+                 call send_(unt$view$i,0,ilen,msg) # formerly msg5
+        case 4:
+                 Call SMOVV("Force has no guns to fire with",msg,ilen)
+                 call send_(unt$view$i,0,ilen,msg) #formerly msg2
+        case 5:
+                 Call SMOVV("Sub not surfaced",msg,ilen)
+                 call send_(unt$view$i,0,ilen,msg) # formerly msg6
+        case 6:
+                 Call SMOVV("Air target too close",msg,ilen)
+                 call send_(unt$view$i,0,ilen,msg) # formerly msg7
+        case 7:
+                 Call SMOVV("Gun not found",msg,ilen)
+                 call send_(unt$view$i,0,ilen,msg) # formerly msg9
+        case 8:  # AV 4/23/93
+                 call smovv ("Max number of salvoes allowed is ", msg, ilen)
+                 call smovi ($Hi_DEQ$SalvoNumber$I, msg, ilen)
+                 call send_  (UNT$View$I, 0, ilen, msg)
+        case 9:  # clk 4/95 (E1393)
+                 call smovv ("Unit is in hiding", msg, ilen)
+                 call send_  (UNT$View$I, 0, ilen, msg)
+        case 10:
+                 call smovv ("Gun can not fire at position", msg, ilen)
+                 call send_  (UNT$View$I, 0, ilen, msg)
+        default:
+                 {}
+        }
+ 
+    if (trace$engage$gun != $no)
+        {
+        call echov (" Error, exiting")
+        }
+ 
+    return
+    }
+else
+    {
+    if (args[3] == $lex$position$)
+        {
+        target = id
+        flag = $posit$guncode
+        putord$phase$i (1)
+        putORD$GunPositFired$I ($yes)     # AV 4/23/93 (H1049)
+        }
+    else
+        {
+        target = unt2$pointer$index
+        flag = $commence$guncode
+        }
+ 
+    if (specified_target_type != $NoTarget$TargetCode)   # clk 1/95
+      {
+       UNT$TargetType$I = target_priority_code (specified_target_type,
+                                                specified_target_word_2)
+       putUNT$TargetType$I
+      }   # end of if a target priority was entered
+    else
+       putUNT$TargetType$I  ($NoTarget$TargetCode)
+ 
+    if (be_word1 != $Blank_Literal)     # clk 7/95 (E1419)
+      call Store_BE_Info (UNT$Pointer, be_word1, be_word2)
+    if (tin != $Blank_Literal)
+      call Store_TIN_Info (UNT$Pointer, tin)
+ 
+    if (gun_name != $null)
+        {
+        for_deq_chain(iunt)
+            {
+            if (xdeq$ident$i == $Gun$Code & xdeq$remaining$i > 0)
+                {
+                tor$pointer = xdeq$pntr$i
+                if (litcmp(xtor$type$c, gun_name) == 0)
+                    {
+                    putdeq$guntarget$i (target)
+                    putdeq$gunflag$i   (flag)
+                    putdeq$SalvoNumber$i (salvo_num)      # AV 4/23/93
+                    }
+                }
+            }
+ 
+        ilen = 0
+        call SMOVHN(unt$name$c,$$MaxLit,msg,ilen) # formerly msg10
+        Call SMOVV(" using gun ",msg,ilen)
+        call SMOVHN(gun_name,$$MaxLit,msg,ilen)
+        call send_(unt$view$i,0,ilen,msg)
+        }
+    else
+        {
+        call assign_guns_salvo (unt$pointer,target,flag,range,salvo_num)   # AV 4/28/93
+        }
+ 
+    ilen = 0
+    call SMOVHN(unt$name$c,$$MaxLit,msg,ilen)
+    Call SMOVV(" commencing to fire at ",msg,ilen) # formerly msg8
+    if (args[3] == $lex$position$)
+        {
+        call SMOVV("POSITION ",msg,ilen)
+        call smovll(tarlat,"NS",msg,ilen)
+        call SMOVV(" ",msg,ilen)
+        call smovll(tarlon,"EW",msg,ilen)
+        }
+    else
+        {
+        call smovhn(args[4],$$MaxName,msg,ilen) # SMM 8/99 E2141
+        }
+ 
+    call send_(unt$view$i,0,ilen,msg)
+    } # end if ierror != 0
+ 
+return
+end
+ 
+
+subroutine Gun_Range(UNT$Pointer,maxr,minr)
+ 
+########################################################
+#$%
+#$% Purpose:   GUN_Range determines maximum range of longest
+#$%            range gun on unit.
+#$%
+#$% Called By: OCOMMENC  TAKE_BASE  ENGAGE_TRACK
+#$%
+#$% Calls:
+#$%
+#$% Tables:    UNT  DEQ  TOR
+#$%
+#$% Date:      JULY 1989
+#$%
+#$% Author:    Richard J. Schauer
+#$%
+########################################################
+ 
+BBcommon
+integer*4 iunt,maxr,minr
+ 
+integer   UNT$Pointer,
+          DEQ$Pointer,
+          TOR$Pointer,
+          TOR$Maxef$I               # MJC 5/1/2000 (E-2145)
+ 
+  iunt = UNT$Pointer$Index
+  minr = 99999
+  maxr = 0
+ 
+  for_Deq_Chain(iunt)
+    {
+     if (xdeq$ident$i == $Gun$Code)
+       {
+        tor$pointer = xdeq$pntr$i
+        tor$maxef$i =0.5 +xtor$maxef$i /$Yds$Per$Mile # jb 0.5 7/26/89
+        minr = min(minr,tor$maxef$i)
+        maxr = max(maxr,xtor$maxrange$i)
+       }
+    }
+ 
+return
+end
+ 
+
+subroutine assign_guns(unt$pointer,target,flag,range)
+########################################################
+#$%
+#$% Purpose:   ASSIGN_GUNS assigns all guns on platform that
+#$%            have ability to fire at the given range.
+#$%
+#$% Called By: TAKE_BASE  ENGAGE_TRACK  OCOMMENC
+#$%
+#$% Calls:
+#$%
+#$% Tables:    UNT  DEQ  TOR
+#$%
+#$% Date:      JULY 1989
+#$%
+#$% Author:    Richard J. Schauer
+#$%
+########################################################
+ 
+BBcommon
+ 
+integer*4 iunt,target,flag
+integer   nguns, nworking
+real*4    range
+literal   target_name
+Character msg[ARB]
+integer   entry_point_flag, salvo_number      # AV   4/28/93
+ 
+integer   ILEN,
+          UNT2$Pointer,
+          UNT$Pointer,
+          DEQ$Pointer,
+          TOR$Pointer                         # MJC 5/1/2000 (E2145)
+literal   CSTRIP8                             # MJC 5/3/2000 (E2145)
+ 
+            #01234567890123456789012345678901234567890
+#String Msg1 "XXXXX assigning XXX guns to fire at XXXXX   "
+ 
+ entry_point_flag = $no     # AV - 4/28/93  (E1168)
+ repeat                                                     # E2143 dew 10/99
+    {
+      break                                                 # E2143 dew 10/99
+      entry assign_guns_salvo (UNT$Pointer, target, flag, range, salvo_number)
+      entry_point_flag = $yes
+    }
+ 
+iunt = unt$Pointer$Index
+ 
+nguns = 0
+nworking = 0
+ 
+for_DEQ_Chain(iunt)
+    {
+    if (xdeq$ident$i == $Gun$Code)
+        {
+        nguns = nguns + 1
+ 
+        if (xdeq$remaining$i > 0)
+            {
+            tor$pointer = xdeq$pntr$i
+            if (xtor$maxrange$I >= range)
+                {
+                nworking = nworking + 1
+                putdeq$guntarget$i (target)
+                if (entry_point_flag == $yes)      # AV 4/28/93
+                    putdeq$SalvoNumber$i (salvo_number)
+                putdeq$gunflag$i (flag)
+                }
+            }
+        }
+    }
+ 
+ilen = 0
+call SMOVHN(xunt$name$c,$$MaxLit,msg,ilen) # formerly msg1
+Call SMOVV(" assigning ",msg,ilen)
+if (nguns == nworking)
+    {
+    call SMOVV("ALL",msg,ilen)
+    }
+else
+    {
+    call smovib(nworking,3,msg,ilen)
+    }
+Call SMOVV(" guns to fire at ",msg,ilen)
+if (flag == $posit$guncode)
+    {
+    call SMOVV("POSITION",msg,ilen)
+    }
+else
+    {
+7002
+    if (nworking > 0 &                      # DEW           1/11/90
+        flag == $Take$guncode)              # DEW           1/11/90
+        {
+        PUTunt$AttackIndx$i (target)        # jb <<<>>>???  8/22/89
+ 
+        if (trace$engage$gun != $no)
+            {
+            call echov (" Vectoring...")
+            }
+        }
+ 
+    unt2$pointer$to target
+    if (xunt2$type$i == $shorebase$code)
+        call SMOVHN(xunt2$name$c,$$MaxLit,msg,ilen)
+    else
+        call SMOVHN(target_name(unt$pointer,target),$$MaxLit,msg,ilen)
+    }
+ 
+call send_(xunt$view$i,0,ilen,msg)
+ 
+if (trace$engage$gun != $no)
+    {
+    call echoh (msg,ilen)
+    }
+ 
+return
+end
+ 
+
+subroutine deassign_guns(unt$pointer,target,flag1,flag2)
+########################################################
+#$%
+#$% Purpose:   Deassign_guns removes gun targets from the
+#$%            DEQ table for guns onboard the platform.
+#$%
+#$% Called By: CEASE_GUNS  GUN_TARGETS  FNDORD  RMORD
+#$%
+#$% Calls:
+#$%
+#$% Tables:    UNT DEQ
+#$%
+#$% Date:      JULY 1989
+#$%
+#$% Author:    Richard J. Schauer
+#$%
+########################################################
+ 
+BBcommon
+ 
+integer*4 iunt,target,flag1,flag2
+ 
+integer   UNT$Pointer,
+          DEQ$Pointer,
+          DEQ$Gunflag$I             # MJC 5/1/2000 (E-2145)
+ 
+iunt = unt$Pointer$Index
+for_DEQ_Chain(iunt)
+    {
+    if (xdeq$ident$I == $Gun$code)
+        {
+        deq$gunflag$i = xdeq$gunflag$i
+        if (deq$gunflag$I >= flag1 &
+            deq$gunflag$i <= flag2 &
+            xdeq$guntarget$i == target)
+            {
+            putdeq$guntarget$i (0)
+#            putdeq$gunflag$i (0)
+            putdeq$gunflag$i ($fired$guncode)       # 1/93 clk
+            }
+        }
+    }
+ 
+return
+end
+ 
+
+logical function Sub_Surfaced(UNT$Pointer)
+ 
+########################################################
+#$%
+#$% Purpose:   Sub_Surfaced determines if submarine platform
+#$%            is at or above it's keel depth.
+#$%
+#$% Called By: OCOMMENC  TAKE_BASE  ENGAGE_TRACK GET_SKUNKS
+#$%            GUN_SIGHTS
+#$% Calls:
+#$%
+#$% Tables:    UNT SHC
+#$%
+#$% Date:      JULY 1989
+#$%
+#$% Author:    Richard J. Schauer
+#$%
+########################################################
+ 
+BBcommon
+ 
+integer UNT$Pointer,
+        SHC$Pointer             # MJC 5/1/2000 (E-2145)
+ 
+  Sub_surfaced = .False.
+  if(xUNT$SuperType$i ==$FalseContact$SuperCode) # jb   2/12/91
+      RETURN
+  shc$pointer = xunt$shcpntr$i
+  if (xunt$truealtdepth$i <= xshc$keeldepth$i)
+    Sub_surfaced = .true.
+ 
+return
+end
+ 
+ 
+
+logical function Has_Guns(UNT$Pointer)
+ 
+########################################################
+#$%
+#$% Purpose:   Has_Guns determines if guns are present in
+#$%            the DEQ table for the given platform.
+#$%
+#$% Called By: TAKE_BASE  ENGAGE_TRACK OCOMMENC
+#$%
+#$% Calls:
+#$%
+#$% Tables:    UNT DEQ
+#$%
+#$% Date:      JULY 1989
+#$%
+#$% Author:    Richard J. Schauer
+#$%
+########################################################
+ 
+BBcommon
+integer*4 iunt
+ 
+integer   UNT$Pointer,
+          DEQ$Pointer               # MJC 5/1/2000 (E-2145)
+ 
+  Has_Guns = .False.
+  iunt = UNT$Pointer$Index
+ 
+  for_Deq_Chain(iunt)
+    {
+     if (xdeq$ident$i == $Gun$Code & xdeq$remaining$i > 0)
+       {
+        Has_Guns = .True.
+        BREAK
+       }
+    }
+ 
+return
+end
+ 
+
+subroutine cease_guns(nord,id,unt$pointer,nargs,args)
+ 
+########################################################
+#$%
+#$% Purpose:   Cease_Guns processes cease fire commands
+#$%            to silence guns.
+#$%
+#$% Called By: OCOMMENC
+#$%
+#$% Calls:
+#$%
+#$% Tables:    UNT DEQ ORD
+#$%
+#$% Date:      JULY 1989
+#$%
+#$% Author:    Richard J. Schauer
+#$%
+#$% Revised:    Dane Wills 1/11/90 - to handle remaining syntax
+#$%
+#$%
+#$% Syntax:    CEASE FIRING (at) [ | TRACK <track-no>                |
+#$%                                  POSITION <latitude> <longitude> |
+#$%                                  BASE <name>                      ]
+#$%                              [ | USING <name> ]
+#$%
+########################################################
+ 
+BBcommon
+integer nord,nargs
+literal args[nargs]
+logical found
+ 
+literal     the_shooter, the_base, the_gun, the_track, target_name, a_name
+real*4      the_lat, the_lon
+logical     all_action, match_deq, gun_found
+ 
+integer     IVIEW,IARGS,ILEN,ISAVE,IUNT,ID,
+            DEQ$Pointer, DEQ$Guntarget$I,
+            DEQ$Gunflag$I,
+            ORD$Pointer, UNT$Pointer,
+            TOR$Pointer                         # MJC 5/1/2000 (E2145)
+literal     CSTRIP8, TOR$Type$C                 # MJC 5/3/2000 (E2145)
+character   msgx[ARB]
+ 
+iview        = Xunt$view$i
+the_shooter  = Xunt$name$c
+the_base     = 0
+the_gun      = 0
+the_track    = 0
+the_lat      = 0
+the_lon      = 0
+found        = .false.
+gun_found    = .true.
+ 
+iargs = nargs
+ 
+if (args[nargs-1] == $lex$using$)
+    {
+    the_Gun   = args[nargs]
+    gun_found = .false.
+    iargs     = nargs - 2
+    }
+ 
+all_action   = (iargs == 2)     # no specifics, therefore everything
+ 
+if (iargs > 2)
+    {
+    if (args[3] == $lex$track$)
+        {
+        the_track = args[4]
+        }
+    else if (args[3] == $lex$position$)
+        {
+        the_lat      = args[4]
+        the_lon      = args[5]
+        }
+    else if (args[3] == $lex$base$)
+        {
+        the_base = args[4]
+        }
+    }
+ 
+#------------------------------------------------------------
+# syntax decoded, now build a ACK message
+ 
+ilen = 0
+call smovhn (the_shooter, $$MaxLit, msgx, ilen)
+call smovv (" terminating gunfire with", msgx,ilen)
+isave = ilen
+ 
+if (trace$engage$gun != $no)
+    {
+    call echor
+    call echov ("~ ")
+    call echohn (the_shooter,8)
+    call echov (" (#")
+    call echoi (iunt)
+    call echov (") Ceasing gun fire: ")
+    }
+ 
+#------------------------------------------------------------
+# start search
+ 
+for_DEQ_chain
+    {
+    if (xdeq$ident$i != $Gun$Code ) next        # skip non-guns
+ 
+    tor$pointer = xdeq$pntr$i
+    tor$type$c = xtor$type$c
+ 
+    if (the_gun != 0)                           # was a gun specified
+        {
+        if (tor$type$c != the_gun) next         # Yes, not the same
+        gun_found = .true.
+        }
+ 
+    match_deq = all_action                      # was Track/Base/Pos
+ 
+    deq$GunTarget$i = Xdeq$GunTarget$i
+    deq$GunFlag$i   = Xdeq$GunFlag$i
+ 
+    if (! match_deq)                            # YES
+        {
+        if (deq$GunFlag$i == $posit$guncode)
+            a_name = 0
+        else
+            a_name = target_name(unt$pointer,deq$guntarget$i)
+ 
+        if (the_track != 0)                     #   .. track
+            {
+            if (the_track == a_name) match_deq = .true.
+            }
+        else if (the_base != 0)                 #   .. base
+            {
+            if (the_base == a_name) match_deq = .true.
+            }
+        else                                    #   .. position
+            {
+            if (a_name == 0)                    #
+                {
+                call fndord(deq$guntarget$i,ord$pointer)
+                if (ord$pointer != 0       &
+                    Xord$w04$c  == the_lat &
+                    Xord$w05$c  == the_lon  ) match_deq = .true.
+                }
+            }
+        }
+ 
+    if (! match_deq) next
+ 
+    #------------------------------------------------------------
+    # got a live one
+ 
+    found = .true.
+ 
+    if (deq$GunTarget$i != 0 |
+        deq$GunFlag$i   != 0  )
+        {
+        PUTdeq$GunTarget$i (0)
+#        PUTdeq$GunFlag$i   (0)
+        putdeq$gunflag$i ($fired$guncode)       # 1/93 clk
+ 
+        call smovv (" ", msgx,ilen)
+        call smovhn (tor$type$c,$$MaxLit, msgx,ilen)
+        }
+ 
+    if (trace$engage$gun != $no)
+        {
+        call echov (" ")
+        call echohn (tor$type$c,8)
+        }
+    }
+ 
+#------------------------------------------------------------
+# report the results
+ 
+if (ilen > isave)
+    {
+    call send_(iview,0,ilen,msgx)
+    call Clear_BTT_Info (UNT$Pointer)   # clk 7/95 (E1419)
+    }
+else if (! gun_found)
+    {
+    call wgoerr (iview,the_shooter,nord,nargs,args,"No such gun.")
+    }
+else if (! found)
+    {
+    call wgoerr (iview,the_shooter,nord,nargs,args,"No such assignment.")
+    }
+else
+    {
+    call wgoerr (iview,the_shooter,nord,nargs,args,"No gun assignments.")
+    }
+ 
+end

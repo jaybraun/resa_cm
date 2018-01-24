@@ -1,0 +1,307 @@
+ 
+##			File WGXCOTH.rat
+#####   version 1.0     dated   July 1987
+###
+ 
+include "macros.inc"
+include "bbcode.inc"
+include "bbctl.inc"
+include "bbunt.inc"
+include "bbvue.inc"
+include "bbrmt.inc"
+include "bbtrk.inc"
+include "bbrth.inc"
+include "bbpnd.inc"
+ 
+define (ROT1common,
+        real tsave
+        integer islot
+        integer iview
+        COMMON    /rot1com/ tsave[12],islot,iview
+       )
+ 
+# need to redefine address for subtable RCL in PND (copy of ROT table)
+ 
+define (RTH$RCL$Address,(RTH$POINTER + 1 + (RTH$RCL$INDEX-1)*13))
+ 
+define(BBImplicit, Implicit NONE)                          # MJC 5/4/2000 (E2145)
+ 
+
+subroutine ROTLAT (RTH$Pointer,vue$Pointer,iunit,time,is2way)
+ 
+########################################################
+#$%
+#$% Purpose:   ROTLAT provides executive control
+#$%            for over the horizon (ROTHR) tracks that
+#$%            are inserted to the Remote Track table
+#$%
+#$% Called By: RPPND2
+#$%
+#$% Calls:     FIND_RMTOTH     PUT_RMTOTH
+#$%
+#$% Tables:    ROT    RTH$RCL
+#$%
+#$% Date:      JULY 87
+#$%
+#$% Author:    Richard Schauer
+#$%
+########################################################
+ 
+BBcommon
+ROT1common
+real time
+ 
+integer IFIRST,ILAST,IUNIT,
+        INEW,IFLAG,IRMTINDX,IS2WAY,
+        VUE$Pointer,
+        RTH$Pointer                             # MJC 5/4/2000 (E2145)
+ 
+  iview = vue$pointer$index
+  ifirst = Xvue$FirstRmtIndx$I
+  ilast = Xvue$LastRmtIndx$I
+  islot = 1
+ 
+  call find_rmtoth(RTH$Pointer,ifirst,ilast,iunit,inew,iflag,irmtindx)
+  if (iflag != $YES)
+    call put_rmtoth(RTH$Pointer,inew,irmtindx,iunit,time,is2way)
+ 
+return
+end
+ 
+
+ 
+subroutine find_rmtoth(RTH$Pointer,ifirst,ilast,iunit,inew,iflag,irmtindx)
+ 
+########################################################
+#$%
+#$% Purpose:   FIND_RMTOTH finds the rmt track that corresponds
+#$%            to the Rothr local track; if first time for track
+#$%            it gets next available slot; and flags if rmt table is full
+#$%
+#$% Called By: ROTLAT
+#$%
+#$% Calls:     Zero_RMT_Entry    <wgmdrem.rat>
+#$%
+#$% Tables:    ROT    RTH$RCL
+#$%
+#$% Date:      JULY 87
+#$%
+#$% Author:    Richard Schauer
+#$%
+########################################################
+ 
+BBcommon
+ROT1common
+ 
+real oldtm
+ 
+integer IPTR,IPTROD,INEW,IFLAG,IRMTINDX,
+        IFIRST,ILAST,IUNIT,
+        RTH$RCL$Index, RMT$Pointer,
+        RTH$Pointer                             # MJC 5/4/2000 (E2145)
+real    RMT$Lastdettime$F                       # MJC 5/11/2000 (E2145)
+ 
+  iptr = 0
+  iptrod = 0
+  oldtm = 1.E35
+  inew = $NO
+  iflag = $NO
+  irmtindx = 0
+  RTH$RCL$index = islot
+ 
+  for (rmt$pointer$to ifirst; rmt$pointer$index <= ilast; rmt$pointer$next)
+    {
+     if (Xrmt$InUse$I == $NO)
+       {
+        iptr = rmt$pointer$index
+        NEXT
+       }
+ 
+     rmt$LastDetTime$f = Xrmt$LastDetTime$f
+ 
+     if (rmt$LastDetTime$f + Minutes$to$OLD < Game$Time)
+       {
+        call Zero_RMT_Entry (RMT$Pointer)
+        iptr = rmt$pointer$index
+        NEXT
+       }
+     if (rmt$LastDetTime$f < oldtm &
+        (rmt$LastDetTime$f + Minutes$to$YELLOW < Game$Time |
+         Xrmt$IsAssigned$i == $NO))
+       {			
+	iptrod = rmt$pointer$index
+	oldtm = rmt$LastDetTime$f
+       }
+ 
+     if (Xrmt$OverHoriz$i == $NO)                 NEXT
+     if (Xrmt$Detector$i  != iunit)               NEXT
+     if (Xrmt$Detectee$i  != XRTH$RCL$UnitIndx$I) NEXT
+     BREAK                                        # Break loop, we found it
+    }
+ 
+  if (rmt$pointer$index > ilast)
+    {
+     inew = $YES
+     if (iptr != 0)
+       irmtindx = iptr
+     else if (iptrod != 0)
+       {
+        irmtindx = iptrod
+    	if (tsave[iview] !=game$time)
+          {
+           tsave[iview] = game$time #$% set view's flag to game minute
+           call echor
+           call echov ("(Overwriting oldest RMT for view #")
+           call echoi (iview)
+           call echov  (')')
+          }
+       }
+     else
+       {
+        if (tsave[iview] != game$time)
+          {
+           tsave[iview] = game$time
+           call echov("No slots available for OTH tracks for view #")
+           call echoi(iview)
+           call echor
+          }
+        iflag = $YES
+        RETURN
+       }
+     call Zero_RMT_Entry (RMT$Pointer)
+    }
+  else
+    irmtindx = RMT$Pointer$Index
+ 
+return
+end
+
+ 
+subroutine PUT_RMTOTH(RTH$Pointer,inew,irmtindx,iunit,time,is2way)
+ 
+########################################################
+#$%
+#$% Purpose:   PUT_RMTOTH update the remote track with the Rothr
+#$%            local track information
+#$%
+#$% Called By: ROTLAT
+#$%
+#$% Calls:     OTHTKNO
+#$%
+#$% Tables:    ROT    RTH$RCL
+#$%
+#$% Date:      JULY 87
+#$%
+#$% Author:    Richard Schauer
+#$%
+########################################################
+ 
+BBcommon
+ROT1common
+real time
+ 
+integer IRMTINDX,INEW,IUNIT,
+        ITN,IS2WAY,
+        RTH$RCL$Index, RTH$Pointer,
+        RMT$Pointer, RMT$Detectee$I,
+        RMT$Detector$I, RMT$Detectorview$I,
+        RMT$Class$I, RMT$Detectiontype$I,
+        RMT$Composition$I, RMT$Course$I,
+        RMT$Speed$I, RMT$Detectionage$I                     # MJC 5/4/2000 (E2145)
+real    RMT$Firstdettime$F, RMT$Lastdettime$F,
+        RMT$Apparentlat$F, RMT$Apparentlon$F,
+        RMT$Timereported$F                                  # MJC 5/4/2000 (E2145)
+ 
+  RTH$RCL$Index = islot
+  RMT$Pointer$to irmtindx
+ 
+  if (XRTH$RCL$LostCounter$I != 0) RETURN
+ 
+  if (inew == $YES)
+    {
+     RMT$Detectee$I = XRTH$RCL$UnitIndx$I
+     RMT$Detector$I = iunit
+     RMT$DetectorView$I = iview                   # iview is in ROT1common
+     rmt$FirstDetTime$f = XRTH$RCL$FirstTime$f
+     RMT$Class$I = XRTH$RCL$Class$I
+     RMT$DetectionType$I = $ActiveNonVisual$code
+ 
+     PUTrmt$Detectee$I
+     PUTrmt$Detector$I
+     PUTrmt$DetectorView$I
+     PUTrmt$FirstDetTime$f
+     PUTrmt$Class$I
+     PUTrmt$DetectionType$I
+ 
+     PUTrmt$OverHoriz$I       ($YES)
+ 
+     call othtkno(iview,itn)     # get track number
+     PUTrmt$TrackNumber$I (itn)
+     if (RMT$Class$I == $air$code)     # if air track get raid size
+       {
+        RMT$Composition$I = XRTH$RCL$RaidSize$I
+        PUTrmt$Composition$I
+       }
+    }
+ 
+  rmt$LastDetTime$f = Xrth$RCL$DetTime$f
+  RMT$ApparentLat$F = XRTH$RCL$Lat$F
+  RMT$ApparentLon$F = XRTH$RCL$Long$F
+  RMT$Course$i = XRTH$RCL$Course$I
+  RMT$Speed$i = XRTH$RCL$Speed$I
+  rmt$TimeReported$f = time
+  if (rmt$LastDetTime$f >= game$time - minutes$to$old)
+    rmt$DetectionAge$I = $current$code
+  else
+    rmt$DetectionAge$I = $Old$code
+ 
+  PUTrmt$DetectionAge$I
+  PUTrmt$ApparentLat$F
+  PUTrmt$ApparentLon$F
+  PUTrmt$Course$I
+  PUTrmt$Speed$I
+  PUTrmt$TimeReported$f
+  PUTrmt$LastDetTime$f
+ 
+return
+end
+ 
+
+ 
+subroutine othtkno(iview,itn)
+ 
+########################################################
+#$%
+#$% Purpose:   OTHTKNO gets the next track number for a
+#$%            Over-the-horizon track number (ROTHR)
+#$%
+#$% Called By: put_othrmt
+#$%
+#$% Calls:
+#$%
+#$% Tables:    VUE
+#$%
+#$% Date:      JULY 87
+#$%
+#$% Author:    Richard Schauer
+#$%
+########################################################
+ 
+BBcommon
+ 
+integer ITN,IVIEW,
+        VUE$Nextothtrack$I,
+        VUE$Pointer                     # MJC 5/4/2000 (E2145)
+ 
+  VUE$Pointer$to iview
+ 
+  itn = max0 (1,Xvue$NextOTHTrack$I)
+ 
+  if (itn >= 999)
+    vue$NextOTHTrack$I = 1
+  else
+    vue$NextOTHTrack$I = itn + 1
+  PUTvue$NextOTHTrack$I
+ 
+return
+end

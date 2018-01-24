@@ -1,0 +1,570 @@
+####                    file  WGOPSET.rat
+ 
+include "bbctl.inc"
+include "bbcode.inc"
+include "bbacc.inc"
+include "bblrt.inc"
+include "bbunt.inc"
+include "bbisr.inc"
+include "bbord.inc"
+include "plplay.inc"
+include "ascii.inc"
+include "orders.inc"
+include "plplay.inc"
+include "stationmsg.inc"              # joa 12/97 (E1852)
+
+define(BBImplicit, Implicit NONE)                          # MJC 5/4/2000 (E2145)
+ 
+subroutine oset (nord,   # I                       # order number
+                 iview,  # I                       # given view
+                 nargs,  # I                       # number of arguments
+                 args)   # L                       # array of arguments
+ 
+########################################################
+#$%
+#$% Purpose:   OSET processes SET commands.
+#$%
+#$% Called By: EXEORD
+#$%
+#$% Calls:     SunTim
+#$%
+#$% Tables:    None
+#$%
+#$% Date:      JAN 83
+#$%
+#$% Author:    Dana Wills
+#$%
+########################################################
+ 
+BBcommon
+ 
+integer nord,iview,nargs
+literal args[nargs]
+real advance_time               # Minutes to advance time
+integer min_to_dtg, irc, month_to_julian, jj
+real gm                   # game minute of scenario
+real gmc                  # repetition of gm for confirmation
+real newgametime #function
+Character msg[ARB]
+ 
+if (args[2] == $LEX$Zulu$)
+    {
+    advance_time = args[4] * $Minutes$Per$Hour + args[5]
+    if (args[3] == $LEX$Back$) advance_time = - Advance_time
+    irc = min_to_dtg (Start$Time, advance_time, Start$Time)
+    julian$day =  month_to_julian(_		# Gregorian to julian day
+    				int(Start$year),
+    				int(Start$month),
+    				int(Start$day))
+    zulu$StartTime = Start$hour * $Minutes$Per$Hour + Start$minute
+ 
+    call SunTim                         ## update WET sunrise/sunset time
+    call RotTim                         ## update ROTHR sites sunrise/set time
+    call record_start_time
+    }
+else if (args[2] == $LEX$GAME$)
+{
+    gm = args[3]
+    gmc = args[4]
+    if (gm != gmc)
+    {
+        jj = 0
+ 
+        Call SMOVV("Game time not changed. Times do not match.",msg,jj)
+        #$% send message to view for display
+        call send_ (iview,0,jj,msg)
+        return
+    }
+
+    game$time=newgametime(gm,iview) #greater of the two
+}
+ 
+return
+end
+ 
+
+ 
+Subroutine Oalert (kview, UNT$Pointer, nargs, args)
+########################################################
+#$%
+#$% Purpose:   Process air alert commands.
+#$%
+#$% Called By: EXEORD (wgop)
+#$%
+#$% Calls:     LRT_Match,       LRT_Slot
+#$%
+#$% Tables:    LRT
+#$%
+#$% Date:      JAN 83
+#$%
+#$% Author:    Timothy P. Adamos
+#$%
+########################################################
+ 
+BBcommon
+ 
+literal         args[ARB]                               ## contains commands
+integer         kview,                                  ## owner of commands
+                nargs,                                  ## number of arguments
+                unt_indx
+ 
+literal         LRT$Text1$C,
+                LRT$Text2$C,
+                LRT$Text3$C,
+                LRT$Text4$C,
+                CSTRIP8                                 # MJC 5/4/2000 (E2145)
+ 
+string  msg1            "Sorry, unable to find aircraft type for alert. "
+string  msg2[ARB]       "Sorry, ALERT table full at this time."
+ 
+integer KK,
+        LRT$Pointer,
+        LRT$Vueindx$I,
+        LRT$Ready1$I,
+        LRT$Ready2$I,
+        LRT$Ready3$I,
+        UNT$Pointer,
+        ACC$Pointer                             # MJC 5/4/2000 (E2145)
+ 
+unt_indx = UNT$Pointer$Index
+ 
+kk = 0; call smovv ("        ", LRT$Text1$C, kk)
+kk = 0; call smovv ("        ", LRT$Text2$C, kk)
+kk = 0; call smovv ("        ", LRT$Text3$C, kk)
+kk = 0; call smovv ("        ", LRT$Text4$C, kk)
+ 
+if (nargs >= 6) LRT$Text1$C = args[6]
+if (nargs >= 7) LRT$Text2$C = args[7]
+if (nargs >= 8) LRT$Text3$C = args[8]
+if (nargs >= 9) LRT$Text4$C = args[9]
+ 
+ 
+call LRT_Match (unt_indx, args[2], ACC$Pointer, LRT$Pointer)
+ 
+if (LRT$Pointer != -1 & ACC$Pointer != -1)      ## found MATCH
+  {
+    LRT$VueIndx$I = xLRT$VueIndx$I              ## set view for aircraft
+### putLRT$VueIndx$I (LRT$VueIndx$I)            ## jb -delete PUT 8/13/88
+ 
+    putLRT$UntIndx$I (unt_indx)
+    putLRT$AccPntr$I (ACC$Pointer)
+ 
+    LRT$Ready1$I = args[3]                      ## update data
+    putLRT$Ready1$I
+    LRT$Ready2$I = args[4]
+    putLRT$Ready2$I
+    LRT$Ready3$I = args[5]
+    putLRT$Ready3$I
+ 
+    putLRT$Text1$C
+    putLRT$Text2$C
+    putLRT$Text3$C
+    putLRT$Text4$C
+ 
+    if (lrt$last < lrt$pointer)                 #jb     12/22/83
+     {
+      lrt$used = lrt$pointer$index * lrt$entry  #jb     12/22/83
+     }
+  }     # End if found match..
+ 
+else if (ACC$Pointer == -1)                     ## air type not found
+    {
+    call send_ (kview,0,47,msg1)                 ## no air message
+    }
+else                                            ## Unknown Unit/Acc Combo
+    {
+    kk = 0
+    call smovv ("Sorry, ",            msg2,kk)
+    call smovhn(Xunt$name$c,$$MaxLit,           msg2,kk)
+    call smovv (" does not carry ",  msg2,kk)
+    call smovhn(args[2],$$MaxName,    msg2,kk) # SMM 8/99 E2141
+    call smovv (" aircraft.",        msg2,kk)
+    call send_ (kview,0,kk,msg2)
+    }
+ 
+return
+end
+ 
+
+Subroutine LRT_Match (unt_indx, air_name, acc_pntr, lrt_pntr)
+########################################################
+#$%
+#$% Purpose:   Find a match for air type in ACC table and
+#$%             and UNT pointer index in LRT table.
+#$%
+#$% Called By: OALERT
+#$%
+#$% Calls:
+#$%
+#$% Tables:    LRT      ACC
+#$%
+#$% Date:      JAN 83
+#$%
+#$% Author:    Timothy P. Adamos
+#$%
+########################################################
+ 
+bbcommon
+ 
+literal         air_name                                ## aircraft type
+integer         acc_pntr,                               ## ACC$pntr
+                ifree,                                  ## available LRT slot
+                lrt_pntr,                               ## LRT pointer
+                unt_indx
+ 
+integer         ACC$Pointer,
+                LRT$Pointer,
+                LRT$Untindx$I                           # MJC 5/4/2000 (E2145)
+literal         CSTRIP8                                 # MJC 5/4/2000 (E2145)
+ 
+ifree = 0
+acc_pntr  = -1
+lrt_pntr  = -1
+ 
+    #$% search thru ACC table for pointer to air_name
+for (ACC$Pointer$First; ACC$Pointer$OK; ACC$Pointer$Next)
+    {
+    if (air_name != xACC$Type$C)  next
+ 
+    acc_pntr  = ACC$Pointer
+ 
+        #$% search thru LRT table for a particular slot
+    for (LRT$Pointer$First; LRT$Pointer$Valid; LRT$Pointer$Next)
+        {
+        LRT$UntIndx$I = xLRT$UntIndx$I
+        if (LRT$UntIndx$I == 0)
+            {
+            if (ifree == 0) ifree = lrt$pointer
+            next
+            }
+                                        ## check if unit and a/c match
+        if (unt_indx != LRT$UntIndx$I | acc_pntr != xLRT$ACCPntr$I) next
+ 
+        lrt_pntr  = LRT$Pointer                         ## save pointers
+ 
+        return
+        }
+ 
+    break
+    }
+ 
+return
+end
+ 
+
+Subroutine Ointell (id, kview)
+########################################################
+#$%
+#$% Purpose:   Process Intell Spot Report commands.
+#$%
+#$% Called By: WGOP
+#$%
+#$% Calls:
+#$%
+#$% Tables:    ISR
+#$%
+#$% Date:      April 83
+#$%
+#$% Author:    D.E. Wills
+#$%
+#$% Modified:  Carol Kropp - 7/96 (E1376)
+#$%            Insert the current game zulu time into the
+#$%            first line of the message.  If the 1st line
+#$%            of text entered by the user exceeds 70
+#$%            characters, it is truncated.
+#$%
+#$%            Jim Allen - 12/97 (E1852)
+#$%            Intell messages goes to all stations in
+#$%            view not individual stations.  StationMsgCommon
+#$%            block added so that the originating station
+#$%            value can be overriden.
+#$%
+########################################################
+ 
+BBcommon
+StationMsgCommon
+ 
+integer         id,
+                kview
+ 
+integer         Game_DTG    # function to convert game minute to DTG
+ 
+literal         args[$max$args]
+integer         len_txt[max$lines$of$Intell],
+                nargs,
+                to_who[15]
+ 
+character       txt[80,max$lines$of$Intell]
+ 
+integer         I,NLINES,ISIDE,ILAST,IALL,K,
+                K1,KK,LINE,MID,ICOUNT,LENGTH,
+                IFIRST_MSG,LAST_MSG,IMSG,
+                ORD$Pointer, ORD$WRD$Index,
+                ISR$Pointer                             # MJC 5/4/2000 (E2145)
+literal         CSTRIP8                                 # MJC 5/4/2000 (E2145)
+ 
+common /scratch$pad/ len_txt, txt
+ 
+string          msg_look "Check your INTELL Spot Report ASTAB."
+string          msg_nogo "Could not process INTELL command"
+ 
+for (i=$first$View; i <= $last$view; i=i+1) to_who[i] = NO
+ 
+#____________________________________________________________
+# get INTELL Command Line
+ 
+call fndord (id,ord$pointer)
+ 
+if (ord$pointer == 0)
+    {
+    call send_ (kview,0,length(msg_nogo),msg_nogo)
+    return
+    }
+ 
+nargs  = Xord$NbrArgs$i                 # Number of Args on INTELL Line
+nlines = Xord$count$i - 1               # number of lines of text
+ 
+for (ord$wrd$index = 1; ord$wrd$index <= nargs; # get the args
+     ord$wrd$index = ord$wrd$index + 1)
+    {
+    args[ord$wrd$index] = Xord$wrd$$C
+    }
+ 
+if (args[2] == $lex$Blue$)
+    {
+    iside = $firstBlue$view
+    ilast = $lastBlue$view
+    }
+else
+    {
+    iside = $firstOrange$view
+    ilast = $lastOrange$view
+    }
+ 
+if (nargs == 2)
+    {
+    iall = YES
+    }
+else
+    {
+    iall = NO
+ 
+    for (i=3; i<= nargs; i=i+1)
+        {
+        k = args[i] + iside - 1
+ 
+        if (k > ilast) next
+ 
+        to_who[k] = YES
+        }
+    }
+ 
+#____________________________________________________________
+# get the INTELL message lines
+ 
+# move the current zulu time into the first line - clk 6/96 (E1376)
+call fndord ((id+1), ORD$Pointer)        # locate the 1st
+if (ORD$Pointer$Ok)                      # line of the msg
+  k1 = xORD$NbrArgs$I
+else
+  k1 = 0
+kk = 0
+call smoviz (Game_DTG(Game$Time), 6, txt[1,1], kk)
+call smovv  ("Z: ", txt[1,1], kk)
+if ((k1 * 8) < 70)    # 79 characters max - length("ddhhmmZ: ")
+  call smovh (xORD$Args$I, k1 * 8, txt[1,1], kk)
+else
+  call smovh (xORD$Args$I, 70, txt[1,1], kk)
+len_txt[1] = kk
+ 
+# move the remaining lines into the txt buffer
+for (line = 2; line <= nlines; line=line+1)     # loop for each line
+    {
+    len_txt[line] = 0
+ 
+    mid = id + line
+    call fndord (mid, ord$pointer)
+ 
+    if (ord$pointer == 0) next          # missing a line (forget it !)
+ 
+    k1 = Xord$NbrArgs$i             # Number of Args of text on this line
+ 
+    kk = 0;
+    call smovh (Xord$args$i, k1 * 8, txt[1,line], kk)
+    len_txt[line] = kk
+ 
+    for (kk = 1; kk <= len_txt[line]; kk = kk + 1)
+        {
+        if (txt[kk,line] < $SPACE |            # check for invalid characters
+            txt[kk,line] > 127  )
+            {
+            txt[kk,line] = '?'
+            }
+        }
+    }
+ 
+#____________________________________________________________
+# Make room for the INTELL messages (one per view)
+ 
+for (i = iside; i <= ilast; i = i + 1)
+    {
+    if (iall == NO & to_who[i] == NO) next
+ 
+    repeat
+        {
+        call count_isr (i,icount,ifirst_msg,last_msg)
+ 
+        if (icount + nlines <= ISR$Lines_Per_View) break        # 2/20/91 DEW
+ 
+        call purge_isr (i,ifirst_msg)    # purge out First message
+        }
+    }
+ 
+#____________________________________________________________
+# Disburse the INTELL messages (one per view)
+ 
+StationMsgIndx = 0   # cause msg to go to view - joa 12/97 (E1852)
+for (i = iside; i <= ilast; i = i + 1)
+    {
+    if (iall == NO & to_who[i] == NO) next
+ 
+    call count_isr (i,icount,ifirst_msg,last_msg)
+    imsg = last_msg + 1
+ 
+    for (line = 1; line <= nlines; line=line+1)
+        {
+        if (len_txt[line] == 0) next
+ 
+        call getisr (isr$pointer)       # get an empty ISR Slot
+        if (isr$pointer == 0)
+            {
+            # display msg, ISR table full
+ 
+            next 2
+            }
+ 
+        putISR$LineLen$I (len_txt[line])        # Length of this Line
+        putISR$LineNbr$I (line)                 # Nbr of line in page
+        putISR$VueIndx$I (i)                    # Index to View Owning Info
+        putISR$MsgNbr$I  (imsg)                 # Nbr of Msg
+ 
+        if (isr$last < isr$pointer)                     #jb     12/22/83
+         {
+          isr$used = isr$pointer$index * isr$entry      #jb     12/22/83
+         }
+ 
+        call lib$movc3 (len_txt[line], txt[1,line], XISR$Text$I) # Up to 80 Byte
+        }
+ 
+    call send_ (i,0,length(msg_look),msg_look)
+    }
+ 
+#______________________________________________________________________
+# Reset ISR$Used field
+ 
+ilast = 0
+for (isr$pointer$first; isr$pointer$valid; isr$pointer$next)
+    {
+    if (Xisr$VueIndx$i != 0) ilast = isr$pointer
+    }
+ 
+if (ilast == 0)
+    {
+    isr$used = 0
+    }
+else
+    {
+    isr$pointer = ilast
+    isr$used = isr$pointer$index * isr$entry
+    }
+ 
+return
+end
+
+ 
+subroutine count_isr (iview,icount,ifirst,ilast) # count msg lines for a view
+bbcommon
+ 
+integer ICOUNT,ILAST,IFIRST,IVIEW,
+        ISR$Pointer, ISR$Msgnbr$I                # MJC 5/4/2000 (E2145)
+ 
+icount = 0
+ilast  = 0              # last message number
+ifirst = 999999
+ 
+for (isr$pointer$first; isr$pointer$ok; isr$pointer$next)
+    {
+    if (Xisr$VueIndx$i != iview) next
+ 
+    icount = icount + 1
+    isr$MsgNbr$i = Xisr$MsgNbr$i
+ 
+    ilast  = max(ilast,  isr$MsgNbr$i)
+    ifirst = min(ifirst, isr$MsgNbr$i)
+    }
+ 
+return
+end
+
+ 
+subroutine purge_isr (iview,ifirst)     # purge a msg for a view
+bbcommon
+ 
+integer ISR$Pointer,
+        IVIEW,
+        IFIRST                          # MJC 5/4/2000 (E2145)
+ 
+for (isr$pointer$first; isr$pointer$ok; isr$pointer$next)
+    {
+    if (Xisr$VueIndx$i != iview)  next
+    if (Xisr$MsgNbr$i  != ifirst) next
+ 
+    isr$zero
+    PUTisr$modified$i (YES)
+    }
+ 
+return
+end
+
+ 
+subroutine getisr (isr$pointer)         # get an empty ISR Slot
+bbcommon
+ 
+integer ISR$Pointer                     # MJC 5/4/2000 (E2145)
+ 
+for (isr$pointer$first; isr$pointer$valid; isr$pointer$next)
+    {
+    if (Xisr$VueIndx$i != 0) next
+ 
+    return
+    }
+ 
+isr$pointer = 0
+ 
+return
+end
+real function newgametime(gm,iview)
+
+#returns either proposed game time or game$time
+BBcommon
+real gm
+integer iview, jj
+character msg[ARB]
+
+if (gm < game$time)
+{
+
+    if (iview!=0) #from an order
+    {
+       jj = 0
+       Call SMOVV("Game time not changed. Value less than current time.",msg,jj)
+       #$% send message to view for display
+       call send_ (iview,0,jj,msg)
+    }
+    newgametime=game$time
+    return
+}
+
+newgametime=gm
+return
+end

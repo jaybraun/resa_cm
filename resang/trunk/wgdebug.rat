@@ -1,0 +1,1311 @@
+# WGDEBUG.RAT   -   Process Wargame-Debug requests
+#------------------------------------------------------------
+#
+# Modifications:
+#
+#   Who When        What
+#   --- ----        ----------
+#   DEW 22-Jan-91   Changed calls to ECHOH with quoted strings
+#                   to call ECHOV without the second argument.
+#
+#------------------------------------------------------------
+ 
+include "bbctl.inc"
+include "bbcode.inc"
+include "ascii.inc"
+define (BBImplicit, Implicit None)                      # MJC 6/29/2K (E2145 - Implicit None)
+define ($$MaxWatch,16)
+define ($snapsize,400)
+ 
+define (WatchCommon,
+        integer wChg,wAdd[$$MaxWatch],wVal[$$MaxWatch]
+        common  /watch_com/ wChg,wAdd,wVal, icmd_code, imodel_code
+       )
+ 
+define ($max_cpu_mod, 60)
+ 
+define (CPUCommon,
+        integer cpu_flag, cpu_mod_cnt
+        real    cpu_start, cpu_top, cpu_last, cpu_now, cpu_val[$max_cpu_mod, 2]
+        literal cpu_mod[$max_cpu_mod]
+        common  /cpu_com/ cpu_flag, cpu_mod_cnt, cpu_start, cpu_top, cpu_last,
+                          cpu_now, cpu_val, cpu_mod
+       )
+ 
+
+ 
+subroutine dbreak (iflag)
+    # WARNING:  assume argument is a CONSTANT:  SO NO CHANGE IT!
+########################################################
+#$%
+#$% Purpose:   DBREAK displays debug watch addresses
+#$%            if changed, and processes any control
+#$%            characters that have been entered at
+#$%            the terminal.
+#$%
+#$% Called By: RESYNC   WGHALT   WGSTAT     WARCYC
+#$%
+#$% Calls:     GET_CH      ECHOR      ECHOH
+#$%
+#$% Tables:    None
+#$%
+#$% Date:      OCT 80
+#$%
+#$% Author:    Dana Wills
+#$%
+#$% Modified:  Carol Kropp - 9/97 (E1892)
+#$%            Added call to update the game rate registered
+#$%            with ALSP when the time is changed.
+#$%
+#$%            John McCormick- 1/25/03 (E2332)
+#$%            These type of commands have no place in Joint Training Confederation
+#$%            ^K to kill ALSP, numeric input at swar to change game rate
+########################################################
+ 
+ 
+BBcommon
+WatchCommon
+integer K,
+        IWORD,
+        ICOPY,
+        IFLAG,
+        IDUMP,
+        ICHAR,
+        IVCHAR,
+        IPNT,
+        ICMD_CODE,
+        IMODEL_CODE                             # MJC 6/29/2K (E2145 - Implicit None)
+integer snap[$snapsize]
+ 
+data wAdd/ $$MaxWatch * 0 /
+ 
+call watch_cpu
+ 
+wChg = $no
+for (k = 1; k <= $$MaxWatch; k = k + 1)
+    {
+    if (wAdd[k] <= 0) next
+ 
+    iword = ibb[wAdd[k]]
+ 
+    if (iword == wVal[k]) next
+ 
+    if (wChg == $no)
+        {
+        wChg = $yes
+        call echor
+        call echo ($bell)
+        call echov ("Watch Alert !!")
+        call echo ($bell)
+        }
+ 
+    call echor
+    call echov ("  Address ")
+    call echoi (wAdd[k])
+    call echov (" changed from ")
+    call echoi (wVal[k])
+    call echov (" to ")
+    call echoi (iword)
+    call echo ($period)
+ 
+    wVal[k] = iword
+    }
+ 
+if (wChg == $yes) call ddebug
+ 
+#$% get flag position (yes/no)
+icopy = iflag
+idump = iflag
+ 
+repeat
+   {
+    #$% get a character
+    call get_ch (ichar,0)
+ 
+ 
+    #$% else if the charactrer is a ^Z
+    if (ichar == $cntlZ)
+       {
+        #$% display message to the user
+        call echor
+        call echov ("Console (small) Halt Request Accepted (^Z).")
+        call echor
+ 
+        #$% set halt request
+        halt$request = $yes + $yes
+       }
+    #$% else if the charactrer is a Z or a z
+    else if (ichar == $LETZ | ichar == $Litz)
+       {
+        #$% display message to the user
+        call echor
+        call echov ("Console (small) Halt Cancellation Accepted (Z).")
+        call echor
+ 
+        #$% set halt request off
+        halt$request = $no
+       }
+ 
+    #$% else if the charactrer is a ^H, H or h
+    else if (ichar == $cntlH | ichar == $LETH | ichar == $Lith)
+       {
+        #$% display message to the user
+        call echor
+        call echov ("WARGAM Console control functions")
+        call echor
+        call echor
+        call echov (" ^H   Display this message")
+        call echov (" ^Z   Halt WARCYC (not PLAYER/STATUS/PLOT)")
+        call echor
+        call echov (" ^D   Debug control mode. ")
+        call echor
+        call echov (" ^V   Display constant area comparisons")
+        call echor
+        call echov (" The same letter (not controlled) reverses ")
+        call echor
+        call echov (" the specified function.")
+        call echor
+       }
+ 
+    else if (ichar == $cntlD)
+        {
+        call ddebug
+        }
+ 
+    else if (ichar == $cntlV)
+        {
+        iVchar = $yes
+        }
+ 
+    else if (ichar == $LETV | ichar == $LiTv)
+        {
+        iVchar = $no
+        }
+ 
+    #$% repeat until the character is a null
+    } until (ichar == $null)
+ 
+ 
+if (iVchar == $yes & idump == $yes)
+    {
+    for(ipnt=1; ipnt<= $snapsize; ipnt=ipnt+1)
+        {
+         if (snap[ipnt] == ibb[ipnt]) next       # if no change
+        #if (ipnt == 13)              next       # if Random$seed
+         if (ipnt == 4)                          # if Game$minute
+           {
+            if (snap[ipnt]+1 == ibb[ipnt]) next
+           }
+ 
+        call echor
+        call echo ($Lparen)
+        call echoi (Game$minute)
+        call echov (") Word ")
+        call echoi (ipnt)
+        call echov (" Changed from ")
+        call echoi (snap[ipnt])
+        call echov (" to ")
+        call echoi (ibb[ipnt])
+        call echov ("    ")
+       }
+    }
+ 
+ if (icopy == $yes)
+   {
+    for(ipnt=1; ipnt<= $snapsize; ipnt=ipnt+1) snap[ipnt] = ibb[ipnt]
+   }
+ 
+return
+end
+
+ 
+subroutine Watch_cpu            # watch CPU Usage (by Model)
+ 
+########################################################
+#$%
+#$% Purpose:   Watch_CPU allows the user to observe the CPU
+#$%            usage of each model in WARCYC.
+#$%
+#$% Called By: DBREAK
+#$%
+#$% Calls:     ECHOR      ECHOH      ECHOHN
+#$%
+#$%
+#$% Tables:    None
+#$%
+#$% Date:      APR 83
+#$%
+#$% Author:    Dana Wills
+#$%
+########################################################
+ 
+BBcommon
+CPUCommon
+integer J,
+        IFLAG,
+        I,
+        IDOT,
+        KK                                      # MJC 6/29/2K (E2145 - Implicit None)
+integer         last_cycle /-1/
+integer			runtim
+literal         mod_name
+character       mod_byte[8]
+equivalence     (mod_name,mod_byte)
+ 
+cpu_now = runtim()/1000.0
+ 
+if   (trace$cpu != NO) iflag = YES      # check the BB trace variable
+else                   iflag = NO
+ 
+if (test$name == 'START')               # special case for initialization
+    {
+    cpu_flag    = YES                   # this done only once at startup
+    cpu_start   = cpu_now
+    cpu_mod_cnt = 0
+    }
+else if (test$name == 'TOP')
+    {
+    if (cpu_flag == YES)                # don't output if this is prior to
+        {                               # very first cycle of this execution
+        cpu_flag = NO
+        }
+    else if (game$minute == last_cycle)
+        {
+        continue
+        }
+    else
+        {
+        call show_cpu (1, YES, iflag)           # display CPU Usage this cycle
+ 
+        if (trace$cpu > YES)                    # display CPU usage over game
+            call show_cpu (2, NO, YES+YES)      #
+        }
+ 
+     last_cycle = game$minute
+    }
+else if (test$name == 'HALT')
+    {
+    call show_cpu (1, YES, iflag)               # display CPU Usage this cycle
+ 
+    call show_cpu (2, NO, YES+YES)              # display CPU Usage this game
+    }
+else
+    {
+    mod_name = test$name
+ 
+    repeat
+        {
+        for (i=1; i <= cpu_mod_cnt; i=i+1)      # search for Model Name
+            {
+            if (mod_name == cpu_mod[i]) break   # Found It !
+            }
+ 
+        if (i > cpu_mod_cnt)                    # Was It Found ?
+            {
+            cpu_mod_cnt = cpu_mod_cnt + 1               # NO
+ 
+            if (cpu_mod_cnt > $max_cpu_mod) cpu_mod_cnt=$max_cpu_mod # Too many
+ 
+            i = cpu_mod_cnt
+ 
+            cpu_mod[i]   = mod_name             # Add A Model
+            cpu_val[i,1] = 0.0
+            cpu_val[i,2] = 0.0
+            }
+ 
+        cpu_val[i,1] = cpu_val[i,1] + max(0.0,(cpu_now - cpu_last)) # Summ the CPU Time
+        cpu_val[i,2] = cpu_val[i,2] + max(0.0,(cpu_now - cpu_last))
+ 
+        idot = NO
+ 
+        for (kk = 1; kk <= 8; kk = kk + 1)
+            {
+            if (idot == YES) mod_byte[kk] = $SPACE
+ 
+            if (mod_byte[kk] != $PERIOD) next
+ 
+            idot = YES
+            mod_byte[kk] = $ASTER
+            }
+ 
+        } until (idot == NO)    # end of repeat
+    }
+ 
+cpu_last = cpu_now
+ 
+return
+end
+
+ 
+subroutine Show_cpu (irow, iclear, itrace)      # display CPU Usage (by Model)
+    # WARNING: first 2 arguments are CONSTANTS:  DON'T CHANGE THEM!
+########################################################
+#$%
+#$% Purpose:   Show_CPU displays to the user the CPU
+#$%            usage of each model in WARCYC.
+#$%
+#$% Called By: DBREAK
+#$%
+#$% Calls:     ECHOR      ECHOH      ECHOHN
+#$%
+#$%
+#$% Tables:    None
+#$%
+#$% Date:      APR 83
+#$%
+#$% Author:    Dana Wills
+#$%
+########################################################
+ 
+BBcommon
+CPUCommon
+integer ITRACE,
+        I,
+        IDOT,
+        INDEX,
+        IROW,
+        K,
+        IPNT,
+        ICLEAR                                  # MJC 6/29/2K (E2145 - Implicit None)
+real    VHIGH                                   # MJC 7/6/2K (E2145 - Implicit None)
+real    total_cpu
+real    pcent[$max_cpu_mod]
+integer pflag[$max_cpu_mod]
+real    vismod_CPU
+real    rejmod_CPU
+ 
+if (itrace != NO)                               # should I output anything ?
+    {
+    vismod_CPU = 0.0
+    rejmod_CPU = 0.0
+ 
+    total_cpu = 0.0
+ 
+    for (i=1; i <= cpu_mod_cnt; i=i+1)          # compute total CPU usage
+        {
+        idot = index(cpu_mod[i],'.')
+        if (idot >= 1 & idot <= 8) next
+ 
+        total_cpu = total_cpu + cpu_val[i,irow]
+        }
+ 
+    for (i=1; i <= cpu_mod_cnt; i=i+1)          # compute each % CPU usage
+        {
+        pcent[i] = 100.0 * cpu_val[i,irow]/total_cpu
+ 
+        if (pcent[i] < 0.005) pflag[i] = YES    # flag as PRINTED already
+        else                  pflag[i] = NO     # flag as need to be printed
+        }
+ 
+    k = 99
+    repeat
+        {
+        vhigh = 0.0
+        ipnt  = 0
+ 
+        for (i=1; i <= cpu_mod_cnt; i=i+1)
+            {
+            if (pflag[i] == YES) next           # flagged as PRINTED
+ 
+            if (pcent[i] < vhigh) next
+ 
+            vhigh = pcent[i]
+            ipnt = i
+            }
+ 
+        if (ipnt == 0) break
+ 
+        if (k >= 8)
+            {
+            call echor
+            call echov ("% CPU (cycle")
+ 
+            if (itrace == YES) call echoib(game$minute-1,5)     # single cycle
+            else               call echoib(99999,5)             # last cycle
+ 
+            call echov ("): ")
+ 
+            k = 0
+            }
+ 
+        if (k != 0) call echov (", ")
+        k=k+1
+ 
+        if      (cpu_mod[ipnt] == 'VISMOD') vismod_CPU = cpu_val[ipnt,irow]
+        else if (cpu_mod[ipnt] == 'REJMOD') rejmod_CPU = cpu_val[ipnt,irow]
+ 
+        call echohn (cpu_mod[ipnt],$$MaxLit)
+        call echov ('=')
+        call echof  (pcent[ipnt],2)
+ 
+        pflag[ipnt] = YES                       # flag as PRINTED
+        }
+ 
+    if (itrace != YES)                          # Summ of cycles
+        {
+        if (k != 0) call echov (", ")
+ 
+        call echov ("Total=")
+        call echof (total_cpu,2)
+        }
+ 
+    call echov (" !")
+ 
+    if (trace$parallel != $NO)
+        {
+        if (vismod_cpu > 0.0)
+            {
+            call echor
+            call echov ("|| CPU (cycle")
+ 
+            if (itrace == YES) call echoib(game$minute-1,5)     # single cycle
+            else               call echoib(99999,5)             # last cycle
+ 
+            call echov ("): ")
+            call echov ("VISMOD=")
+ 
+            call echof (vismod_cpu,2)
+            }
+ 
+        if (rejmod_cpu > 0.0)
+            {
+            call echor
+            call echov ("|| CPU (cycle")
+ 
+            if (itrace == YES) call echoib(game$minute-1,5)     # single cycle
+            else               call echoib(99999,5)             # last cycle
+ 
+            call echov ("): ")
+            call echov ("REJMOD=")
+ 
+            call echof (rejmod_cpu,2)
+            }
+ 
+        }
+    }
+ 
+if (iclear == YES)                              # check if should zero values
+    {
+    for (i=1; i <= cpu_mod_cnt; i=i+1) cpu_val[i,irow] = 0.0
+    }
+ 
+return
+end
+
+ 
+subroutine ddebug                       # set/clear skip/trace flags
+ 
+########################################################
+#$%
+#$% Purpose:   DDEBUG allows the user to access the
+#$%            debug capabilities programmed into
+#$%            WARCYC.
+#$%
+#$% Called By: DBREAK     WGORDT
+#$%
+#$% Calls:     ECHOR      ECHOH      ECHOHN
+#$%            GETCH      DELAY      ECHO
+#$%            DMODEL     DVALUE     FSFPTR
+#$%            FBIN       TYPERR     ECHOI
+#$%
+#$%
+#$% Tables:    None
+#$%
+#$% Date:      OCT 80
+#$%
+#$% Author:    Dana Wills
+#$%
+#$% Modified:  Carol Kropp - 9/97 (E1892)
+#$%            Added call to update the game rate registered
+#$%            with ALSP when the time is changed.
+#$%
+########################################################
+ 
+BBcommon
+WatchCommon
+integer JSTAT,
+        IADD,
+        ICHAR,
+        ICMD_CODE,
+        IVAL,
+        IOK,
+        K,
+        KPOS,
+        IERR,
+        J,
+        M,
+        IMODEL_CODE                             # MJC 6/29/2K (E2145 - Implicit None)
+#
+#   ?
+#   Clear skip of <model>
+#   Disable Station <value>
+#   Go
+#   List flag settings
+#   Minute length to <value>
+#   Pause after skipping <model>
+#   Skip <model>
+#   Trace <model> <value>
+#   Watch <address>
+#   VAX Debugger
+#   Xecute ????
+#   Quality tests
+#
+ 
+ 
+IntCharEquiv(nmod,5,39)
+ 
+define (Data$nmod_dat1, DATA nmod [1,$use(Data_Count)])
+define (Data$nmod_name, DATA (nmodC [m,$use(Data_Count)],m=2,3))
+define (Data$nmod_dat45, DATA (nmod [m,$use(Data_Count)],m=4,5))
+define (Data$nmod,
+     $incr(Data_Count)
+     Data$nmod_dat1 / @1 /
+     Data$nmod_name / @2, @3 /
+     Data$nmod_dat45 / @4, @5 /
+)
+ 
+#          code,"model"    ,skip,trace
+ 
+$set(DataCount,0)
+data$nmod($LetA,"PGA-","Rcrd",   $$skip$RECORD,         $$trace$Record)
+data$nmod($LetB,"Save","s   ",   $$skip$saves,          $$trace$saves)
+data$nmod($LetC,"Comm","    ",   $$skip$Comm,           $$trace$comm)
+data$nmod($LetD,"Dama","ge  ",   $$skip$DAMAGE,         $$trace$damage)
+data$nmod($LetE,"Enga","ge  ",   $$skip$ENGAGE,         $$trace$engage)
+data$nmod($LetF,"Flto","ps  ",   $$skip$FLTOPS,         $$trace$fltops)
+data$nmod($LetG,"BB-T","rim ",   $$skip$bbtrim,         0)
+data$nmod($LetH,"HFDF","    ",   $$skip$HFDF,           $$trace$hfdf)
+data$nmod($LetI,"EOIR","    ",   $$skip$EOIR,           $$trace$EOIR)
+data$nmod($LetJ,"Comm","Jam ",   $$skip$Comms_Jamming,  $$trace$comm)
+data$nmod($LetK,"Fail","ure ",   $$skip$FAILURE,        0)
+data$nmod($LetL,"LIDA","R   ",   $$skip$LIDAR,          $$trace$LIDAR)
+data$nmod($LetM,"Moti","on  ",   $$skip$MOTION,         $$trace$motion)
+data$nmod($LetN,"MAD ","    ",   $$skip$MAD,            $$trace$mad)
+data$nmod($LetO,"Orde","rs  ",   $$skip$WGORDP,         $$trace$wgordp)
+data$nmod($LetP,"Repr","ting",   0            ,         $$trace$reporting)
+data$nmod($LetQ,"SWAB","S   ",   $$skip$SWABS ,         $$trace$swabs)
+data$nmod($LetR,"Rada","rESM",   $$skip$Radar,          $$trace$radar)
+data$nmod($LetS,"SOSU","S   ",   $$skip$SOSUS,          $$trace$sosus)
+data$nmod($LetT,"Surv","Sat ",   $$skip$SurvSat,        $$trace$survsat)
+data$nmod($LetU,"Sona","r   ",   $$skip$SONAR,          $$trace$sonar)
+data$nmod($LetV,"Visu","al  ",   $$skip$VISUAL,         $$trace$visual)
+data$nmod($letW,"CPU ","    ",   0            ,         $$trace$cpu)
+data$nmod($LetX,"Dete","ctio",   $$skip$DETECT,         0)
+data$nmod($LetY,"Data","Coll",   $$skip$DataCollect,    $$Trace$DataCollect)
+data$nmod($LetZ,"Remo","ve  ",   0            ,         $$trace$Remove)
+data$nmod($dig0,"Rand","om  ",   0            ,         $$trace$Random)
+data$nmod($dig1,"Repo","rtIn",   $$skip$Reporting,      0)
+data$nmod($dig2,"Repr","tOut",   $$skip$REPOUT,         0)
+data$nmod($dig3,"EMI ","    ",   $$Skip$Emi   ,         $$Trace$EMI)
+data$nmod($dig4,"Smar","Torp",   $$skip$SmartTorp,      $$trace$SmartTorp)
+data$nmod($dig5,"Roth","r   ",   $$skip$Rothr ,         $$trace$Rothr)
+data$nmod($dig6,"Para","llel",   0            ,         $$trace$Parallel)
+data$nmod($dig7,"Intr","aEMI",   $$Skip$Intemi,         $$Trace$Intemi)
+data$nmod($dig8,"ExMs","gs  ",   $$Skip$ExMsgs,         $$trace$ExMsgs)
+data$nmod($dig9,"Extr","act ",   $$Skip$Extract,        $$trace$Extract)
+data$nmod($EQUAL,"Bist","atic",  $$Skip$Bistatic,       $$Trace$Bistatic)
+data$nmod($LESS ,"Dete","ct  ",  $$Skip$Detect,         $$Trace$Detect)
+data$nmod(0,     "    ","    ",  0            ,         0)  # this last line must be Zeroes...
+ 
+#$% initialize values
+jstat = 0
+iadd = 0
+ 
+repeat
+   {
+    #$% if status is negative (trace called) or address is
+    #$% zero (no index chosen in nmode array)
+    if (jstat < 0 | iadd == 0)
+       {
+        #$% display debug prompt
+        call echor
+        call echov ("Debug @ ")
+        call echohn (test$name,$$MaxLit)
+        call echov (" > ")
+       }
+ 
+    repeat
+       {
+        #$% get a character
+        call get_ch (ichar,0)
+ 
+        #$% if character is a null, delay 1 sec, otherwisw break
+        if (ichar != $null) break
+        call delay (1000)
+       }
+ 
+    #$% make all letters capitols
+    if (ichar >= $LiTa & ichar <= $LiTz) ichar = ichar - $space
+ 
+    icmd_code = ichar
+ 
+    #$% if the character is a ? (help)
+    if (ichar == $quest)
+       {
+        #$% display message to user
+        call echo ($quest)
+        call echor
+        call echov ("WARGAM Console debug control")
+        call echor; call echov ("  Clear skip of <model>")
+        call echor; call echov ("  Disable Station (0=No/1=Yes) <value>")
+        call echor; call echov ("  Game (mode: 0=Go/1=Pause) <value>")
+        call echor; call echov ("  List flag settings")
+        call echor; call echov ("  Minute length to <value>")
+        call echor; call echov ("  Pause after skipping <model>")
+        call echor; call echov ("  Quality check of <data>")
+        call echor; call echov ("  Skip <model>")
+        call echor; call echov ("  Trace <model> <value>")
+        call echor; call echov ("  Watch <address>")
+        call echor; call echov ("  VAX Debugger")
+        call echor; call echov ("  Xecute")
+        call echor
+       }
+    #$% else if the character is Q
+    else if (ichar == $LetQ)                    # "Quality check "
+       {
+        #$% display message to user
+        call echov ("Quality check of ")
+ 
+        #$% get table/other code from user, and test it
+        call dquality
+       }
+    #$% else if the character is S
+    else if (ichar == $LetS)                    # "Skip <model>"
+       {
+        #$% display message to user
+        call echov ("Skip ")
+ 
+        #$% get model number index input from user
+        call dmodel (nmod,4,iadd,jstat)
+        if (jstat >= 0 & iadd != 0)
+            #$% set ibb address
+            IBB[iadd] = $yes
+       }
+    else if (ichar == $LetD)                    # "Disable Station <Value>"
+       {
+        #$% display message to user
+        call echov ("Disable station (0=No/1=Yes) ")
+ 
+        #$% get value number input from user
+        call dvalue (ival,jstat)
+        if (jstat < 0)
+            {
+            call echov ("Not changed")
+            next
+            }
+ 
+        lock$station = ival
+ 
+        if (lock$station == YES) call echov (" (Locked Out)")
+        else                     call echov (" (Enabled)")
+       }
+    #$% else if the character is P
+    else if (ichar == $LetP)                    # "Pause after skipping <mod>"
+       {
+        #$% display message to user
+        call echov ("Pause after skipping ")
+ 
+        #$% get model number index input from user
+        call dmodel (nmod,4,iadd,jstat)
+        if (jstat >= 0 & iadd != 0)
+            #$% set ibb address
+            IBB[iadd] = $yes+$yes
+       }
+    #$% else if the character is C
+    else if (ichar == $LetC)                    # "Clear skip of <model>"
+       {
+        #$% display message to user
+        call echov ("Clear skip of ")
+ 
+        #$% get model number index input from user
+        call dmodel (nmod,4,iadd,jstat)
+        if (jstat >= 0 & iadd != 0)
+            #$% set ibb address
+            IBB[iadd] = $no
+       }
+    #$% else if the character is T
+    else if (ichar == $LetT)                    # "Trace <model> <val>"
+       {
+        #$% display message to user
+        call echov ("Trace ")
+ 
+        #$% get model number index input from user
+        call dmodel (nmod,5,iadd,jstat)
+        if (jstat < 0 | iadd == 0) next
+ 
+        #$% get value number input from user
+        call dvalue (ival,jstat)
+        if (jstat < 0) next
+ 
+        if (ival == 0) call echov (" off")
+        #$% set ibb address
+        IBB[iadd] = ival
+       }
+    #$% else if the character is W
+    else if (ichar == $LetW)                    # "Watch <address>"
+       {
+        #$% display message to user
+        call echov ("Watch ")
+ 
+        #$% get value number input from user
+        call dvalue (ival,jstat)
+        if (jstat < 0) next
+ 
+        #$% set default value
+        iok = $no
+        for (k = 1; k <= $$MaxWatch; k=k+1)
+           {
+            if (wAdd[k] != 0) next
+ 
+            iok = k
+            break
+           }
+ 
+        if (ival == 0)
+           {
+            #$% display message to user
+            call echov (" off")
+ 
+            for (k = 1; k <= $$MaxWatch; k=k+1) wAdd[k] = 0
+           }
+            #$% else if table full
+            else if (iok == $no)
+           {
+            #$% display message to user
+            call echov (" addresses all in use.")
+           }
+        else
+           {
+            kpos = max$bb$words
+ 
+            wAdd[iok] = ival
+ 
+            wVal[iok] = ibb[ival]
+            #$% display message to user
+            call echov (" ok.")
+           }
+ 
+        if (1 == 2)
+           {
+            9100
+            #$% display message to user
+            call echov (" Can't!  ")
+            call typerr (ierr)
+            call echo ($period)
+           }
+       }
+    #$% else if the character is L
+    else if (ichar == $LetL)                    # "List flag settings"
+       {
+        #$% display message to user
+        call echov ("List flag settings")
+ 
+        call echor
+        call echov (" ")
+        call echov ("Cycle length is ")
+        call echoi (int(time$spec))
+ 
+        call echor
+        call echov (" ")
+        call echov ("Game mode is ")
+        call echoi (game$pause)
+        if (game$pause == YES) call echov (" (Paused)")
+        else                   call echov (" (Executing)")
+ 
+        call echor
+        call echov (" ")
+        call echov ("Station is ")
+        call echoi (Lock$Station)
+        if (lock$station == YES) call echov (" (Locked Out)")
+        else                     call echov (" (Enabled)")
+ 
+        #$% for each model in data table
+        for (k = 1; nmod[1,k] != 0; k=k+1)
+           {
+            j = nmod[4,k]
+            if (j == 0) next
+ 
+            if (IBB[j] == 0) next
+ 
+            #$% display message to user
+            call echor
+            call echov (" ")
+            if (IBB[j] == $yes) call echov ("Skip  ")
+            else                call echov ("Pause ")
+ 
+            #$% display message to user
+            call echov (" (")
+            call echo  (nmod[1,k])
+            call echov (") ")
+            call echohn (nmod[2,k],$$MaxLit)
+           }
+ 
+            #$% for each model in data table
+            for (k = 1; nmod[1,k] != 0; k=k+1)
+           {
+            j = nmod[5,k]
+            if (j == 0) next
+ 
+            if (IBB[j] == 0) next
+ 
+            #$% display message to user
+            call echor
+            call echov (" ")
+            call echov ("Trace ")
+ 
+            call echov (" (")
+            call echo  (nmod[1,k])
+            call echov (") ")
+            call echohn (nmod[2,k],$$MaxLit)
+            call echov (" = ")
+            ival = IBB[j]
+            call echoi (ival)
+           }
+ 
+        for (k = 1; k <= $$MaxWatch; k=k+1)
+           {
+            if (wAdd[k] == 0) next
+ 
+            #$% display message to user
+            call echor
+            call echov (" ")
+            call echov ("Watch ")
+ 
+            call echoi (wAdd[k])
+            call echov (" for ")
+            call echoi (wVal[k])
+            call echov (".")
+           }
+ 
+        call echor
+       }
+    #$% else if the character is M
+    else if (ichar == $LetM)                    # "Minute length to <val>"
+       {
+        #$% display message to user
+        call echov ("Minute length to ")
+ 
+        #$% get value number input from user
+        call dvalue (ival,jstat)
+        if (jstat < 0) next
+ 
+        game$rate =  60. / max0(ival,3)
+        time$spec = time$step * $Seconds$Per$Minute / game$rate
+ 
+        # register the current game rate - clk 9/97 (E1892)
+        if (ALSP$Active != $no & Game$Pause != $yes)
+          call alsp_register_rate (game$rate)
+       }
+    #$% else if the character is X
+    else if (ichar == $LetV)                    # "VAX Debugger"
+       {
+        #$% display message to user
+        call echov ("VAX Debugger")
+        call echor
+        call echor
+ 
+        call trace
+       }
+    else if (ichar == $LetX)                    # Xecute
+       {
+        #$% display message to user
+        call echov ("Xecute")
+        call echor
+        break
+       }
+    #$% else if the character is G
+    else if (ichar == $LetG)                    # "Game Mode"
+       {
+        #$% display message to user
+        call echov ("Game (mode: 0=go/1=pause)")
+ 
+        #$% get value number input from user
+        call dvalue (ival,jstat)
+        if (jstat < 0) next
+ 
+        game$pause = ival
+ 
+        if (game$pause == YES) call echov (" (Paused)")
+        else                   call echov (" (Executing)")
+       }
+    else
+       {
+        #$% sound warning bell
+        call echo ($bell)
+        jstat = 0
+        iadd = 1
+        next
+       }
+ 
+    iadd = 0
+   }
+ 
+return
+end
+
+ 
+subroutine dvalue_help
+ 
+########################################################
+#$%
+#$% Purpose:   DVALUE_help displays currently known info
+#$%            reguarding bit fields for trace options.
+#$%
+#$% Called By: Dvalue
+#$%
+#$% Calls:     ECHOR      ECHOH      ECHOI      ECHO
+#$%
+#$% Tables:    None
+#$%
+#$% Date:      FEB 83
+#$%
+#$% Author:    Dana Wills
+#$%
+########################################################
+ 
+WatchCommon
+integer IMODEL_CODE,
+        ICMD_CODE                           # MJC 6/29/2K (E2145 - Implicit None)
+call echor
+ 
+if (imodel_code == $LETO)
+    {
+    call echov ("  Special values for Order tracing are:"); call echor
+ 
+    call echov ("    ORD Table Dump                 1"  ); call echor
+    call echov ("    ORD Entry Remove               2"  ); call echor
+    call echov ("    ORD Entry Remove (TraceBack)   4"  ); call echor
+    call echov ("    Cancel Order Trace             8"  ); call echor
+    call echov ("    General Execution             16"  ); call echor
+    call echov ("    ORD Retrieval (from VUE/STA)  32"  ); call echor
+    call echor
+    }
+else if (imodel_code == $LETU)
+    {
+    call echov ("  Special values for SONAR tracing are:"); call echor
+ 
+    call echov ("    Active Detections              1"  ); call echor
+    call echov ("    Passive Detections             2"  ); call echor
+    call echor
+    }
+else if (imodel_code == $LETD)  # jb                            5/18/87
+    {
+    call echov ("  Special values for DAMAGE tracing are:"); call echor
+ 
+    call echov ("    General Execution              1"  ); call echor
+    call echov ("    Lost a/c & Weapons             2"  ); call echor
+    call echor
+    }
+else if (imodel_code == $LETE)
+    {
+    call echov ("  Special values for Engagement tracing are:"); call echor
+ 
+    call echov ("    General Execution              1"  ); call echor
+    call echov ("    Target Selection (ROE)         2"  ); call echor
+    call echov ("    Target Selection               4"  ); call echor
+    call echov ("    All Target Assignments         8"  ); call echor
+    call echov ("    Gun Engagements               16"  ); call echor
+    call echor
+ 
+    #(trace$engage$exe, istrip(trace$engage,0,M1bits)) # trace general exec
+    #(trace$engage$roe, istrip(trace$engage,1,M1bits)) # trace ckroe select
+    #(trace$engage$tgt, istrip(trace$engage,2,M2bits)) # trace assgnt select
+    #(trace$engage$tgx, istrip(trace$engage,3,M1bits)) # trace assgnt all
+    }
+else if (imodel_code == $LETR)
+    {
+    call echov ("  Special values for Radar/ESM tracing are:"); call echor
+ 
+    call echov ("    Radar sub-model                1"  ); call echor
+    call echov ("    ESM sub-model                  2"  ); call echor
+    call echov ("    Jamming sub-model              4"  ); call echor
+    call echov ("    EMI sub-sub-model              8"  ); call echor
+    call echor
+    }
+else if (imodel_code == $LETF)
+    {
+    call echov ("  Special values for FLIGHT OPS tracing are:"); call echor
+ 
+    call echov ("    General Execution              1"  ); call echor
+    call echov ("    Disable Launch Queing          2"  ); call echor
+    call echov ("    Disable Recover Queuing        4"  ); call echor
+    call echov ("    Flight Plan Assignments        8"  ); call echor
+    call echov ("    Launch/Recover Que Opts       16"  ); call echor
+    call echov ("    Reconn Model                  32"  ); call echor
+    call echov ("    Time-Over-Target              64"  ); call echor
+    call echor
+    }
+ 
+return
+end
+
+ 
+subroutine dvalue (ival,istat)
+ 
+########################################################
+#$%
+#$% Purpose:   DVALUE gets a numeric value from
+#$%            the user input.
+#$%
+#$% Called By: DDEBUG
+#$%
+#$% Calls:     GET_CH     DELAY      ECHOR
+#$%            ECHOH      ECHOI      ECHO
+#$%
+#$% Tables:    None
+#$%
+#$% Date:      OCT 80
+#$%
+#$% Author:    Dana Wills
+#$%
+########################################################
+ 
+WatchCommon
+integer IVAL,
+        ISIGN,
+        ICHAR,
+        ISTAT,
+        ICMD_CODE,
+        IMODEL_CODE                             # MJC 6/29/2K (E2145 - Implicit None)
+#   Used for <value> in the following command syntax:
+#
+#       Trace <model> <value>
+#       Minute length to <value>
+#
+#
+#   ival  == returns value entered
+#
+#   istat == -1 :: Cancel
+#         == 0  :: terminated w/space
+#         == 1  :: terminated w/return
+#
+ 
+#$% intialize values
+ival = 0
+isign = 1
+ 
+repeat
+   {
+    repeat
+       {
+        #$% get input character
+        call get_ch (ichar,0)
+ 
+        #$% if a null, delay 1 sec otherwise break
+        if (ichar != $null) break
+        call delay (1000)
+       }
+ 
+    #$% if character is a retun or linefeed, set status
+    if (ichar == $return | ichar == $linefeed)
+       {
+        #call echor
+        istat = 1
+        break
+       }
+    #$% else if character is an escape or space, set status
+    else if (ichar == $esc | ichar == $space)
+       {
+        #call echor
+        istat = 0
+        break
+       }
+    #$% else if character is ^K
+    else if (ichar == $cntlK)
+       {
+        call echov ("^K  cancel")
+        #call echor
+        istat = -1
+        break
+       }
+    #$% else if character is ? (help)
+    else if (ichar == $quest)
+       {
+        if (icmd_code == $LetT) call dvalue_help
+ 
+        call echov ("?  Enter a Decimal value or a <CNTL-K>")
+        call echor
+        call echoi (ival*isign)
+       }
+    #$% else if the character is DEL (delete)
+    else if (ichar == $del)
+       {
+        if (ival == 0 & isign == 1)
+           {
+            istat = -1
+            break
+           }
+ 
+        ival = ival / 10
+        if (ival == 0) isign = 1
+ 
+        call echov ("\\\ ")
+        call echoi (ival*isign)
+       }
+    #$% else if character is minus and value entered is zero
+    else if (ival == 0 & ichar == $minus )
+       {
+        call echo ($minus)
+        isign = isign * -1
+       }
+ 
+    #$% else if character is not a number or value entered is above 9999999
+    else if (ichar >  $dig9 |
+             ichar <  $dig0 |
+             ival  >  9999999)
+       {
+        #$% sound warning bell
+        call echo ($bell)
+       }
+    else
+       {
+        #$% display the character entered to the user
+        call echo (ichar)
+        ival = ival * 10 + ichar - $dig0
+       }
+   }
+ 
+ival = ival * isign
+ 
+return
+end
+ 
+ 
+ 
+subroutine dmodel (nmod,isel,iadd,istat)
+    # WARNING: isel a CONSTANT:  DON'T CHANGE IT!
+########################################################
+#$%
+#$% Purpose:   DMODEL gets a model index from
+#$%            the terminal.
+#$%
+#$% Called By: DDEBUG
+#$%
+#$% Calls:     GETCH      DELAY      ECHOH
+#$%            ECHOR      ECHO       ECHOHN
+#$%
+#$% Tables:    None
+#$%
+#$% Date:      OCT 80
+#$%
+#$% Author:    Dana Wills
+#$%
+########################################################
+ 
+integer nmod[5,10]
+WatchCommon
+integer IADD,
+        ICHAR,
+        IMODEL_CODE,
+        ISTAT,
+        I,
+        K,
+        ISEL,
+        ICMD_CODE                               # MJC 6/29/2K (E2145 - Implicit None)
+#   Used for <model> in the following command syntax:
+#
+#       Skip <model>
+#       Pause after skipping <model>
+#       Clear skip of <model>
+#       Trace <model> <value>
+#
+#   nmod  == array of model identifiers
+#
+#   isel  == subscript of IBB address (the number 4 or 5)
+#
+#   iadd  == returns an index to nmod array
+#
+#   istat == -1 :: Cancel
+#
+ 
+iadd = 0
+ 
+repeat
+   {
+    repeat
+       {
+        #$% get character entered by user
+        call get_ch (ichar,0)
+ 
+        #$% if character is a null, delay 1sec otherwise break
+        if (ichar != $null) break
+        call delay (1000)
+       }
+ 
+    #$% capitalize all letters
+    if (ichar >= $LiTa & ichar <= $LiTz) ichar = ichar - $space
+ 
+    imodel_code = ichar
+ 
+    #$% if the character is ^K
+    if (ichar == $cntlK)
+       {
+        #$% display message to user
+        call echov ("^K  cancel")
+        call echor
+ 
+        #$% set flags and break
+        iadd = 0
+        istat = -1
+        break
+       }
+    #$% else if character is a ? (help)
+    else if (ichar == $quest)
+       {
+        #$% display message to user
+        call echov ("?  Enter a code for the model, one of:")
+        i = 99
+ 
+        #$% for each model in data table
+        for (k = 1; nmod[1,k] != 0; k=k+1)
+           {
+            if (nmod[isel,k] == 0) next
+ 
+            if (i >= 4)
+               {
+                call echor
+                i = 0
+               }
+ 
+            i = i + 1
+            #$% display message to user
+            call echov ("  (")
+            call echo  (nmod[1,k])
+            call echov (") ")
+            call echoh (nmod[2,k],$$MaxLit)
+           }
+ 
+        istat = -1
+        break
+ 
+#       call echor
+#       call echov ("Debug>>>")
+       }
+    else
+       {
+        for (k = 1; nmod[1,k] != 0; k=k+1)
+           {
+            if (nmod[isel,k] == 0) next
+ 
+            if (nmod[1,k] != ichar) next
+ 
+            iadd = nmod[isel,k]
+            #$% display message to user
+            call echo  (nmod[1,k])
+            call echov ("-(")
+            call echohn (nmod[2,k],$$MaxLit)
+            call echov (") ")
+            istat = 0
+            return
+           }
+ 
+        #$% sound warning bell, set istat and break
+        call echo ($bell)
+        istat = -1
+        break
+       }
+   }
+ 
+return
+end
+ 

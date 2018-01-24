@@ -1,0 +1,825 @@
+ 
+include "ascii.inc"
+include "bbctl.inc"
+include "bbcode.inc"
+ 
+include "bbacc.inc"
+include "bbaml.inc"
+include "bbbml.inc"
+include "bbshc.inc"
+include "bbunt.inc"
+ 
+define (err, -3)   # alsp.inc undefines it - who_am_i uses it
+ 
+define (number_args, 1)
+define (output_unit, 10)
+define ($MaxNosicId, 9999)
+ 
+define (BBImplicit, Implicit None)
+ 
+undefine write   # use the standard fortran write statement
+ 
+program BB2OTG
+#########################################################################
+#$%
+#$% Purpose:    This program is intended to tap into the RESA blackboard
+#$%             to create ENTER OTG orders. Unique nosic id numbers are
+#$%             generated for ships, aircraft and boats. (E2297)
+#$% Calls:      initr4         <rlib.olb>
+#$%             read_arguments
+#$%             ctoi
+#$%             who_am_i
+#$%             bbmap
+#$%             check_version
+#$%             remark
+#$%             exit
+#$%             Init_Collection_File
+#$%             delay
+#$%             Game_DTG
+#$%             smov..
+#$%             echo..
+#$%             write
+#$%             close
+#$%
+#$% Tables:     global variables
+#$%
+#$% Date:       Aug 2002
+#$%
+#$% Author:     James O. Allen
+#$%
+#########################################################################
+BBcommon
+ 
+integer   ctoi        # integer function
+integer   Game_DTG    # integer function
+ 
+integer          arg_len[number_args], k
+vaxcharacter*80  args[number_args], params
+ 
+integer   game_number
+character  msg[ARB]
+VMSCHAR*ARB bbname
+integer   error
+integer   next_cycle, delay_time, next_record_interval
+ 
+integer   msg1_len
+character msg1[MAXCARD]
+vaxcharacter*MAXCARD  v_msg1
+Equivalence  (msg1, v_msg1)
+ 
+  call initR4
+ 
+  call who_am_i (game_number, bbname)
+  BBmap (bbname)
+  call check_version (error, msg)
+ 
+  if (msg[1] != EOS)
+    call remark (msg)
+  if (error == YES)
+    call exit
+ 
+  call help_pgm(0,
+              "bb2otg: Create ENTER OTG orders for RESA Message Generator",
+              "bb2otg Tags: RMG, GCCS-M. blackboard, orders",
+              "Usage: bb2otg",
+              "",
+              "",
+              "",
+              "",
+              "Example: bb2otg")
+  call Init_Collection_File
+ 
+  call write_ShipSub_OTG
+  call write_GhostAir_OTG
+  call write_GhostShore_OTG
+  call write_SHC_OTG
+  call write_AirChar_OTG
+  call write_AirSide_OTG
+  call write_Boat_OTG
+ 
+  close (output_unit)
+ 
+end
+ 
+
+ 
+subroutine who_am_i (igame, bbname)
+###########################################################
+#$%
+#$% Purpose:   WHO_AM_I allows user to start a game using
+#$%            a command line input
+#$%
+###########################################################
+ 
+character  buf[30]
+integer    k,ic, igame, CTOI # jb E2145  6/1/00
+VMSCHAR*(*) BBname             # jb E2144  (Re: BBSmap & MAKE_..) 8/3/00
+ 
+igame = 0
+ 
+call make_CSF_bb_name (igame,$$BBNAME,bbname)
+ 
+end
+
+ 
+Subroutine Init_Collection_File
+#########################################################################
+#$%
+#$% Purpose:    Init_Collection_File will open the data collection file
+#$%             and write the scenario information.
+#$%
+#$% Called By:  collect_load_stats
+#$%
+#$% Calls:      smov..
+#$%             open
+#$%             echo..
+#$%             exit
+#$%             write
+#$%
+#$% Tables:     global variables
+#$%
+#$% Date:       Aug 2002
+#$%
+#$% Author:     James O. Allen
+#$%
+#########################################################################
+BBcommon
+ 
+integer  interval    # interval at which data is to be collected
+integer  Game_DTG    # integer function
+integer  record_interval # Interval at which data is to be recorded
+integer    name_len
+character  file_name[ARB]
+vmschar*ARB  file_name_v
+equivalence(file_name, file_name_v)
+integer    return_val, msg_len
+character  msg[MAXCARD]
+vaxcharacter*MAXCARD v_msg
+ 
+Equivalence  (msg, v_msg)
+ 
+name_len = 0
+call smovhn (Scenario$Name, $$MaxLit, file_name, name_len)
+call smovv  ("_bb2otg.cmd", file_name, name_len)
+call smov   (EOS, file_name, name_len)
+open (unit   = output_unit,  file   = file_name_v,
+      iostat = return_val, recl = 120*4,   status = 'unknown')
+if (return_val != 0)
+{
+ call echov ("Output file not opened")
+ call echor
+ call exit
+}
+ 
+call echov ("Output file is ")
+call echohn (file_name, 20)
+call echor
+ 
+return
+end
+
+Subroutine write_ShipSub_OTG
+#########################################################################
+#$%
+#$% Purpose:    Init_Collection_File will open the data collection file
+#$%             and write the scenario information.
+#$%
+#$% Called By:  collect_load_stats
+#$%
+#$% Calls:      smov..
+#$%             open
+#$%             echo..
+#$%             exit
+#$%             write
+#$%
+#$% Tables:     global variables
+#$%
+#$% Date:       Aug 2002
+#$%
+#$% Author:     James O. Allen
+#$%
+#$% Modified:   James O. Allen 6/03 (E2345)
+#$%             Generate NOSIC ID using one-up sequence number
+#$%
+#$% Modified:   James O. Allen 6/03 (E2348)
+#$%             Add SCONUM for ships
+#########################################################################
+BBcommon
+ 
+literal cstrip8
+vmschar*8 reportCode2Text
+vmschar vstrip*24
+integer unt$pointer, unt$type$i
+integer iview
+integer   msg_len
+integer get_unique_nosicid, nosicid
+character msg[MAXCARD]
+vaxcharacter*MAXCARD  v_msg
+Equivalence  (msg, v_msg)
+BBDeclare (unt$Flag$V, unt$FullName$v, unt$HullType$v, unt$SCONUM$v)
+ 
+for (UNT$pointer$first; UNT$pointer$ok; UNT$Pointer$next)
+{
+    unt$Type$i = Xunt$Type$i
+    if (unt$type$i == $Surface$code | unt$type$i == $sub$code)
+    {
+        # ENTER OTG <name> ID FLAG REPORT TYPE <type> <number> NAMED <vname>
+        msg_len = 0
+        call smovv ("ENTER OTG ", msg, msg_len)
+        call smovhn(Xunt$Name$c, 8, msg, msg_len)
+ 
+ 
+        nosicid = Xunt$nosicid$i
+        if (nosicid > 0)
+        {
+            call smovv (" ID ", msg, msg_len)
+            call smoviz(nosicid, 4, msg, msg_len)
+        }
+ 
+        call smovv (" FLAG ", msg, msg_len)
+		unt$Flag$V = Xunt$Flag$V
+        if (unt$Flag$V > " ")
+            call smovvt(unt$Flag$v, msg, msg_len)
+        else
+        {
+            # Set flag based on view 2-3,6 KS, 4-5 US, 7-10 KN, 1 neutral   tmb 6-20-17
+            #    agree with routine OCreate in wgopcreate.rat
+            iview = Xunt$View$i
+            if  (iview == 1)                   call smovv ("YY", msg, msg_len)
+            else if (iview >= 4 & iview <= 5)  call smovv ("US", msg, msg_len)   
+            else if (iview > 0 & iview <= 6)   call smovv ("KS", msg, msg_len) # 1,4,5 already assigned
+            else if (iview >= 7 & iview <= 10) call smovv ("KN", msg, msg_len)
+            else                               call smovv ("??", msg, msg_len) 
+        }
+        call smovv (" REPORT ", msg, msg_len)
+        if (Xunt$OtgCode$i == $UNK$otg_code)
+        {
+            # Set report code based on view 2,3,5,6  NAV, 1 MER, else NAVNRU tmb 6-20-17
+            iview = Xunt$View$i
+            if      (iview >= 2 & iview <= 3) call smovv ("NAV", msg, msg_len)
+            else if (iview >= 5 & iview <= 6) call smovv ("NAV", msg, msg_len)
+            else if (iview >= 1 & iview <= 1) call smovv ("MER", msg, msg_len)
+            else                              call smovv ("NAVNRU", msg, msg_len)
+        }
+        else
+        {
+            call smovvt(reportCode2Text(Xunt$OtgCode$i), msg, msg_len)
+        }
+		unt$HullType$v = Xunt$HullType$v
+        if (unt$HullType$v > " ")
+        {
+            call smovv (" TYPE ", msg, msg_len)
+            call smovvt(UNT$HullType$V, msg, msg_len)
+            call smovv (" ", msg, msg_len)
+            call smovib(XUNT$HullNumber$I, 4, msg, msg_len)
+        }
+ 
+		unt$SCONUM$v = Xunt$SCONUM$v
+        if (unt$SCONUM$v > " ")
+        {
+            call smovv (" SCONUM ", msg, msg_len)
+            call smovvt(UNT$SCONUM$V, msg, msg_len)
+        }
+ 
+        call smovv (" NAMED ", msg, msg_len)
+		unt$FullName$V = Xunt$FullName$V
+        if (unt$FullName$V > " ")
+            call smovvt (unt$FullName$V, msg, msg_len)
+        else
+            call smovhn(Xunt$Name$c, 8, msg, msg_len)
+ 
+        if (Xunt$NosicId$i == 0)
+        {
+            call smovv ("    # NOSIC Id will be assigned when order entered", msg, msg_len)
+        }
+ 
+        write (output_unit, fmt=*)  v_msg[1:msg_len]
+    }
+}
+ 
+return
+end
+
+Subroutine write_GhostAir_OTG
+#########################################################################
+#$%
+#$% Purpose:    Write OTG Info for ghost Air with track sharing
+#$%
+#$%
+#$% Called By:  BB2OTG
+#$%
+#$% Calls:      smov..
+#$%             open
+#$%             echo..
+#$%             exit
+#$%             write
+#$%
+#$% Tables:     global variables
+#$%
+#$% Date:       Aug 2013
+#$%
+#$% Author:     James O. Allen
+#$%
+#########################################################################
+BBcommon
+ 
+literal cstrip8, reportCode2Text
+vmschar vstrip*24
+integer unt$pointer, unt$type$i
+integer iview
+integer msg_len
+integer get_unique_nosicid, nosicid
+character msg[MAXCARD]
+vaxcharacter*MAXCARD  v_msg
+Equivalence  (msg, v_msg)
+BBDeclare(unt$Flag$V, unt$FullName$V, unt$SCONUM$v)
+ 
+msg_len = 0
+call smovv ("# Ghost Aircraft with Shared Tracks", msg, msg_len)
+write (output_unit, fmt=*)  v_msg[1:msg_len]
+ 
+for (UNT$pointer$first; UNT$pointer$ok; UNT$Pointer$next)
+{
+    unt$Type$i = Xunt$Type$i
+    if (unt$type$i == $Air$Code & Xunt$GhostedUnit$i == $YES &
+        Xunt$AlspShared$i == $YES)
+    {
+        # ENTER OTG <name> ID FLAG REPORT TYPE <type> <number> NAMED <vname>
+        msg_len = 0
+        call smovv ("ENTER OTG ", msg, msg_len)
+        call smovhn(Xunt$Name$c, 8, msg, msg_len)
+ 
+ 
+        nosicid = Xunt$nosicid$i
+        if (nosicid > 0)
+        {
+            call smovv (" ID ", msg, msg_len)
+            call smoviz(nosicid, 4, msg, msg_len)
+        }
+ 
+        call smovv (" FLAG ", msg, msg_len)
+		unt$Flag$V = Xunt$Flag$V
+        if (unt$Flag$V > " ")
+            call smovvt(unt$Flag$v, msg, msg_len)
+        else
+        {
+            # Set flag based on view 2-3,6 KS, 4-5 US, 7-10 KN, 1 neutral   tmb 6-20-17
+            #    agree with routine OCreate in wgopcreate.rat
+            iview = Xunt$View$i
+            if  (iview == 1)                   call smovv ("YY", msg, msg_len)
+            else if (iview >= 4 & iview <= 5)  call smovv ("US", msg, msg_len)   
+            else if (iview > 0 & iview <= 6)   call smovv ("KS", msg, msg_len) # 1,4,5 already assigned
+            else if (iview >= 7 & iview <= 10) call smovv ("KN", msg, msg_len)
+            else                               call smovv ("??", msg, msg_len)
+        }
+        call smovv (" REPORT ", msg, msg_len)
+        if (Xunt$OtgCode$i == $UNK$otg_code)
+        {
+            # Set report code based on view 2,3,6  NAV, 4-5 OTH, 1 MER, else NAVNRU tmb 6-20-17
+            iview = Xunt$View$i
+            if  (iview == 1)                  call smovv ("MER", msg, msg_len)
+            else if (iview >= 4 & iview <= 5) call smovv ("OTH", msg, msg_len)
+            else if (iview > 0 & iview <= 6)  call smovv ("NAV", msg, msg_len)
+            else                              call smovv ("NAVNRU", msg, msg_len)
+        }
+        else
+        {
+            call smovhn(reportCode2Text(Xunt$OtgCode$i), 8, msg, msg_len)
+        }
+ 
+		unt$SCONUM$v = Xunt$SCONUM$v
+        if (unt$SCONUM$v > " ")
+        {
+            call smovv (" SCONUM ", msg, msg_len)
+            call smovvt(UNT$SCONUM$V, msg, msg_len)
+        }
+ 
+        call smovv (" NAMED ", msg, msg_len)
+		unt$FullName$V = Xunt$FullName$V
+        if (unt$FullName$V > " ")
+            call smovvt (unt$FullName$V, msg, msg_len)
+        else
+            call smovhn(Xunt$Name$c, 8, msg, msg_len)
+ 
+        if (Xunt$NosicId$i == 0)
+        {
+            call smovv ("    # NOSIC Id will be assigned when order entered", msg, msg_len)
+        }
+ 
+        write (output_unit, fmt=*)  v_msg[1:msg_len]
+    }
+}
+ 
+return
+end
+
+Subroutine write_GhostShore_OTG
+#########################################################################
+#$%
+#$% Purpose:    Write OTG Info for ghost shore with track sharing
+#$%
+#$%
+#$% Called By:  BB2OTG
+#$%
+#$% Calls:      smov..
+#$%             open
+#$%             echo..
+#$%             exit
+#$%             write
+#$%
+#$% Tables:     global variables
+#$%
+#$% Date:       Aug 2013
+#$%
+#$% Author:     James O. Allen
+#$%
+#########################################################################
+BBcommon
+ 
+literal cstrip8, reportCode2Text
+vmschar vstrip*24
+integer unt$pointer, unt$type$i
+integer iview
+integer   msg_len
+integer get_unique_nosicid, nosicid
+character msg[MAXCARD]
+vaxcharacter*MAXCARD  v_msg
+Equivalence  (msg, v_msg)
+BBDeclare(unt$Flag$V, unt$SCONUM$v, unt$FullName$V)
+msg_len = 0
+call smovv ("# Ghost Shorebases with Shared Tracks", msg, msg_len)
+write (output_unit, fmt=*)  v_msg[1:msg_len]
+ 
+ 
+for (UNT$pointer$first; UNT$pointer$ok; UNT$Pointer$next)
+{
+    unt$Type$i = Xunt$Type$i
+    if (unt$type$i == $ShoreBase$Code & Xunt$GhostedUnit$i == $YES &
+        Xunt$AlspShared$i == $YES)
+    {
+        # ENTER OTG <name> ID FLAG REPORT TYPE <type> <number> NAMED <vname>
+        msg_len = 0
+        call smovv ("ENTER OTG ", msg, msg_len)
+        call smovhn(Xunt$Name$c, 8, msg, msg_len)
+ 
+ 
+        nosicid = Xunt$nosicid$i
+        if (nosicid > 0)
+        {
+            call smovv (" ID ", msg, msg_len)
+            call smoviz(nosicid, 4, msg, msg_len)
+        }
+ 
+        call smovv (" FLAG ", msg, msg_len)
+		unt$Flag$V = Xunt$Flag$V
+        if (unt$Flag$V > " ")
+            call smovvt(unt$Flag$v, msg, msg_len)
+        else
+        {
+            # Set flag based on view 2-3,6 KS, 4-5 US, 7-10 KN, 1 neutral   tmb 6-20-17
+            #    agree with routine OCreate in wgopcreate.rat
+            iview = Xunt$View$i
+            if  (iview == 1)                   call smovv ("YY", msg, msg_len)
+            else if (iview >= 4 & iview <= 5)  call smovv ("US", msg, msg_len)   
+            else if (iview > 0 & iview <= 6)   call smovv ("KS", msg, msg_len) # 1,4,5 already assigned
+            else if (iview >= 7 & iview <= 10) call smovv ("KN", msg, msg_len)
+            else                               call smovv ("??", msg, msg_len)
+        }
+        call smovv (" REPORT ", msg, msg_len)
+        if (Xunt$OtgCode$i == $UNK$otg_code)
+        {
+            # Set report code based on view 2,3,6 NAV, 1 MER, 4-5 OTH else NAVNRU tmb 6-20-17
+            iview = Xunt$View$i
+            if  (iview == 1)                  call smovv ("MER", msg, msg_len)
+            else if (iview >= 4 & iview <= 5) call smovv ("OTH", msg, msg_len)
+            else if (iview > 0 & iview <= 6)  call smovv ("NAV", msg, msg_len)
+            else                              call smovv ("NAVNRU", msg, msg_len)
+
+        }
+        else
+        {
+            call smovhn(reportCode2Text(Xunt$OtgCode$i), 8, msg, msg_len)
+        }
+ 
+		unt$SCONUM$v = Xunt$SCONUM$v
+        if (unt$SCONUM$v > " ")
+        {
+            call smovv (" SCONUM ", msg, msg_len)
+            call smovvt(UNT$SCONUM$V, msg, msg_len)
+        }
+ 
+        call smovv (" NAMED ", msg, msg_len)
+		unt$FullName$V = Xunt$FullName$V
+        if (unt$FullName$V > " ")
+            call smovvt (unt$FullName$V, msg, msg_len)
+        else
+            call smovhn(Xunt$Name$c, 8, msg, msg_len)
+ 
+        if (Xunt$NosicId$i == 0)
+        {
+            call smovv ("    # NOSIC Id will be assigned when order entered", msg, msg_len)
+        }
+ 
+        write (output_unit, fmt=*)  v_msg[1:msg_len]
+    }
+}
+ 
+return
+end
+
+Subroutine write_AirChar_OTG
+BBcommon
+ 
+literal cstrip8
+vmschar vstrip*24
+integer acc$pointer
+integer   msg_len
+character msg[MAXCARD]
+vaxcharacter*MAXCARD  v_msg
+Equivalence  (msg, v_msg)
+BBDeclare(acc$FullName$V)
+msg_len = 0
+call smovv ("# Aircraft types", msg, msg_len)
+write (output_unit, fmt=*)  v_msg[1:msg_len]
+ 
+ 
+for (ACC$pointer$first; ACC$pointer$ok; ACC$Pointer$next)
+{
+    # ENTER OTG <name> NAMED <vname>
+    msg_len = 0
+    call smovv ("ENTER OTG ", msg, msg_len)
+    call smovhn(XACC$Type$c, 8, msg, msg_len)
+ 
+    call smovv (" NAMED ", msg, msg_len)
+	acc$FullName$V = Xacc$FullName$V
+    if (acc$FullName$V > " ")
+        call smovvt (acc$FullName$V, msg, msg_len)
+    else
+        call smovhn(Xacc$Type$c, 8, msg, msg_len)
+ 
+    write (output_unit, fmt=*)  v_msg[1:msg_len]
+}
+ 
+return
+end
+
+Subroutine write_AirSide_OTG
+#########################################################################
+#$%
+#$% Purpose:    Init_Collection_File will open the data collection file
+#$%             and write the scenario information.
+#$%
+#$% Called By:  collect_load_stats
+#$%
+#$% Calls:      smov..
+#$%             open
+#$%             echo..
+#$%             exit
+#$%             write
+#$%
+#$% Tables:     global variables
+#$%
+#$% Date:       Aug 2002
+#$%
+#$% Author:     James O. Allen
+#$%
+#$% Modified:   James O. Allen 6/03 (E2345)
+#$%             Generate NOSIC ID using one-up sequence number
+#########################################################################
+BBcommon
+ 
+literal cstrip8
+vmschar*8 reportcode2text
+vmschar vstrip*24
+integer aml$pointer
+integer unt$pointer
+integer iview
+integer   msg_len
+integer nosicid, get_unique_nosicid
+character msg[MAXCARD]
+vaxcharacter*MAXCARD  v_msg
+Equivalence  (msg, v_msg)
+BBDeclare(aml$Flag$V)
+ 
+msg_len = 0
+call smovv ("# Aircraft Side Numbers", msg, msg_len)
+write (output_unit, fmt=*)  v_msg[1:msg_len]
+ 
+for (AML$pointer$first; AML$pointer$ok; AML$Pointer$next)
+{
+    # ENTER OTG <name> ID FLAG REPORT
+    msg_len = 0
+    call smovv ("ENTER OTG ", msg, msg_len)
+    call smovhn(Xaml$SideNumber$c, 8, msg, msg_len)
+ 
+    nosicid = Xaml$Nosicid$i
+    if (nosicid > 0)
+    {
+        call smovv (" ID ", msg, msg_len)
+        call smoviz(nosicid, 4, msg, msg_len)
+    }
+ 
+    call smovv (" FLAG ", msg, msg_len)
+	aml$Flag$V = Xaml$Flag$V
+    if (aml$Flag$V > " ")
+        call smovvt(aml$Flag$v, msg, msg_len)
+    else
+    {
+        # Set flag based on view 2-3,6 KS, 4-5 US, 7-10 KN, 1 neutral   tmb 6-20-17
+        #    agree with routine OCreate in wgopcreate.rat
+        unt$pointer$to Xaml$OwnerIndx$i
+        iview = Xunt$View$i
+        if  (iview == 1)                   call smovv ("YY", msg, msg_len)
+        else if (iview >= 4 & iview <= 5)  call smovv ("US", msg, msg_len)   
+        else if (iview > 0 & iview <= 6)   call smovv ("KS", msg, msg_len) # 1,4,5 already assigned
+        else if (iview >= 7 & iview <= 10) call smovv ("KN", msg, msg_len)
+        else                               call smovv ("??", msg, msg_len)
+    }
+    call smovv (" REPORT ", msg, msg_len)
+ 
+    if (Xaml$OtgCode$i == $UNK$otg_code)
+    {
+        # Set report code based on view 2,3,6 NAV, 1 MER, 4-5 OTH else NAVNRU tmb 6-20-17
+        unt$pointer$to Xaml$OwnerIndx$i
+        iview = Xunt$View$i
+        if  (iview == 1)                  call smovv ("MER", msg, msg_len)
+        else if (iview >= 4 & iview <= 5) call smovv ("OTH", msg, msg_len)
+        else if (iview > 0 & iview <= 6)  call smovv ("NAV", msg, msg_len)
+        else                              call smovv ("NAVNRU", msg, msg_len)
+    }
+    else
+    {
+        call smovvt(reportCode2Text(Xaml$OtgCode$i), msg, msg_len)
+    }
+ 
+    if (Xaml$NosicId$i == 0)
+    {
+        call smovv ("   # NOSIC Id will be assigned when order entered", msg, msg_len)
+    }
+ 
+    write (output_unit, fmt=*)  v_msg[1:msg_len]
+}
+ 
+return
+end
+
+ 
+Subroutine write_Boat_OTG
+#########################################################################
+#$%
+#$% Purpose:    Init_Collection_File will open the data collection file
+#$%             and write the scenario information.
+#$%
+#$% Called By:  collect_load_stats
+#$%
+#$% Calls:      smov..
+#$%             open
+#$%             echo..
+#$%             exit
+#$%             write
+#$%
+#$% Tables:     global variables
+#$%
+#$% Date:       Aug 2002
+#$%
+#$% Author:     James O. Allen
+#$%
+#$% Modified:   James O. Allen 6/03 (E2345)
+#$%             Generate NOSIC ID using one-up sequence number
+#########################################################################
+BBcommon
+ 
+literal cstrip8
+vmschar*8 reportcode2text
+vmschar vstrip*24
+integer bml$pointer
+integer unt$pointer
+integer iview
+integer   msg_len
+integer nosicid, get_unique_nosicid
+character msg[MAXCARD]
+vaxcharacter*MAXCARD  v_msg
+Equivalence  (msg, v_msg)
+BBDeclare(bml$Flag$V)
+ 
+msg_len = 0
+call smovv ("# Boat Names", msg, msg_len)
+write (output_unit, fmt=*)  v_msg[1:msg_len]
+ 
+for (BML$pointer$first; BML$pointer$ok; BML$Pointer$next)
+{
+    # ENTER OTG <name> ID FLAG REPORT
+    msg_len = 0
+    call smovv ("ENTER OTG ", msg, msg_len)
+    call smovhn(Xbml$Name$c, 8, msg, msg_len)
+ 
+    nosicid = Xbml$Nosicid$i
+    if (nosicid > 0)
+    {
+        call smovv (" ID ", msg, msg_len)
+        call smoviz(nosicid, 4, msg, msg_len)
+    }
+ 
+    call smovv (" FLAG ", msg, msg_len)
+	bml$Flag$V = Xbml$Flag$V
+    if (bml$Flag$V > " ")
+        call smovvt(bml$Flag$v, msg, msg_len)
+    else
+    {
+        # Set flag based on view 2-3,6 KS, 4-5 US, 7-10 KN, 1 neutral   tmb 6-20-17
+        #   agree with routine OCreate in wgopcreate.rat 
+        unt$pointer$to Xbml$OwnerIndx$i
+        iview = Xunt$View$i
+        if  (iview == 1)                   call smovv ("YY", msg, msg_len)
+        else if (iview >= 4 & iview <= 5)  call smovv ("US", msg, msg_len)   
+        else if (iview > 0 & iview <= 6)   call smovv ("KS", msg, msg_len) # 1,4,5 already assigned
+        else if (iview >= 7 & iview <= 10) call smovv ("KN", msg, msg_len)
+        else                               call smovv ("??", msg, msg_len)
+    }
+    call smovv (" REPORT ", msg, msg_len)
+ 
+    if (Xbml$OtgCode$i == $UNK$otg_code)
+    {
+        # Set report code based on view 2,3,5,6  NAV, 1 MER, else NAVNRU tmb 6-20-17
+        unt$pointer$to Xbml$OwnerIndx$i
+        iview = Xunt$View$i
+        if      (iview >= 2 & iview <= 3) call smovv ("NAV", msg, msg_len)
+        else if (iview >= 5 & iview <= 6) call smovv ("NAV", msg, msg_len)
+        else if (iview >= 1 & iview <= 1) call smovv ("MER", msg, msg_len)
+        else                              call smovv ("NAVNRU", msg, msg_len)
+    }
+    else
+    {
+        call smovvt(reportCode2Text(Xbml$OtgCode$i), msg, msg_len)
+    }
+ 
+    if (Xbml$NosicId$i == 0)
+    {
+        call smovv ("    # NOSIC Id will be assigned when order entered", msg, msg_len)
+    }
+ 
+    write (output_unit, fmt=*)  v_msg[1:msg_len]
+}
+ 
+return
+end
+
+Subroutine write_SHC_OTG
+BBcommon
+ 
+literal cstrip8
+vmschar vstrip*24
+integer shc$pointer
+integer   msg_len
+character msg[MAXCARD]
+vaxcharacter*MAXCARD  v_msg
+Equivalence  (msg, v_msg)
+BBDeclare(shc$FullName$V)
+ 
+msg_len = 0
+call smovv ("# Ship classes", msg, msg_len)
+write (output_unit, fmt=*)  v_msg[1:msg_len]
+ 
+for (SHC$pointer$first; SHC$pointer$ok; SHC$Pointer$next)
+{
+    if (Xshc$MaxSpeed$i == 0) next  # means shorebase
+ 
+    msg_len = 0
+    call smovv ("ENTER OTG ", msg, msg_len)
+    call smovhn(Xshc$Type$c, 8, msg, msg_len)
+    call smovv (" NAMED ", msg, msg_len)
+ 
+	shc$FullName$V = Xshc$FullName$V
+    if (shc$FullName$V > " ")
+        call smovvt (shc$FullName$V, msg, msg_len)
+    else
+        call smovhn(Xshc$Type$c, 8, msg, msg_len)
+ 
+    write (output_unit, fmt=*)  v_msg[1:msg_len]
+}
+ 
+return
+end
+
+ 
+vmschar*8 function reportCode2Text(reportCode)
+ 
+integer reportCode
+ 
+        if      (reportCode == $NAV$otg_code)      return( "NAV   ")
+        else if (reportCode == $NAVNP$otg_code)    return( "NAVNP ")
+        else if (reportCode == $NAVNRU$otg_code)   return( "NAVNRU")
+        else if (reportCode == $OTH$otg_code)      return( "OTH   ")
+        else if (reportCode == $OTHNP$otg_code)    return( "OTHNP ")
+        else if (reportCode == $STS$otg_code)      return( "STS   ")
+        else if (reportCode == $STSNP$otg_code)    return( "STSNP ")
+        else if (reportCode == $MER$otg_code)      return( "MER   ")
+        else if (reportCode == $FSH$otg_code)      return( "FSH   ")
+        else if (reportCode == $TOM$otg_code)      return( "TOM   ")
+        else if (reportCode == $OBG$otg_code)      return( "OBG   ")
+        else if (reportCode == $RTH$otg_code)      return( "RTH   ")
+        else if (reportCode == $UNK$otg_code)      return( "UNK   ")
+        else                                      return( "??????")
+ 
+return
+end

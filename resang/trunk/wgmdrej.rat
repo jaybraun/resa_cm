@@ -1,0 +1,2233 @@
+###                     File  WGMDREJ.rat
+ 
+#
+#   FLOWCHART FOR WGMDREJ IS LOCATED IN WGMAIN.HIR
+#   ==============================================
+#
+ 
+ 
+##
+## Modification of code for VAX  --  Completed 12/5/81 by Paulson
+##
+ 
+#####   version 3.1  dated-  7apr81
+ 
+###
+### mod to version 6.0          dated 12 sep 95
+###
+### smn prog    module  comments
+### === ====    ======  =================================================
+### E1424 joa   getrej  Add elevation to antenna height
+###             various Add call to terrain masking check along los
+ 
+###
+### mod to version 3.0          dated 6-jan-1981
+###
+### smn prog    module  comments
+### === ====    ======  =================================================
+### 002 sfc             changed routine to call LCLRAS and LCLESM to
+###                     enter active radar and ESM detection data
+###                     in the local detection table;
+###
+ 
+ 
+#####   version 3.0     dated 22-dec-1980
+
+ 
+include "wgmdrej.inc"               # REJ specific definitions... # DEW 9/4/90
+ 
+include "parallel.inc"
+INCLUDE "bbctl.inc"                 # Control Section
+INCLUDE "bbcode.inc"                # Variables and Constants
+INCLUDE "bbacc.inc"                 # Aircraft Characteristics
+INCLUDE "bbbar.inc"                 # Barrier Table
+INCLUDE "bbboy.inc"                 # Buoy Table
+INCLUDE "bbchf.inc"                 # jb Chaff Characteristics    7/31/90
+INCLUDE "bbcjc.inc"                 # Comms Jammer Characteristics GGG 4/18/88
+INCLUDE "bbcmc.inc"                 # Cruise Missle Characteristics
+INCLUDE "bbdeq.inc"                 # Dynamic Equipment Table REH 3/89
+INCLUDE "bbesm.inc"                 # ESM Table
+INCLUDE "bbsui.inc"                 # SUI Table
+INCLUDE "bbjam.inc"                 # Radar Jammer Characteristics
+INCLUDE "bbrad.inc"                 # Radar Table
+INCLUDE "bbrel.inc"                 # Recognized Emitter List Table
+INCLUDE "bbshc.inc"                 # Ship Characteristics
+INCLUDE "bbunt.inc"                 # Unit Table
+INCLUDE "bbwet.inc"                 # Weather Table 4/21/83
+include "bbjew.inc"                 # jecewsi - JFR 8/31/94
+INCLUDE "ascii.inc"
+ 
+define (BBimplicit, Implicit None)
+ 
+
+Subroutine rejmod
+ 
+#######################################################
+#$%
+#$% Purpose:   REJMOD provides executive control
+#$%            for the radar, ESM, and jamming
+#$%            module.
+#$%
+#$% Called By: WARCYC
+#$%
+#$% Calls:     PREREJ     REJDET
+#$%
+#$% Tables:    None
+#$%
+#$% Date:      JAN 81
+#$%
+#$% Author:    Ron Williams
+#$%
+#######################################################
+ 
+#$% initialize radar, ESM, and jammer modules
+call prerej
+ 
+#$% process detections
+call rejdet
+ 
+return
+end
+ 
+
+Subroutine prerej
+#######################################################
+#$%
+#$% Purpose:   PREREJ controls initialization of
+#$%            Unit and Device Arrays. Active sensor
+#$%            and jammer type devices are added to
+#$%            a list. Sensor type devices are added
+#$%            to the "front" end of the device list,
+#$%            while jammer types are added to the end
+#$%            of the table.
+#$%
+#$% Called By: REJMOD
+#$%
+#$% Calls:     ANGPI      LACREJ     LSBREJ
+#$%            LCMREJ     LSHREJ
+#$%
+#$% Tables:    BOY        BAR        UNT        DEQ
+#$%
+#$%
+#$% Date:
+#$%
+#$% Author:    Williams
+#$%
+#$% Note:      Modified to allow multiple active Radar, ESM,
+#$%            Jammer type equipments aboard a unit.   R. Hundt, 10/30/90
+#######################################################
+ 
+BBcommon
+RMcommon
+ 
+Integer*4       Current_Jammer_Index
+Integer*4       Current_Sensor_Index
+Real*4          FLat[4]
+Real*4          FLon[4]
+Integer*4       BAR$PT$INDEX
+Real*4          BAR$PT$LAT$f
+Real*4          BAR$PT$LON$f
+Integer*4       BAR$Pointer
+real*4          boy$BirthTime$f
+Integer*4       BOY$Chaffalt$i
+Integer*4       BOY$Indxchf$i
+Real*4          boy$KillTime$f
+Integer*4       BOY$Pointer
+Integer*4       CHF$Pointer
+Integer*4       CMC$Pointer
+Integer*4       DEQ$EM$INDEX
+Integer*4       DEQ$Ident$i
+Integer*4       DEQ$Pointer
+Byte            Device_Type_Code
+Integer*4       IX
+Integer*4       LIFE
+real*4          MAXMIN
+Byte            Msg_Required
+Integer*4       RAD$Pointer
+Integer*4       RAD$Radartype$i
+Integer*4       SHC$Pointer
+Integer*4       Unit_Index
+Integer*4       UNT$Pointer
+Integer*4       UNT$Status$i
+Integer*4       UNT$SuperType$i
+Integer*4       UNT$Truealtdepth$i
+Integer*4       UNT$Type$i
+Real*4          W0
+Real*4          W1
+ 
+ 
+kchbar = 0
+ 
+#$% for each buoy entered, build arrays of chaff related info
+for (boy$pointer$first;boy$pointer$ok;boy$pointer$next)
+    {
+    if (xboy$type$i != $CHAFF$code)  next  # jb not chaff  1/18/91
+ 
+    #$% get buoy pointer index number
+    ix = boy$pointer$index
+ 
+    #$% set barrier pointer to boy pointer index
+    bar$pointer$to ix
+ 
+        ###------ begin chaff-characteristics change    8/28/90
+    #$% compute chaff life in terms of game minutes
+    boy$IndxCHF$i = Xboy$IndxCHF$i
+    if ( boy$IndxCHF$i > 0 & boy$IndxCHF$i <= chf$SLOTS )
+       {
+        CHF$Pointer$TO (boy$IndxCHF$i)
+        if (xCHF$RBOCflag$i != $NO)    NEXT  # jb (not needed???) 1/18/91
+        LIFE = xCHF$Life$i
+       }
+    else LIFE = chaff$life
+    maxmin = game$time - LIFE
+        ###----------- end chaff-characteristics change    8/28/90
+ 
+    #$% get game minute chaff becomes active and later is inactive
+    boy$BirthTime$f = xboy$BirthTime$f
+    boy$KillTime$f = xboy$KillTime$f
+ 
+    #$% If the barrier is too old, or fell to the ground
+    if ( boy$KillTime$f < maxmin |   #if entire barrier too
+        Xboy$ChaffAlt$i <= 1 ) # old, or has sunk to ground jb   4/2/90
+        {
+        PUTboy$KillTime$f (1.0)
+        next
+        }
+ 
+    if (xBAR$Falling$i == $YES) #jb Entire barrier falling    4/16/90
+       {
+        boy$ChaffAlt$i = Xboy$ChaffAlt$i - chaff$SinkRate #jb 3/20/90
+        boy$ChaffAlt$i = MAX ( 1, boy$ChaffAlt$i )        #jb 4/2/90
+        PUTboy$ChaffAlt$i                                 #jb 3/20/90
+       }
+ 
+    PUTbar$type$i ($CHAFF$code)  # jb (vice RBOC) necessary???   1/18/91
+#@    bar$CVU$index = Xbar$View$i                # Owner's View  4/11/84
+#@    PUTbar$CVU$CHAFLG$i ($YES)                 # sees chaff    4/11/84
+ 
+    if (boy$BirthTime$f < maxmin)              #if tail end too old
+        {
+        #$% for each corner of barrier
+        for (bar$pt$index=1;bar$pt$index<=4;bar$pt$index=bar$pt$index+1)
+            {
+            flat[bar$pt$index] = xbar$pt$lat$f
+            flon[bar$pt$index] = xbar$pt$lon$f
+            }
+ 
+        #$% compute percent of barriers life remaining
+        w0 = (maxmin - boy$BirthTime$f) / _
+                                (boy$KillTime$f - boy$BirthTime$f)
+        w1 = 1.0 - w0
+ 
+        bar$pt$index = 1                # reduce size of barrier due to decay
+        bar$pt$lat$f = w1 * flat[1] + w0 * flat[4]
+        putbar$pt$lat$f
+        bar$pt$lon$f = w1 * flon[1] + w0 * flon[4]
+        $angpi(bar$pt$lon$f)
+        putbar$pt$lon$f
+ 
+        bar$pt$index = 2
+        bar$pt$lat$f = w1 * flat[2] + w0 * flat[3]
+        putbar$pt$lat$f
+        bar$pt$lon$f = w1 * flon[2] + w0 * flon[3]
+        $angpi(bar$pt$lon$f)
+        putbar$pt$lon$f
+ 
+        boy$BirthTime$f = maxmin                # save life remaining
+        putboy$BirthTime$f
+        }
+ 
+    kchbar = kchbar + 1                         # increment counter and
+    ichfx[kchbar] = ix                          # save pointer to barrier
+    }
+ 
+Unit_Index = 0                                  # initialize value
+ 
+call clear_REJ_Data  (_
+                      Current_Sensor_Index,     # out
+                      Current_Jammer_Index)     # out
+ 
+Msg_Required = $yes                             # msg once per minute
+ 
+for (UNT$pointer$first;UNT$pointer$ok;UNT$pointer$next)
+    {
+    UNT$status$i = xUNT$status$i                # get unit status
+ 
+    # unit table index must corresopond to unt table index
+    Unit_Index  = Unit_Index  + 1               # increment counter
+ 
+    unit_pointer [unit_index]= 0                # Initialize as unused
+    Unit_InChaff [ Unit_Index ] = 0             # it is not used - 5/2/94 JOA
+ 
+    # if unit being deleted or a/c awaiting launch, get next entry
+    if (UNT$status$i == $beingdeleted$code   |
+        UNT$status$i == $acawaitinglaunch$code)
+        {
+         Unit_Pointer [ Unit_Index ] = 0     # set to zero so we know
+         Unit_InChaff [ Unit_Index ] = 0     # it is not used - 5/2/94 JOA
+         next
+        }
+ 
+    if (Xunt$NeverDetect$i == YES) next         # joa 3/05 per_never
+ 
+    UNT$type$i = xUNT$type$i                    #get platform type
+    UNT$SuperType$i = xUNT$SuperType$i
+ 
+    #$% UNT entry can't detect with radar
+    if (UNT$type$i == $PIM$code               |
+        UNT$SuperType$i == $Torpedo$SuperCode |
+        UNT$SuperType$i == $CTRmeasure$SuperCode |
+        UNT$SuperType$i == $FalseContact$SuperCode) # jb    2/12/91
+            {
+            Unit_Pointer [ Unit_Index ] = 0     # set to zero so we know
+            Unit_InChaff [ Unit_Index ] = 0     # it is not used - 5/2/94 JOA
+            next     # reh 7/16/90
+            }
+ 
+    if (UNT$type$i == $sub$code)                # check if SUB submerged
+        {
+        UNT$truealtdepth$i = XUNT$truealtdepth$i        #       10/1/85
+ 
+        SHC$Pointer = xUNT$SHCpntr$i            # Chase down whether 4/7/83
+        if (UNT$truealtdepth$i > Xshc$SCOPEdepth$I & #  ex-        10/1/85
+            UNT$truealtdepth$i > Mast$Depth$Max )    #   posed??   10/1/85
+            {
+             Unit_Pointer [ Unit_Index ] = 0     # set to zero so we know
+             Unit_InChaff [ Unit_Index ] = 0     # it is not used - 5/2/94 JOA
+             NEXT                                # If not, SKIP..
+            }
+        }  #  End if potential target is a Submarine
+ 
+    #______________________________________________________________________
+ 
+    Unit_Pointer [ Unit_Index ] = UNT$pointer          # initialize values
+    Unit_InChaff [ Unit_Index ] = $OutsideChaff$code                             #       6/2/83
+ 
+    if (UNT$type$i == $cruisemissile$code)      # a cruise missile
+        {
+        if (xunt$TimeSeek$f <= game$time)     # if seeker on
+            {
+            cmc$pointer = XUNT$cmcpntr$i        # since cm has no equip list
+                                                # store radar table pointer
+            if (Xcmc$seekertype$i != $esm$code)
+                {
+                call Add_Sensor_to_List (_
+                                          Unit_Index,               # in
+                                          xUNT$Type$i,              # in
+                                          Current_Sensor_Index,     # in/out
+                                          Current_Jammer_Index,     # out
+                                          $$$SurfaceRadar,          # in
+                                          xUNT$TrueAltDepth$i,      # in
+                                          $no,                      # in, $yes if DEQ
+                                          xCMC$RdrPntr$i,           # in
+                                          Msg_Required)             # in/out
+                }
+            }
+ 
+         call inchff(UNT$pointer,
+                     Unit_InChaff[ Unit_Index ],
+                     Unit_InChaffBARIndex[ Unit_Index ])
+        }
+    else # else Air/Ship/Shore
+        {
+        FOR_DEQ_CHAIN
+            {
+            if (Xdeq$TimeWhenUse$f > game$time |  # damaged/disabled
+                xDEQ$On$i == $Off)                  # Equip. is Off
+                {
+                next                                # get next equip
+                }
+ 
+            Device_Type_Code = $no
+ 
+            deq$ident$i = Xdeq$ident$i  # get equipment type
+ 
+            if (deq$ident$i == $radar$code)     # if equipment is radar
+                {
+                RAD$pointer = Xdeq$pntr$i       # get radar pointer
+ 
+                RAD$radartype$i = XRAD$radartype$i      # get radar type
+ 
+                if (RAD$radartype$i == $air$code)
+                    {
+                    Device_Type_Code = $$$AirRadar
+                    }
+                else if (RAD$radartype$i == $surface$code)
+                    {
+                    Device_Type_Code = $$$SurfaceRadar
+                    }
+                else if (RAD$radartype$i == $approach$code)     # 6/19/86
+                    {
+                    Device_Type_Code = $$$ApproachRadar
+                    }
+                }# end if equip is a radar
+            else if (deq$ident$i == $ESM$code)     # if equipment is ESM
+                {
+                Device_Type_Code = $$$ESM
+                }
+            else if (DEQ$Ident$i == $jammer$code)
+                {
+                for(deq$EM$index  = 1;
+                    deq$EM$index <= deq$EM$slots;
+                    deq$EM$index  = deq$EM$index + 1)
+                    {
+                    if (xdeq$EM$band$i == $yes) #$% if found
+                        {
+                        Device_Type_Code = $$$RadarJammer
+                        Break
+                        }
+                    }
+                }       # end if Jammer
+            else if ((JECEWSI$Game == $yes) &                      # if a JECEWSI Game and
+                     (DEQ$Ident$I == $RadarJammer$Code         |   # JECEWSI type equipment
+                      DEQ$Ident$I == $CommunicationJammer$Code |   # JFR 9/21/94
+                      DEQ$Ident$I == $RadComJammer$code        ))
+                {
+                 for (DEQ$EM$Index  = 1;
+                      DEQ$EM$Index <= DEQ$EM$Slots;
+                      DEQ$EM$Index  = DEQ$EM$Index + 1)
+                   {
+                    if (xDEQ$EM$Band$I == $yes)
+                      {
+                       Device_Type_Code = $$$RadarJammer
+                       Break
+                      }
+                    }
+                }   # end of if JECEWSI related
+             ELSE IF (DEQ$Ident$i == $CommunicationJammer$Code) # GGG 4/18/88
+                {
+                FOR ( DEQ$EM$Index  = 1;
+                      DEQ$EM$Index <= DEQ$EM$Slots;
+                      DEQ$EM$Index  = DEQ$EM$Index + 1 )
+                    {
+                    IF ( xDEQ$EM$Band$I == $yes )
+                        {
+                        Device_Type_Code = $$$CommJammer
+                        BREAK
+                        }
+                    }
+                }                        # end if Comms. Jammer
+ 
+            if ( DEQ$ident$i == $ESM$code |
+                 DEQ$ident$i == $Radar$code )
+                {
+                call Add_Sensor_to_List (_
+                                          Unit_Index,               # in
+                                          xUNT$Type$i,              # in
+                                          Current_Sensor_Index,     # in/out
+                                          Current_Jammer_Index,     # out
+                                          Device_Type_Code,         # in
+                                          xDEQ$AntHeight$i,         # in
+                                          $yes,                     # in, $yes=D
+                                          DEQ$Pointer,              # in
+                                          Msg_Required)             # in/out
+                }
+            else if ((DEQ$Ident$i == $jammer$code |
+                      DEQ$Ident$i == $CommunicationJammer$Code |
+                      DEQ$Ident$i == $RadarJammer$Code |         # JFR 9/21/94
+                      DEQ$Ident$i == $RadComJammer$Code) &       # JECEWSI Interface Eq Types
+                     (jecewsi$game != $yes)) # JFR 9/21/94 (prevent duplication in comm jammer)
+                {
+                call Add_Jammer_to_List (_
+                                          Unit_Index,               # in
+                                          xUNT$Type$i,              # in
+                                          Current_Sensor_Index,     # in/out
+                                          Current_Jammer_Index,     # out
+                                          Device_Type_Code,         # in
+                                          xDEQ$AntHeight$i,         # in
+                                          $yes,                     # in, yes=DEQ
+                                          DEQ$Pointer,              # in
+                                          Msg_Required)             # in/out
+                }
+            }           # end of DEQ loop
+ 
+        # if platform is aircraft
+        if (UNT$type$i == $air$code)
+            {
+            call inchff(UNT$pointer,
+                        Unit_InChaff[Unit_Index ],
+                        Unit_InChaffBARIndex[Unit_Index ])
+            }
+        } # end if Air/Ship/Shore
+    }
+ 
+#$% set the Unit highwater mark
+Current_Max_Units = Min (Unit_Index, UNT$Slots)
+ 
+return
+end     # prerej
+ 
+ 
+
+ Subroutine airtgt(UNT$pointer,         # air srch radar tgt processing
+                   RAD$pointer,
+                   radhgt,              # SQUARE-ROOT!!
+                   ACR$Pointer,         # in, 8/20/90
+                   Sensor_Index)
+ #######################################################
+ #$%
+ #$% Purpose:   AIRTGT processes air search
+ #$%            radar targets.
+ #$%
+ #$% Called By: REJDET
+ #$%
+ #$% Calls:     PREPRX_M   PROXIM_M   QSQRT
+ #$%            CHAFF      RADDET
+ #$%
+ #$% Tables:    UNT        RAD
+ #$%
+ #$% Date:      JAN 81
+ #$%
+ #$% Author:    Ron Williams
+ #$%
+ #$% Modifications:
+ #$%    1/8/91 trs modified RAD$CH$Frequency$i (integer) to
+ #$%    RAD$CH$Frequency$F (floating).
+ #$%
+ #######################################################
+ 
+ BBcommon
+ RMcommon
+ 
+Integer*4       ACR$Pointer
+Integer*4       BOY$Pointer
+Integer*4       CHF$Pointer
+Literal         CSTRIP8
+Integer*4       Sensor_Index
+Integer*4       ISKIP
+Integer*4       Unit_Index
+Real*4          RAD$CH$Frequency$F
+Integer*4       RAD$CH$INDEX
+Integer*4       RAD$Pointer
+Real*4          RADHGT
+Real*4          RNGLOS
+Real*4          TGTBRG
+Real*4          TGTHGT
+Real*4          TGTRNG
+Integer*4       UNT$Pointer
+Integer*4       UNT2$Pointer
+Integer*4       UNT2$Type$i
+ 
+ 
+Real*4          sector                  # JFR 1/27/94
+Real*4          scanrate                # JFR 1/27/94
+Real*4          vts_sweeps              # JFR 1/27/94
+Real*4          orientation             # JFR 9/8/94 ( jecewsi)
+Integer*4       FOV_ok                  # JFR 1/27/94
+Integer*4       nsweep                  # JFR 1/27/94
+ 
+call preprx_M (UNT$Pointer$Index,        # jb                8/29/89
+               xUNT$truelatitude$f,      #call pre-PROXIM routine:  send
+               xUNT$truelongitude$f,     # detector position
+               xUNT$costruelat$f,        #send cos detector lat
+               float(xRAD$maxrange$i))   #send maximum range
+ 
+#$% for all units
+for (Unit_Index=1; Unit_Index<=Current_Max_Units; Unit_Index=Unit_Index+1)
+    {
+    if (unit_pointer[unit_index] == 0) next             # unused slot
+    unt2$pointer = Unit_Pointer[Unit_Index]    #$% set tgt unit pointer
+    if (unt2$pointer == UNT$pointer) next      #$% if target self, SKIP
+ 
+    unt2$type$i = xunt2$type$i                 #$% get tgt unit type
+ 
+    #$% PER # H1039  9/24/92 SMM
+    #$% Skip radar detection of units in same view
+    if (xUNT2$View$I == xUNT$View$I &           # clk 2/93 (E1073) - Detect own
+        UNT2$Type$I  != $CruiseMissile$Code)    # cruise missiles, since this
+       NEXT                                     # is the only way to see them.
+ 
+    if (unt2$type$i != $air$code &             #$% SKIP if not airborne
+        unt2$type$i != $cruisemissile$code) next
+ 
+    if(Unit_InChaff[Unit_Index] == $ActuallyInChaff$code) #skip if in chaff?? 7/31/90
+        {        # (Check whether chaff 'tuned' to radar freq.: 7/31/90
+        iSKIP = $YES  # jb Assume chaff IS effective.. but..   8/6/90
+        call find_active_channel (UNT$Pointer,         # jb    8/6/90
+                                  $radar$code,
+                                  xRAD$Type$c,
+                                  RAD$CH$Index)
+ 
+        RAD$CH$Frequency$F = XRAD$CH$Frequency$F      # 1/8/91 trs
+ 
+        BOY$Pointer$TO  Unit_InChaffBarIndex[Unit_Index]  # jb Compare the    7/31/90
+        CHF$Pointer$TO (xBOY$IndxCHF$i)    # chaff "tuning" to 7/31/90
+ 
+        if (CHF$Pointer$VALID)             # the radar freq:   7/31/90
+            {
+            if(RAD$CH$Frequency$F < Xchf$LOWfreq$i )  # 1/8/91 trs
+                {
+                iSKIP = $NO    # jb Chaff is NOT effective    8/6/90
+                }
+            }
+        else if(RAD$CH$Frequency$F < CHAFF$LOWfreq) # Default chaff..1/8/91 trs
+            {                            # jb                8/6/90
+            iSKIP = $NO    # jb Chaff is NOT effective      8/6/90
+            }
+        if (iSKIP == $YES)  NEXT # jb Chaff prevents detection  8/6/90
+        }    # End of if (ActuallyInChaff..)
+ 
+##   if (xpos2$truealtdepth$i <= 300) next      # <= 300' now OK  4/7/83
+ 
+    call proxim_M (unt2$Pointer$Index,         # jb              8/29/89
+                   xunt2$truelatitude$f,          #get rng/brg to target
+                   xunt2$truelongitude$f,
+                   xunt2$costruelat$f,
+                   tgtrng,
+                   tgtbrg)
+ 
+    if (tgtrng < 0)  next                        #skip if too far away
+    if (tgtrng < 1)  tgtrng = 1                  #no zero-divide 6/3/83
+ 
+    tgthgt = float(xunt2$truealtdepth$i)         # target height
+    tgthgt = SQRT( tgthgt )                      #sqrt target height
+ 
+    rnglos = (radhgt + tgthgt) * 1.23            #line of sight range
+ 
+    if (tgtrng > rnglos)  next                   #skip if beyond LOS
+ 
+    #if surfc-based radar, @ chaff rng 6/14/83
+    if (xUNT$type$i != $air$code &
+        Unit_InChaff[Unit_Index] ==$ProjectionInChaff$code)
+        {
+        next
+        }
+    ###------------------  Removed for CHAFF PHASE 1  jb    3/20/90
+    #$% determine if tgt is behind chaff
+    #call chaff(tgtrng,
+    #           tgtbrg,
+    #           xunt2$truealtdepth$i-radhgt*radhgt, #rel hgt of target
+    #           isee)
+    #
+    #if (isee == $no)  next                       #skip if obscured by chaff
+    ###----------------End of Removal for CHAFF PHASE 1  jb    3/20/90
+ 
+    # check to see if radar FOV calculation is necessary for VTS - JFR 1/27/94
+    # check to see if radar FOV calculation is necessary for JECEWSI - JFR 11/27/94
+    # get index of active channel for radar # reh 5/3/89
+    call find_active_channel (UNT$Pointer, # (used for VTS - JFR 1/27/94 / JECEWSI - JFR 11/27/94))
+                              $radar$code,
+                              xRAD$Type$c,
+                              RAD$CH$Index)
+    # now get the number of sweeps per minute for the channel - JFR 1/27/94
+    nsweep = xRAD$CH$Scanwidth$I * xRAD$CH$Scanrate$I # JFR 1/27/94
+    VTS_sweeps = float(nsweep) * model$interval # num of sweeps since model last executed - JFR 1/27/94
+    FOV_ok = $yes # flag in field of view - JFR 1/27/94
+    if (VTS_sweeps < 1.0 |     # if < 1 sweep completed in this cycle - JFR 1/27/94
+        jecewsi$game == $yes ) # or if jecewsi scan sectors enabled - JFR 8/15/94
+       {
+        # for VTS, find out if in radar field of view - JFR 1/27/94
+        scanrate = float(xRAD$CH$Scanrate$I) * $deg2rad # input to FOV routine # JFR 1/27/94
+        sector = float(xRAD$CH$Scanwidth$I) * $deg2rad  # input to FOV routine # JFR 1/27/94
+        orientation = $TWOPI + 0.5 # flag orientation of radar about course - JFR 9/8/94
+        call RADFOV(UNT$Pointer,  # evil scumbag agressor - JFR 1/27/94
+                    UNT2$Pointer, # helpless victim
+                    Sensor_index, # radar to check (not used for Jecewsi)
+                    sector,       # width of swept sector
+                    scanrate,     # scan rate scans per minute (not used for Jecewsi)
+                    orientation,  # orientation of jecewsi equipment
+                    FOV_ok)       # Is it in this equipments FOV?
+       }
+ 
+    if (trace$jecewsi == $yes |              # JFR 1/27/94
+        trace$radar == $yes )
+      {
+       call echor
+       call echov  ("Target ")
+       call echohn (xUNT2$Name$C, $$MaxLit)
+ 
+       if (FOV_ok == $yes)
+         call echov  (" is in radar FOV of unit ")
+       else
+         call echov (" is not in radar FOV of unit ")
+ 
+       call echohn (xUNT$Name$C, $$MaxLit)
+       call echov  (" for this cycle")
+       call echor
+      }   # end of trace
+ 
+    if (FOV_ok == $no)
+      next
+ 
+    call raddet(UNT$pointer,                     #test for detection
+                unt2$pointer,
+                unt2$type$i,
+                RAD$pointer,
+                radhgt,                          # joa 11/95 (E1422)
+                $yes,                            #indicates ducting not used
+                tgtrng,
+                tgtbrg,
+                tgthgt,                          # joa 11/95 (E1422)
+                Sensor_Index)
+ 
+    }
+ 
+ return
+ end                                            #end airtgt
+ 
+ 
+
+Subroutine reprad(UNT$pointer,                 #report radar detection
+                  unt2$pointer,
+                  unt2$type$i,
+                  tgtrng,
+                  tgtbrg)
+ 
+ #######################################################
+ #$%
+ #$% Purpose:   REPRAD loads radar detection data
+ #$%            into unit detection table.
+ #$%
+ #$% Called By: RADDET
+ #$%
+ #$% Calls:     APPLL      LCLRAS     ANG2PI
+ #$%
+ #$% Tables:    UNT
+ #$%
+ #$% Date:      JAN 81
+ #$%
+ #$% Author:    Ron Williams
+ #$%
+ #######################################################
+ 
+ BBcommon
+ RMcommon
+ 
+Real*4          FALAT
+Real*4          FALON
+Integer*4       LBEAR
+Integer*4       LRNGE
+Real*4          TGTBRG
+Real*4          TGTRNG
+Integer*4       UNT$Pointer
+Integer*4       UNT2$Pointer
+Integer*4       UNT2$Type$i
+ 
+ tgtbrg = tgtbrg + xUNT$headingerror$f            #add in heading error
+ $ang2pi(tgtbrg)
+ 
+ call appll(xUNT$assumedlatitude$f, #call apprnt lt & ln - send ass lt of dtctr
+            xUNT$assumedlongitude$f,              #send ass lon of detector
+            tgtrng,                               #send range to target
+            tgtbrg,                               #send bearing to target
+            falat,                                #return app lat (target)
+            falon)                                #return app lon (target)
+ 
+ 
+ lrnge = tgtrng + .5                              #round & store range
+ 
+ lbear = tgtbrg * (180/$pi) + .5                  #convert brng to whole degs
+ 
+ #$% adjust bearing to be between 0 - 359 degrees
+ if (lbear >= 360)
+     lbear = lbear - 360
+ 
+ #$% enter active radar detection data into local detection table
+ call LCLRAS (UNT$pointer,
+              unt2$pointer,
+              lbear,
+              falat,
+              falon,
+              lrnge,
+              unt2$type$i,
+              $RADAR$code)                      #               7/7/83
+ 
+ return
+ end                                              #end reprad
+ 
+
+Subroutine jamlst(Device_Index,         # in, radar device
+                  UNT$pointer,          # in,owner of victim radar
+                  RAD$pointer,          # in
+                  hgtrad)               # in, SQUARE-ROOT!!
+ 
+#######################################################
+#$%
+#$% Purpose:   JAMLST generates a list of effective
+#$%            radar jamming equipment that may im-
+#$%            pact on a given radar (detection).
+#$%
+#$% Called By: REJDET
+#$%
+#$% Calls:     PREPRX_M     PROXIM_M     GETREJ
+#$%
+#$% Tables:    UNT        RAD        DEQ
+#$%            JAM
+#$%
+#$% Date:      JAN 81
+#$%
+#$% Author:    Ron Williams
+#$%
+#$% Modifications:
+#$%    1/8/91 trs modified RAD$CH$Frequency$i (integer) to
+#$%    RAD$CH$Frequency$F (floating).
+#$%
+#$%            Jim Allen - 11/95 (E1422)
+#$%            Added terrain line-of-sight test.
+#$%
+#######################################################
+ 
+BBcommon
+RMcommon
+ 
+Integer*4       los_test     # function to test for line-of-sight (E1422)
+ 
+Real*4          BRGJ
+Literal         CSTRIP8
+Real*4          DBNOS
+Real*4          DCBLS                              # jb; for decibels 8/22/88
+Integer*4       DEQ$Pointer
+Integer*4       DEQ2$EM$Band$i
+Integer*4       DEQ2$EM$INDEX
+Integer*4       DEQ2$Pointer
+Integer*4       Device_Index
+Real*4          DUCTFC
+Real*4          Game_Time_Save
+Real*4          HGTJAM
+Real*4          HGTRAD
+Integer*4       Jammer_Index
+Integer*4       JAM$FQ$INDEX
+Integer*4       JAM$Pointer
+Byte            Msg_Sent / $no /
+Real*4          R
+Real*4          RAD$CH$Frequency$F
+Integer*4       RAD$CH$INDEX
+Integer*4       RAD$Pointer
+Real*4          RNGJ
+Real*4          RNGMAX
+Integer*4       Unit_Index
+Integer*4       UNT$Pointer
+Integer*4       UNT2$Pointer
+Integer*4       UNT2$Type$i
+ 
+Integer*4       FOV_ok        # jecewsi - JFR 8/31/94
+Real*4          Sector        # jecewsi - JFR 8/31/94
+REal*4          Scanrate      # jecewsi - JFR 8/31/94
+Real*4          orientation   # jecewsi - JFR 9/8/94
+Integer*4       OR_Index      # jecewsi - JFR 9/8/94
+ 
+SAVE Game_Time_Save      # jb For portability...  5/22/00
+ 
+If (Game_Time_Save != Game$Time )
+    {
+    Game_Time_Save = Game$Time
+    Msg_Sent = $no
+    }
+ 
+kjammr = 0                                     # no jammers affect this radar
+ 
+call preprx_M (UNT$Pointer$Index,              # jb                8/29/89
+            xUNT$truelatitude$f,               #prepare box check
+            xUNT$truelongitude$f,
+            xUNT$costruelat$f,
+            500.)                              #500 mile range limit
+ 
+# get index of active channel for radar        # reh 5/3/89
+call find_active_channel (UNT$Pointer,
+                          $radar$code,
+                          xRAD$Type$c,
+                          RAD$CH$Index)
+ 
+RAD$CH$Frequency$F = XRAD$CH$Frequency$F        # 1/8/91 trs
+ 
+#$% for all active units
+for (Unit_Index=1; Unit_Index<=Current_Max_Units ; Unit_Index=Unit_Index+1)
+    {
+    if (unit_pointer[unit_index] == 0) next     # unused slot
+ 
+    # if unit has no Comms or Radar Jamming
+    if (Unit_First_Jammer_Index[Unit_Index] == 0) next
+ 
+    unt2$pointer = Unit_Pointer[Unit_Index]     # get jammer unit pointer
+ 
+    call proxim_M (unt2$Pointer$Index,          # jb                8/29/89
+                   xunt2$truelatitude$f,        #get range/bearing to jammer
+                   xunt2$truelongitude$f,
+                   xunt2$costruelat$f,
+                   rngj,
+                   brgj)
+ 
+    if (rngj < 0.0) next                        #skip if beyond 500 miles
+ 
+    unt2$type$i = xunt2$type$i
+ 
+    #$% for all jammer equips on a unit
+    FOR ( Jammer_Index = Unit_First_Jammer_Index [ Unit_Index ];
+          (Jammer_Index >= Unit_Last_Jammer_Index [ Unit_Index ] &
+           Jammer_Index > 0 );
+          Jammer_Index = Jammer_Index - 1)
+        {
+        JAM$Pointer = Device_Equip_Pointer[ Jammer_Index]
+        hgtjam = Device_SQRT_AntHeight[ Jammer_Index]
+        DEQ$Pointer = Device_DEQ_Pointer[ Jammer_Index]
+ 
+        if (Device_type [ Device_Index ] == $$$AirRadar | #if air search radar
+            ducting$strength    == 0      |               # or no ducting present
+            xUNT$truealtdepth$i >  300    |               #  or esm above 300 ft
+            xunt2$truealtdepth$i > 300     )              #   or jammer above 300
+            {
+            rngmax = 1.23 * (hgtrad + hgtjam)       #line of sight range
+            ductfc = 1.0                            # set ducting factor
+            }
+        else
+            {
+            rngmax = xjam$maxrange$i                # get max range
+            ductfc = ducting$factor                 # get ducting factor
+            }
+ 
+        if (rngj > rngmax) next                     #skip if too far away
+ 
+        if (los_test (                      # Uses GP terrain grid to determine LOS
+                    xUNT$TrueLatitude$F,    # Detector latitude: real: in: rad
+                    xUNT$TrueLongitude$F,   # Detector longitude: real: in: rad
+                    xUNT$CosTrueLat$F,      # Cosine of detector latitude: real: in:rad
+                    hgtrad,                 # Sqrt Detector altitude: real: in: ft
+                    xUNT2$TrueLatitude$F,   # Target latitude: real: in: rad
+                    xUNT2$TrueLongitude$F,  # Target longitude: real: in: rad
+                    xUNT2$CosTrueLat$F,     # Cosine of target latitude: real: in:rad
+                    hgtjam) == $NO)         # Sqrt Target altitude: real: in: ft
+          {
+           next                 # Jammer obscured by terrain
+          }
+ 
+    #_____________________________________________________________________
+    # is this guy jamming me ???                                ## 6/30/83
+ 
+        FOV_ok = $yes            # default flag in field of view - JFR 1/27/94
+        if (jecewsi$game == $yes ) # if jecewsi scan sectors enabled - JFR 8/15/94
+           {
+            sector = float(xjam$JammingSector$I)
+            DEQ$Pointer = Device_Deq_Pointer[Jammer_index]
+            OR_Index = xDEQ$EmitterIndx$I
+            call FindJAMOrient (UNT2$Pointer, OR_Index, orientation)
+ 
+            # since this is a case of a jammer (unt2$pointer) we
+            # swap the pointers in the call to RADFOV so we can use
+            # this routine for finding targets in radar FOV (other cases)
+            # and for finding radars in jammer FOV (this case)
+            call RADFOV (UNT2$Pointer, # agressor
+                         UNT$Pointer,  # victim
+                         Jammer_index, # Jammer to check (not used for Jecewsi)
+                         sector,       # width of swept sector
+                         scanrate,     # scan rate scans per minute (not needed for Jecewsi
+                         orientation,  # jecewsi equipment orientation
+                         FOV_ok)       # Is it in this equipments FOV?
+ 
+            if (trace$jecewsi == $yes |   # JFR 11/27/94
+                trace$radar == $yes)
+               {
+                call echor
+                call echov  ("Target ")
+                call echohn (xUNT$Name$C, $$MaxLit)
+                if (FOV_ok == $yes)
+                  call echov  (" IS in Jammer FOV of unit ")
+                else
+                  call echov  (" IS NOT in Jammer FOV of unit ")
+                call echohn (xUNT2$Name$C, $$MaxLit)
+                call echov  (" for this cycle")
+                call echor
+               }
+           }   # end of if JECEWSI
+ 
+        if (FOV_ok == $no)                   # JFR 11/27/94
+          next
+ 
+        deq2$Pointer = Device_DEQ_Pointer[Jammer_Index]    #eq index of jammer 3/89 reh
+ 
+        # for each electromagnetic band
+        for(DEQ2$EM$index=1;
+            DEQ2$EM$index$ok;
+            DEQ2$EM$index=DEQ2$EM$index+1)
+            {                            # "X" to integer        8/30/88
+    ##      if (XDEQ2$EM$band$i == $no) next        #skip if not operating
+            DEQ2$EM$band$i = XDEQ2$EM$band$i    #        8/30/88
+            if (DEQ2$EM$band$i == $no) next #skip if not operating
+ 
+            jam$fq$index = DEQ2$EM$index
+ 
+            # if within jammer bandwidth (previously, had to match up exactly)
+            if ((NINT(RAD$CH$Frequency$F) <
+                    Xjam$fq$centerfreq$i + xjam$fq$Bandwidth$i) & # JFR 8/15/94
+                (NINT(RAD$CH$Frequency$F) >
+                    Xjam$fq$centerfreq$i - xjam$fq$Bandwidth$i)) # JFR 8/15/94
+                {
+                if (rngj < 1)                       #if very near
+                    {
+                    kjammr = -1                     #indicate no radar possible
+                    break
+                    }
+ 
+    ###         r = 2.0 * ductfc * qkdb(rngj)   # jb OLD range term 8/22/88
+ 
+                if(rngj < 1.0) rngj = 1.0    # jb (protect LOG10)    9/1/88
+                DCBLS = 10 * log10(rngj)     #jb -  replace QKDB    8/22/88
+                r = 2.0 * ductfc * DCBLS     # intermediate term    8/22/88
+ 
+                dbnos = Xjam$fq$performfactor$i +   #compute noise pwr in db
+                        XRAD$antennagain$i - r
+                #$% coded as precaution to multiple jammers per unit
+                if ( kjammr >=
+                      ($MaxJammersPerUnit + $MaxCommsJammersPerUnit) * UNT$Slots )
+                    {
+                    If ( Msg_Sent == $no )
+                        {
+                        call echor                                  #     5/22/00
+                        call echov (" Jammer array exceeded. REJ") # jb E2144
+                        Msg_Sent = $yes
+                        }
+                    return
+                    }
+ 
+                kjammr = kjammr + 1
+ 
+                PWRJAM[kjammr] = 10 ** (dbnos/10.)      # get jammer power 8/22/88
+ 
+                brgjam[kjammr] = brgj                   # get jammer bearing
+                Unit_With_Jammer[kjammr]  = Unit_Index  # save Jammer source
+                Jammer_DEQ[kjammr] = DEQ2$Pointer
+                # break commented out 11/6/90
+                next                                    # get next equipment
+                }# end if rad and jam are fequency aligned
+            }
+    #_____________________________________________________________________
+        if (kjammr < 0) break                       #if jammer right on top, no
+        } # end for all active jammers "type"  equip on unit
+    } # end for all active units
+ 
+return
+end                             #end jamlst  qkdb, qkpow
+ 
+
+Subroutine getrej(UNT$pointer,   # platform unt pointer    (in)
+                  Device_AntHeight, # device height on unit(in), feet
+                  ieqpnt,        # equipment char pointer  (out)
+                  anthgt,        # sq root of antenna hgt  (out)
+                  Device_Indx)   #                         (in)
+#######################################################
+#$%
+#$% Purpose:   GETREJ gets radar, ESM, and jammer
+#$%            equipment characteristics pointer
+#$%            and antenna height.
+#$%
+#$% Called By: JAMLST     REJDET     ESMTGT
+#$%
+#$% Calls:     QSQRT
+#$%
+#$% Tables:    UNT        DEQ        SB
+#$%
+#$%
+#$% Date:      JAN 81
+#$%
+#$% Author:    Ron Williams
+#$%
+########################################################
+ 
+BBcommon
+RMcommon
+ 
+Integer*4       UNT$Pointer
+Integer*4       Device_AntHeight
+Integer*4       IEQPNT
+Real*4          Anthgt
+Integer*4       Device_Indx
+ 
+Integer*4       DEQ$Pointer
+Integer*4       I_SWITCH_1
+Integer*4       SHC$Pointer
+Integer*4       UNT$Type$i
+ 
+##--------- Code shortened 4/27/83 ----------------------------------
+ 
+UNT$Type$I = xUNT$Type$I
+ 
+if (UNT$type$i != $cruisemissile$code)         #if NOT a cruise-missile
+    {
+    Deq$Pointer = Device_DEQ_Pointer[ Device_indx ]
+ 
+    ieqpnt = xDeq$pntr$i     #$% set equip. char. pntr for return
+ 
+    SWITCH (UNT$type$i)                                #       4/27/83
+        {
+        case $Air$Code:          # Airborne except Cruise Mis., above
+            {
+            anthgt = float(xUNT$truealtdepth$i)            #       4/19/83
+            }
+        DEFAULT: # Shorebase and all ships/subs except sub @ SCOPE depth
+            {
+            anthgt = Device_AntHeight + float (xUNT$TrueAltDepth$I)   # Add in elevation
+            }                                                         # joa 11/95 (E1422)
+        } # end switch unit type
+ 
+    if (xUNT$SUPERtype$i == $submarine$SUPERcode )# radar on sub, 2/12/91
+        {
+        SHC$Pointer = xUNT$SHCpntr$i     #       is it at SCOPE depth?..
+        if (XUNT$truealtdepth$i == Xshc$SCOPEDEPTH$i)
+        anthgt = 2.0                    # If so, antenna 2' out of water
+        }
+    }   # end of IF.. unit is NOT Cruise-Missile
+else                   # unit is a CRUISE-MISSILE
+    {
+    ieqpnt = Device_EQ_Pointer[ Device_Indx ]    # (can only be surface srch) for RETURN
+ 
+    #$% compute antenna height as cm altitude   # & cm has no eq table
+    anthgt = float(xUNT$truealtdepth$i)         #               4/19/83
+    }
+ 
+anthgt = SQRT( anthgt )                        # SQRT to RETURN 4/19/83
+ 
+return
+end # end getrej
+ 
+
+#$% process all emitter sources for this ESM
+Subroutine esmtgt(UNT$pointer,
+                  esm$pointer,
+                  esmhgt,                      # SQUARE-ROOT!!
+                  ACR$Pointer,                 # in, reh 8/15/90
+                  ESM_EquipPtr)                # hdf 10/90
+ 
+ #######################################################
+ #$%
+ #$% Purpose:   ESMTGT processes potential ESM
+ #$%            targets for possible detection.
+ #$%
+ #$% Called By: REJDET
+ #$%
+ #$% Calls:     PREPRX_M     PROXIM_M     ESMDET
+ #$%
+ #$% Tables:    UNT        ESM
+ #$%
+ #$% Date:      JAN 81
+ #$%
+ #$% Author:    Ron Williams
+ #$%
+ #$% Modified:  Susan Miller 3/99 (E2059)
+ #$%            Allow shorebases to be considered for ESM
+ #$%            detections.
+ #######################################################
+ 
+ BBcommon
+ RMcommon
+ 
+Integer*4       ACR$Pointer
+Integer*4       ACR2$Pointer
+Real*4          bearingESM
+Integer*4       ESM_EquipPtr
+integer*4       emitter_backlobe                        # flag
+Integer*4       ESM$Pointer
+Real*4          ESMHGT
+Integer*4       Jammer_Index
+Integer*4       Sensor_Index
+Integer*4       Unit_Index
+Integer*4       NODUCT
+Real*4          TGTBRG
+Real*4          TGTRNG
+Integer*4       UNT$Pointer
+Integer*4       UNT$View$i
+Integer*4       UNT2$Pointer
+Integer*4       UNT2$Type$i
+Integer*4       JAM$POINTER   # jecewsi - JFR 8/31/94
+Integer*4       FOV_ok        # jecewsi - JFR 8/31/94
+Real*4          Sector        # jecewsi - JFR 8/31/94
+REal*4          Scanrate      # jecewsi - JFR 8/31/94
+Real*4          orientation   # jecewsi - JFR 9/8/94
+Integer*4       OR_Index      # jecewsi - JFR 9/8/94
+Integer*4       DEQ$POINTER   # jecewsi - JFR 9/8/94
+literal         CSTRIP8       # jecewsi - JFR 11/27/94
+ 
+call preprx_M (UNT$Pointer$Index,                   # jb 8/29/89
+               xUNT$truelatitude$f,     #prep-PROXIM  routine:  send de-
+               xUNT$truelongitude$f,                # detector position
+               xUNT$costruelat$f,                   # send cos detector lat
+               FLOAT(xESM$MaxRange$I))              # & max permitted rng
+ 
+#$% get unit view
+UNT$view$i = xUNT$view$i
+ 
+#$% for all units currently in game (process for ESM detection)
+for (Unit_Index=1;Unit_Index<=Current_Max_Units ;Unit_Index=Unit_Index+1)
+    {
+    if (unit_pointer[unit_index] == 0) next     # Unused slot
+ 
+    unt2$pointer = Unit_Pointer[Unit_Index]       # possible emitter unit
+ 
+    if (xunt2$view$i == UNT$view$i)  next         #skip if same view
+ 
+    unt2$type$i = xunt2$type$i
+ 
+# commented out 3/10/99 SMM for testing by DLR (E2059)
+#    if (unt2$type$i == $shorebase$code)  next     #skip if shorebase
+ 
+    call proxim_M (unt2$Pointer$Index,            # jb 8/29/89
+                 xunt2$truelatitude$f,  #call rang/bear routine - send trgt lat
+                 xunt2$truelongitude$f,           #send target longitude
+                 xunt2$costruelat$f,              #send cos of target latitude
+                 tgtrng,                          #return range
+                 tgtbrg)                          #return bearing
+ 
+    if (tgtrng < 0.)  next                       #skip if too far away
+ 
+    if (ducting$strength == 0 |                 #if no ducting present
+        xUNT$truealtdepth$i > 300 |             # or esm above 300 ft
+        xunt2$truealtdepth$i > 300)             #  or emitter platform
+                                                #   above 300 feet
+        {
+        noduct = $yes
+        }
+     else
+        {
+        noduct = $no
+        }
+ 
+    #$% for all sensor equips on a unit
+    FOR ( Sensor_Index = Unit_First_Sensor_Index [ Unit_Index ];
+          ( Sensor_Index <= Unit_Last_Sensor_Index [ Unit_Index ] &
+            Sensor_Index != 0);
+          Sensor_Index = Sensor_Index + 1)
+        {
+        #$% if no emitters on ( from sensor list )
+        if ( Device_Type [ Sensor_Index ] != $$$AirRadar &
+             Device_Type [ Sensor_Index ] != $$$SurfaceRadar &
+             Device_Type [ Sensor_Index ] != $$$ApproachRadar )
+            {
+            Next                        # get next sensor device
+            }
+ 
+        ACR2$Pointer = Device_ANT_Pointer [ Sensor_Index ]
+ 
+        #$% if emitter has restricted antenna coverage
+ 
+        emitter_backlobe = $no
+ 
+        #$% if air radar
+        if (Device_Type[Sensor_Index] == $$$AirRadar)
+            {
+            isit = 1                            # 4/22/83 used for trace
+            }
+        else if (Device_Type[Sensor_Index] == $$$SurfaceRadar)
+            {
+            isit = 2                            # 4/22/83 used for trace
+            }
+        else if (Device_Type[Sensor_Index] == $$$ApproachRadar)
+            {
+            isit = 4                            # 4/22/83
+            }
+ 
+        call esmdet(UNT$pointer,            #$% process ESM detection
+                    Unit_Index,
+                    unt2$pointer,
+                    unt2$type$i,
+                    esm$pointer,
+                    esmhgt,
+                    noduct,                    #               4/27/83
+                    tgtrng,
+                    tgtbrg,
+                    ESM_EquipPtr,
+                    Sensor_Index,
+                    emitter_backlobe)           # in, flag, use backlobe gain
+ 
+        } # end for all sensor devices
+ 
+    emitter_backlobe = $no                      # default, jammers are omnidirectiona
+ 
+    # Note that the Jammer types use the end of the Device table
+ 
+    #$% for all active jammer equips on a unit (RadarJammers and CommJammers)
+    FOR ( Jammer_Index = Unit_First_Jammer_Index [ Unit_Index ];
+          ( Jammer_Index >= Unit_Last_Jammer_Index [ Unit_Index ] &
+            Jammer_Index != 0);
+          Jammer_Index = Jammer_Index - 1)
+        {
+        #$% if no emitters on ( from sensor list )
+        if ( Device_Type [ Jammer_Index ] != $$$RadarJammer &
+             Device_Type [ Jammer_Index ] != $$$CommJammer )
+            {
+            Next                        # get next jammer device
+            }
+ 
+        #$% if jammer
+        if (Device_Type[Jammer_Index] == $$$RadarJammer)
+            {
+            isit = 3                       # trace info
+            }
+        else if (Device_Type[Jammer_Index] == $$$CommJammer)
+            {
+            isit = $$$CommJammer
+            }
+ 
+        # is the ESM detector in the directional jammer's FOV - JFR 8/15/94
+        FOV_ok = $yes         # default - flag in field of view
+        if (jecewsi$game == $yes) # if jecewsi scan sectors enabled
+           {
+            JAM$Pointer = Device_Equip_Pointer[ Jammer_Index]
+            sector = float(xjam$JammingSector$I)
+            DEQ$Pointer = Device_Deq_pointer[Jammer_index]
+            OR_Index = xDEQ$EmitterIndx$I
+            call FindJAMOrient (UNT2$POINTER, OR_Index, orientation)
+ 
+            # since this is a case of a jammer (unt2$pointer) we
+            # swap the pointers in the call to RADFOV so we can use
+            # this routine for finding targets in radar FOV (other cases)
+            # and for finding radars in jammer FOV (this case)
+            call RADFOV (UNT2$Pointer, # agressor
+                         UNT$Pointer,  # victim
+                         Jammer_index, # Jammer to check (not used for Jecewsi)
+                         sector,       # width of swept sector
+                         scanrate,     # scan rate scans per minute (not needed for Jecewsi
+                         orientation,  # orientable field of view for jecewsi
+                         FOV_ok)       # Is it in this equipments FOV?
+ 
+            if (trace$jecewsi == $yes)
+              {
+               call echor
+               call echov  ("Target ")
+               call echohn (xUNT2$Name$C, $$MaxLit)
+               if (FOV_ok == $yes)
+                 call echov (" is in Jammer FOV of unit ")
+               else
+                 call echov (" is NOT in Jammer FOV of unit ")
+               call echohn (xUNT$Name$C, $$MaxLit)
+               call echov  (" for this cycle")
+               call echor
+              }   # end of trace
+           }   # end of if JECEWSI
+ 
+        if (FOV_ok == $no)                   # JFR 11/27/94
+          next
+ 
+        CALL esmdet ( UNT$pointer,
+                      Unit_Index,
+                      unt2$pointer,
+                      unt2$type$i,
+                      esm$pointer,
+                      esmhgt,
+                      noduct,
+                      tgtrng,
+                      tgtbrg,
+                      ESM_EquipPtr,
+                      Jammer_Index,
+                      emitter_backlobe)
+ 
+        }# end for all jammer types
+    }# end for all units
+ 
+ return
+ end # end esmtgt
+ 
+ 
+
+ 
+ Subroutine repesm(UNT$pointer,                 #report esm detection
+                   unt2$pointer,
+                   unt2$type$i,
+                   ieqpnt,
+                   tgtbrg,
+                   iesmpntr)    # IF >= ESM$base, is ESM$pointer 10/23/85
+ 
+ #######################################################
+ #$%
+ #$% Purpose:   REPESM loads ESM detection data
+ #$%            into unit detection table.
+ #$%
+ #$% Called By: ESMDET
+ #$%
+ #$% Calls:     ANG2PI     LCLESM
+ #$%
+ #$% Tables:    UNT
+ #$%
+ #$% Date:      JAN 81
+ #$%
+ #$% Author:    Ron Williams
+ #$%
+ #######################################################
+ 
+ BBcommon
+ RMcommon
+ 
+Integer*4       IEQPNT
+Integer*4       IESMPNTR
+Integer*4       LBEAR
+Real*4          RORLAT
+Real*4          RORLON
+Real*4          TGTBRG
+Integer*4       UNT$Pointer
+Integer*4       UNT2$Pointer
+Integer*4       UNT2$Type$i
+ 
+ #$% get assumed position
+ rorlat = xUNT$assumedlatitude$f
+ rorlon = xUNT$assumedlongitude$f
+ 
+ #$% update tgt bearing
+ tgtbrg = tgtbrg + xUNT$headingerror$f
+ $ang2pi(tgtbrg)
+ 
+ #$% get bearing in degrees
+ lbear = tgtbrg * (180/$pi) + .5
+ 
+ #$% adjust bearing to be between 0 - 359 degrees
+ if (lbear >= 360)
+      lbear = lbear - 360
+ 
+ #$% enter ESM detection data into local detection table
+ call LCLESM (UNT$pointer,
+              unt2$pointer,
+              lbear,
+              rorlat,
+              rorlon,
+              ieqpnt,
+              iesmpntr) # IF >= ESM$base, is ESM$pointer 10/23/85
+ 
+ return
+ end                                            #end repesm
+ 
+
+ Subroutine jamsig(UNT$pointer,                 #jammer signal strength
+                   UNT$type$i,
+                   Jammer_Index,                # in
+                   jam$pointer,
+                   signal,
+                   LowFreq,
+                   HighFreq)
+ 
+ #######################################################
+ #$%
+ #$% Purpose:   JAMSIG computes jammer signal strength.
+ #$%
+ #$% Called By: ESMDET
+ #$%
+ #$% Calls:     QPOWER     FLOAT
+ #$%
+ #$% Tables:    UNT        JAM        DEQ
+ #$%            SB
+ #$%
+ #$% Date:      JAN 81
+ #$%
+ #$% Author:    Ron Williams
+ #$%
+ #######################################################
+ 
+BBcommon
+RMcommon
+ 
+Integer*4       DEQ$EM$INDEX
+Integer*4       DEQ$Pointer
+Integer*4       HighFreq
+Integer*4       Jammer_Index
+Integer*4       JAM$FQ$Bandwidth$i
+Integer*4       JAM$FQ$Centerfreq$i
+Integer*4       JAM$FQ$INDEX
+Integer*4       JAM$FQ$Performfactor$i
+Integer*4       JAM$Pointer
+Integer*4       LowFreq
+Real*4          PPOW
+Real*4          PWRACC
+Real*4          SIGNAL
+Integer*4       UNT$Pointer
+Integer*4       UNT$Type$i
+ 
+pwracc = 0.                                        # initialize value
+ 
+DEQ$Pointer = Device_DEQ_Pointer [ Jammer_Index ]  # get equipment index 3/89 reh
+ 
+for(DEQ$EM$index=1; DEQ$EM$index <= DEQ$EM$slots;
+    DEQ$EM$index=DEQ$EM$index+1)
+    {
+    if (xDEQ$EM$Band$I == $YES )                   # if operating...
+        {
+        jam$fq$index = DEQ$EM$Index                # set index to jammer
+ 
+        jam$FQ$CenterFreq$I = Xjam$FQ$CenterFreq$I
+ 
+        IF ( ( jam$FQ$CenterFreq$I >= LowFreq ) &  # in ESM Freq Range...
+             ( jam$FQ$CenterFreq$I <= HighFreq ) )
+            {
+ 
+##          pwracc = qkpowr(float(Xjam$fq$performfactor$i - 77)) *
+##              Xjam$fq$bandwidth$i * 1000000 + pwracc  # jb OLD  9/6/88
+ 
+            jam$fq$performfactor$i = Xjam$fq$performfactor$i   # 8/29/88
+            jam$fq$bandwidth$i     = Xjam$fq$bandwidth$i       # 8/29/88
+ 
+            Ppow = FLOAT(jam$FQ$performfactor$I -77)/10.    #     9/6/88
+            Ppow = 10**( Ppow)                              #    8/29/88
+ 
+            pwracc = Ppow *                         # jb NEW      8/29/88
+                FLOAT ( jam$FQ$BandWidth$I ) * 1000000 + pwracc # 8/29/88
+ 
+            }
+        }
+    }
+ 
+#if (pwracc > 0.0)           # jb (To protect LOG10 function,    9/1/88
+if (pwracc > 1.0)            # which is more touchy than QKDB)   9/1/88
+    {
+     SIGNAL = 10 * log10(pwracc)        #jb - replace QKDB     8/22/88
+ 
+    }
+else
+    {
+    signal = 0.0
+    }
+ 
+return
+end     # jamsig
+ 
+
+ 
+ Subroutine comjamsig(UNT$pointer,           # comm-jammer signal strength
+                      UNT$type$i,
+                      Jammer_Index,          # in
+                      cjc$pointer,
+                      signal,
+                      LowFreq,
+                      HighFreq)
+ 
+ #######################################################
+ #$%
+ #$% Purpose:   COMJAMSIG computes Comm-jammer signal strength.
+ #$%
+ #$% Called By: ESMDET
+ #$%
+ #$% Calls:     QPOWER     FLOAT
+ #$%
+ #$% Tables:    UNT        CJC        DEQ
+ #$%
+ #$% Date:      April 88
+ #$%
+ #$% Author:    Dane Wills (derived from JAMSIG)
+ #$%
+ #######################################################
+ 
+BBcommon
+RMcommon
+ 
+real*4          CJC$FQ$Frequencyjammed$f
+Integer*4       CJC$FQ$INDEX
+Integer*4       CJC$Pointer
+Integer*4       DEQ$EM$INDEX
+Integer*4       DEQ$Pointer
+Integer*4       HighFreq
+Integer*4       Jammer_Index
+Integer*4       LowFreq
+Real*4          PPOW
+Real*4          PWRACC
+Real*4          SIGNAL
+Integer*4       UNT$Pointer
+Integer*4       UNT$Type$i
+ 
+#$% initialize linear power
+pwracc = 0.
+ 
+DEQ$Pointer = Device_DEQ_Pointer[ Jammer_Index ]
+ 
+for(DEQ$EM$index=1; DEQ$EM$index <= DEQ$EM$slots; DEQ$EM$index=DEQ$EM$index+1)
+    {
+    if (xDEQ$EM$Band$I == $YES )            # if operating...
+        {
+        CJC$fq$index = DEQ$EM$Index
+ 
+        CJC$FQ$FrequencyJammed$F = xCJC$FQ$FrequencyJammed$F
+ 
+        IF ( ( CJC$FQ$FrequencyJammed$F >= LowFreq ) &
+             ( CJC$FQ$FrequencyJammed$F <= HighFreq ) )
+            {
+ 
+##          pwracc = qkdb( qkpowr( FLOAT( xCJC$FQ$PerformanceFactor$I - 77 ) ) *
+##              FLOAT ( xCJC$FQ$BandWidth$I ) ) + pwracc    # (OLD way)
+ 
+            #$%  power accumulation algorithm modified
+            #$% to correspond with JAMSIG 11/8/90, reh
+ 
+            #$% convert dBm to Watts
+            Ppow =10**(FLOAT( xCJC$FQ$PerformanceFactor$I - 30 -77)/10.) #8/24/88
+ 
+            If (Ppow > 1.0)            # jb Protect LOG10    9/1/88
+                {
+                pwracc = (Ppow *                           # 8/24/88
+                   FLOAT ( xCJC$FQ$BandWidth$I )) + pwracc # 8/24/88
+                }
+            ELSE pwracc = 0.0          #                    9/1/88
+ 
+           }
+       }
+   }
+ 
+#if (pwracc > 0.0)           # jb (To protect LOG10 function,    9/1/88
+if (pwracc > 1.0)            # which is more touchy than QKDB)   9/1/88
+    {
+     signal = 10 * log10(pwracc)     #jb -         replace QKDB  8/22/88
+    }
+else
+    {
+    signal = 0.0
+    }
+end     # comjamsig  qk
+ 
+
+ Subroutine chflst(UNT$pointer,RAD$pointer,radhgt)
+                                            #/\  SQUARE-ROOT!!
+ #######################################################
+ #$%
+ #$% Purpose:   CHFLST generates a list of active
+ #$%            chaff barrier data that may affect
+ #$%            radar detections.
+ #$%
+ #$% Called By: REJDET
+ #$%
+ #$% Calls:     PREPRX_M     PROXIM_M     ANGPI
+ #$%            QTRIG
+ #$%
+ #$% Tables:    UNT        RAD        BOY
+ #$%            BAR
+ #$%
+ #$% Date:      JAN 81
+ #$%
+ #$% Author:    Ron Williams
+ #$%
+ #$% Modifications:
+ #$%    1/8/91 trs modified RAD$CH$Frequency$i (integer) to
+ #$%    RAD$CH$Frequency$F (floating).
+ #$%
+ #######################################################
+ 
+ BBcommon
+ RMcommon
+ 
+Integer*4       BAR$CVU$ChaFlg$i
+Integer*4       BAR$CVU$INDEX
+Integer*4       BAR$PT$INDEX
+Integer*4       BAR$Pointer
+Real*4          BEAR
+Integer*4       BOY$Indxchf$i
+Integer*4       BOY$Pointer
+Real*4          Brg[4]
+Integer*4       CHF$Pointer
+Literal         CSTRIP8
+Real*4          DIFF
+Real*4          FCOS
+Real*4          FSIN
+Real*4          GAMMA
+Integer*4       I
+Integer*4       ITHICK
+Integer*4       J
+Integer*4       K
+Integer*4       M
+Integer*4       N
+Real*4          RAD$CH$Frequency$F
+Integer*4       RAD$CH$INDEX
+Integer*4       RAD$Maxrange$i
+Integer*4       RAD$Pointer
+Real*4          RADHGT
+Real*4          Rng[4]
+Real*4          RNGMAX
+Real*4          SIDEA
+Real*4          SIDEB
+Integer*4       UNT$Pointer
+ 
+ 
+ kchaff = 0                             #$% init. subscript
+ 
+ if (kchbar == 0)  return               #$% if no chaff barriers, return
+ 
+ RAD$maxrange$i = xRAD$maxrange$i       #                       4/9/84
+ call preprx_M (UNT$Pointer$Index,    # jb                      8/29/89
+             xUNT$truelatitude$f,     #prep-PROXIM  routine; send
+             xUNT$truelongitude$f,                # detector position,
+             xUNT$costruelat$f,                   # and cos of lat.,&
+             float(RAD$maxrange$i+200))           # max. rng.   4/9/84
+ 
+ for (i=1 ; i<=kchbar ; i=i+1)           #$% for each chaff barrier,
+    {
+     bar$pointer$to ichfx[i]            #$% set BAR and BOY pointers
+     boy$pointer$to ichfx[i]
+ 
+     for (bar$pt$index=1;bar$pt$index<=4;bar$pt$index=bar$pt$index+1)
+        {                               # For each corner of barrier:
+         call proxim_M ( 0,             # jb    _M        8/30/89
+                     xbar$pt$lat$f,                     # send lat
+                     xbar$pt$lon$f,                     #send longitude
+                     xboy$costruelat$f,                 #send cos lat.
+                     rng[bar$pt$index],               #return range
+                     brg[bar$pt$index])               #return bearing
+ 
+         #$% if range to this corner is OUT-OF-BOUNDS,          6/3/83
+         if (rng[bar$pt$index] < 0.0)                   #       6/3/83
+            {
+             NEXT  2    #$% If corner too far, SKIP BARRIER     6/3/83
+            }
+        }
+ 
+     rngmax = 0.0                               #$% set max rng to zero
+ 
+     for (n=1;n<=4;n=n+1)                       #find furthest vertex
+        {
+         if (rng[n] > rngmax)                   #$% this range greater?
+            {
+             rngmax = rng[n]                    #$% if so, reset max.
+             m = n
+            }
+        }
+ 
+     j = 1 + mod(m,2)                           # find diagonally oppos-
+                                                #  ite pair of vertices
+     k = j + 2                                  #    for broadside
+ 
+     diff = brg[k] - brg[j]
+     $angpi(diff)
+ 
+     if (diff >= 0)                             #order clockwise
+        {
+         sidea = rng[j]
+         sideb = rng[k]
+         gamma = diff
+         bear = brg[j]
+        }
+     else
+        {
+         sidea = rng[k]
+         sideb = rng[j]
+         gamma = -diff
+         bear = brg[k]
+        }
+ 
+     kchaff = kchaff + 1
+ 
+     brgchf[kchaff] = bear
+     subtnd[kchaff] = gamma
+ 
+     #call qktrig(gamma,fcos,fsin)
+     fcos = cos(gamma)
+     fsin = sin(gamma)
+ 
+##     factr1[kchaff] = sideb * fsin            # Inactivated
+##     factr2[kchaff] = sidea - sideb * fcos    #   on
+##     factr3[kchaff] = sidea * factr1[kchaff]  #       5/26/83
+ 
+###-----Information FOR PROGRAMMER:---------------------------------
+#  [ BE AWARE that I haven't implemented/tested this!! ]
+#       The range from the radar to the chaff-barrier is about to
+#       be approximated as the average of the horizontal ranges to the
+#       left- and right- hand corners of the chaff-cloud rectangle.
+#       This is not bad in most cases, and doesn't use excessive com-
+#       puter time for a non-critical purpose.  Should a need arise for
+#       more precision, the Sine Law and Cosine Law could be used to
+#       compute the horizontal range from the radar to the chaff-cloud
+#       diagonal, measured in the direction of the Line-Of-Sight to the
+#       target.  At this point in this CHFLST subroutine, the SIN of the
+#       angle (opposite SideB) between SideA and the diagonal would be
+#       computed as SynB[kchaff], where SynB[boy$SLOTS] is a Real*4 array,
+#       added to RMcommon so as to be passed-on to subroutine CHAFF,
+#       where rngchf[kchaff] would be computed instead of at this point.
+#       Observing that just preceding this note the SIN and COS of angle
+#       GAMMA have been put into Fsin and Fcos, the Cosine Law is used to
+#       compute the length of the diagonal:
+#
+# discrim = SideA*SideA + SideB*SideB - 2*SideA*SideB*Fcos
+# if ( discrim < 1.0 ) DIAG = 1.0
+# else DIAG = SQRT( discrim )
+#
+#       Next, DIAG is used to compute SynB[kchaff] per the Sine Law:
+#
+# SynB[kchaff] = SideB*Fsin / DIAG
+#
+#       Also, the length of SideA is forwarded in an additional Real*4
+#       array, ASide[boy$SLOTS] added to RMcommon:
+#
+# ASide[kchaff] = SideA
+#
+#       See subroutine CHAFF for computation of rngchf[kchaff] by
+#       use of the Sine Law (RATHER THAN by the next Instruction).
+###------------------------------------------------------------------
+     rngchf[kchaff] = .5 * (sidea + sideb) # "Usually-tolerable approx"
+ 
+     if ( rngchf[kchaff] <  RAD$maxrange$i )  # in radar rng?
+       {                                      # CFG# 21i :
+        call find_active_channel (UNT$Pointer,    # jb    8/6/90
+                              $radar$code,
+                              xRAD$Type$c,
+                              RAD$CH$Index)
+ 
+        RAD$CH$Frequency$F = XRAD$CH$Frequency$F  # 1/8/91 trs
+ 
+        bar$CVU$index = XUNT$View$i #
+ 
+        BOY$IndxCHF$i = xBOY$IndxCHF$i    # jb Compare the    8/29/90
+        CHF$Pointer$TO (BOY$IndxCHF$i)    # chaff "tuning" to 7/31/90
+        if (CHF$Pointer$VALID)             # the radar freq:   7/31/90
+           {
+            if(RAD$CH$Frequency$F >= Xchf$LOWfreq$i )  # 1/8/91 trs
+               {
+                bar$CVU$CHAFLG$i = $YES     # jb Radar freq. high enuf
+                PUTbar$CVU$CHAFLG$i #jb Chaff tuning MAY let View see..
+               }
+           }
+        else if(RAD$CH$Frequency$F >= CHAFF$LOWfreq) # Default chaff 1/8/91 trs
+           {                            # jb                8/8/90
+            bar$CVU$CHAFLG$i = $YES     # jb Radar freq. high enuf
+            PUTbar$CVU$CHAFLG$i #jb Chaff tuning MAY let View see..
+           }
+ 
+       }    # End if chaff barrier is within radar's range
+ 
+     boy$IndxCHF$i = Xboy$IndxCHF$i
+     if ( boy$IndxCHF$i > 0 & boy$IndxCHF$i <= chf$SLOTS )
+        {
+         CHF$Pointer$TO (boy$IndxCHF$i)
+         Ithick= xCHF$Depth$F * 1000.0            # jb    8/28/90
+        }
+     else Ithick = chaff$thickness
+ 
+                        # Note: radhgt is SQRT, so must be squared here..
+     topchf[kchaff] =MAX(1.0,xboy$ChaffAlt$i - radhgt*radhgt) # 3/20/90
+     botchf[kchaff] =MAX(0.0,topchf[kchaff] - Ithick ) # jb 8/28/90
+    }    # End of loop thru chaff barriers..
+ 
+ return
+ end
+ 
+
+ 
+ Subroutine chaff(rng,brg,hgt,isee) # tgt rng,brg,rel.ht above antenna
+ 
+ #######################################################
+ #$%
+ #$% Purpose:   CHAFF determines if the target
+ #$%            detection is affected by a
+ #$%            chaff barrier.
+ #$%
+ #$% Called By: AIRTGT
+ #$%
+ #$% Calls:     QTRIG
+ #$%
+ #$% Tables:    None
+ #$%
+ #$% Date:      JAN 81
+ #$%
+ #$% Author:    Ron Williams
+ #$%
+ #######################################################
+ 
+ BBcommon
+ RMcommon
+ 
+Real*4          BRG
+Real*4          DIFF
+Real*4          HGT
+Integer*4       ISEE
+Integer*4       K
+Real*4          RNG
+Real*4          TEST
+ 
+ isee = $yes
+ 
+ for (k=1;k<=kchaff;k=k+1)               #for each nearby chaff barrier
+    {
+     diff = brg - brgchf[k]
+     $angpi(diff)
+ 
+     if (diff >= 0 & diff <= subtnd[k])  #if in same direction as chaff
+        {
+ 
+###-----Information FOR PROGRAMMER: (Continued from subroutine CHFLST)
+# [ As above, BE AWARE that I haven't implemented/tested this!! ]
+#       To compute rngchf[k] using the Sine Law instead of the present
+#       appoximation in CHFLST, the angle opposite SideB is computed
+#       from the SynB array forwarded in common from CHFLST:
+#
+# BB = asin( SynB[k] )
+#
+#       This permits the length of the segment of the Diagonal opposite
+#       the angle DIFF (just above) to be computed, using the ASide
+#       array forwarded from CHFLST:
+#
+# D = ASide[k] *sin( DIFF ) / sin( $PI -DIFF -BB )
+#
+#       Finally, rngchf[k], the range from the radar (ALONG THE LINE
+#       OF SIGHT TO THE TARGET) may be computed:
+#
+# rngchf[k] = D * SynB[k] / Sin(DIFF)
+#
+##---------------------------------------------------------------------
+### ------------- three lines replaced 5/26/83 ------------------------
+#        call qktrig(diff,fcos,fsin)
+ 
+#        denom = factr1[k] * fcos + factr2[k] * fsin
+#        if (rng * denom >= factr3[k])  # if beyond chaff
+### -------------- Revision of above test 5/26/83: --------------------
+         if ( rng > rngchf[k] )         # if beyond chaff       5/31/83
+            {
+ 
+#### ----- next 3 lines replaced  5/11/83 -----------------------------
+#            test = hgt * rngchf[k]
+#            if (test >= botchf[k] * rng &      #if LOS goes thru the
+#                test <= topchf[k] * rng)       #     chaff
+#
+### ------  Revision of Above test 5/11/83: --------------------------
+             test = hgt / rng   # tan of tgt elev. from radar   5/11/83
+ 
+             if(test <(topchf[k] / rngchf[k]) & # if < tan chafftop elev
+                test >(botchf[k] / rngchf[k]) ) #  & > tan chaffbot elev
+                {                               #               5/11/83
+                 isee = $no     # --then, chaff interrupts radar-tgt LOS
+                 break
+                }
+            }
+        }
+    }
+ 
+ return
+ end                                    # End CHAFF   $qk
+ 
+
+ 
+ Subroutine inchff(UNT$pointer,inflag,indxBAR) # jb indxBAR 8/1/90
+ 
+ #######################################################
+ #$%
+ #$% Purpose:   INCHFF determines if the target is
+ #$%            within an active chaff barrier.
+ #$%
+ #$% Called By: LACREJ     LCMREJ
+ #$%
+ #$% Calls:     INOUT
+ #$%
+ #$% Tables:    UNT        BAR
+ #$%            BOY
+ #$%
+ #$% Date:      JAN 81
+ #$%
+ #$% Author:    Ron Williams
+ #$%
+ #######################################################
+ 
+ BBcommon
+ RMcommon
+ 
+Integer*4       BAR$PT$INDEX
+Integer*4       BAR$Pointer
+Integer*4       BOY$Chaffalt$i
+Integer*4       BOY$Indxchf$i
+Integer*4       BOY$Pointer
+Integer*4       CHF$Pointer
+Integer*4       I
+Integer*4       INDXBAR
+Byte            inflag
+Integer*4       INSIDE
+Integer*4       ITHICK
+Integer*4       UNT$Pointer
+ 
+ real x[4],y[4]
+ 
+ #$% initialize chaff flag
+ inflag = $outsidechaff$code
+ 
+ #$% for each barrier
+ for (i=1 ; i<=kchbar ; i=i+1)
+    {
+     #$% set BOY and BAR table pointers
+     bar$pointer$to ichfx[i]
+     boy$pointer$to ichfx[i]
+ 
+     for (bar$pt$index=1;bar$pt$index<=4;bar$pt$index=bar$pt$index+1)
+        {
+         #$% test if target within chaff
+         x[bar$pt$index] = xbar$pt$lon$f
+         y[bar$pt$index] = xbar$pt$lat$f
+        }
+ 
+     #$% test if projection in barrier effective range (see WGMDSOS.rat)
+     call inout(xUNT$truelongitude$f,xUNT$truelatitude$f,4,x,y,inside)
+        ## 4 = # vertices; x,y arrays of vertices; inside is a flag
+     #$% if in barrier effective range
+     if (inside == $yes)
+        {
+         #$%set in flag
+         inflag = $projectioninchaff$code
+         indxBAR = ichfx[i]            # jb        8/1/90
+ 
+         boy$IndxCHF$i = Xboy$IndxCHF$i
+         if ( boy$IndxCHF$i > 0 & boy$IndxCHF$i <= chf$SLOTS )
+            {
+             CHF$Pointer$TO (boy$IndxCHF$i)
+             Ithick= xCHF$Depth$F * 1000.0           # jb    8/28/90
+            }
+         else Ithick = chaff$thickness
+ 
+          #$% if unit is in the chaff cloud
+          boy$ChaffAlt$i = xboy$ChaffAlt$i               #       6/2/83
+          if (xUNT$truealtdepth$i <= boy$ChaffAlt$i & # was TrueDepth
+              xUNT$truealtdepth$i >=(boy$ChaffAlt$i - Ithick))
+            {                                        # jb 8/28/90
+             #$% set in-chaff flag and break
+             inflag = $ActuallyInChaff$code
+             indxBAR = ichfx[i]            # jb        8/1/90
+             break
+            }
+        }
+    }
+ 
+ return
+ end
+ 
+
+subroutine clear_REJ_Data  (_
+                            Sensor_Index,             # out
+                            Jammer_Index)             # out
+implicit none
+RMCommon
+ 
+ 
+Integer*4   Sensor_Index
+Integer*4   Jammer_Index
+Integer     i
+ 
+Sensor_Index = 0
+Jammer_Index = UNT$Slots * $MaxREJPerUnit + 1
+ 
+#$% clear the unit array
+for (i = 1; i <= unt$slots; i = i + 1)
+{
+    Unit_Pointer[ i ] = 0
+    Unit_InChaffBarIndex[ i ] = 0
+    Unit_First_Sensor_Index[ i ] = 0
+    Unit_Last_Sensor_Index[ i ] = 0
+    Unit_First_Jammer_Index[ i ] = 0
+    Unit_Last_Jammer_Index[ i ] = 0
+    Unit_InChaff[ i ] = 0
+    Unit_Type[ i ] = 0
+}
+ 
+#$% clear the device array
+for (i = 1; i <= arith(unt$slots,*,$MaxREJPerUnit); i = i + 1)
+{
+    Device_DEQ_Pointer[ i ] = 0
+    Device_Unit_Index[ i ] = 0              # index back to owner
+    Device_Type[ i ] = 0
+    Device_SQRT_AntHeight[ i ] = 0          # SQRT altitude of device
+    Device_Equip_Pointer[ i ] = 0           # eg. RAD$Pointer
+    Device_ANT_Pointer[ i ] = 0             # 0 if no blockage
+}
+ 
+return
+end
+ 
+
+subroutine Add_Sensor_to_List (_
+                                Unit_Index,              # in
+                                Unt$Type$i,              # in, may be constant !
+                                Highwater_Sensor_Index,  # in/out
+                                LowWater_Jammer_Index,   # in
+                                Equip_Type,              # in, may be constant !
+                                Equip_AntHeight,         # in
+                                EQ_Flag,                 # in
+                                Pointer,                 # in, DEQ or EQ
+                                Msg_Required)            # in/out
+#implicit none
+BBCommon
+RMCommon
+ 
+Integer*4   Unit_Index
+Integer*4   Unt$Type$i
+Integer*4   Highwater_Sensor_Index
+Integer*4   LowWater_Jammer_Index
+Byte        Equip_Type
+Integer*4   Equip_AntHeight
+Byte        EQ_Flag
+Integer*4   Pointer
+Byte        msg_required
+ 
+Byte        Device_Found
+Integer*4   Sensor_Index
+Integer*4   UNT$Pointer
+ 
+# Note : Sensors types are stored in lower part of Device table, starting
+#        from the front of the table
+#        Jammer types are stored in upper part of Device table, starting
+#        from the end of the table
+ 
+If ( Equip_Type == $no ) return
+ 
+#$% if we want only one device of each type (Air, Sur, ESM ...)
+if ( Level$REJ == 0 )
+    {
+    Device_Found = $no
+ 
+    #$% for all sensor equips on a unit
+    FOR ( Sensor_Index = Unit_First_Sensor_Index[Unit_Index ];
+          ( Sensor_Index <= Unit_Last_Sensor_Index[ Unit_Index ] &
+            Sensor_Index != 0);
+          Sensor_Index = Sensor_Index + 1)
+        {
+        If ( Device_type [ Sensor_Index ] == Equip_Type )
+            {
+            Device_Found = $yes
+            Break
+            }
+        }
+    if ( Device_Found == $no )
+        {
+        Highwater_Sensor_Index = Highwater_Sensor_Index + 1
+        Sensor_Index = Highwater_Sensor_Index
+        }
+    }
+else # else we want all devices added to list
+    {
+    Highwater_Sensor_Index = Highwater_Sensor_Index + 1
+    Sensor_Index = Highwater_Sensor_Index
+    }
+ 
+#$% if the Sensors encroach on the Jammer part of the device table
+If ( Highwater_Sensor_Index >= LowWater_Jammer_Index )
+    {
+    if ( msg_required == $yes )
+        {
+        print *,"Devices overflow Device table."
+        msg_required = $no
+        }
+    return
+    }
+ 
+If ( Unit_First_Sensor_Index[ Unit_Index ] == 0 )
+    {
+    Unit_First_Sensor_Index[ Unit_Index ] = Sensor_Index
+    Unit_Type[ Unit_Index ] = unt$type$i
+    }
+ 
+#$% set highwater mark
+Unit_Last_Sensor_Index[ Unit_Index ] = Highwater_Sensor_Index
+ 
+If ( EQ_Flag == $yes ) # radar/esm/jammer/commjammer - JFR 1/26/94
+    {
+    Device_DEQ_Pointer[ Sensor_Index ] = Pointer
+    }
+Else # must be a cruise missile - JFR 1/26/94
+    {
+    Device_EQ_Pointer[ Sensor_Index ] = Pointer
+    }
+ 
+if (Level$Antenna != 0)
+    {
+    UNT$Pointer$To Unit_Index
+ 
+    }
+ 
+Device_Type [ Sensor_Index ] = Equip_Type
+Device_Unit_Index [ Sensor_Index ] = Unit_Index
+ 
+#$% get information about device
+call getrej(Unit_Pointer[ Unit_Index ],            # in
+            Equip_AntHeight,                       # in, hgt on unit
+            Device_Equip_Pointer [ Sensor_Index ], # out
+            Device_SQRT_AntHeight [ Sensor_Index ],# out
+            Sensor_Index)                          # in, record
+ 
+return
+end
+ 
+
+subroutine Add_Jammer_to_List (_
+                                Unit_Index,              # in
+                                Unt$Type$i,              # in, may be constant !
+                                Highwater_Sensor_Index,  # in
+                                LowWater_Jammer_Index,   # in/out
+                                Equip_Type,              # in, may be constant !
+                                Equip_AntHeight,         # in
+                                EQ_Flag,                 # in
+                                Pointer,                 # in, DEQ or EQ
+                                Msg_Required)            # in/out
+#implicit none
+BBCommon
+RMCommon
+ 
+Integer*4   Unit_Index
+Integer*4   Unt$Type$i
+Integer*4   Highwater_Sensor_Index
+Integer*4   LowWater_Jammer_Index
+Byte        Equip_Type
+Integer*4   Equip_AntHeight
+Byte        EQ_Flag
+Integer*4   Pointer
+Byte        msg_required
+ 
+Byte        Device_Found
+Integer*4   Jammer_Index
+ 
+# Note : Sensors types are stored in lower part of Device table, starting
+#        from the front of the table
+#        Jammer types are stored in upper part of Device table, starting
+#        from the end of the table
+ 
+If ( Equip_Type == $no ) return
+ 
+#$% if we want only one device of each type (Air, Sur, ESM ...)
+if ( Level$REJ == 0 )
+    {
+    Device_Found = $no
+ 
+    #$% for all jammer equips on a unit already added to device list
+    FOR ( Jammer_Index = Unit_First_Jammer_Index[ Unit_Index ];
+          ( Jammer_Index >= Unit_Last_Jammer_Index[ Unit_Index ] &
+            Jammer_Index != 0);
+          Jammer_Index = Jammer_Index - 1)
+        {
+        If ( Device_type [ Jammer_Index ] == Equip_Type )
+            {
+            Device_Found = $yes
+            Break
+            }
+        }
+    if ( Device_Found == $no )
+        {
+        LowWater_Jammer_Index = Lowwater_Jammer_Index - 1
+        Jammer_Index = Lowwater_Jammer_Index
+        }
+    }
+else # else we want all devices added to list
+    {
+    LowWater_Jammer_Index = LowWater_Jammer_Index - 1
+    Jammer_Index = LowWater_Jammer_Index
+    }
+ 
+#$% if the Sensors encroach on the Jammer part of the device table
+If ( LowWater_Jammer_Index <= Highwater_Sensor_Index )
+    {
+    if ( msg_required  == $yes)
+        {
+        print *,"Devices overflow Device table."
+        msg_required = $no
+        }
+    return
+    }
+ 
+If ( Unit_First_Jammer_Index[ Unit_Index ] == 0 )
+    {
+    Unit_First_Jammer_Index[ Unit_Index ] = Jammer_Index
+    Unit_Type[ Unit_Index ] = Unt$Type$i
+    }
+ 
+#$% set highwater mark
+Unit_Last_Jammer_Index[ Unit_Index ] = Lowwater_Jammer_Index
+ 
+If ( EQ_Flag == $yes )
+    {
+    Device_EQ_Pointer[ Jammer_Index ] = Pointer
+    }
+Else # jammer or commjammer - JFR 1/26/94
+    {
+    Device_DEQ_Pointer[ Jammer_Index ] = Pointer
+    }
+ 
+Device_Type [ Jammer_Index ] = Equip_Type
+Device_Unit_Index [ Jammer_Index ] = Unit_Index
+ 
+#$% get information about jammer type
+call getrej(Unit_Pointer[ Unit_Index ],            # in
+            Equip_AntHeight,                       # in, hgt on unit
+            Device_Equip_Pointer [ Jammer_Index ], # out, eg. JAM$Pointer
+            Device_SQRT_AntHeight [ Jammer_Index ],# out
+            Jammer_Index )                         # in, single record
+ 
+return
+end
+ 

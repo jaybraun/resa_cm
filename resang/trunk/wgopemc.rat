@@ -1,0 +1,299 @@
+ 
+#####   version 3.1  dated-  7apr81
+#####  file wgopEMC.rat
+ 
+###
+### mod to version 3.0          dated 23 feb 1981
+###
+### smn prog    module  comments
+### === ====    ======  =================================================
+### ??? rjw     oemcon  modified
+###             chemeq  modified
+###             emerr   removed
+###
+ 
+#####   version 3.0  dated- 22dec80
+ 
+#$%     MODULE                        UTILITY                      DATA
+#$%   SUBROUTINES                   SUBROUTINES                   TABLES
+#$%   ===========                   ===========                   ======
+#$%
+#$%     OEMCON                        SEND
+#$%     CHEMEQ                        WHSIDE                        UNT
+#$%     UPDBOY <OACTIV>                                             EMC
+#$%                                                                 RAD
+#$%                                                                 SON
+#$%                                                                 SUI
+#$%
+#$%
+#$%
+#$%   NOTES
+#$%   =====
+#$%
+#$%   1.  <FILENAME> INDICATES WHERE SUBROUTINE IS LOCATED.
+#$%
+#$%   2.  UTILITY SUBROUTINES NOT SHOWN ON FLOWCHART.
+#$%
+#$%   3.  * INDICATES NO OTHER SUBROUTINES CALLED.
+#$%
+#$%
+#$%
+#$%   FLOWCHART FOR FILE OEMCON
+#$%   =========================
+#$%
+#$%   EXEORD <WGORDP> - OEMCON - CHEMEQ - UPDBOY*
+ 
+# 
+ 
+ include "bbctl.inc"
+ include "bbcode.inc"
+ include "bbunt.inc"
+ include "bbdeq.inc"
+ include "bbemc.inc"
+ include "bbsui.inc"
+ include "orders.inc"
+ include "bbson.inc"
+ include "bbrad.inc"
+ include "ascii.inc"
+ include "macros.inc"
+ define (BBImplicit, Implicit None)                         # MJC 6/24/2K (E2145 - Implicit None)
+ Subroutine oemcon (unt$pointer, #process order to implement EMCON plan
+		    nwrds,       #unt$pointer = unit pointer for addressee
+		    ilex)        #nwrds = number of words being passed
+		                 #ilex = order content
+#######################################################
+ #$%
+ #$% Purpose:   OEMCON processes EMCON commands to
+ #$%            implement EMCON plans.
+ #$%
+ #$% Called By: EXEORD
+ #$%
+ #$% Calls:     WHSIDE     SEND       CHEMEQ
+ #$%
+ #$% Tables:    DEQ        UNT        EMC
+ #$%
+ #$% Date:      APRIL 80
+ #$%
+ #$% Author:    Dana Wills
+ #$%
+ #######################################################
+ 
+ BBcommon
+ integer NWRDS,
+         I,
+         NFL,
+         ISIDE,
+         KKLEN                          # MJC 6/24/2K (E2145 - Implicit None)
+ BBDeclare  (UNT$Pointer,
+             UNT$Emconindx$I,
+             EMC$Pointer,
+             DEQ$Pointer)               # MJC 6/24/2K (E2145 - Implicit None)
+ literal CSTRIP8                        # MJC 6/24/2K (E2145 - Implicit None)
+ literal ilex[nwrds],ipname
+ Character msg[ARB]
+ 
+# String msg1 '      has no EMCON plan named      '
+ 
+ if (nwrds>2)                   #if exempt platforms specified in command
+    {                           #search command platform list
+     for (i=4; i<=nwrds; i=i+1)
+	if (xunt$name$c == ilex[i]) return    #if platform is exempted
+    }
+ 
+ ipname = ilex[2]               #name of EMCON plan
+ nfl = .true.                   #improper command flag
+ 
+ for (emc$pointer$first; emc$pointer$ok; emc$pointer$next)
+    {                           #search for specified EMCON plan name
+     if (ipname != xemc$name$c) next
+ 
+     #$% call to determine which side
+     call whside(xunt$view$i,iside)
+ 
+     #$% if not same side, get next, break loop
+     if (xemc$side$i != iside)  next
+ 
+     break
+    }
+ 
+ #$% if EMC pointer is not OK
+ if (!emc$pointer$ok)
+    {
+     #$% enter unit name and plan name in message
+     kklen = 0;
+     Call SMOVHN(xunt$name$c,$$MaxLit,msg,kklen)
+     Call SMOVV(" has no EMCON plan named ",msg,kklen)
+     Call SMOVHN(ipname,$$MaxLit,msg,kklen)
+     #$% call to display first message, return
+     call send_ ( xunt$view$i, 0, kklen, msg )
+     return
+    }
+ 
+ #$% for each equipment entry
+FOR_DEQ_CHAIN
+    {
+     #$% call to check EMCON equipment
+     call chemeq (unt$pointer,
+		  DEQ$pointer,
+		  emc$pointer)
+    }
+ 
+ 
+ #$% set EMCON index to EMCON pointer and store
+unt$emconindx$i = emc$pointer$index
+ putunt$emconindx$i
+ 
+ return
+ end
+ 
+
+ 
+ 
+ Subroutine chemeq (unt$pointer,
+		    DEQ$pointer,
+		    emc$pointer)
+#######################################################
+ #$%
+ #$% Purpose:   CHEMEQ checks and turns on EMCON
+ #$%            equipment.
+ #$%
+ #$% Called By: OEMCON
+ #$%
+ #$% Calls:     UPDBOY
+ #$%
+ #$% Tables:    DEQ        UNT        EMC
+ #$%            RAD        SON        SUI
+ #$%
+ #$% Date:      APRIL 80
+ #$%
+ #$% Author:    Dana Wills
+ #$%
+ #######################################################
+ 
+ BBcommon
+ BBDeclare  (DEQ$Ident$I,
+             DEQ$Pointer,
+             DEQ$Oktosend$I,
+             DEQ$On$I,
+             RAD$Pointer,
+             RAD$Radartype$I,
+             SUI$Pointer,
+             SUI$Band$I,
+             EMC$Pointer,
+             UNT$Pointer)                   # MJC 6/24/2K (E2145 - Implicit None)
+    		# Execution of the EMCON order ITSELF:
+ define(Bacon,#) # ignores airborne and sonar; else DOES turn on/off
+# define(Bacon,) # includes airborne & sonar; turns OFF but NOT on..
+ 
+ #$% get equipment ID
+ deq$ident$i = xdeq$ident$i
+ 
+ #$% if equipment is radar
+ if (deq$ident$i == $radar$code)
+    {
+     #$% if type is aircraft
+     if (xunt$type$i == $air$code)
+	{
+	 #$% check equipment on for EMCON (AIRBORNE)
+Bacon	 emc$airborne$i = xemc$airborne$i	# x	7/9/86
+Bacon	 deq$on$i = emc$airborne$i		#	7/9/86
+Bacon	 if (deq$on$i != $ON)	# 7/8/86	7/9/86
+Bacon    	PUTdeq$on$i			#	7/9/86
+	}  # End if AIRBORNE
+     else
+	{
+	 #$% get radar equipment and radar type
+	 rad$pointer = xdeq$pntr$i
+	 rad$radartype$i = xrad$radartype$i
+	 if (rad$radartype$i == $surface$code)
+	    {
+	     #$% check equipment for EMCON (SURFACE search)
+	     deq$on$i = xemc$surfacesearch$i
+Bacon	     if (deq$on$i != $ON)		# 7/8/86  7/9/86
+	     	PUTdeq$on$i
+	    }
+	 #$% else if radar type is AIR search..
+	 else if (rad$radartype$i == $air$code)
+	    {
+	     #$% check equipment for EMCON (AIR search)
+	     deq$on$i = xemc$airsearch$i
+Bacon  	     if (deq$on$i != $ON)		# 7/8/86  7/9/86
+	     	PUTdeq$on$i
+	    }
+	 #$% else if radar type is approach (12)## 1/7/86 <SCC> begin
+	 else if (rad$radartype$i == $approach$code)
+	    {
+	     #$% check equipment for EMCON (APPROACH radar)
+	     deq$on$i = xemc$approach$i
+Bacon  	     if (deq$on$i != $ON)		# 7/8/86  7/9/86
+	     	PUTdeq$on$i
+	    }                                   ## 1/7/86 <SCC> end
+	}	# End if NOT airborne
+    }	# End if equip. is RADAR
+ 
+ #$% else is equipment ID is sonar (2)
+ else if (deq$ident$i == $sonar$code)
+    {
+     #$% set equipment on for EMCON sonar and store
+Bacon deq$on$i = xemc$sonar$i
+Bacon if (deq$on$i == $OFF)		#	7/8/86
+Bacon  	PUTdeq$on$i
+ 
+     #$% get sonar equipment pointer
+Bacon son$pointer = xdeq$pntr$i
+ 
+Bacon if (XSON$VARIABLEDEPTH$I == $ON)    #if VDS
+Bacon  	{
+	 #$% if ON, set activate order	#	$ON omitted 7/9/86
+ 
+Bacon 	 if(deq$on$i == $OFF)
+Bacon 	  {
+Bacon 	   iorder = $lex$silence$
+Bacon 	   call UPDBOY(unt$POINTER,   #create/delete BOY table entry
+Bacon 		     son$pointer,   #unt$POINTER = pass unit pntr for platform
+Bacon 		     iorder,        #son$pointer = pass sonar char pointer
+Bacon 		     $vds$code)     #iorder = pass activate or silence code
+Bacon	  }
+Bacon 	}	# End if sonar is VDS..
+ 
+    }	# End if equip. is SONAR
+ 
+ #$% else if equipment ID is acoustic COMM (23)
+ else if (deq$ident$i == $acousticcomm$code)
+    {
+     #$% set OK to send for sonar and store
+     deq$oktosend$i = xemc$sonar$i
+     PUTdeq$oktosend$i
+    }
+ 
+ #$% else if equipment ID is commsuite
+ else if (deq$ident$i == $commsuite$code)
+    {
+     #$% get commsuite equipment pointer and band
+     sui$pointer = xdeq$pntr$i
+     sui$band$i = xsui$band$i
+     #$% if commsuite band is HFDF
+     if (sui$band$i == $hf$code)
+	{
+	 #$% set OK to send for HFDF and store
+	 deq$oktosend$i = xemc$hf$i
+	 PUTdeq$oktosend$i
+	}
+     #$% else if commsuite band is high frequency low range
+     else if (sui$band$i == $hflri$code)
+	{
+	 #$% set OK to send for HFLR and store
+	 deq$oktosend$i = xemc$hflri$i
+	 PUTdeq$oktosend$i
+	}
+     #$% else if commsuite band is VHF or UHF
+     else if (sui$band$i == $vhf$code |
+	      sui$band$i == $uhf$code)
+	{
+	 #$% set OK to send for VHF and UHF and store
+	 deq$oktosend$i = xemc$vhfuhf$i
+	 PUTdeq$oktosend$i
+	}
+    }
+return
+end

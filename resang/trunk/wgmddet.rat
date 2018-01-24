@@ -1,0 +1,2577 @@
+##                      file  WGMDDET.rat
+#####   version 3.1  dated-  7apr81
+ 
+###
+### mod to version 3.0          July-Oct l982
+### smn prog    module  comments
+### === ====    ======  =================================================
+###     ojb     lclPSN  Implementation of PPS for BGTCSF Passive Sonar Model
+###             lclPSN  involved existing subroutines, and the addition of
+###             lclRAS  lclTMA.  (Elsewhere, significant changes in the
+###             lclVIS  Plot, Status, and WGMDSNR modules.)
+###         new lclTMA
+###
+### mod to version 3.0          dated 17-feb-1981
+###
+### smn prog    module  comments
+### === ====    ======  =================================================
+### 002 rjw             modified practically all the routines in order
+###                     to correct some bugs as well as to separate out
+###                     those fields which need to be set only for
+###                     new tracks; added debug messages
+###
+### mod to version 3.0          dated 6-jan-1981
+###
+### smn prog    module  comments
+### === ====    ======  =================================================
+### 002 sfc             new file for Reporting Policy; called by the
+###                     detection models to enter detection data in
+###                     the LCL Table;
+###
+###
+ 
+#####   version 3.0     dated 22-dec-1980
+###     reh   3/89      conversion from UNT,POS,DYN to UNT, DEQ tables
+ 
+ 
+# 
+ 
+ 
+#$%     MODULE                       UTILITY                    DATA
+#$%   SUBROUTINES                  SUBROUTINES                 TABLES
+#$%   ===========                  ===========                 ======
+#$%
+#$%     LCLVIS                       CHKREL                      UNT
+#$%     LCLRAS                       ECHOR                       LCL
+#$%     LCLESM                       ECHOH                       ACC
+#$%     LCLPSN                       WHSIDE                      SHC
+#$%     LCLTMA                                                   IFF
+#$%     LCLSLT
+#$%     LCLDEL
+#$%     LCLID
+#$%     LCLUMX
+#$%     LCLIFF
+#$%
+#$%   NOTES
+#$%   =====
+#$%
+#$%   1.  <FILENAME> INDICATES FILE WHERE SUBROUTINE IS LOCATED.
+#$%
+#$%   2.  UTILITY SUBROUTINES ARE NOT SHOWN ON FLOWCHART.
+#$%
+#$%   3.  * INDICATES NO OTHER SUBROUTINES CALLED.
+#$%
+#$%
+#$%   FLOWCHART FOR DETECT
+#$%   ====================
+#$%
+#$%   LCLVIS - LCLUMX*
+#$%          - LCLSLT*
+#$%          - LCLID *
+#$%   LCLRAS - LCLUMX*
+#$%          - LCLSLT*
+#$%          - LCLID *
+#$%          - LCLIFF*
+#$%   LCLESM - LCLUMX*
+#$%          - LCLSLT*
+#$%          - LCLID *
+#$%   LCLPSN - LCLUMX*
+#$%          - LCLSLT*
+#$%          - LCLTMA*
+
+ 
+ 
+define(trace$sonar$Passive,istrip(trace$sonar,1,M1bits))  #     8/15/83
+#define ($debug, $$Debug$Control)
+#define(SubAlwaysKnown,) # jb If sub shallow, don't set LCL$Class$I
+define(SubAlwaysKnown,#) # jb Set LCL$Class$i to SUB regardless of depth
+ 
+include "bbacc.inc"
+include "bbcode.inc"
+include "bbctl.inc"
+include "bbctm.inc"                       # jb    9/3/91
+include "bbdeq.inc"
+include "bbesm.inc"
+include "bbiff.inc"                        # cml 3/28/91
+include "bblcl.inc"
+include "bbpnd.inc"
+include "bbshc.inc"
+include "bbshn.inc"
+include "bbtrp.inc"                       # jb    9/3/91
+include "bbunt.inc"
+include "bbvue.inc"
+include "bbrtl.inc"                                     #       7/12/83
+ 
+define(BBimplicit,IMPLICIT NONE)    # jb E2145  7/6/00
+ 
+
+########################################################################
+Subroutine LCLVIS (_            # Process visual detection for LCL Table
+                   unt2$pointer,        # detector
+                   unt$pointer,         # detectee
+                   lbear,
+                   ralat,
+                   ralon,
+                   lrnge,
+                   lptr,
+                   unt$type$i)
+ 
+########################################################################
+#$%
+#$% Purpose:   LCLVIS processes visual detection
+#$%            data into the LCL table.
+#$%
+#$% Called By: VISMOD <VISMOD>
+#$%
+#$% Calls:     LCLUMX     LCLSLT     LCLID
+#$%
+#$% Tables:    UNT        LCL
+#$%
+#$%
+#$% Date:      FEB 81
+#$%
+#$% Author:    Ron Williams
+#$%
+########################################################
+BBcommon
+ 
+LITERAL CSTRIP8                             # jb E2145  7/6/00
+REAL  RALAT,RALON, LCL$Range$F,             # jb E2145  7/6/00
+    LCL$Firstdettime$F,LCL$Lastdettime$F,   # jb E2145  7/6/00
+    LCL$Apparentlat$F,LCL$Apparentlon$F     # jb E2145  7/6/00
+Integer  I,IOK,IDEMIT,IEMAX,IDTYPE,         # jb E2145  7/6/00
+    IDTTYP,IMESM,ITARGT,IFOUND,             # jb E2145  7/6/00
+    ISAVE_LCL_NEXTINDX_I,IYEL,              # jb E2145  7/6/00
+    IPTOWN,KUFI,LPTR,LBEAR,LIMIT,           # jb E2145  7/6/00
+    LRNGE,NUSED                             # jb E2145  7/6/00
+Integer UNT$Pointer,UNT$Type$I,             # jb E2145  7/6/00
+    UNT$Nbrac$I,UNT$View$I                  # jb E2145  7/6/00
+Integer UNT2$Pointer,UNT2$Reportnewair$I,   # jb E2145  7/6/00
+    UNT2$View$I,UNT2$Reportnewship$I                # jb E2145  7/6/00
+Integer LCL$Pointer,LCL$Accpntr$I,LCL$Altitude$I,   # jb E2145  7/6/00
+    LCL$Bearing$I,LCL$Class$I,LCL$Classified$I,     # jb E2145  7/6/00
+    LCL$Composition$I,LCL$Detectiontype$I,          # jb E2145  7/6/00
+    LCL$Course$I,LCL$Detectee$I,LCL$Nextindx$I,     # jb E2145  7/6/00
+    LCL$Ownforce$I,LCL$Remaining$I,LCL$Shcpntr$I,   # jb E2145  7/6/00
+    LCL$Reportstatus$I,LCL$Speed$I,LCL$Targetid$I   # jb E2145  7/6/00
+ 
+data idttyp /$activevisual$code/
+ 
+unt$nbrac$i         = 0         ## 3/89
+if (trace$visual != $no)
+   {
+    call echor
+    call echohn(xunt2$name$c,$$MaxLit)
+    call echov(" seeing ")
+    call echohn(xunt$name$c,$$MaxLit)
+   }
+ 
+kufi   = xunt2$firstlclindx$i   # set unit chain to first LCL index
+ 
+                                # initialize values
+ifound = $no                    #   ??
+nused = 0                       #   count of LCL slots in use (by detector)
+idemit = $no
+iptown = 0                      #   LCL pointer of FIRST OWN force
+iYEL   = $NO                    #   LCL pointer of FIRST Yellow track   6/3/86
+imesm  = $NO                    #   LCL pointer of FIRST ESM track      6/25/86
+ 
+unt2$view$i = xunt2$view$i                      # get detector's &
+unt$view$i  = xunt$view$i                       #  target's views
+ 
+itargt = unt$pointer$index              # Save tgt UNT/POS pointer INDEX
+ 
+#----------------------------------------
+# search the detector's local track table
+ 
+if (kufi != 0)                          # if unit chain is not empty
+   {
+    for (i=kufi; ; )                    # for each unit chain entry
+       {
+        nused = nused + 1               # increment pointer
+ 
+        lcl$pointer$to i                # set LCL pointer
+ 
+        lcl$OwnForce$i = Xlcl$OwnForce$i        #       6/3/86
+        if (iptown == 0 & lcl$OwnForce$i != $no) # if own force, save
+            iptown = lcl$pointer
+ 
+        idtype = xlcl$detectiontype$i   # moved up      6/3/86
+        lcl$LastDetTime$f = xlcl$LastDetTime$f          # 6/3/86
+ 
+        if (iYEL == $NO)                                # 7/21/86
+         {
+          if( idtype == $esm$code &                     # 6/23/86
+              lcl$LastDetTime$f + Minutes$To$Yellow  < game$time)
+                {
+                 iYEL   = lcl$Pointer                   # 6/3/86
+                }
+          else if (lcl$LastDetTime$f +(Minutes$To$OLD)< game$time)
+                {
+                 iYEL   = lcl$Pointer                   # 7/21/86
+                }
+         }
+ 
+#<<<>>> else if(imesm == $NO & idtype == $esm$code)     # 6/25/86
+        if(imesm == $NO & idtype == $esm$code)  # jb    3/23/87
+                imesm = lcl$Pointer                     # 6/25/86
+ 
+        if (xlcl$detectee$i == itargt)  # if this detectee is target
+         {
+          if (unt2$view$i == unt$view$i)              # if views are same
+           {
+            lcl$OwnForce$i = $yes                   # set own force to YES
+            PUTlcl$OwnForce$i                       # store it in LCL table
+            lcl$targetid$i = $friendly$code         # set target-ID FRIENDLY
+            PUTlcl$targetid$i
+           }
+          else
+           {
+            lcl$OwnForce$i = $NO
+            PUTlcl$OwnForce$i
+           }
+ 
+          if(idtype == $esm$code &                      # 6/23/86
+             (lcl$LastDetTime$f + Minutes$To$Yellow  >=game$time) )
+                idemit = $yes   # emitter flag moved up   6/3/86
+ 
+          if (idtype == idttyp) # if type is VISUAL     2/21/84
+           {
+            call lclid(unt2$view$i,unt$view$i,lcl$targetid$i)   #2/21/84
+            PUTlcl$targetid$i                   # store target ID       2/21/84
+            ifound = $yes                       # included from below   6/3/86
+#            LCL$Class$I = xLCL$Class$I          # Extract target class 7/7/91
+            LCL$Class$I = UNT$Type$I            # jb Set target class   7/7/91
+            putLCL$Class$I                      # jb  ...and store      7/7/91
+            break                               # included from below   6/3/86
+           }
+ 
+          else if (idtype == $activenonvisual$code)     #       6/3/86
+           {    # keep only 1 active track per target...
+            ifound = $yes                       # set found flag to YES
+            if (UNT$Type$I == $sub$code)        # If target is sub then
+                {                               #  set class to sub
+                LCL$Class$I = $sub$code         # (Take care of surfaced
+                putLCL$Class$I                  # sub being displayed as
+                }                               # surface track)        5/13/87
+            else LCL$Class$I = xLCL$Class$I     # Extract target class  5/13/87
+            break
+           }
+         }      # End if this slot's detectee matches target..
+ 
+        lcl$nextindx$i = xlcl$nextindx$i        # get next index
+        if (lcl$nextindx$i == $no) break        # break if next index NO
+        i = lcl$nextindx$i                      # set entry to next indx
+       }
+   }    #       End of search thru this unit's LCL chain..
+ 
+if (ifound == $no)                              # if found flag is NO
+   {
+    if (trace$visual != $no)
+       {
+        call echov("...new track")
+       }
+######################################################################
+ 
+    if (iYEL != $NO) # Try to use a YELLOW ESM track..          # 6/25/86
+     {                                                          # 6/3/86
+      lcl$pointer = iYEL                                        # 6/3/86
+      lcl$zero                                                  # 6/3/86
+     }                                                          # 6/3/86
+    else if(iptown !=0) # If no iYEL track, try an OWN..        # 6/3/86
+     {
+        lcl$pointer = iptown                                    # 6/3/86
+        lcl$zero                                                # 6/3/86
+     }
+    else  # If no YEL/OWN track, try to use a new slot          # 6/3/86
+     {
+      iok    = $yes     # initialize flag               #       6/23/86
+      call LCLUMX (_                            #check max # detections
+                 unt2$pointer,
+                 nused,
+                 iemax,
+                 limit)
+ 
+      if (iemax != $no) iok = $no # exceeded this unit's max slots?
+ 
+#       {                       #  tracks allocated for this unit ?
+#        if (iptown == 0) return
+#        lcl$pointer = iptown
+#        lcl$zero
+#       } # this above alternative moved up/made conditional
+ 
+      else      # iemax shows unit's max slots not exceeded..   6/3/86
+       {
+          #$% find free slot in LCL table
+        call LCLSLT (_
+                 kufi,
+                 unt2$pointer,
+                 iok,
+                 lcl$pointer)
+       }        # End else iemax shows unit's max slots not exceeded
+ 
+#     if (iok == $no) return              # if LCL Table full
+      if (iok == $no)
+        {       #
+         if (imesm != $NO) # If an esm trk, current or not..    6/25/86
+          {
+            lcl$pointer = imesm  # wipe out the esm track!      7/9/86
+            lcl$ZERO    # prepare to use wiped-out slot..       6/25/86
+          }
+                # if track is assignedTARGET (critical):
+         else if(kufi != 0 & Xunt$assignedtarget$i ==itargt) #else /\
+          {
+            lcl$pointer$to kufi
+            lcl$ZERO
+          }
+         else RETURN
+        }
+ 
+     }  # End else try to find new slot for track       6/3/86
+###################################################################
+ 
+    if (unt2$view$i == unt$view$i)              # if views are same
+       {
+        lcl$OwnForce$i = $yes                   # set own force to YES
+        PUTlcl$OwnForce$i                       # store it in LCL table
+ 
+        lcl$targetid$i = $friendly$code         # set target-ID FRIENDLY
+       }
+    else if (idemit == $yes)            # else if emitter flag is YES
+       {
+        call lclid(unt2$view$i,unt$view$i,lcl$targetid$i)
+                                                # put unit ID in LCL tbl
+ 
+        if (trace$visual != $no)
+           {
+            call echov("...id")
+           }
+       }
+    else
+       {
+        lcl$targetid$i = $unknown$code          # set tgt ID to unknown
+       }
+ 
+    PUTlcl$targetid$i                           # store target ID
+ 
+    lcl$reportstatus$i = $needsreport$code      # set report status
+    putlcl$reportstatus$i                       # store report status
+ 
+    lcl$FirstDetTime$f = game$time              # set first detect time
+    putlcl$FirstDetTime$f                       # store time of 1st det.
+ 
+    lcl$detectee$i          = itargt            # set detectee to target
+    putlcl$detectee$i                           # store detectee
+ 
+    if (xlcl$detectiontype$i == $activevisual$code)     # IF visual,    5/31/82
+        PUTlcl$VisualClass$i (YES)              # mark it as VISUAL "   5/31/82
+ 
+                                                # set track type
+    if (unt$type$i == $air$code          |
+        unt$type$i == $cruisemissile$code|
+        UNT$Type$I == $SAMissile$Code    ) lcl$class$i = $air$code
+    else if (unt$type$i == $sub$code )     lcl$class$i = $sub$code
+    else
+     {
+      lcl$class$i = $surface$code
+      if (Xlcl$ClassScore$i == $POSSB$Code)     # NOT a         10/4/83
+        PUTlcl$ClassScore$i ($Null$Code)        #       sub!    10/4/83
+     }
+ 
+    putlcl$class$i                              # store class
+ 
+    if (lcl$class$i == $air$code)               # if class is air
+       {
+        unt2$reportnewair$i  = $yes             # set report-new-a/c YES
+        putunt2$reportnewair$i                  # store report-new-a/c
+       }
+    else                                        # else class is surface
+       {
+        unt2$reportnewship$i = $yes             #set report-new-ship YES
+        putunt2$reportnewship$i                 # store report-new-ship
+       }
+   }
+ 
+if (trace$visual != $no)
+   {
+    call echov("...LCL#")
+    call echoi(lcl$pointer$index)
+   }
+ 
+lcl$bearing$i           = lbear                 # set bearings
+putlcl$bearing$i                                # store bearings
+ 
+if (Xlcl$LastDetTime$f != game$time)
+    {
+    PUTlcl$LastDetTime$f  (game$time)
+    }
+ 
+#PUTlcl$LastDetFlags$i (0)       # moved down from "if" above    7/29/86
+#putlcl$LastDetVisual$i ($YES)                   #               7/7/83
+putlcl$LastDetType$i ($Visual$Type)             #       2/1/91 DEW
+ 
+lcl$detectiontype$i     = idttyp                # set type ActiveVisual
+putlcl$detectiontype$i                          # store detection type
+ 
+lcl$apparentlat$f       = ralat                 # set apparent latitude
+putlcl$apparentlat$f                            # store apparent latitude
+ 
+lcl$apparentlon$f       = ralon                 # set apparent longitude
+putlcl$apparentlon$f                            # store apparent longitude
+ 
+lcl$Range$F             = lrnge                 # set range and store it
+putlcl$Range$F
+ 
+## itargt is same as UNT$Pointer$Index
+ 
+lcl$speed$i             = xunt$truespeed$f + .5 # set true speed and store it
+putlcl$speed$i
+ 
+lcl$course$i            = xunt$truecourse$f * (180/$pi) + .5    # true course
+putlcl$course$i
+ 
+if (unt$type$i == $air$code)                    # if type is AIRCRAFT
+   {
+    if (lptr != 0)                              # if pointer is valid
+       {
+        lcl$accpntr$i       = lptr              # set ACC ptr. and store
+        putlcl$accpntr$i
+ 
+        lcl$classified$i = $yes                 # set classified to YES
+        putlcl$classified$i
+ 
+        call lclid(unt2$view$i,unt$view$i,lcl$targetid$i)
+        PUTlcl$targetid$i                               # store target ID
+       }
+ 
+    lcl$altitude$i      = xunt$truealtdepth$i / 100     # set true altitude it
+    putlcl$altitude$i
+ 
+ 
+    unt$nbrac$i     = xunt$nbrac$i          # get number of aircraft
+    lcl$Remaining$i =  unt$nbrac$i    # jb Moved-up             8/16/90
+    PUTlcl$Remaining$i                # jb Moved-up             8/16/90
+ 
+    if      (unt$nbrac$i > 3)  lcl$composition$i = 3
+    else if (unt$nbrac$i > 1)  lcl$composition$i = 2
+    else if (unt$nbrac$i == 1) lcl$composition$i = 1
+    else                       lcl$composition$i = 0
+    putlcl$composition$i                                # store it
+ 
+    if(Xunt2$AttackIndx$i ==unt$Pointer$Index & Xlcl$TallyHo$i < 1)
+       {    # If this is the target being attacked & TallyHo NOT set
+        if (lcl$Composition$i > 0 & Xlcl$TallyHo$i < 1)
+        PUTlcl$tallyho$i (unt$nbrac$i)
+       }
+   }    # End if detectee is A/C
+ 
+else if (unt$type$i == $cruisemissile$code |     # type is cruise missile
+         UNT$Type$I == $SAMissile$Code)          # advanced SAM 1/94 SMM
+   {
+    lcl$composition$i = 1
+    putlcl$composition$i                                # store composition
+ 
+    lcl$altitude$i      = xunt$truealtdepth$i / 100     # set true altitude
+    putlcl$altitude$i
+   }
+else
+   {
+    if (lptr != 0)                              # if pointer is valid
+       {
+        lcl$shcpntr$i       = lptr              # set SHC pointer and store it
+        putlcl$shcpntr$i
+ 
+        lcl$classified$i = $yes                 # set classified YES, store it
+        putlcl$classified$i
+ 
+        call lclid(unt2$view$i,unt$view$i,lcl$targetid$i)
+        PUTlcl$targetid$i                               # store target ID
+       }
+   }    # End if LCL Pointer is valid
+ 
+return
+end
+
+ 
+ 
+############################################################################
+Subroutine LCLRAS (_    # Process radar or act sonar detection for LCL Table
+                   unt$pointer,         # unt index of detector
+                   unt2$pointer,        # unt index of detectee
+                   lbear,
+                   ralat,
+                   ralon,
+                   lrnge,
+                   unt2$type$i,
+                   idtcod)              # $SONAR$code or $RADAR$code    7/7/83
+ 
+## NOTE:  DO NOT ATTEMPT TO MODIFY CONSTANT, "IDTCOD" IN THIS SUBROUTINE!!
+########################################################
+#$%
+#$% Purpose:   LCLRAS processes active sonar or radar or MAD or LIDAR
+#$%            detections into the LCL table.
+#$%
+#$% Called By:REPRAD REPASD REPORT_LIDAR_DETECTION REPORT_MAD_DETECTION
+#$%
+#$% Calls:     LCLUMX     LCLSLT     LCLID
+#$%            Prep_AEG_slot
+#$%            Prep_AEG_slot
+#$%
+#$% Tables:    UNT        LCL
+#$%
+#$%
+#$% Date:      FEB 81
+#$%
+#$% Author:    Ron Williams
+#$%
+#$% Modified:  Carol Kropp - 10/93 (Variable Cycle Time)
+########################################################
+BBcommon
+ 
+LITERAL CSTRIP8                             # jb E2145  7/6/00
+REAL LCL$Range$F, RALAT,RALON,              # jb E2145  7/6/00
+     LCL$Apparentlat$F,LCL$Apparentlon$F,   # jb E2145  7/6/00
+     LCL$Firstdettime$F,LCL$Lastdettime$F   # jb E2145  7/6/00
+integer  entry_point_flag
+integer  minor_axis, major_axis, orientation, brg_error
+integer  limit
+Integer I,IDTCOD,ITSIDE,IDSIDE,IFOUND,IDEMIT, # jb E2145  7/6/00
+    IDTYPE,IDTTYP,IOK,IEMAX,IPTOWN,IMESM,     # jb E2145  7/6/00
+    ISAVE_LCL_NEXTINDX_I,IYEL,ITARGT,KUFI,    # jb E2145  7/6/00
+    LBEAR,LRNGE,NUSED,                        # jb E2145  7/6/00
+    UNT$Pointer,UNT$Reportnewair$I,           # jb E2145 7/6/00
+    UNT$View$I, UNT$Reportnewship$I,          # jb E2145  7/6/00
+    unt2$pointer,UNT2$View$I,UNT2$Type$I,     # jb E2145  7/6/00
+    UNT2$Nbrac$I
+Integer LCL$Pointer,LCL$Altitude$I,LCL$Bearing$I,    # jb E2145  7/6/00
+    LCL$Class$I,LCL$Classscore$I,LCL$Composition$I,  # jb E2145  7/6/00
+    LCL$Course$I,LCL$Detectee$I,LCL$Detectiontype$I, # jb E2145  7/6/00
+    LCL$Nextindx$I,LCL$Ownforce$I,LCL$Remaining$I,   # jb E2145  7/6/00
+    LCL$Reportstatus$I,LCL$Targetid$I,LCL$Speed$I    # jb E2145  7/6/00
+ 
+data idttyp /$activenonvisual$code/
+ 
+entry_point_flag = $no
+ 
+repeat                                                      # E2143 dew 10/99
+  {
+   break
+   entry LFA_LCLRAS (_    # Process active LFA sonar detection for LCL Table
+                     unt$pointer,      # unt index of detector
+                     unt2$pointer,     # unt index of detectee
+                     lbear,            # brg + detector heading error (degrees)
+                     ralat,            # ellipse center latitude (radians)
+                     ralon,            # ellipse center longitude (radians)
+                     lrnge,            # range (nmi)
+                     unt2$type$i,      # detectee's type ($Sub$Code)
+                     idtcod,           # type of detection made ($Sonar$Code)
+                     brg_error,        # bearing error of receiver (degrees)
+                     minor_axis,       # bistatic ellipse minor axis (nmi)
+                     major_axis,       # bistatic ellipse major axis  (nmi)
+                     orientation)      # bistatic eillipse orientation (degrees)
+ 
+   entry_point_flag = $yes
+  }
+ 
+#$% PERs E1033 & E1034 - disallow active detections of torpedos  cpa 8/92
+if ( ( xUNT2$type$i == $Torpedo$Code |
+       xUNT2$Supertype$i == $Torpedo$Supercode ) &
+      ( idtcod == $SONAR$code ) ) return  # cpa
+ 
+ 
+if (trace$visual != $no)
+   {
+    call echor
+    call echohn(xunt$name$c,$$MaxLit)
+    call echov(" act det of ")
+    call echohn(xunt2$name$c,$$MaxLit)
+   }
+ 
+ 
+unt$view$i  = xunt$view$i       #$% detectOR View /jb moved     6/30/87
+unt2$view$i = xunt2$view$i      #$% detectEE View /jb  UP       6/30/87
+call whside(unt$view$i, itside)                 #  jb           6/30/87
+call whside(unt2$view$i,idside)                 #  jb           6/30/87
+if (itside == idside & Xunt2$Status$i ==$ReadyToRecover$code)   # jb    6/30/87
+ {
+##  lcl$zero    # jb    LCL Pointer not set at this point!      7/25/89
+  RETURN                                        #<<<>>>  jb     6/29/87
+ }
+ 
+kufi = xunt$firstlclindx$i              # set unit chain to first LCL index
+ifound = $no
+nused = 0
+idemit = $no
+iptown = 0
+iYEL   = 0                                      #       6/2/86
+imesm  = 0                                      #       6/25/86
+ 
+itargt = unt2$pointer$index             # set target next pointer
+ 
+ 
+if (kufi != 0)                          # if unit chain non-empty
+   {
+    for (i=kufi; ; )                    # loop thru LCL Tbl chain for unit
+       {
+        nused = nused + 1               # increment counter
+        lcl$pointer$to i                # set pointer
+ 
+        idtype = xlcl$detectiontype$i
+        lcl$LastDetTime$f = xlcl$LastDetTime$f
+ 
+        if (iYEL == $NO)
+         {
+          if( idtype == $esm$code &
+              lcl$LastDetTime$f + Minutes$To$Yellow <= Game$time)
+                 iYEL   = lcl$Pointer
+          else if (lcl$LastDetTime$f + Minutes$To$OLD < Game$Time)
+                 iYEL   = lcl$Pointer
+         }
+ 
+        if(iptown == 0  &  Xlcl$OwnForce$i !=$no)
+                 iptown = lcl$pointer   # if own force, set pointer
+ 
+        if (imesm  == $NO & idtype == $esm$code)  # jb   3/23/87
+                 imesm  = lcl$pointer                   # 6/25/86
+ 
+        if (xlcl$detectee$i == itargt)  # if this detectee is target
+         {
+          if (unt2$view$i == unt$view$i)              # if views are same
+           {
+            lcl$OwnForce$i = $yes                   # set own force to YES
+            PUTlcl$OwnForce$i                       # store it in LCL table
+            lcl$targetid$i = $friendly$code         # set target-ID FRIENDLY
+            PUTlcl$targetid$i
+           }
+          else
+           {
+            lcl$OwnForce$i = $NO
+            PUTlcl$OwnForce$i
+           }
+ 
+          if(idtype == $esm$code &
+             (lcl$LastDetTime$f + Minutes$To$Yellow >= Game$time))
+                idemit = $yes
+          else if (idtype == $activevisual$code | idtype == idttyp)
+               {        # keep only 1 active track per target...
+                ifound = $yes                   # set flag to YES
+                break                           # break loop
+               }
+         }
+ 
+        lcl$nextindx$i = xlcl$nextindx$i        # get next index
+        if (lcl$nextindx$i == $no) break        # if no next index, break loop
+        i = lcl$nextindx$i                      # set new index
+       }
+   }    # End of   if KUFI was non-zero..
+ 
+if (ifound == $no)                              # if not found
+   {
+    if (trace$visual != $no)
+       {
+        call echov("...new track")
+       }
+#####################################################################
+    if (iYEL != $NO)                                            # 6/2/86
+     {                                                          # 6/2/86
+      lcl$pointer = iYEL                                        # 6/2/86
+      lcl$zero                                                  # 6/2/86
+     }                                                          # 6/2/86
+    else if(iptown !=0) # If no YEL track, try an OWN..         # 6/23/86
+     {
+      lcl$pointer = iptown                              #       6/23/86
+      lcl$zero                                          #       6/23/86
+     }
+ 
+    else  # If no YEL/OWN track, try to find new slot           6/2/86
+     {
+      iok = $YES        # initialize flag                       6/23/86
+      call LCLUMX (_    # check max nbr of detections for unit
+                 unt$pointer,
+                 nused,
+                 iemax,
+                 limit)
+ 
+      if (iemax != $no) iok = $no       # if max exceeded, set flag
+      else
+       {
+        call LCLSLT (_                  # find free slot in LCL table
+                 kufi,
+                 unt$pointer,
+                 iok,
+                 lcl$pointer)
+       }
+ 
+      if (iok == $no)           # no new slot available..but,
+       {
+        if (imesm != $NO) # If an esm trk, current or not..     6/25/86
+         {
+          lcl$pointer = imesm   # wipe out the esm track!       7/9/86
+          lcl$ZERO      # prepare to use wiped-out slot..       6/25/86
+         }
+                # if track is assignedTARGET (critical):
+        else if (kufi != 0 & Xunt$assignedtarget$i == itargt)   # 6/23/86
+         {
+          lcl$pointer$to kufi   # wipe out some other track!
+          lcl$ZERO      # prepare to use wiped-out track..
+         }
+        else RETURN
+       }
+     }  # End ELSE if NO YEL/OWN track, try find new slot..
+###################################################################
+ 
+    if (unt$view$i == unt2$view$i)    #$% if same view
+       {
+        #$% set own force to YES
+        lcl$OwnForce$i = $yes
+        #$% store own force
+        PUTlcl$OwnForce$i
+ 
+        #$% set target ID to friendly
+        lcl$targetid$i = $friendly$code
+       }
+    #$% else if emitter is YES
+    else if (idemit == $yes)
+       {
+        #$% store unit ID in the LCL table
+        call lclid(unt$view$i,unt2$view$i,lcl$targetid$i)
+ 
+        #$% if visual trace display requested by user (usually for debug)
+        if (trace$visual != $no)
+           {
+            #$% display trace message
+            call echov("...id")
+           }
+       }
+    else
+       {
+        #$% set target ID to unknown
+        lcl$targetid$i = $unknown$code
+       }
+ 
+    PUTlcl$targetid$i                           # store target ID
+ 
+    putlcl$VisualClass$i (NO)                   # mark it as Non-Visual
+ 
+    lcl$reportstatus$i = $needsreport$code      # set report status, store it
+    putlcl$reportstatus$i
+ 
+    #$% set first detection time and store it
+    lcl$FirstDetTime$f = Game$Time
+    putlcl$FirstDetTime$f
+ 
+    #$% set detectee to target and store it
+    lcl$detectee$i          = itargt
+    putlcl$detectee$i
+ 
+    # itargt is unt2$pointer$index
+ 
+    #$% Set class to AIR, SUB or SURFACE:
+    if      (unt2$type$i == $air$code          |
+             unt2$type$i == $cruisemissile$code|
+             UNT2$Type$I == $SAMissile$Code)     # advanced SAM 1/94 SMM
+       {
+        lcl$class$i = $air$code
+        lcl$remaining$i = Xunt2$nbrac$i    # jb        8/16/90
+        PUTlcl$remaining$i                 # jb        8/16/90
+       }
+    else if (UNT2$type$i == $sub$code)
+       {      #1/24/84; removed 5/7/84; restored 5/11/87:
+SubAlwaysKnown if(xUNT2$TrueAltDepth$i > Mast$depth$Max)
+SubAlwaysKnown {
+                LCL$class$i = $sub$code              # 5/7/84
+SubAlwaysKnown }
+       }
+    else                                 lcl$class$i = $surface$code
+ 
+    putlcl$class$i
+ 
+    #$% if class is air
+    if (lcl$class$i == $air$code)
+       {
+        #$% set report new air to YES and store it
+        unt$reportnewair$i = $yes
+        putunt$reportnewair$i
+       }
+    else
+       {
+        #$% set report new ship to YES and store it
+        unt$reportnewship$i = $yes
+        putunt$reportnewship$i
+       }
+   }    # End if (IFOUND == $NO)
+ 
+ 
+#$% if visual trace display requested by user (usually for debug)
+if (trace$visual != $no)
+   {
+    #$% display trace message
+    call echov("...LCL#")
+    call echoi(lcl$pointer$index)
+   }
+ 
+#$% set bearings and store it
+if (entry_point_flag == $no)
+  {
+   lcl$bearing$i           = lbear
+   putlcl$bearing$i
+  }
+else   # bistatic detection
+  {
+   lbear = lbear + brg_error
+   putLCL$Bearing$I  (lbear)
+   putLCL$BrgError$I (brg_error)
+  }
+ 
+#$% set last detection time and store it
+if (Xlcl$LastDetTime$f != game$Time)
+    {
+     PUTlcl$LastDetTime$f  (Game$Time)
+    }
+ 
+#$% set detection type to active NONvisual and store it
+lcl$detectiontype$i     = idttyp
+putlcl$detectiontype$i
+ 
+#$% set apparent latitude and store it
+lcl$apparentlat$f       = ralat
+putlcl$apparentlat$f
+ 
+#$% set apparent longitude and store it
+lcl$apparentlon$f       = ralon
+putlcl$apparentlon$f
+ 
+#$% set range and store it
+lcl$Range$F             = lrnge
+putlcl$Range$F
+ 
+#$% set true speed and store it
+lcl$speed$i             = xunt2$truespeed$f + .5
+putlcl$speed$i
+ 
+#$% set true course and store it
+lcl$course$i            = xunt2$truecourse$f * (180/$pi) + .5
+putlcl$course$i
+ 
+if( idtcod == $SONAR$code )                             #       7/7/83
+  {
+   if (entry_point_flag == $no)       # active sonar detection (not LFA)
+     {
+      putlcl$LastDetType$i ($Sonar$Type)                #     2/1/91 DEW
+      if (Xlcl$ACTSONflag$i != $YES)                    #       7/12/83
+        {
+         putlcl$ACTSONflag$i   ($YES)                       #       7/7/83
+         putlcl$ALERTflag$i    ($YES)                       # jb   12/17/90
+         lcl$ClassScore$i = Xlcl$ClassScore$i               #       7/12/83
+         if (lcl$ClassScore$i < $PROBSB$CODE )              #       7/13/83
+           {
+            if (unt2$type$i ==$sub$code |
+                lcl$ClassScore$i < $POSSB$Code )       # 2/1/91
+              PUTlcl$ClassScore$i (lcl$ClassScore$i +1)      #       7/12/83
+           }
+        }
+     }
+   else         # active LFA sonar detection     8/13/91
+     {
+      putLCL$ActSonFlag$I  ($yes)
+      putLCL$LastDetType$I  ($Bistatic$Type)
+      putLCL$MinorAxis$I  (minor_axis)
+      putLCL$MajorAxis$I  (major_axis)
+      putLCL$Orientation$I  (orientation)
+     }
+  }
+else if( idtcod == $MAD$code )                           #       2/1/91 DEW
+   {
+     putlcl$LastDetType$i ($Mad$Type)                    #       2/1/91 DEW
+   }
+else if( idtcod == $LIDAR$code )                         # 2/21/91 smm & clk
+   {
+     putlcl$LastDetType$i ($LIDAR$Type)                  # 2/21/91 smm & clk
+   }
+else
+   {
+     putlcl$LastDetType$i ($Radar$Type)                  #       2/1/91 DEW
+     call isar (unt$pointer,unt2$pointer,lcl$pointer)
+   }
+ 
+#$% if next unit type is air
+if (unt2$type$i == $air$code)
+   {
+    #$% set altitude and store
+    lcl$altitude$i      = xunt2$truealtdepth$i / 100
+    putlcl$altitude$i
+ 
+    unt2$nbrac$i         = xunt2$nbrac$i
+ 
+    #$% determine the number of aircraft
+    if      (unt2$nbrac$i > 3)  lcl$composition$i = 3
+    else if (unt2$nbrac$i > 1)  lcl$composition$i = 2
+    else if (unt2$nbrac$i == 1) lcl$composition$i = 1
+    else                       lcl$composition$i = 0
+    #$% store the number of aircraft
+    putlcl$composition$i
+   }
+#$% else if next unit is cruise missile
+else if (unt2$type$i == $cruisemissile$code |
+         UNT2$Type$I == $SAMissile$Code)
+   {
+    #$% set altitude and store it
+    lcl$altitude$i      = xunt2$truealtdepth$i / 100
+    putlcl$altitude$i
+ 
+    #$% set composition to one and store it
+    lcl$composition$i = 1
+    putlcl$composition$i
+ 
+    # clk 1/95:  At the request of Dan Bacon, when a missile is detected,
+    #            it should be friendly/hostile/neutral designated (whether
+    #            of not an ESM detection is made). (E1314)
+    call lclid (UNT$View$I, UNT2$View$I, LCL$TargetID$I)
+    putLCL$TargetID$I
+   }
+ 
+#$%  check for iff detection
+call LCLIFF(UNT$Pointer,UNT2$Pointer,LCL$Pointer)
+ 
+return
+end  # routine LCLRAS
+
+Subroutine isar (unt$pointer,unt2$pointer,lcl$pointer)
+BBcommon
+ 
+BBDeclare (unt$pointer,unt2$pointer,lcl$pointer)
+BBDeclare (unt$TrueAltDepth$i, shc$pointer, acc$pointer, unt2$type$i)
+BBDeclare (unt$type$i)
+ 
+real      HEIGHT,
+          RANGE,
+          BRG,
+          SQ2,
+          DUMMY,
+          RANDOM
+literal   CSTRIP8
+ 
+real*8    random_number
+ 
+if (Xlcl$Classified$i == $yes)   RETURN           # Track already classified
+ 
+if (Xunt$TYPE$i != $AIR$code)  RETURN
+ 
+ACC$pointer  = Xunt$ACCpntr$I
+if (xACC$ISAR$i != $YES)  RETURN
+UNT2$Type$I = xUNT2$Type$I
+ 
+if (UNT2$Type$I == $Air$Code)
+{
+    return
+}
+else if (UNT2$Type$I == $SubSurface$Code  &
+         xUNT2$TrueAltDepth$i > Keel$Depth)
+{
+    return
+}
+else
+{
+    height = xUNT2$AntennaHeight$I
+}
+ 
+call GETRB_M (UNT$Pointer, UNT2$Pointer, range, brg)
+ 
+Unt$TrueAltDepth$i = xUnt$TrueAltDepth$i
+SQ2 = float(Unt$TrueAltDepth$i)
+SQ2 = SQRT(SQ2)
+ 
+if( RANGE > ISAR$ID$MaxRange | RANGE > (SQRT(height) +SQ2) )
+{    # (Require range to be well WITHIN maximum LOS..
+    RETURN
+}
+ 
+random_number = RANDOM (dummy)
+if (ISAR$ID$Probability < random_number)
+{
+    return
+}
+ 
+if (UNT2$Pointer$Valid)
+{
+    shc$pointer  = Xunt2$SHCpntr$I
+    if(shc$pointer$VALID)
+    {
+        #shc$Type$C = xSHC$Type$C
+        #lcl$USERCLASS$C = SHC$TYPE$C
+        #PUTlcl$UserClass$c
+ 
+        PUTlcl$Classified$i ($YES)
+        PUTlcl$SHCpntr$I (shc$pointer)
+    }
+}
+ 
+return
+end
+
+ 
+ 
+###########################################################################
+Subroutine LCLESM (_                    # Process ESM detection for LCL Table
+                   unt$pointer,         # unt index of detector
+                   unt2$pointer,        # unt index of detectee
+                   lbear,
+                   rorlat,
+                   rorlon,
+                   lep,
+                   iesmpntr) # IF >= esm$BASE, this is ESM$pointer 10/23/85
+ 
+########################################################
+#$%
+#$% Purpose:   LCLESM processes ESM detection
+#$%            into the LCL table.
+#$%
+#$% Called By: REPESM <REJMOD>
+#$%
+#$% Calls:     LCLUMX     LCLSLT     LCLID
+#$%            CHKREL
+#$%
+#$% Tables:    UNT        LCL
+#$%
+#$% Date:      FEB 81
+#$%
+#$% Author:    Ron Williams
+#$%
+########################################################
+BBcommon
+ 
+LITERAL CSTRIP8                             # jb E2145  7/6/00
+REAL  RANDN,RORLAT,RORLON,STDEV,                # jb E2145  7/6/00
+    LCL$Firstdettime$F,LCL$Lastdettime$F,       # jb E2145  7/6/00
+    LCL$Origlat$F,LCL$Origlon$F,LCL$Uptime$F    # jb E2145  7/6/00
+Integer I,IACTPT,IDTYPE,IDTTYP,IEMAX,IFOUND,    # jb E2145  7/6/00
+    IOK,IESMPNTR,IPTOWN,ISAVE_LCL_NEXTINDX_I,   # jb E2145  7/6/00
+    ITARGT,IYEL,KUFI,LEP,LBEAR,LCLSAV,          # jb E2145  7/6/00
+    LIMIT,NUSED                                 # jb E2145  7/6/00
+Integer LCL$Pointer,LCL$Bearing$I,LCL$Brgerror$I, # jb E2145 7/6/00
+    LCL$Detectee$I,LCL$Detectiontype$I,         # jb E2145  7/6/00
+    LCL$Emitterpntr$I,LCL$Fingerprinted$I,      # jb E2145  7/6/00
+    LCL$Nextindx$I,LCL$Reportstatus$I,          # jb E2145  7/6/00
+    UNT$Reportnewesm$I,LCL$Targetid$I           # jb E2145  7/6/00
+Integer ESM$Pointer,UNT$Pointer,UNT2$Pointer
+ 
+data idttyp /$esm$code/
+ 
+#$% if visual trace display requested by user (usually for debug)
+if (trace$visual != $no)
+   {
+    #$% display trace message
+    call echor
+    call echohn(xunt$name$c,$$MaxLit)
+    call echov(" esm det of ")
+    call echohn(xunt2$name$c,$$MaxLit)
+    call echov(" emitting ")
+    call echoh(ibb[lep],5)
+   }
+ 
+#$% set unit chain to first LCL index
+kufi = xunt$firstlclindx$i
+ifound = $no
+nused  = 0
+iactpt = 0
+iptown = 0
+iYEL   = $NO                                    #       6/2/86
+ 
+#  1. Change priority to use YELLOW esm slot if available;
+#       else iptown slot if available; else consider mechanism
+#       to use IGNORED slot if available; THEN if all else fails,
+#       use a new slot; and if  none available, send message to
+#       View that <unit> is losing a new ESM track...
+ 
+ 
+#$% set target to next pointer
+itargt = unt2$pointer$index
+ 
+#$% No process on friendly forces unless the Level$ESM is 1.        #khc 9/92
+if (Level$ESM == 0)
+   {
+    call lclid(xunt$view$i,xunt2$view$i,lcl$targetid$i)
+    if (lcl$targetid$i == $Friendly$code)
+       return
+   }
+ 
+#$% if chain is not empty
+if (kufi != 0)                           # if unit chain non-empty
+   {
+    #$% for each unit chain entry
+    for (i=kufi; ; )
+       {
+        #$% increment counter
+        nused = nused + 1
+ 
+        #$% set LCL pointer
+        lcl$pointer$to i
+ 
+        idtype = xlcl$detectiontype$i   # moved up        6/2/86
+        lcl$LastDetTime$f = xlcl$LastDetTime$f          # 6/2/86
+ 
+        if (idtype == idttyp )  # If type is ESM..        6/2/86
+         {              #..save lcl indx if YELLOW        6/2/86
+          if(iYEL == $NO &
+                  lcl$LastDetTime$f + Minutes$To$Yellow < game$time)
+                {
+                 iYEL = lcl$Pointer             #       6/2/86
+                }
+         } # End if type is ESM..
+        else if(lcl$LastDetTime$f + Minutes$To$OLD  < game$time)
+                {                       #       /\      7/21/86
+                 iYEL = lcl$Pointer             #       7/21/86
+                }
+ 
+        if (iYEL == $NO)                                #       6/25/86
+         {
+          if ( iptOWN ==0 & Xlcl$OwnForce$i !=$no )
+                iptOWN = lcl$pointer
+         }
+ 
+        #$% if detectee is target
+        if (xlcl$detectee$i == itargt)
+           {
+#           idtype = xlcl$detectiontype$i  # (moved up) 6/2/86
+ 
+            #$% if ID is active visual or active non visual
+            if (idtype == $activevisual$code |
+                idtype == $activenonvisual$code)
+               {
+                #$% set active pointer
+                iactpt = lcl$pointer
+               }
+ 
+            #$% else if detection type is esm and pointers match
+            else if (idtype == idttyp &
+                     lep == xlcl$emitterpntr$i)
+               {
+                #$% set flag to YES
+                ifound = $yes
+                #$% break
+                break
+               }
+           }    # End if detectee is target...
+ 
+        #$% get next index
+        lcl$nextindx$i = xlcl$nextindx$i
+        #$% if not next index, break loop
+        if (lcl$nextindx$i == $no) break
+        #$% set entry to next index
+        i = lcl$nextindx$i
+ 
+       }        # End for each slot in chain
+   }    # End   if chain NOT empty..
+ 
+#$% if not found
+if (ifound == $no)      #  If match not found....
+   {
+    if (iYEL != $NO)    # Try to use YELLOW esm track           # 6/2/86
+     {                                                          # 6/2/86
+      lcl$pointer = iYEL                                        # 6/2/86
+      lcl$zero                                                  # 6/2/86
+     }                                                          # 6/2/86
+    else if(iptown != 0) # if no YELLOW esm, try OWN force      # 6/23/86
+     {
+      lcl$pointer =iptown # pre-empt ownforce trk
+      lcl$ZERO                                          #       6/23/86
+     }
+ 
+    else  # If no YEL/OWN track, try to find new slot # 6/2/86
+     {
+        #$% if visual trace display requested by user (usually for debug)
+      if (trace$visual != $no)
+        {
+         call echov("...new track")
+        }
+ 
+      call LCLUMX (_    #$% check maximum number of detections for unit
+                 unt$pointer,
+                 nused,
+                 iemax,
+                 limit)
+ 
+      if (iemax != $no) RETURN  # have we exceeded max no. of     6/2/86
+ 
+#     if (iemax != $no) RETURN  # have we exceeded max no. of     6/2/86
+#       {                       #  tracks allocated for this unit ?
+#        if (iptown == 0) return
+#        lcl$pointer = iptown
+#        lcl$zero
+#       }
+ 
+      else
+       {
+        #$% find free slot in LCL table
+        call LCLSLT (_
+                 kufi,
+                 unt$pointer,
+                 iok,
+                 lcl$pointer)
+ 
+        if (iok == $no) RETURN
+       }
+ 
+     }  # End ELSE if NO YEL/OWN track, try find new slot..
+ 
+######################################################################
+ 
+    #$% set report status and store it
+    lcl$reportstatus$i = $needsreport$code
+    putlcl$reportstatus$i
+ 
+    #$% set first detection time to game minute and store it
+    lcl$FirstDetTime$f = game$time
+    putlcl$FirstDetTime$f
+ 
+    #$% set detectee to target and store it
+    lcl$detectee$i          = itargt
+    putlcl$detectee$i
+ 
+    #$% set detection type to esm and store it
+    lcl$detectiontype$i     = idttyp
+    putlcl$detectiontype$i
+ 
+    #$% set emitter pointer and store it
+    lcl$emitterpntr$i       = lep
+    putlcl$emitterpntr$i
+#---------------------------------------------------------------
+    # Insert brg-error for this track while it exists: 10/23/85
+ 
+    if (iesmpntr >= ESM$BASE) # by ESM (NOT radar seeing a jammer)
+     {
+      esm$Pointer = iesmpntr                    #       10/23/85
+      stdev = Xesm$StDevBrgErr$F                #       9/30/85
+     }
+    else stdev = 3. #up to 9-deg. error on jam strobe.. 10/23/85
+ 
+    LCL$BrgError$i =INT(randn(0.0,stdev) +0.5)  #       9/30/85
+    putlcl$BrgError$i                           #       9/30/85
+#----------------------------------------------------------------
+    #$% check fingerprint and store it
+    call chkrel(lep,unt2$pointer,lcl$fingerprinted$i)
+    putlcl$fingerprinted$i
+ 
+    #$% set new ESM report to YES and store it
+    unt$reportnewesm$i = $yes
+    putunt$reportnewesm$i
+ 
+    #$% set unit ID in the LCL table and store target ID
+    call lclid(xunt$view$i,xunt2$view$i,lcl$targetid$i)
+ 
+    PUTlcl$targetid$i
+ 
+    #$% if active pointer is valid
+    if (iactpt != 0)
+       {
+        #$% save pointer
+        lclsav = lcl$pointer
+ 
+        #$% set pointer
+        lcl$pointer = iactpt
+ 
+        #$% store target ID
+        PUTlcl$targetid$i
+ 
+        #$% if visual trace display requested by user (usually for debug)
+        if (trace$visual != $no)
+           {
+            #$% display trace message
+            call echov("...id of LCL#")
+            call echoi(lcl$pointer$index)
+           }
+ 
+        #$% set pointer
+        lcl$pointer = lclsav
+       }
+   }    # End if(IFOUND == $NO)
+ 
+#$% if visual trace display requested by user (usually for debug)
+if (trace$visual != $no)
+   {
+    #$% display trace message
+    call echov("...LCL#")
+    call echoi(lcl$pointer$index)
+   }
+ 
+#$% set bearings and store it
+lcl$bearing$i   = lbear + lcl$BrgError$i                 #      10/1/85
+if(lcl$bearing$i >360) lcl$bearing$i =lcl$bearing$i -360 #      10/1/85
+else if(lcl$bearing$i < 0) lcl$bearing$i =lcl$bearing$i +360 #  10/1/85
+else if(lcl$bearing$i ==360) lcl$bearing$i = 0           #      10/1/85
+putlcl$bearing$i
+ 
+#$% set last detection time and store it
+if (Xlcl$LastDetTime$f != game$time)
+    {
+     PUTlcl$LastDetTime$f  (game$time)
+    }
+ 
+#$% set origin latitude
+lcl$origlat$f           = rorlat
+putlcl$origlat$f
+ 
+#$% set origin longitude
+lcl$origlon$f           = rorlon
+putlcl$origlon$f
+ 
+#$% if not found or uptime is less than downtime
+if (ifound == $no | xlcl$UpTime$f < xlcl$DownTime$f)
+   {
+    #$% set uptime to game minute and store it
+    lcl$UpTime$f        = game$time
+    putlcl$UpTime$f
+   }
+ 
+return
+end     #       End of subroutine LCLESM
+
+#######################################################################
+Subroutine LCLPSN (_    # Process passive sonar detection for LCL tbl
+                   unt$pointer,         # unt  pointer for detector
+                   unt2$pointer,        # unt2 pointer for detectee
+                   lbear,               # integer(brng + HeadingError)
+                   rorlat,              # Orig.Lat
+                   rorlon,              # Orig.Lon
+                   lsldd,               # up to six tonals
+                   lac,                 # AcousticComm-detection flag
+                   kbb,                 # Broadband detection flag
+                   lef,                 # for lcl$EchoFreq$i
+                   lsbnbr,              # for lcl$SonobuoyNbr$i
+                   stdev,               # Std. Dev. of Brg.-Error 7/7/83
+                   SE,                  # Signal-Excess         7/13/83
+                   iOMNI)               # Sonobuoy OMNI-flag    7/13/83
+ 
+########################################################
+#$%
+#$% Purpose:   LCLPSN processes passive sonar
+#$%            detection into the LCL table.
+#$%
+#$% Called By: REPPSD <SONMOD>
+#$%
+#$% Calls:     LCLUMX     LCLSLT
+##             lclTMA     rLL2RB        randn           #       7/13/83
+#$%
+#$% Tables:    UNT        LCL
+#$%            SHC        RTL                #       7/13/83
+#$%
+#$% Date:      FEB 81
+#$%
+#$% Author:    Ron Williams
+#$%
+#$% Modified:  Carol Kropp - 10/93 (Variable Cycle Time)
+#$%
+########################################################
+BBcommon
+ 
+LITERAL CSTRIP8                    # jb E2145  7/6/00
+REAL SE,STDEV,RANDN,RORLAT,RORLON, # jb E2145  7/6/00
+    LCL$Origlat$F,LCL$Origlon$F,   # jb E2145  7/6/00
+    LCL$Firstdettime$F             # jb E2145  7/6/00
+ 
+Integer  I,IOK,IDTYPE,IDTTYP,IEMAX,  # jb E2145  7/6/00
+    IFOUND,IOMNI,IPTOWN,ITARGT,KBB,  # jb E2145  7/6/00
+    ISAVE_LCL_NEXTINDX_I,KCLASS_MAX, # jb E2145  7/6/00
+    KTONS,KTON_CLASS,KUFI,LAC,LEF,   # jb E2145  7/6/00
+    LBEAR,LIMIT,LPMODE,LSLDD,LSBNBR, # jb E2145  7/6/00
+    MLDTN,NUSED                      # jb E2145  7/6/00
+Integer UNT$Pointer,UNT$Type$I,UNT$View$I, # jb E2145  7/6/00
+    UNT$Reportnewesm$I,                    # jb E2145  7/6/00
+    UNT2$Pointer,UNT2$Type$I,UNT2$View$I,  # jb E2145  7/6/00
+    UNT2$Rtlindx$I, SHN$Pointer,           # jb E2145  7/6/00
+    SHN$SPD$Index,SHN$SPD$TN$Index         # jb E2145  7/6/00
+Integer LCL$Pointer,LCL$Nextindx$I,        # jb E2145  7/6/00
+    LCL$Reportstatus$I,LCL$Brgerror$I,     # jb E2145  7/6/00
+    LCL$Detectee$I,LCL$Sonobuoynbr$I,      # jb E2145  7/6/00
+    LCL$Detectiontype$I,LCL$Targetid$I,    # jb E2145  7/6/00
+    LCL$Bearing$I,LCL$Omniflag$I,          # jb E2145  7/6/00
+    LCL$Acousticcomm$I,LCL$Echofreq$I,     # jb E2145  7/6/00
+    LCL$Classscore$I,LCL$Shcpntr$I,        # jb E2145  7/6/00
+    LCL$Propmode$I,LCL$SL$speedindx$I,     # jb E2145  7/6/00
+    LCL$SL$field$I,LCL$SL$Index,           # jb E2145  7/6/00
+    LCL$SL$detected$I,LCL$Tmaflag$I        # jb E2145  7/6/00
+Integer RTL$Pointer,TRP$Pointer,           # jb E2145  7/6/00
+        CTM$Pointer,SHC$Pointer            # jb E2145  7/6/00
+integer   entry_point_flag, lsl_index
+integer   last_det_type, brg_error, minor_axis, major_axis, orientation
+ 
+dimension lsldd[6]                      # 6 tonal frequencies   7/21/83
+data idttyp /$passivesonar$code/
+ 
+entry_point_flag = $no
+ 
+repeat                                                      # E2143 dew 10/99
+  {
+   break                                                    # E2143 dew 10/99
+   entry Bistatic_LCLPSN (_  # Process LFA Bistatic sonar detection for LCL tbl
+                   unt$pointer,     # unt  pointer for detector
+                   unt2$pointer,    # unt2 pointer for detectee
+                   lbear,           # brg + detector's heading error (degrees)
+                   rorlat,          # ellipse center latitude (radians)
+                   rorlon,          # ellipse center longitude (radians)
+                   lsldd,           # up to six tonals  (not used for LFA)
+                   lac,             # AcousticComm-detection flag ($no)
+                   kbb,             # Broadband detection flag  ($no)
+                   lef,             # for lcl$EchoFreq$i (db)
+                   lsbnbr,          # for lcl$SonobuoyNbr$i
+                   brg_error,       # Bearing Error  (degrees)
+                   SE,              # Signal Excess
+                   iOMNI,           # Sonobuoy OMNI-flag ($no)
+                   last_det_type,   # type of detection made
+                   minor_axis,      # bistatic ellipse minor axis (nmi)
+                   major_axis,      # bistatic ellipse miajor axis (nmi)
+                   orientation)     # bistatic ellipse orientation (degrees)
+ 
+   entry_point_flag = $yes
+  }
+ 
+#$% if visual trace display requested by user (usually for debug)
+if (trace$visual != $no)
+   {
+    #$% display trace message
+    call echor
+    call echohn(xunt$name$c,$$MaxLit)
+    call echov(" hearing ")
+    call echohn(xunt2$name$c,$$MaxLit)
+   }
+ 
+#$% set unt (detector) chain to first LCL index
+kufi = xunt$firstlclindx$i
+ifound = $no
+nused = 0
+iptown = 0
+ 
+#$% set target to next pointer
+itargt = unt2$pointer$index
+ 
+if (kufi != 0)                           # if unt chain non-empty
+   {
+    #$% for each unt chain entry
+    for (i=kufi; ; )
+       {
+        #$% increment counter
+        nused = nused + 1
+ 
+        #$% set pointer
+        lcl$pointer$to i
+ 
+        #$% if own force, set pointer
+        if (iptown == 0 & Xlcl$OwnForce$i != $no) iptown = lcl$pointer
+ 
+        #$% set ID detection type
+        idtype = xlcl$detectiontype$i
+ 
+        #$% if detectee is the target and sonobuoy numbers match and
+        #$% ID detection type is passive sonar
+        if (xlcl$detectee$i == itargt &
+            xlcl$sonobuoynbr$i == lsbnbr &
+            idtype == idttyp)
+           {
+            #$% set found flag to YES
+            ifound = $yes
+            break
+           }
+ 
+        #$% get next index
+        lcl$nextindx$i = xlcl$nextindx$i
+        #$% if not next index, break loop
+        if (lcl$nextindx$i == $no) break
+        #$% set next index
+        i = lcl$nextindx$i
+       }
+   }
+ 
+#$% if not found
+if (ifound == $no)
+   {
+    #$% if visual trace display requested by user (usually for debug)
+    if (trace$visual != $no)
+       {
+        #$% display trace message
+        call echov("...new track")
+       }
+ 
+    #$% check maximum number of detections for unit
+    call LCLUMX (_
+                 unt$pointer,
+                 nused,
+                 iemax,
+                 limit)
+ 
+    if (iemax != $no)                     # have we exceeded max no. of
+       {                                  # tracks allocated for this unit ?
+        if (iptown == 0) return
+        lcl$pointer = iptown
+        lcl$zero
+       }
+    else
+       {
+        #$% find free slot in LCL table
+        call LCLSLT (_
+                 kufi,
+                 unt$pointer,
+                 iok,
+                 lcl$pointer)
+        if (iok == $no)                 # if LCL Table full
+         {
+    ##---------------------------------------------------
+          if (trace$sonar$PASSIVE != $NO)               #       7/26/83
+           {
+            call echov (" LCL Tbl. FULL!")          # 15
+           }
+    ##-----------------------------------------------------
+          return
+         }
+       }
+    #$% set report status and store it
+    lcl$reportstatus$i  = $needsreport$code
+    putlcl$reportstatus$i
+ 
+    #$% set first detection time to game minute and store it
+    lcl$FirstDetTime$f = Game$Time
+    putlcl$FirstDetTime$f
+ 
+    putlcl$ORIGbearing$i (lbear)
+#       Compute Passive-Sonar Brg. Error for this track:<<<>>>  7/7/83
+    if (entry_point_flag == $no)
+      {
+       LCL$BrgError$i = INT(randn(0.0,stdev) +0.5)         #       7/11/83
+       putlcl$BrgError$i                                   #       7/7/83
+      }
+    else   # bistatic track and bearing error already calculated
+      putLCL$BrgError$I  (brg_error)
+ 
+    #$% set detectee to target and store it
+    lcl$detectee$i            = itargt
+    putlcl$detectee$i
+ 
+    #$% set sonobuoy number and store it
+    lcl$sonobuoynbr$i         = lsbnbr
+    putlcl$sonobuoynbr$i
+ 
+    #$% set detection type to passive and store it
+    lcl$detectiontype$i       = idttyp          # $passivesonar$code
+    putlcl$detectiontype$i
+ 
+    #$% set target ID to unknown and store it
+    lcl$targetid$i            = $unknown$code
+    putlcl$targetid$i
+ 
+    #$% set new ESM report to YES and store it
+    unt$reportnewesm$i = $yes
+    putunt$reportnewesm$i
+   }            #  End of  if NOT found  ( track is new )
+ 
+#$% if visual trace display requested by user (usually for debug)
+if (trace$visual != $no)
+   {
+    #$% display trace message
+    call echov("...LCL#")
+    call echoi(lcl$pointer$index)
+   }
+ 
+lcl$bearing$i   = lbear + Xlcl$BrgError$i               #       7/7/83
+if(lcl$bearing$i >360) lcl$bearing$i =lcl$bearing$i -360 #      8/17/83
+else if(lcl$bearing$i < 0) lcl$bearing$i =lcl$bearing$i +360 #  8/17/83
+else if(lcl$bearing$i ==360) lcl$bearing$i = 0          #       8/17/83
+putlcl$bearing$i
+ 
+#$% set last detection time
+if (Xlcl$LastDetTime$f != Game$Time)
+   PUTlcl$LastDetTime$f  (Game$Time)
+ 
+#$% store the type of the last detection made
+if (entry_point_flag == $yes)                   #  clk  8/13/91
+  {
+   putlcl$LastDetType$i (last_det_type)
+   if (last_det_type == $Bistatic$Type)  # a bistatic detection (not ping steal)
+     {
+      #$% store containment ellipse information
+      putLCL$MinorAxis$I  (minor_axis)
+      putLCL$MajorAxis$I  (major_axis)
+      putLCL$Orientation$I  (orientation)
+     }
+  }
+else  putLCL$LastDetType$I ($Sonar$Type)
+ 
+lcl$OMNIflag$i = iOMNI  # STET! --lcl$OMNIflag$i used below--   8/3/83
+putlcl$OMNIflag$i                                       #       8/3/83
+ 
+#$% set orig latitude and store it
+lcl$origlat$f             = rorlat
+putlcl$origlat$f
+ 
+#$% set orig longitude and store it
+lcl$origlon$f             = rorlon
+putlcl$origlon$f
+ 
+#$% set acoustic communication and store it
+lcl$acousticcomm$i        = lac
+putlcl$acousticcomm$i
+#$% set echo frequency and store it
+lcl$echofreq$i            = lef
+putlcl$echofreq$i
+ 
+lcl$FirstDetTime$f = Xlcl$FirstDetTime$f                #       8/3/83
+ 
+unt$type$i = xunt$type$i                                #       8/19/83
+unt2$type$i = xunt2$type$i
+if ( lef != 0 | lac != $NO )                            #       7/12/83
+ {
+  putlcl$actEMITflag$i ($YES)                           #       7/7/83
+  lcl$ClassScore$i = Xlcl$ClassScore$i                  #       7/12/83
+  if (lcl$ClassScore$i < $PROBSB$CODE )                 #       7/13/83
+   {
+    if(unt2$type$i ==$sub$code | (lcl$ClassScore$i < $POSSB$Code &
+             xlcl$LastDetType$i  != $Visual$Type) )     #       2/1/91
+     {                                                  #       7/29/83
+      PUTlcl$ClassScore$i (lcl$ClassScore$i +1)         #       7/12/83
+     }
+   }
+  putlcl$TargetID$I ($Unknown$Code) # det. of echo or acoustic: 8/19/83
+  lcl$ClassScore$i = Xlcl$ClassScore$i                  #       8/19/83
+  if (entry_point_flag == $yes)                         # clk 8/13/91
+    putLCL$Class$I  ($Sub$Code)
+  else if ( lcl$ClassScore$i == $POSSB$Code )           #       8/19/83
+    {} #    PUTlcl$Class$i ( $Surface$Code ) # Inactivated      7/6/91
+  else if ( lcl$ClassScore$i == $PROBSB$Code )          #       8/19/83
+        PUTlcl$Class$i ( $Sub$Code )                    #       8/19/83
+ }
+ 
+#               # If BroadBand flag is to be CHANGED to YES     7/12/83
+if( Xlcl$broadband$i !=$YES  &  kbb !=$NO )             #       7/12/83
+ {
+  putlcl$broadband$i ($YES)
+  lcl$ClassScore$i = Xlcl$ClassScore$i                  #       7/12/83
+  if (lcl$ClassScore$i < $PROBSB$CODE )                 #       7/13/83
+    {
+     if(unt2$type$i ==$sub$code | (xlcl$LastDetType$i != $Visual$Type &
+        lcl$ClassScore$i < $POSSB$CODE) )        # jb 2/1/91    9/3/91
+      {
+       PUTlcl$ClassScore$i ( lcl$ClassScore$i +1 )      #       8/31/83
+      }
+    }
+  putlcl$TargetID$I ($Unknown$Code)     # det. of broadband:    8/19/83
+  lcl$ClassScore$i = Xlcl$ClassScore$i                  #       8/19/83
+  if ( lcl$ClassScore$i == $POSSB$Code )                #       8/19/83
+    {} #    PUTlcl$Class$i ( $Surface$Code ) # Inactivated      7/6/91
+  else if ( lcl$ClassScore$i == $PROBSB$Code )          #       8/19/83
+        PUTlcl$Class$i ( $Sub$Code )                    #       8/19/83
+ }      # End    if BroadBand Flag is to be changed to YES
+ 
+else putlcl$broadband$i (kbb)                           #       9/6/83
+ 
+#$% if detectee type is not air
+if (unt2$type$i != $air$code)
+   {
+ 
+    #$% set ships characteristics and store it
+    lcl$shcpntr$i = xunt2$shcpntr$i
+    putlcl$shcpntr$i
+ 
+    #$% save prop mode in lpmode:
+    lpmode = xlcl$propmode$i
+ 
+    #$% if unt2 type is sub, set new(?) prop mode
+    if (unt2$type$i == $sub$code) lcl$propmode$i = xunt2$propulsionmode$i
+    else                          lcl$propmode$i = $null$code
+ 
+    #$% store prop mode
+    putlcl$propmode$i
+ 
+    # itargt has value unt2$pointer$index
+ 
+    #$% set speed index and store it
+    lcl$sl$speedindx$i =(xunt2$truespeed$f +2.5)/5.    # jb    7/31/91
+    if(lcl$sl$speedindx$i < 1) lcl$sl$speedindx$i = 1  # jb    8/01/91
+    else if(lcl$sl$speedindx$i >6) lcl$sl$speedindx$i =6 # jb  8/01/91
+    putlcl$sl$speedindx$i                              # jb    7/31/91
+ 
+    #$% if prop mode changed:
+    if (lcl$propmode$i != lpmode)       # (speed-independent)   9/6/83
+       {
+        #$% set signature-line subtable to zero and store it
+        lcl$sl$field$i = 0
+        PUTlcl$sl$field$i
+       }
+ 
+    if (entry_point_flag == $yes)              #  clk  8/13/91
+      putlcl$LastDetType$i (last_det_type)
+    else putLCL$LastDetType$I ($Sonar$Type)
+ 
+    unt2$RTLindx$i = Xunt2$RTLindx$i                    #       7/14/83
+ 
+    ktons = 0                   # counter for tonals detected   7/7/83
+    kton_class = 0  # counter for tonals that can be classified  # JFR 5/11/93
+    # four possible classification names - JFR 5/11/93
+    if (unt2$RTLindx$i != 0)   # No fngrprnting  - JFR 5/11/93
+       {
+        rtl$pointer$to   unt2$RTLindx$i  #   7/12/83 - moved JFR 5/11/93
+        if (xRTL$Classification1$c != 0) kton_class = kton_class + 1  # JFR 5/11/93
+        if (xRTL$Classification2$c != 0) kton_class = kton_class + 1 # JFR 5/11/93
+        if (xRTL$Classification3$c != 0) kton_class = kton_class + 1 # JFR 5/11/93
+        if (xRTL$Classification4$c != 0) kton_class = kton_class + 1 # JFR 5/11/93
+       }
+ 
+     kclass_max = kton_class # JFR 5/11/93 {for less than 4 classification names}
+ 
+    for (lsl_index=1; lsl_index < 7; lsl_index=lsl_index+1)
+     {                  #$% for each source line entry:         7/7/83
+      if (lsldd[lsl_index] == 0 )        # skip if not detected
+       {
+        next
+       }
+ 
+      ktons =ktons +1                                   #       7/7/83
+ 
+      # at this point LSLDD[LSL_Index] contains a Freq we are detecting
+      # We need to find the correct index in the SHN$SPD$TN table
+ 
+      #$% Smart Torpedo Unit Type,  Reh 5/2/90
+      If (Xunt2$Supertype$I == $Torpedo$Supercode)
+        {
+        Trp$Pointer = Xunt2$Trppntr$I
+        Shn$Pointer$To Xtrp$Noiseindx$I
+        }
+      #$% Countermeasure Unit Type,  Reh 5/15/90
+      Else If (Xunt2$Supertype$I == $Ctrmeasure$Supercode)
+        {
+        Ctm$Pointer = Xunt2$Ctmpntr$I
+        Shn$Pointer$To Xctm$Noiseindx$I
+        }
+      Else
+        {
+        Shc$Pointer = Xunt2$Shcpntr$I              #Set Shc Pntr For Target
+ 
+        If(Xunt2$Propulsionmode$I == $Electric$Code) # Sub In Battery Mode
+             Shn$Pointer$To Xshc$Noiseindxelec$I    #Set Noise Ch Ptr Thus
+        Else                                       #In All Other Cases
+            Shn$Pointer$To Xshc$Noiseindx$I        #Set Noise Ch Ptr Thus
+        }
+ 
+      shn$spd$index = lcl$sl$speedindx$i                        # dew 8/30/91
+      for (shn$spd$tn$Index = 1; shn$spd$tn$Index <= 6;
+           shn$spd$tn$Index = shn$spd$tn$Index + 1)
+        {
+        if (LSLDD[LSL_Index] != Xshn$spd$tn$Freq$i) next        # dew 8/30/91
+ 
+        lcl$sl$index = shn$spd$tn$index
+        lcl$sl$detected$i = $yes  # Flag detection by tonal #     7/7/83
+        putlcl$sl$detected$i                              #       7/7/83
+        break
+        }
+     }          # End for each source line  entry
+ 
+    if (ktons > 0 | xlcl$BroadBand$i == $yes) # if classification - JFR 5/11/93
+       { # tonals detected or broadband detection
+        if (kton_class > ktons ) kton_class = ktons # can't have more classification
+                                 # than we have tonals + BB to work with - JFR 5/11/93
+        if (xlcl$BroadBand$i == $yes) kton_class = kton_class + 1 # BB detection
+                           # adds to the classification capability - JFR 5/11/93
+        if (kton_class > 4) kton_class = 4 # max of four passive sonar - JFR 5/11/93
+                                           # classifications
+ 
+        # say kton_class = 3 , then classscore = $sonFP1$code + 2 = $sonFP3$code
+        # i.e. 3rd classification name
+        lcl$ClassScore$i = xlcl$ClassScore$i # get class score - JFR 5/12/93
+        if (kton_class + $SonFP1$code < lcl$ClassScore$i) # JFR 5/12/93
+           { # this test makes sure that subsequent loss of tonals does not
+             # degrade classification (tonals + FP base < current class score)
+            kton_class = lcl$ClassScore$i - $SonFP1$Code + 1
+           }
+        PUTlcl$ClassSCORE$i($SonFP1$code + kton_class - 1) #Flag: Sonar-fngrprntd - JFR 5/11/93
+ 
+        PUTlcl$Class$i ( unt2$Type$i )                  #       8/19/83
+ 
+        unt$View$i =  Xunt$View$i                       #       8/19/83
+        unt2$View$i = Xunt2$View$i                      #       8/19/83
+        call lclid(unt$view$i,unt2$view$i,lcl$targetid$i) #     8/19/83
+        PUTlcl$targetid$i       # $Neutral/Friendly/Enemy$code  8/19/83
+       }
+ 
+ 
+    mldtn = Xlcl$NumTonals$i # If NumTonals to be incremented:  7/12/83
+    if( mldtn < ktons)
+     {
+      putLCL$NumTonals$i (ktons)                        #       7/7/83
+      if (mldtn < 2  &  ktons >= 2) # if CHANGED to 2+ tonals   7/12/83
+       {
+        lcl$ClassScore$i = Xlcl$ClassScore$i            #       8/31/83
+        if (lcl$ClassScore$i < $PROBSB$CODE )           #
+         {
+         if(unt2$type$i ==$sub$code | (lcl$ClassScore$i < $POSSB$Code &
+                        xlcl$LastDetType$I != $Visual$type ) )  #       2/1/91
+           {                                            #       7/29/83
+            PUTlcl$ClassScore$i (lcl$ClassScore$i +1)   #       7/12/83
+           }
+         }
+       }
+      putlcl$TargetID$I ($Unknown$Code) # det. of tonal:        8/19/83
+      lcl$ClassScore$i = Xlcl$ClassScore$i              #       8/19/83
+      if ( lcl$ClassScore$i == $POSSB$Code )            #       8/19/83
+        {} #    PUTlcl$Class$i ( $Surface$Code ) # Inactivated   7/6/91
+      else if ( lcl$ClassScore$i == $PROBSB$Code )      #       8/19/83
+        PUTlcl$Class$i ( $Sub$Code )                    #       8/19/83
+    }  #       End if( mldtn < ktons)
+ 
+    if (Game$Time - lcl$FirstDetTime$f > $TMA$Criteria  &  #    7/25/83
+        lcl$OMNIflag$i  != $YES ) # NO TMA for OMNI buoys..     8/3/83
+     {
+      call lclTMA (     LCL$Pointer,                    #       7/13/83
+                        UNT2$Pointer,   #
+                        rorlat,         # lat. brg-line origin  8/23/83
+                        rorlon,         # lon. brg-line origin  8/23/83
+                        SE,             # Signal-Excess
+                        lbear )         # integer sonar tgt Bearing
+                                        #  with heading-error
+     }
+    else  PUTlcl$TMAflag$i  ($NO)       # NO TMA <- Time or OMNI 7/14/83
+ 
+    ##--------------------------------------------------------
+    if (trace$sonar$PASSIVE != $NO)             #       7/26/83
+     {
+      lcl$Detectee$i  =  Xlcl$Detectee$i        #       8/17/83
+      lcl$ClassScore$i = Xlcl$ClassScore$i      #       8/17/83
+      call echov (" C-Score= ")             # 10
+      call echoi (lcl$ClassScore$i)             # 2?
+      call echov (" TMAFlg= ")              # 9
+      call echoi (lcl$TMAflag$i)                # 2?
+      call echov (" DTCTEE slot= ")         # 14
+      call echoi (lcl$Detectee$i)               # 2?
+     }
+    ##----------------------------------------------------------
+ 
+   }    #       End 'if target not AIR..'
+ 
+return
+end                     # end LCLPSN
+
+########################################################################
+Subroutine LCLTMA(LCL$Pointer,  # TARGET-MOTION ANALYSIS  7/13/83
+                  UNT2$Pointer,         # Pntr to TGT
+                  rorlat,               # Lat. of brg-line ORIGIN 8/24/83
+                  rorlon,               # Lon. of bgr-line ORIGIN 8/24/83
+                  SE,                   # Signal-Excess
+                  lbear )               # integer sonar tgt Bearing
+                                        #   with heading error
+########################################################
+#$%
+#$% Purpose:   LCLTMA determines TMA solutions and stores data
+###            (for the Passive Sonar ASTAB) in the LCL table
+#$% Called By: LCLPSN
+#$%
+#$% Calls:     rRB2LL   rLL2RB  random(x)       abs(...)
+#$%
+#$% Tables:     LCL
+#$%
+#$% Date:      July 83            Jan 92
+#$% Author:    O.J. Bryant       C. Kropp
+#$%
+#$% Modified:  Carol Kropp - 10/93 (Variable Cycle Time)
+#$%            When updating the TMA, the distance travelled
+#$%            is no longer based on one minute, but time
+#$%            last processed.
+########################################################
+BBcommon
+ 
+real     rorlat, rorlon, se
+real     LCL$OrigLat$F, LCL$OrigLon$F, LCL$Range$F
+real     LCL$TMAlat$F, LCL$TMAlon$F
+real     LCL_bearing, random_number, random_sign
+real     true_range, true_bearing, true_speed
+real     cosl, TMA_course, dist_traveled
+REAL    X, RANDOM   # jb E2145  7/6/00
+Integer JSIG1       # jb E2145  7/6/00
+integer  LCL$Pointer, UNT2$Pointer, lbear
+integer  LCL$OrigBearing$I, LCL$TMAflag$I, LCL$TMAseIndx$I
+integer  LCL$TMAbrgIndx$I, LCL$TMARandomNumber$I, LCL$Course$I
+integer  LCL$Speed$I, LCL$TMAquality$I
+integer  jSE, jSIG2
+integer  row, bearing, column, course
+ 
+real     RNGR[4,4],      # Range-error multipliers
+         SPDR[4,4]       # Speed-error multipliers
+integer  ICSR[4,4],      # Course-error multipliers
+         LQUA[4,4]       # TMA Qualities
+        #  4 Columns of fixed data for each of the above arrays:
+#          [1,1]          [4,1]  [1,2]          [4,2]   PPS pg. 3-13
+data RNGR / 1.0, 0.8, 0.7, 0.4,   0.8 ,0.7, 0.4, .25,
+            0.7, 0.4, .25, 0.1,   0.4, .25, 0.1, .05 /
+ 
+data SPDR / 0.5, 0.4, 0.3, 0.2,   0.4, 0.3, 0.2, 0.1,
+            0.3, 0.2, 0.1, .05,   0.2, 0.1, .05, 0.0 /
+ 
+data ICSR / 120,90,45,30,  90,45,30,15,  45,30,15,7,  30,15,7,5 /
+ 
+data LQUA / 0,0,1,1,  0,1,1,1,  1,1,1,2, 1,1,2,2 /  #   PPS pg. 3-14
+ 
+LCL$OrigLat$F = xLCL$OrigLat$F
+LCL$origlon$F = xLCL$origlon$F
+LCL$OrigBearing$I = xLCL$OrigBearing$I
+ 
+jSE = INT( SE + 0.5 )                   # integer Signal-Excess 9/29/83
+jSIG1 = int(Sonar$Sigma) * (-1)         # 1-Sigma cutoff        11/21/83
+jSIG2 = 2 * jSIG1                       # 2-Sigma cutoff        11/21/83
+ 
+if      (jSE <= jSIG2) row = 1          # Row # for signal-excess 11/21/83
+else if (jSE <= jSIG1) row = 2
+else if (jSE <=  0)    row = 3
+else                   row = 4
+ 
+bearing = ABS (lbear - LCL$OrigBearing$I)        # Cumul chng in tgt bearing
+if ( bearing > 180 ) bearing = 360 - bearing     #       8/17/83
+ 
+if      ( bearing <  6 )  column = 1             # Column # for delta-BEARING:
+else if ( bearing < 16 )  column = 2
+else if ( bearing < 46 )  column = 3
+else                      column = 4
+ 
+LCL$TMAflag$I = xLCL$TMAflag$I
+LCL$TMAseIndx$I = xLCL$TMAseIndx$I
+LCL$TMAbrgIndx$I = xLCL$TMAbrgIndx$I
+LCL_bearing = xLCL$Bearing$I * $pi/180.0         # to agree with LOB
+ 
+ 
+#$% If no TMA solution has been generated before or either the signal
+#$% excess index or the change of bearing index have changed, then
+#$% compute a new TMA solution.
+ 
+if (LCL$TMAflag$I == $no |
+   (LCL$TMAseIndx$I != row | LCL$TMAbrgIndx$I != column))
+  {
+   putLCL$TMAflag$I ($YES)            # flag as TMA solution
+ 
+   random_number  = Random (x)        # (pseudo-random) multiplier
+   random_sign = Random (x)           # (pseudo-random) sign-determinant
+   if (random_sign < 0.5)
+      random_number = -random_number  # set sign of random_number
+ 
+   # Store the random number for the TMA solution's updates
+   LCL$TMARandomNumber$I = INT (random_number * 100)
+   putLCL$TMARandomNumber$I
+ 
+   putLCL$TMAseIndx$I  (row)
+   putLCL$TMAbrgIndx$I (column)
+ 
+   #$% Compute the TMA range from the LOB origin
+   call RLL2RB(_  # get true range and bearing from LOB origin to target true position 7/13/83
+               rorlat,                    # lat of LOB origin      8/23/83
+               rorlon,                    # lon of LOB origin      8/23/83
+               COS (rorlat),              # cos of LOB-origin Lat. 8/15/83
+               xUNT2$TrueLatitude$F,      # lat of end             8/15/83
+               xUNT2$TrueLongitude$F,     # lon of end             8/15/83
+               xUNT2$CosTrueLat$F,        # cosine of end lat      8/15/83
+               true_range,                # True range, LOB-origin to target
+               true_bearing)              # True bearing, LOB-origin to target
+  # $ANG2PI (true_bearing)      # Activate this line if you use true_bearing below!
+   LCL$Range$F = true_range * (1 + random_number * RNGR [row,column])
+   putLCL$Range$F
+ 
+   #$% Compute the TMA position
+   LCL$TMAlat$F = rorlat  # RRB2LL position SENT as LOB-origin;  8/24/83
+   LCL$TMAlon$F = rorlon  #  returned as LCL$TMA position        8/24/83
+   cosl =  cos(rorlat)
+   call RRB2LL(_                 # COMPUTE TMA POSITION:
+               LCL$TMAlat$F,     # lat LOB origin -> TGT lat
+               LCL$TMAlon$F,     # lon LOB origin -> TGT lon
+               LCL$Range$F,      # TMA range
+               LCL_bearing,      # brg fm LCL tbl (vice rel brg) 8/24/83
+               0.0,              # pass zero  (vice heading)
+               cosl)             # pass LOB origin; -> TGT
+ 
+   putLCL$TMAlat$F               # NEW
+   putLCL$TMAlon$F               # TMA position
+ 
+   #$% Compute the TMA course
+   course  = (xUNT2$TrueCourse$F * 180./$pi) +0.5  # Int. TGT true cse
+   LCL$Course$I = course + int( random_number * ICSR [ row, column ] + 0.5)
+   #$% Adjust the course to be between 0-359
+   if (LCL$Course$I < 0)  LCL$Course$I = LCL$Course$I + 360         # 8/8/83
+   else if (LCL$course$I >= 360) LCL$Course$I = LCL$Course$I - 360  # 8/8/83
+   putLCL$Course$I
+ 
+   #$% Compute the TMA speed
+   true_speed = xUNT2$TrueSpeed$F              # 8/24/83
+   LCL$Speed$I  = true_speed * (1.0 + random_number * SPDR [row, column]) + 0.5
+   putLCL$Speed$I
+ 
+   #$% Determine the TMA quality
+   LCL$TMAquality$I = LQUA [row, column]
+   putLCL$TMAquality$I
+  }
+ 
+ELSE    # Update the TMA solution's range and course.
+  {
+   LCL$TMAlat$F = xLCL$TMAlat$F          # targets previous
+   LCL$TMAlon$F = xLCL$TMAlon$F          # TMA position
+   cosl =  cos(LCL$TMAlat$F)             #                   8/15/83
+ 
+   # Calculcate the distance (nautical miles) traveled in one game cycle
+   LCL$course$I = xLCL$Course$I
+   TMA_course = LCL$Course$I * $PI/180.0         # course in radians  8/24/83
+   dist_traveled = FLOAT (xLCL$Speed$I) * Model$Interval * $Hours$Per$Minute
+ 
+   # Update the TMA solution course, as a course change could happen
+   # without triggering the calculation of a new TMA solution.
+   course  = INT ((xUNT2$TrueCourse$F * 180./$pi) + 0.5)      # true course in degrees
+   LCL$Course$I = course + int ((xLCL$TMARandomNumber$I * 0.01) * ICSR [row, column] + 0.5)
+   if (LCL$Course$I < 0)  LCL$Course$I = LCL$Course$I + 360
+   else if (LCL$Course$I >= 360) LCL$Course$I = LCL$Course$I - 360
+   putLCL$Course$I
+ 
+   # Calculate a "DR" position to be used in finding the new TMA range
+   call RRB2LL(_
+               LCL$TMAlat$F,             # Old TGT lat -> New TGT "DR" lat
+               LCL$TMAlon$F,             # Old TGT lon -> New TGT "DR" lon
+               dist_traveled,                    # pass dist traveled
+               0.0,                      # pass zero vice rel brg  8/08/83
+               TMA_course,                    # pass TMA course         8/24/83
+               cosl)                     # cosine of old -> cosine new "DR" lat
+ 
+   # Compute the new TMA range from the LOB origin to the DR position
+   call RLL2RB(_
+               LCL$OrigLat$F,            # lat of detector
+               LCL$OrigLon$F,            # lon of detector
+               COS(LCL$OrigLat$F),       # cosine of detector lat
+               LCL$TMAlat$F,             # lat of tgt "DR"
+               LCL$TMAlon$F,             # lon of tgt "DR"
+               cosl,                     # cosine of tgt "DR" lat
+               LCL$Range$F,              # output range
+               true_bearing )                    # output bearing
+  # $ANG2PI (true_bearing)      # Activate this line if you use true_bearing below!
+ 
+   putLCL$Range$F
+ 
+   # Compute the new TMA position at the computed range along the LOB
+   LCL$TMAlat$F = rorlat         # Send as LOB origin
+   LCL$TMAlon$F = rorlon         # Send as LOB origin
+   cosl = cos(LCL$TMAlat$F)      # Send as cosine of LOB origin latitude
+ 
+   call RRB2LL(_                 # Compute TMA position
+               LCL$TMAlat$F,     # lat LOB origin -> TGT TMA lat
+               LCL$TMAlon$F,     # lon LOB origin -> TGT TMA lon
+               LCL$Range$F,      # TMA range
+               LCL_bearing,           # brg fm LCL tbl (vice rel brg) 8/24/83
+               0.0,              # pass zero  (vice heading)
+               cosl)             # cosine laT LOB origin -> consin TGT TMA lat
+ 
+   putLCL$TMAlat$F               # New TMA position, based upon the newly
+   putLCL$TMAlon$F               # calucated range along the LCL bearing    8/24/83
+  }
+ 
+return
+end                     #        End lclTMA
+ 
+
+############################################################################
+Subroutine LCLUMX (_                    # Check max # of detections for unit
+                   unt$pointer,
+                   nused,
+                   iemax,
+                   limit)
+ 
+########################################################
+#$%
+#$% Purpose:   LCLUMX checks the maximum number
+#$%            of detections for each unit.
+#$%
+#$% Called By: LCLVIS     LCLESM     LCLRAS
+#$%            LCLPSM
+#$%
+#$% Calls:     None
+#$%
+#$% Tables:    UNT        ACC
+#$%            SHC
+#$%
+#$% Date:      FEB 81
+#$%
+#$% Author:    Ron Williams
+#$%
+#$% Modified:  Carol Kropp - 10/93 (Variable Cycle Time)
+#$%            itsave now stores the game$time when the
+#$%            lcl track overflow message was sent.
+########################################################
+BBcommon
+ 
+LITERAL CSTRIP8                         # jb E2145  7/6/00
+integer itsave[unt$slots], ITemp
+integer iTime / 0 /, iCount / 0 /
+Integer IEMAX,IUNIT,LIMIT,NUSED,
+        UNT$Pointer,ACC$Pointer,
+        SHC$Pointer                     # jb E2145  7/6/00
+ 
+#$% set maximum to NO
+iemax = $no
+ 
+#$% if aircraft
+if (xunt$type$i == $air$code)
+   {
+    #$% set ACC pointer and set track limit
+    acc$pointer = xunt$accpntr$i
+    limit = xacc$tracklimit$i
+   }
+else
+   {
+    #$% set SHC pointer and set track limit
+    shc$pointer = xunt$shcpntr$i
+    limit = xshc$tracklimit$i
+   }
+ 
+#$% if number used is greater
+if (nused >= limit)
+    {
+    #$% set maximum to YES
+    iemax = $yes
+ 
+    #$% set UNT pointer
+    iunit = unt$pointer$index
+ 
+    ITemp = Game$time
+ 
+    if (iTime != iTemp)
+        {
+ 
+        if (iCount > 0)
+            {
+            #$% display message
+            call echov (" [")
+            call echoi (iCount)
+            call echov (" LCL list exc]")
+            }
+ 
+        iCount = 0
+        iTime = iTemp
+        }
+ 
+    #$% if save is game minute, return
+    if (itsave[iunit] == iTemp) return
+ 
+    # count Units overflowing LCL allocation
+    iCount = iCount + 1
+ 
+    #$% set save to game minute
+    itsave[iunit] = iTemp
+ 
+    if (trace$detect != $no)
+        {
+        #$% display message
+        call echov (" [")
+        call echohn (xunt$name$c,$$MaxLit)
+        call echov (" LCL>")
+        call echoi (limit)
+        call echov ("]")
+        }
+    }
+ 
+return
+end
+
+############################################################################
+Subroutine LCLSLT (_                    # Find free slot in LCL Table
+                   kufi,
+                   unt$pointer,
+                   iok,
+                   lcl$pointer)
+ 
+########################################################
+#$%
+#$% Purpose:   LCLSLT searches for a free slot
+#$%            in the LCL table.
+#$%
+#$% Called By: LCLVIS     LCLESM     LCLRAS
+#$%            LCLPSN
+#$%
+#$% Calls:     ECHOR      ECHOH
+#$%
+#$% Tables:    UNT        LCL
+#$%
+#$% Date:      FEB 81
+#$%
+#$% Author:    Ron Williams
+#$%
+#$% Modified:  Carol Kropp - 10/93 (Variable Cycle Time)
+#$%            ltsave now stores the game$time when the
+#$%            lcl table overflow message was sent.
+#$%
+########################################################
+BBcommon
+ 
+real ltsave / 0.0 /
+Integer ID,IOK,INDEXX,KUFI,NUM,         # jb E2145  7/6/00
+    UNT$Pointer,UNT$Firstlclindx$I, # jb E2145  7/6/00
+    LCL$Pointer, LCL$Nextindx$I     # jb E2145  7/6/00
+ 
+#$% if no free slots
+if (local$first$free == 0)              # if no free slots
+   {
+    #$% display message that LCL table full
+    iok = $no
+ 
+    call get_parallel_info (num,id)    # Ignore alternate proc's
+    if (num != 1)    RETURN            #                11/19/90
+ 
+    if (ltsave == Game$Time) return
+    ltsave = Game$Time
+ 
+    call echor
+    call echov ("LCL Table overflow")
+    call echor
+   }
+else
+   {
+    #$% set pointer to YES
+    iok = $yes
+    #$% if unit chain is zero
+    if (kufi == 0)
+       {
+        #$% set first LCL index to first free slot and store it
+        unt$firstlclindx$i = local$first$free
+        putunt$firstlclindx$i
+       }
+    else
+       {
+        #$% set next index to first free slot and store it
+        lcl$nextindx$i = local$first$free
+        putlcl$nextindx$i
+       }
+ 
+    #$% set pointer to first free slot and set index
+    lcl$pointer$to local$first$free
+    index = xlcl$nextindx$i
+    local$first$free = index
+ 
+    #$% set next index to zero and store it
+    lcl$nextindx$i = 0
+    putlcl$nextindx$i
+   }
+ 
+return
+end
+
+ 
+Subroutine LCLDEL                       # Delete old entries in the LCL Table
+ 
+########################################################
+#$%
+#$% Purpose:   LCLDEL deletes old entries in
+#$%            the LCL table.
+#$%
+#$% Called By: WARCYC
+#$%
+#$% Calls:     None
+#$%
+#$% Tables:    UNT        LCL
+#$%
+#$% Date:      FEB 81
+#$%
+#$% Author:    Ron Williams
+#$%
+#$% Modified:  Susan Miller 12/93 to handle updating the AEG
+#$%            table when a LCL track is deleted.
+#$% Modified:  Susan Miller 12/93 to handle updating the AEG
+#$%            table when a LCL track is deleted.
+#$% Modified:  Carol Kropp - 11/93 (Variable Time Step)
+#$%            Detection times are now computed and stored
+#$%            as seconds, vice minutes.
+#$%
+########################################################
+BBcommon
+ 
+LITERAL CSTRIP8                             # jb E2145  7/6/00
+real  old_time    # game time to determine if a detection has faded
+real  prev_time   # game time prior to this cycle
+REAL    LCL$Downtime$F              # jb E2145  7/6/00
+Integer I,ICNT,ISAVE,NTOTAL,        # jb E2145  7/6/00
+    ISAVE_LCL_NEXTINDX_I,           # jb E2145  7/6/00
+    UNT$Pointer,UNT$Firstlclindx$I, # jb E2145  7/6/00
+    LCL$Pointer,LCL$Nextindx$I,     # jb E2145  7/6/00
+    UNT2$Pointer                    # jb E2145  7/6/00
+old_time  = game$time - minutes$to$old
+prev_time = game$time - time$step
+ 
+ntotal = 0
+ 
+#$% for each entry
+for (unt$pointer$first; still_ok(unt); unt$pointer$next) # for each unit 9/88
+   {
+    icnt = 0
+ 
+    #$% for each first LCL index entry
+    for (i = xunt$firstlclindx$i; i>0; )        # loop thru local detections
+       {
+        #$% set pointer
+        lcl$pointer$to i
+        #$% set next index
+        i = xlcl$nextindx$i
+ 
+        #$% if LCL index is old
+        if (old_time > xlcl$LastDetTime$f)       # if LCL entry has gone old
+           {
+            #$% if visual trace display requested by user (usually for debug)
+            if (trace$visual != $no)
+               {
+                #$% display trace message
+                call echor
+                call echohn(xunt$name$c,$$MaxLit)
+                call echov(" det of ")
+                unt2$pointer$to xlcl$detectee$i
+                call echohn(xunt2$name$c,$$MaxLit)
+                call echov(" gone old...LCL#")
+                call echoi(lcl$pointer$index)
+               }
+ 
+            # check to see if this LCL track has an associated AEG slot
+            # and if so, clear it out   SMM 12/93
+            if (xLCL$AssocAEGIndex$I != 0)
+                 call clear_AEG_slot(UNT$Pointer,LCL$Pointer,0)
+             if (trace$visual != $no)
+                {
+                 call echor
+                 Call echov (" Clearing an AEG slot.  ")
+                 call echor
+                }
+ 
+            # check to see if this LCL track has an associated AEG slot
+            # and if so, clear it out   SMM 12/93
+            if (xLCL$AssocAEGIndex$I != 0)
+                 call clear_AEG_slot(UNT$Pointer,LCL$Pointer,0)
+             if (trace$visual != $no)
+                {
+                 call echor
+                 Call echov (" Clearing an AEG slot.  ")
+                 call echor
+                }
+ 
+            #$% clear
+            lcl$zero
+ 
+            #$% set next index to first free slot and store it
+            lcl$nextindx$i = local$first$free
+            putlcl$nextindx$i
+ 
+            #$% set first free slot
+            local$first$free = lcl$pointer$index
+ 
+            #$% if index and pointer are same
+            if (xunt$firstlclindx$i == lcl$pointer$index)
+               {
+                #$% set index to entry and store it
+                unt$firstlclindx$i = i
+                putunt$firstlclindx$i
+               }
+            else
+               {
+                #$% set pointer to save
+                lcl$pointer$to isave
+                #$% set next index and store it
+                lcl$nextindx$i = i
+                putlcl$nextindx$i
+               }
+           }
+ 
+        else
+           {
+            icnt = icnt + 1
+ 
+            #$% set save to pointer
+            isave = lcl$pointer$index
+ 
+            if (xlcl$detectiontype$i == $esm$code)  # has ESM track ja ue01 3/01
+              {
+               if(xlcl$LastDetTime$f <= prev_time  &
+                 xlcl$DownTime$f != 0)                 #  gone down ?
+               {
+                #$% if visual trace display requested by user
+                if (trace$visual != $no)
+                   {
+                    #$% display trace message
+                    call echor
+                    call echohn(xunt$name$c,$$MaxLit)
+                    call echov(" det of ")
+                    unt2$pointer$to xlcl$detectee$i
+                    call echohn(xunt2$name$c,$$MaxLit)
+                    call echov(" emitting ")
+                    call echoh(ibb[xlcl$EmitterPntr$i],5)
+                    call echov(" gone down...LCL#")
+                    call echoi(lcl$pointer$index)
+                   }
+ 
+                #$% set downtime to game minute and store it
+                lcl$DownTime$f = game$time
+                putlcl$DownTime$f
+               } # end of det time test
+              }  # end of esm test  jhm ue01 3/01
+           }
+       }
+ 
+    #$% if visual trace display requested by user (usually for debug)
+    if (trace$visual != $no)
+       {
+        #$% display trace message
+        call echor
+        call echohn(xunt$Name$c,$$MaxLit)
+        ntotal = ntotal + icnt
+        call echov("...")
+        call echoi(icnt)
+        call echov(" LCL tracks")
+       }
+   }
+ 
+#$% if visual trace display requested by user (usually for debug)
+if (trace$visual != $no)
+   {
+    #$% display trace message
+    call echor
+    call echoi(ntotal)
+    call echov(" LCL slots total")
+   }
+ 
+return
+end
+ 
+
+ 
+Subroutine LCLID(idtrvu,itgtvu,id)
+ 
+########################################################
+#$%
+#$% Purpose:   LCLID loads unit identification.
+#$%
+#$% Called By: LCLVIS     LCLRAS     LCLESM
+#$%
+#$% Calls:     WHSIDE
+#$%
+#$% Tables:    None
+#$%
+#$% Date:      FEB 81
+#$%
+#$% Author:    Ron Williams
+#$%
+########################################################
+BBcommon
+ 
+Integer ID,IDSIDE,IDTRVU,   # jb E2145  7/6/00
+        ITSIDE,ITGTVU       # jb E2145  7/6/00
+ 
+call whside(itgtvu,itside)
+ 
+#$% if side is CONTROL
+if (itside == $neutral$code)
+   {
+    #$% set ID to neutral
+    id = $Neutral$code
+   }
+else
+   {
+    #$% determine side identification
+    call whside(idtrvu,idside)
+ 
+    #$% if side is same set ID to friendly
+    if (itside == idside) id = $Friendly$code
+    #$% else set ID to enemy
+    else                  id = $Enemy$code
+   }
+ 
+return
+end
+
+ 
+Subroutine LCLIFF(UNT$Pointer,    # unt index of detector
+                  UNT2$Pointer,   # unt index of detectee
+                  LCL$Pointer)    # lcl index of detectee w.r.t. detector
+ 
+########################################################
+#$%
+#$% Purpose:   LCLIFF processes iff detection into the
+#$%            LCL table.
+#$%
+#$% Called By: LCLRAS
+#$%
+#$% Calls:     None.
+#$%
+#$% Tables:    LCL     IFF
+#$%
+#$% Date:      MAR 91
+#$%
+#$% Author:    Cynthia Leaf
+#$%
+########################################################
+BBcommon
+ 
+Integer ID,IFOUND,                          # jb E2145  7/6/00
+    UNT$Pointer,UNT$View$I,                 # jb E2145  7/6/00
+    UNT2$Pointer,UNT2$Type$I,UNT2$View$I    # jb E2145  7/6/00
+Integer LCL$Pointer,LCL$Accpntr$I,          # jb E2145  7/6/00
+    LCL$Class$I,LCL$Targetid$I,LCL$Shcpntr$I # jb E2145 7/6/00
+Integer IFF$Pointer, IFF2$Pointer,         # jb E2145  7/6/00
+        DEQ$Pointer, DEQ2$Pointer          # jb E2145  7/6/00
+ 
+LCL$TargetID$i = xLCL$TargetID$i
+if (LCL$TargetID$i != $unknown$code)  return   # target is not designated
+                                               # as unknown
+UNT$View$i = xUNT$View$i
+UNT2$View$i = xUNT2$View$i
+ 
+call LCLID(UNT$View$i,UNT2$View$i,id)
+ 
+if (id == $enemy$code)  return               # target is hostile
+ 
+#$%  search target's DEQ table for a transponder that is turned on
+ifound = $NO
+for_DEQ2_CHAIN
+  {
+   if (xDEQ2$Ident$i != $IFF$Code)  next      # equipment is not an iff
+   if (xDEQ2$On$i ==$NO)            next      # found an iff, but it is off
+ 
+   IFF2$Pointer = xDEQ2$Pntr$i
+   if (xIFF2$Function$i != $TRANSPONDER$Code) next # iff is not a transponder
+ 
+   ifound = $YES
+  }
+if (ifound == $NO)  return        # target does not have an iff
+                                  # transponder turned on
+ 
+#$%  search detector's DEQ table for an interrogator that is turned on
+ifound = $NO
+for_DEQ_CHAIN
+  {
+   if (xDEQ$Ident$i != $IFF$Code)  next       # equipment is not an iff
+   if (xDEQ$On$i ==$NO)            next       # found an iff, but it is off
+ 
+   IFF$Pointer = xDEQ$Pntr$i
+   if (xIFF$Function$i != $INTERROGATOR$Code) next # iff is not an interrogator
+ 
+   ifound = $YES
+  }
+if (ifound == $NO)  return        # detector does not have an iff
+                                  # interrogator turned on
+ 
+if ( (xLCL$Range$f > xIFF$Range$i) |  # if target range is greater than
+     (xLCL$Range$f > xIFF2$Range$i) ) # either of the iff ranges, return
+   return
+ 
+#$%  designate track
+putLCL$TargetID$i (id)
+putLCL$IFFDesignated$i ($YES)
+putLCL$Classified$i ($YES)
+ 
+UNT2$Type$i = xUNT2$Type$i                      # set track type
+if (UNT2$Type$i == $air$code)
+  {
+   LCL$Class$i = $air$code
+   LCL$AccPntr$i = xUNT2$AccPntr$i
+   putLCL$AccPntr$i
+  }
+else if (UNT2$type$i == $sub$code )
+   LCL$Class$i = $sub$code
+else
+  {
+   LCL$Class$i = $surface$code
+   if (xLCL$ClassScore$i == $POSSB$Code)     # NOT a         10/4/83
+     putLCL$ClassScore$i ($Null$Code)        #       sub!    10/4/83
+   LCL$ShcPntr$i = xUNT2$ShcPntr$i
+   putLCL$ShcPntr$i
+  }
+ 
+return
+end

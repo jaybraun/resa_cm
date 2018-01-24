@@ -1,0 +1,333 @@
+ 
+#####   version 3.1  dated-  7apr81
+ 
+ 
+#####   version 3.0  dated- 22dec80
+ 
+ 
+# 
+ 
+#$%      MODULE                       UTILITY                     DATA
+#$%    SUBROUTINES                  SUBROUTINES                  TABLES
+#$%    ===========                  ===========                  ======
+#$%
+#$%      WGLJAM                        ECHOH                      JAM
+#$%      GETSR  <WGLOAD>               ECHOR
+#$%      GSLOTM <WGLOAD>
+#$%      BADFLD <WGLOAD>
+#$%
+#$%
+#$%
+#$%    NOTES
+#$%    =====
+#$%
+#$%    1.  <FILENAME> INDICATES WHERE SUBROUTINE IS LOCATED.
+#$%
+#$%    2.  UTILITY SUBROUTINES NOT SHOWN ON FLOWCHART.
+#$%
+#$%    3.  * INDICATES NO OTHER SUBROUTINES CALLED.
+#$%
+#$%
+#$%
+#$%    FLOWCHART FOR FILE WGLJAM
+#$%    =========================
+#$%
+#$%    START0 <WARGAM> - WGLOAD - WGLJAM - GETSR *
+#$%                                      - GSLOTM*
+#$%                                      - BADFLD*
+ 
+
+ 
+ include "bbctl.inc"
+ include "bbcode.inc"
+ include "bbjam.inc"
+ include "ascii.inc"
+ 
+ define(BBImplicit, Implicit NONE)            # MJC 4/28/2000
+ 
+ Subroutine wgljam(reccnt,recsz,rec)
+ 
+ #######################################################
+ #$%
+ #$% Purpose:   WGLJAM loads in the jammer character-
+ #$%            istics scenario file data.
+ #$%
+ #$% Called By: WGLOAD
+ #$%
+ #$% Calls:     BADFLD     ECHOH      ECHOR
+ #$%            GETSR      GSLOTM
+ #$%
+ #$% Tables:    JAM
+ #$%
+ #$% Date:      OCT 80
+ #$%
+ #$% Author:    Ron Williams, Dana Wills
+ #$%
+ #######################################################
+ 
+ BBcommon
+ 
+ integer reccnt,recsz,pnt
+ literal rec[1500]
+ 
+ REAL*4       DCBLS, DBEL3              # jb - (for replacing QKdb)    8/23/88
+ Integer kk                         # jb E2209  11/29/00
+ integer LOOP, LEN, ISTAT,
+         IPOWR, IGAIN, J,
+         JAM$Pointer,
+         JAM$FQ$Index,
+         JAM$Maxrange$I,
+         JAM$Mtbf$I,
+         JAM$Timetorepair$I,
+         JAM$Jammerpower$I,
+         JAM$Jammingsector$I,
+         JAM$Category$I,
+         JAM$Jammergain$I,
+         JAM$FQ$bandwidth$I,
+         JAM$FQ$centerfreq$I,
+         JAM$FQ$performfactor$I         # MJC 4/28/2000
+ literal JAM$Type$C, CSTRIP8            # MJC 5/1/2000
+ real*4  WAVLEN                         # MJC 5/3/2000
+ 
+ BBdeclare (JAM$FullName$V)      # jb  E2209    11/30/00
+ 
+ #$% if file empty
+ if (reccnt <= 1)
+    {
+     #$% display warning message to user
+     call echor
+     call echov("Jammer File Empty")
+     call echor
+     return
+    }
+ 
+ #$% for each record entry
+ for (loop = 2; loop <= reccnt; )
+    {
+     #$% get scenerio data and set len
+     call getsr(loop,recsz,rec)
+     len = rec[1]
+ 
+     #$% call for jam slot entries
+     call gslotm(jam$pointer,$$jam,jam$entry,istat)
+ 
+     #$% if jam table is full
+     if (istat == $no)
+        {
+         #$% display warning message to user
+         call echov("Items from ")
+         call echohn(rec[3],$$MaxLit)
+         call echov(" and on are not loaded.")
+         call echor
+         return
+        }
+ 
+     #$% get name of jammer and save
+     jam$type$c = rec[3]
+     putjam$type$c
+ 
+     #$% initialize jammer frequency index
+     jam$fq$index = 1
+ 
+     #initialize the jecewsi jamming sector and category (even for non jecewsi games)
+     putjam$jammingsector$i (360) # JFR 8/25/94 (default omni)
+     putjam$category$i ($RadComJammer$code) # JFR 8/25/94 (default to both)
+ 
+     ipowr = 0                                  #initialize in case missing
+     igain = 0                                  #initialize in case missing
+ 
+     for (pnt = 4; pnt <= len; )                #for each word in record
+        {
+         #$% if pointer is at RANGE
+         if      (rec[pnt] == 'RANGE')
+            {
+             #$% get jammer max range and save
+             jam$maxrange$i = rec[pnt+1]
+             putjam$maxrange$i
+             #$% increment pointer
+             pnt = pnt + 2
+            }
+ 
+         #$% if pointer is at MNFAL
+         else if (rec[pnt] == 'MNFAL')
+            {
+             #$% get jammer mean time between failure and save
+             jam$mtbf$i = rec[pnt+1]
+             putjam$mtbf$i
+             #$% increment pointer
+             pnt = pnt + 2
+            }
+ 
+         #$% if pointer is at MNRPR
+         else if (rec[pnt] == 'MNRPR')
+            {
+             #$% get jammer mean time to repair and save
+             jam$timetorepair$i = rec[pnt+1]
+             putjam$timetorepair$i
+             #$% increment pointer
+             pnt = pnt + 2
+            }
+         #$% if pointer is at an antenna name, 10/91
+         else if (rec[pnt] == 'ANTEN')
+            {
+            #$% increment pointer, don't do anything this pass
+            pnt = pnt + 4
+            }
+         #$% if pointer is at POWER
+         else if (rec[pnt] == 'POWER')
+            {
+             #$% get jammer power
+             ipowr = rec[pnt+1]
+ 
+            #$% accomodate old databases to modified BUILD range reh 6/89
+            IF ( ipowr > 90 )
+                ipowr = 90
+ 
+            JAM$JammerPower$i = ipowr                        # reh 6/89
+ 
+            PUTJAM$JammerPower$i
+ 
+             #$% increment pointer
+             pnt = pnt + 2
+            }
+ 
+         #$% if pointer is at SSECT     # JFR 8/2/94
+         else if (rec[pnt] == 'SSECT')  # jamming sector for jecewsi JFR 8/2/94
+            {
+             jam$JammingSector$i = rec[pnt+1] # JFR 8/2/94
+             putjam$JammingSector$i           # store jamming sector JFR 8/2/94
+             #$% increment pointer # JFR 8/25/94
+             pnt = pnt + 2         # JFR 8/25/94
+            }
+ 
+         #$% if pointer is at JCAT     # JFR 8/2/94
+         else if (rec[pnt] == 'JCAT')  # radar jammer or comms jammer JFR 8/2/94
+            {
+             if (rec[pnt+1] == 'RADAR')  jam$Category$i = $RadarJammer$code # JFR 8/2/94
+             if (rec[pnt+1] == 'COMM')  jam$Category$i = $CommunicationJammer$code  # JFR 8/2/94
+             if (rec[pnt+1] == 'BOTH')  jam$Category$i = $RadComJammer$code # JFR 8/2/94
+             putjam$Category$i  # store jamming category for jecewsi JFR 8/2/94
+             #$% increment pointer # JFR 8/25/94
+             pnt = pnt + 2         # JFR 8/25/94
+            }
+ 
+         #$% if pointer is at GAIN
+         else if (rec[pnt] == 'GAIN')
+            {
+             #$% get jammer gain
+             igain = rec[pnt+1]
+ 
+            #$% accomodate old databases to modified BUILD range reh 6/89
+            IF ( igain > 50 )
+                igain = 50
+ 
+            JAM$JammerGain$i = igain                        # reh 6/89
+ 
+            PUTJAM$JammerGain$i
+ 
+             #$% increment pointer
+             pnt = pnt + 2
+            }
+ 
+         else if(rec[pnt] == 'NOMEN')  # jb E2209  11/29/00
+           {
+           JAM$Fullname$V = ""
+           kk = 0
+           call vmovh (rec[pnt+1], 24, JAM$Fullname$V, kk)
+           putJAM$Fullname$V
+           pnt = pnt + 4
+           }
+         else if(rec[pnt] == 'UDB')  # jb E2209  11/29/00
+           {
+           if      (rec[pnt+1] == 'YES') putJAM$UDB$i ($YES)
+           else if (rec[pnt+1] != 'NO') putJAM$UDB$i (!$NO)
+           pnt = pnt + 2
+           }
+ 
+         else if (rec[pnt] == 'MODUL')    # jb            9/13/89
+           {
+# commented out 1/29/90, reh
+#            call TypeModul (rec[pnt + 1],rec[pnt + 2], J)
+ 
+            #$% very important !!!!! this is a temporary data fill
+            #$% fix it when sparse matrix values come in
+            #$% rec[ pnt + 1 ] has an international standard ASCII code
+            #$% and should be converted using (currently undefined) function
+ 
+            J = 1       # temporary
+ 
+            PUTjam$ModulationType$i (J)
+            #$% increment pointer
+            pnt = pnt + 2
+           }
+ 
+          #$% if pointer is at FREQ
+         else if (rec[pnt] == 'FREQ')
+            {
+             if (!jam$fq$index$ok) next         #ignore all but first ten
+ 
+             #$% get jammer frequency bandwidth and save
+             jam$fq$bandwidth$i = rec[pnt+2]
+ 
+            # eliminate out-of-bounds bandwidths when using obsolete database
+            # code to check for possible wargame integer overflow error
+            IF ( jam$fq$bandwidth$i > 2000 )        # 5/4/89 reh
+                {
+                call echov ('WARNING: BandWidth > 2000 MHz for Jammer ')
+                call echohn(xJAM$type$c, ARB)
+                call echor
+                jam$fq$bandwidth$i = 2000
+                }
+ 
+             putjam$fq$bandwidth$i
+ 
+             #$% get jammer center frequency and save
+             jam$fq$centerfreq$i = rec[pnt+1]
+             putjam$fq$centerfreq$i
+ 
+             #$% convert frequency to wavelength (centimeters)
+             wavlen = 3.0E4/float(jam$fq$centerfreq$i)
+ 
+##            ------------------------------------------------
+####         DCBLS = qkdb(wavlen)         # jb - older way     8/23/88
+             If(  wavlen <= 1.0)    DCBLS = 0.0          #      9/2/88
+             Else DCBLS = 10. * log10(wavlen)  #jb replace QKDB 9/2/88
+ 
+         #$% get jammer fequency performance factor and save
+###          jam$fq$performfactor$i = ipowr + igain + 77 _ #      8/24/88
+###           + 2.0 * qkdb(wavlen) _             # (older way)    8/24/88
+###           - qkdb(float(jam$fq$bandwidth$i)*1000000.0)  #10**6 3/21/85
+ 
+             DBEL3 = float(jam$fq$bandwidth$i)*1000000.0 #       8/24/88
+             If (DBEL3 > 1.0)        # jb -Protect LOG10 fnctn    9/2/88
+                  DBEL3 = 10. * log10(DBEL3)    #jb replace QKDB 8/23/88
+             Else DBEL3 = 0.0                   # jb              9/2/88
+ 
+             jam$fq$performfactor$i = ipowr + igain + 77 _ #     8/24/88
+                + 2.0*DCBLS - DBEL3                        #     8/24/88
+##            ------------------------------------------------
+             jam$fq$performfactor$i =max(0,jam$fq$performfactor$i)#3/19/85
+             putjam$fq$performfactor$i
+ 
+             #$% increment index
+             jam$fq$index = jam$fq$index + 1
+ 
+             #$% increment pointer
+             pnt = pnt + 3
+            }
+ 
+         else
+            {
+             #$% display unknown field
+             call badfld('Jammer    ',rec[3],rec[pnt])
+             #$% increment pointer
+             pnt = pnt + 1
+            }
+ 
+        }                                       #end for each word in record
+ 
+    }                                           #end for each record
+ 
+ return
+ end
+ 

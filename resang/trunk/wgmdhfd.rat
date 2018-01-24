@@ -1,0 +1,1738 @@
+ 
+#$% Carol Kropp - 11/93 (Variable Time Step)
+#$% All time computations and comparisons are now in seconds.
+ 
+#####   version 3.1  dated-  7apr81
+ 
+#####   version 3.0  dated- 22dec80
+ 
+ 
+# 
+ 
+#$%     MODULE                       UTILITY                     DATA
+#$%   SUBROUTINES                  SUBROUTINES                  TABLES
+#$%   ===========                  ===========                  ======
+#$%
+#$%     HFDMOD                       WHSIDE                       UNT
+#$%     PREHFD                       PREPRX_M                     DEQ
+#$%     LFXHFD                       ANG2PI                       SHC
+#$%     LMOHFD                       PROXIM_M                     HFT
+#$%     HFDDET                       RANDOM
+#$%     HFDFF1                       RLL2RB                       HFP
+#$%     HFDPOS                       ELLOFF                       HFD
+#$%     HFDFP1
+#$%     HFDFF2
+#$%     HFDFRN
+#$%     HFDFF3
+#$%     HDDFR3
+#$%     HFDCMP
+#$%     HDCMP1
+#$%     HFDHBW
+#$%     HFSTOR
+#$%     HFDNEW
+#$%     HFDSET
+#$%     HFELUP
+#$%     HFBGUP
+#$%     HFDFGT
+#$%     HFCLNP
+#$%     HFDDLT
+#$%     HFDDL2
+#$%
+#$%
+#$%
+#$%   NOTES
+#$%   =====
+#$%
+#$%   1.  <FILENAME> INDICATES WHERE SUBROUTINE IS LOCATED.
+#$%
+#$%   2.  UTILITY SUBROUTINES NOT SHOWN ON FLOWCHART.
+#$%
+#$%   3.  * INDICATES NO OTHER SUBROUTINES CALLED.
+#$%
+#$%
+#$%
+#$%   FLOWCHART FOR FILE HFDMOD
+#$%   =========================
+#$%
+#$%   HFDMOD - HFCLNP*
+#$%          - PREHFD - LFXHFD*
+#$%                   - LMOHFD*
+#$%          - HFDDET - HFDFF1 - HFDPOS*
+#$%                            - HFDFP1*
+#$%                   - HFDFF2 - HFDPOS*
+#$%                            - HFDFP1*
+#$%                            - HFDFRN - HFDHBW*
+#$%                   - HFDFF3 - HFDPOS*
+#$%                            - HFDFP1*
+#$%                            - HFDFRN - HFDHBW*
+#$%                            - HFDFR3*
+#$%                   - HFDCMP - HDCMP1 - HFDHBW*
+#$%                   - HFSTOR - HFDFGT*
+#$%                            - HFDNEW*
+#$%                            - HFDSET - HFELUP - ELLOFF*
+#$%                                     - HFBGUP - HFDHBW*
+ 
+
+ 
+include "bbcode.inc"
+include "bbctl.inc"
+include "bbunt.inc"
+include "bbdeq.inc"                       # am DEQ vs. DYN 3/29/89
+include "bbhfd.inc"
+include "bbhfp.inc"
+include "bbhft.inc"
+include "bbshc.inc"
+include "macros.inc"
+define(BBImplicit, Implicit None)         # MJC 7/13/2K (E2145)
+ 
+define(HDcommon,
+ integer khfdf,           ##counter for detectors
+         iux[UNT$Slots],  ##unit index of detector
+         ihx[UNT$Slots],  ##index into prob table for shorebase
+         isd[UNT$Slots],  ##side of detector
+         LASTDI,          ##LAST DETECTOR INDEX INSERTED IN SLOT
+         KSLOT[2],        ##INDEX OF DETECTOR FOR TARGET DETECTIONS IN SLOT'S
+         isdr,            ##radiator side
+         ifreq,           ##radiated frequency
+         hfp$lat$index,
+         hfp$lat$lon$index,
+         hfd_DEQ_Indx[UNT$Slots]   ## DEQ index for HFDF, reh 9/17/90 # MJC 7/19/2K (E2145)
+ real SLOT[2,5],       ##SAVE FOR 1ST AND 2ND TARGET DETECTIONS
+      FLATR,           ##LATITUDE OF RADIATOR
+      FLONR,           ##LONGITUDE OF RADIATOR
+      Dslatr,          ##COS OF LATITUDE OF RADIATOR
+      FLATD,           ##LATITUDE OF DETECTOR
+      FLOND,           ##LONGITUDE OF DETECTOR
+      Dslatd,          ##COS OF LATITUDE OF DETECTOR
+      RD,              ##RANGE FROM DETECTTOR TO RADIATOR
+      HD,              ##HEADING OF RADIATOR FROM DETECTOR
+      Bmajor,          ##MAJOR AXIS,
+      Bminor,          ##MINOR AXIS AND
+      Blpha            ##ORIENTATION OF ELLIPSE     # MJC 7/19/2K (E2145)
+ Common/SCRATCH$PAD/_
+         khfdf,iux,ihx,isd,LASTDI,KSLOT,isdr,ifreq,
+         hfp$lat$index,hfp$lat$lon$index,hfd_DEQ_Indx,
+         SLOT,FLATR,FLONR,Dslatr,FLATD,FLOND,Dslatd,
+         RD,HD,Bmajor,Bminor,Blpha                  # MJC 7/19/2K (E2145)
+      )
+
+ 
+ 
+Subroutine HFDMOD
+ 
+########################################################
+#$%
+#$% Purpose:   HFDMOD provides executive control
+#$%            for the high frequency detection
+#$%            finder module.
+#$%
+#$% Called By: WARCYC
+#$%
+#$% Calls:     PREHFD     HFDDET     HFCLNP
+#$%
+#$% Tables:    None
+#$%
+#$% Date:      APRIL 81
+#$%
+#$% Author:    Tom Paulson
+#$%
+########################################################
+ 
+#$% lists all HFDF sites
+call PREHFD
+#$% determines HFDF detections
+call HFDDET
+call HFCLNP
+ 
+return
+end
+ 
+
+ 
+Subroutine PREHFD                               #lists all hfdf sites
+ 
+########################################################
+#$%
+#$% Purpose:   PREHFD lists all high frequency
+#$%            detection finder sites.
+#$%
+#$% Called By: HFDMOD
+#$%
+#$% Calls:     LFXHFD     LMOHFD
+#$%
+#$% Tables:    UNT
+#$%
+#$% Date:      APRIL 81
+#$%
+#$% Author:    Tom Paulson
+#$%
+########################################################
+ 
+BBcommon
+HDcommon
+BBDeclare  (UNT$Pointer,
+            UNT$Status$I,
+            UNT$Type$I)                  # MJC 7/7/2K (E2145)
+#$% zero flag
+khfdf = 0
+ 
+#$% for each hfdf entry
+for (unt$pointer$first;unt$pointer$ok;unt$pointer$next)
+   {
+    #$% if view is CONTROL, get next entry
+    if (xunt$view$i == $neutral$view) next
+ 
+    #$% get unit status
+    unt$status$i = xunt$status$i
+ 
+    #$% if being deleted or sinking or awaiting launch, get next
+    if (unt$status$i == $beingdeleted$code |
+        unt$status$i == $sinking$code       |
+        unt$status$i == $acawaitinglaunch$code) next
+ 
+    #$% if it's a ghosted unit, skip it  SMM 5/18/92
+    if (xUNT$GhostedUnit$I == $YES) next
+ 
+    #$% get unit type
+    unt$type$i = xunt$type$i
+ 
+    #$% if cruise missile, get next entry
+    if (unt$type$i == $cruisemissile$code) next
+ 
+    #$% else if shorebase
+    else if (unt$type$i == $shorebase$code)
+        call LFXHFD(unt$pointer)                #list stationary sites
+ 
+    else
+        call LMOHFD(unt$pointer)                #list mobile sites
+   }
+ 
+return
+end
+ 
+
+ 
+ 
+Subroutine LFXHFD(unt$pointer)
+ 
+########################################################
+#$%
+#$% Purpose:   LFXHFD lists all fixed HFDF sites.
+#$%
+#$% Called By: PREHFD
+#$%
+#$% Calls:     WHSIDE
+#$%
+#$% Tables:    DEQ        SHC        UNT
+#$%
+#$% Date:      APRIL 81
+#$%
+#$% Author:    Tom Paulson
+#$%
+########################################################
+ 
+BBcommon
+HDcommon
+BBDeclare  (SHC$Pointer,
+            SHC$Hfpindx$I,
+            UNT$Pointer,
+            DEQ$Pointer)                    # MJC 7/7/2K (E2145)
+integer nfound, eqlist[5,ARB]
+ 
+#$% get shorebase pointer
+shc$pointer = xunt$shcpntr$i
+ 
+#$% get index to HFDF table
+shc$HfpIndx$i = xshc$HfpIndx$i
+ 
+if (shc$HfpIndx$i == 0)  return                 #skip if no hfdf capability
+ 
+#$% added 9/18/90
+call DEQGET(unt$pointer,                  # receive UNT pointer
+            $HFDF$Code,                   # receive equipment ident code
+            nfound,                       # receive/return nbr items fnd
+            eqlist)                       # receive/return list of EQ
+ 
+#$% if equipment found 9/18/90
+if (nfound > 0)
+    {
+    #$% only one HFDF per platform
+    DEQ$Pointer$To ( eqlist [ 1,1] )
+ 
+    if ( DEQ$Pointer$Valid )
+        {
+        if (xDEQ$On$i == $On)
+            {
+            #$% increment counter
+            khfdf = khfdf + 1
+ 
+            #$% set unit & HFDF indeces
+            iux[khfdf] = unt$pointer$index
+            ihx[khfdf] = shc$HfpIndx$i
+ 
+            call whside(xunt$view$i,isd[khfdf])             #orange or blue side
+            }
+        }
+    }
+ 
+return
+end
+ 
+
+ 
+ 
+Subroutine LMOHFD(unt$pointer)                  #list mobile hfdf site
+ 
+########################################################
+#$%
+#$% Purpose:   LMOHFD lists all mobile HFDF sites.
+#$%
+#$% Called By: PREHFD
+#$%
+#$% Calls:     WHSIDE
+#$%
+#$% Tables:    UNT        DEQ
+#$%
+#$% Date:      APRL 81
+#$%
+#$% Author:    Tom Paulson
+#$%
+########################################################
+ 
+BBcommon
+HDcommon
+BBDeclare  (DEQ$Pointer,
+            DEQ$Ident$I,
+            UNT$Pointer)                            # MJC 7/7/2K (E2145)
+#$% for each equipment entry
+FOR_DEQ_CHAIN
+   {
+    #$% get equipment ID number attached to the unit
+    deq$ident$i = xdeq$ident$i
+ 
+    #$% if ID is not HFDF, get next entry
+    if (deq$ident$i != $hfdf$code)  next
+ 
+    if (xDEQ$On$i == $Off) next                 # 9/18/90 reh
+ 
+    if (Xdeq$TimeWhenUse$f > game$time) next  # disabled/damaged
+ 
+    #$% Increment HFDF counter
+    khfdf = khfdf + 1
+ 
+    #$% set unit index & set HFDF index to zero
+    iux[khfdf] = unt$pointer$index
+    ihx[khfdf] = 0
+ 
+    hfd_DEQ_Indx [ khfdf ] = DEQ$Pointer$Index      # reh 9/90
+ 
+    call whside(xunt$view$i,isd[khfdf])         #orange or blue side
+ 
+    break
+   }
+ 
+return
+end
+ 
+
+ 
+ 
+Subroutine HFDDET
+ 
+########################################################
+#$%
+#$% Puropose:   HFDDET determines all HFDF detections.
+#$%
+#$% Called By:  HFDMOD
+#$%
+#$% Calls:      WHSIDE     PREPRX_M   ANG2PI
+#$%             HFDFF1     HFDFF2     HFDFF3
+#$%             HFDCMP     HFSTOR
+#$%
+#$% Tables:     HFT        UNT
+#$%             HFP        HFD
+#$%
+#$% Date:       APRIL 81
+#$%
+#$% Author:     Tom Paulson
+#$%
+########################################################
+ 
+BBcommon
+HDcommon
+BBDeclare  (HFT$Pointer,
+            HFT$Senderindx$I,
+            UNT$Pointer,
+            UNT$View$I,
+            UNT$Hfdftrack$I,
+            HFD$Pointer,
+            HFD$Lastdettime$F)              # MJC 7/7/2K (E2145)
+integer I1,
+        INTUP
+real DIFFLT,
+     DIFFLN                                 # MJC 7/7/2K (E2145)
+#$% for each transmission entry
+for (hft$pointer$first;hft$pointer$ok;hft$pointer$next)
+   {
+    #$% get sender index
+    hft$senderindx$i = xhft$senderindx$i
+ 
+    #$% set unit pointer
+    unt$pointer$to hft$senderindx$i
+ 
+    #$% get view
+    unt$view$i = xunt$view$i
+ 
+    #$% if view is CONTROL, get next
+    if (unt$view$i == $neutral$view) next
+ 
+    #$% determine if blue or orange side
+    call whside(unt$view$i,isdr)
+ 
+    #$% get HFDF frequency being detected
+    ifreq = xhft$frequency$i
+ 
+    FLATR = xUNT$TRUELATITUDE$F         #   POSTION OF
+    FLONR = xUNT$TRUELONGITUDE$F        #   RADIATING
+    DsLatr = xUNT$COSTRUELAT$F          #   UNIT
+ 
+    #$% call proximity parameters
+    call preprx_M (unt$Pointer$Index,    # jb _M        8/29/89
+                xunt$truelatitude$f,
+                xunt$truelongitude$f,
+                xunt$costruelat$f,
+                float(hfdf$mobiledetectrange))
+ 
+    if (xhft$LowRisk$i == $no)                  #if not low risk
+       {
+        #$% compute detected unit latitude index
+        difflt = flatr - Hfdf$BaseLatitude
+        hfp$lat$index = (difflt/Hfdf$BinWidth) + 1
+ 
+        #$% compute detected unit longitude index
+        diffln = flonr - Hfdf$BaseLongitude
+        $ang2pi(diffln)
+        hfp$lat$lon$index = (diffln/Hfdf$BinWidth) + 1
+ 
+        #$% if HFP latitude and longitude are not among those in the table
+        if (!(hfp$lat$index$ok & hfp$lat$lon$index$ok))
+            #$% set HFP latitude index to zero
+            hfp$lat$index = 0
+       }
+    else                                        #if low risk
+       {
+        #$% set HFP latitude index to zero
+        hfp$lat$index = 0
+       }
+ 
+    for (i1=1;i1<=5;i1=i1+1)               #INITIALIZE
+       {
+        SLOT[1,I1] = 0.0                #   SLOTS
+        SLOT[2,I1] = 0.0
+        KSLOT[1] = 0                    #ZERO 1ST & 2ND
+        KSLOT[2] = 0                    #   DETECTOR INDICES
+       }
+ 
+    #$% arguments added 9/90 reh
+    CALL HFDFF1 (UNT$Pointer)           #TRY FOR FIRST DETECTION
+ 
+    IF (KSLOT[1] == 0) NEXT     #if not detected get next target
+ 
+    #$% get unit hfdf track
+    unt$hfdftrack$i = xunt$hfdftrack$i
+ 
+    if (unt$hfdftrack$i != 0)   #if current track exists for this detectee
+       {
+        #$% set hfdf pointer to hfdf track
+        hfd$pointer$to unt$hfdftrack$i
+ 
+        if (xhfd$ElpsExists$i != $no)  #if currently have ellipse for tgt
+           {
+            #$% if detected unit is air
+            if (xunt$type$i == $air$code) intup = hfdf$time$ellipse$air
+            #$% else detected unit is surface
+            else                          intup = hfdf$time$ellipse$ship
+ 
+            # intup is the time limit for an ellipse update in seconds
+            if (game$time - xhfd$ElpsUpTime$f < intup) #if update not
+               {                                         #   required
+                hfd$LastDetTime$f = game$time
+                puthfd$LastDetTime$f              #update detect time
+ 
+                next                              #further detections of tgt
+               }                                  #  unnecessary
+           }
+       }
+ 
+    #TRY FOR 2ND DETECTION
+    CALL HFDFF2 (UNT$Pointer)      # in, UNT radiator
+ 
+    IF (KSLOT[2] != 0)
+       {
+        #SEE IF THERE ARE BETTER CHOICES
+        CALL HFDFF3 ( UNT$Pointer )  # in, UNT radiator
+ 
+        CALL HFDCMP             #IF 2 DETECTIONS COMPUTE ELLIPSE PARAMETERS
+       }
+ 
+    CALL HFSTOR(hft$senderindx$i)  #store detection data
+   }
+ 
+return
+end
+ 
+
+ 
+ 
+Subroutine HFDFF1 (UNT$Pointer)     # in, UNT radiator
+ 
+########################################################
+#$%
+#$% Purpose:   HFDFF1 determines if radiator has
+#$%            been detected and if so, fill
+#$%            first slot.
+#$%
+#$% Called By: HFDDET
+#$%
+#$% Calls:     HFDPOS     HFDFP1
+#$%
+#$% Tables:    None
+#$%
+#$% Date:      APRIL 81
+#$%
+#$% Author:    Tom Paulson
+#$%
+########################################################
+ 
+#
+# SEE IF RADIATOR HAS BEEN DETECTED AND IF SO FILL FIRST SLOT.
+#
+BBcommon
+HDcommon
+BBDeclare  (UNT$Pointer)                        # MJC 7/7/2K (E2145)
+integer J,
+        IDF                                     # MJC 7/7/2K (E2145)
+for (j=1;j<=khfdf;j=j+1)        #LOOK THRU ALL DETECTORS
+   {
+    if (isd[j] == isdr) next    #VIEWS MUST BELONG TO OPPOSING FORCES
+ 
+    call HFDPOS(j)
+ 
+    #DETERMINE IF DETECTION HAS TAKEN PLACE
+    call HFDFP1(J,              #J = INDEX FOR DETECTOR
+                IDF,            #IDF = DETECTION FLAG
+                UNT$Pointer)    # in, UNT radiator
+ 
+    IF (IDF == $YES)            #WAS RADIATOR DETECTED
+       {
+        KSLOT[1] = J            #INITIALIZE
+        SLOT[1,1] = FLATD       #   FIRST
+        SLOT[1,2] = FLOND       #   DETECTOR
+        SLOT[1,3] = DSLATD      #   SLOT
+        SLOT[1,4] = RD
+        SLOT[1,5] = HD
+ 
+        break
+       }
+   }
+ 
+return
+end
+ 
+
+ 
+ 
+Subroutine HFDPOS(j)
+ 
+########################################################
+#$%
+#$% Purpose:   HFDPOS determines the true latitude
+#$%            and longitude of detection.
+#$%
+#$% Called By: HFDFF1
+#$%
+#$% Calls:     None
+#$%
+#$% Tables:    UNT
+#$%
+#$% Date:      APRIL 81
+#$%
+#$% Author:    Tom Paulson
+#$%
+########################################################
+ 
+BBcommon
+HDcommon
+BBDeclare  (UNT2$Pointer)               # MJC 7/7/2K (E2145)
+integer J                               # MJC 7/19/2K (E2145)
+#$% set unit pointer
+unt2$pointer$to iux[j]        ##xxx
+ 
+#$% compute true latitude and longitude
+flatd = xunt2$truelatitude$f
+flond = xunt2$truelongitude$f
+dslatd = xunt2$costruelat$f
+ 
+return
+end
+ 
+
+ 
+ 
+Subroutine HFDFP1(j,            #index for detector
+                  idf,          #detection flag
+                  UNT2$Pointer) # in, UNT radiator
+########################################################
+#$%
+#$% Purpose:   HFDFP1 determines if detection has
+#$%            taken place and then procedes to
+#$%            calculate range and bearing.
+#$%
+#$% Called By: HFDFF1
+#$%
+#$% Calls:     PROXIM_M   ANG2PI     RANDOM
+#$%            RLL2RB     HFDFF2     HFDFF3
+#$%
+#$% Tables:    HFP
+#$%
+#$% Date:      APRIL 81
+#$%
+#$% Author:    Tom Paulson
+#$%
+#$% Note:      Intra-platform EMI logic added 9/17/90 reh
+########################################################
+ 
+ 
+BBcommon
+HDcommon
+BBDeclare  (HFP$Pointer,
+            UNT$Pointer,
+            UNT2$Pointer,
+            DEQ$Pointer,
+            DEQ2$Pointer)               # MJC 7/7/2K (E2145)
+integer IDF,
+        J                               # MJC 7/7/2K (E2145)
+real PD,
+     U,
+     Z,
+     RANDOM
+literal CSTRIP8                         # MJC 7/13/2K (E2145)
+Real*4      Intra_Degradation
+Real*4      PbDetect_Intra
+logical*1   detection_made
+Integer*4 Hold_Deq
+ 
+idf = $no                       #initialize detection flag
+pd = 0.0                        #set detection probability to zero
+ 
+if (ihx[j] == 0)                #is detector mobile
+   {
+    #$% get range and bearing to target
+    call PROXIM_M ( 0,                    # jb    _M        8/29/30
+                flatd,
+                flond,
+                dslatd,
+                rd,                     #range
+                hd)                     #bearing (from target to detector)
+ 
+    if (rd < 0.0)  return               #if out of range, no detection
+ 
+    hd = hd + $pi                       #bearing from detector to target
+    $ang2pi(hd)
+ 
+    pd = Hfdf$MobileDetectProb
+   }
+else                            #is detector fixed
+   {
+    if (hfp$lat$index == 0) return  #ignore if not detectable by base
+ 
+    hfp$pointer$to ihx[j]        #point to probability table
+ 
+    pd = xhfp$lat$lon$pd$f      #get probability
+   }
+ 
+if (pd == 0.0) return           #if probability is 0 return
+ 
+u = RANDOM(z)                   #get uniform random number
+ 
+#$% if probability is greater than this random number then the radiator
+#$% has been detected.
+if (pd >= u)
+    {
+    detection_made = $yes
+    }
+else
+    {
+    detection_made = $no
+    }
+ 
+#$% if hfdf would have made the detection excluding intra-platform EMI, 9/17/90 reh
+if ( detection_made != $no )
+    {
+    } # end if hfdf would have made the detection excluding intra-platform EMI
+ 
+if ( detection_made )
+   {
+    idf = $yes                  #show detection exists
+    lastdi = j                  #save last detector index inserted in a slot
+ 
+    if (ihx[j] != 0)            #if detector fixed
+       {
+        call RLL2RB(FLATD,              #calculate range & bearing
+                    FLOND,              #LATITUDE, LONGITUDE
+                    DsLatD,             #   AND COS OF LATITUDE
+                    FLATR,              #   PF DETECTOR
+                    FLONR,              #LATITUDE, LONGITUDE
+                    DsLatR,             #   AND COS OF LATITUDE
+                    RD,                 #   OF RADIATOR
+                    HD)                 #RANGE AND BEARING
+        $ang2pi(hd)                     #                       8/1/84
+       }
+   }
+ 
+return
+end
+ 
+
+ 
+ 
+Subroutine HFDFF2 (UNT$Pointer)
+ 
+########################################################
+#$%
+#$% Purpose:   HFDFF2  determines if radiator has
+#$%            been detected from another detector
+#$%            and if so, fill second slot.
+#$%
+#$% Called By: HFDDET
+#$%
+#$% Calls:     HFDPOS     HFDFP1     HFDFRN
+#$%
+#$% Tables:    None
+#$%
+#$% Date:      APRIL 81
+#$%
+#$% Author:    Tom Paulson
+#$%
+########################################################
+ 
+ 
+BBcommon
+HDcommon
+BBDeclare  (UNT$Pointer)                # MJC 7/7/2K (E2145)
+integer J,
+        IDF,
+        LOST1                           # MJC 7/7/2K (E2145)
+real BNGB,
+     BETA12                             # MJC 7/7/2K (E2145)
+for (j = lastdi + 1;j <= khfdf;j = j + 1)       #look thru remaining detctors
+   {                                            #   for second detection
+    if (isd[j] == isdr) next    #VIEWS MUST BELONG TO OPPOSING FORCES
+ 
+    call HFDPOS(j)              #set detector position data
+ 
+    call HFDFP1(j,          #determine if detection has taken place
+                idf,        #index for detector and detection flag
+                UNT$Pointer) # in, UNT radiator   9/90, reh
+ 
+    if (idf == $yes)        #was radiator detected
+       {
+        call HFDFRN(1,      #replace slot 1 data per range & bearing
+                    j,      #slot number 1 and detector index
+                    lost1,  #$yes means bearings from 1 & 2 too close
+                    BngB)   #angle between target bearings 1 & 2
+ 
+        if (lost1 == $no)   #if data not discarded
+           {                #   initialize slot 2 data
+            kslot[2] = j            #slot 2
+            slot[2,1] = flatd       #   initilization
+            slot[2,2] = flond
+            slot[2,3] = DsLatD
+            slot[2,4] = rd
+            slot[2,5] = hd
+            beta12 = BngB
+           }
+       }
+    if (kslot[2] != 0) break
+   }
+ 
+return
+end
+ 
+
+ 
+ 
+Subroutine HFDFRN(n,            #slot number
+                  j,            #detector index
+                  lost1,        #$no: Bearings far enuf apart -- can't discard
+                  BngB)         #$yes: Bearings too close -- data discarded
+                                #angle between 2 target bearings
+ 
+########################################################
+#$%
+#$% Purpose:   HFDFRN replaces slot data depending
+#$%            on ranges and bearings.
+#$%
+#$% Called By: HFDFF2     HFDFF3
+#$%
+#$% Calls:     HFDHBW
+#$%
+#$% Tables:    None
+#$%
+#$% Date:      APRIL 81
+#$%
+#$% Author:    Tom Paulson
+#$%
+########################################################
+ 
+BBcommon
+HDcommon
+integer LOST1,
+        N,
+        J                              # MJC 7/7/2K (E2145)
+real BNGB,
+     HBW,
+     HFDHBW,
+     TANG                              # MJC 7/7/2K (E2145)
+#$% set flag to NO
+lost1 = $no
+ 
+#$% compute bearing
+BngB = abs(slot[n,5] - hd)
+if (BngB > $pi) BngB = 2.0*$pi - BngB
+ 
+#$% determines half beam width
+hbw = HFDHBW(n)
+TAng = BngB - 2.0 * hbw
+if (TAng < ($pi/60.0) | TAng < hbw)
+   {
+    #$% set flag to YES
+    lost1 = $yes
+ 
+    if (rd < slot[n,4])
+       {
+        kslot[n] = j
+        lastdi = j
+ 
+        slot[n,1] = flatd
+        slot[n,2] = flond
+        slot[n,3] = DsLatD
+        slot[n,4] = rd
+        slot[n,5] = hd
+       }
+   }
+ 
+return
+end
+ 
+
+ 
+ 
+Subroutine HFDFF3 (UNT$Pointer)
+ 
+########################################################
+#$%
+#$% Purpose:   HFDFF3 determines if there are detec-
+#$%            tors in better positions than those
+#$%            in slots one and two.  If so, replace
+#$%            the corresponding detector.
+#$%
+#$% Called By: HFDDET
+#$%
+#$% Calls:     HFDPOS     HFDFP1     HFDFRN
+#$%            HFDFR3
+#$%
+#$% Tables:    None
+#$%
+#$% Date:      APRIL 81
+#$%
+#$% Author:    Tom Paulson
+#$%
+########################################################
+ 
+BBcommon
+HDcommon
+BBDeclare  (UNT$Pointer)                            # MJC 7/7/2K (E2145)
+integer J,
+        IDF,
+        LOST1,
+        IRF                                         # MJC 7/7/2K (E2145)
+real BNGB,
+     BNGC                                           # MJC 7/7/2K (E2145)
+for (j = lastdi + 1;j <= khfdf;j = j + 1)   #look thru remaining detectors
+   {                                        #   for possible better detectors
+                                            #   than the detectors in slots
+                                            #   1 and 2
+ 
+    IF (isd[j] == isdr) next    #VIEWS MUST BELONG TO OPPOSING FORCES
+ 
+    call HFDPOS(j)              #set detector position data
+ 
+    call HFDFP1(j,              #determine if detection has taken place
+                idf,            #index for detector and the detection flag
+                UNT$Pointer)    # in, UNT radiator   9/90, reh
+ 
+    if (idf == $no) next
+ 
+    call HFDFRN(1,              #replace slot 1 data per range & bearing
+                j,              #slot number 1 and detector index
+                lost1,          #lost1 = $yes: brngs from 1 & 3 too close
+                BngB)           #angle between target bearings 1 & 3
+ 
+    if (lost1 == $yes) next     #are 1 & 3 too close
+ 
+    call HFDFR3(2,              #replace slot 2 data per 2nd range & angle
+                j,              #   between 2 target bearings & detector index
+                BngB,           #angle between target bearings 1 & 3
+                BngC,           #angle between target bearings 1 & 2
+                irf)            #irf = $yes - slot 2 data has been replacd
+ 
+    if (irf == $yes) next       #has slot 2 data been replaced
+ 
+    call HFDFRN(2,              #replace slot 2 data per range & bearing
+                j,              #detector index
+                lost1,          #lost1 = $yes: brngs from 2 & 3 too close
+                BngB)           #angle between target bearings 2 & 3
+ 
+    if (lost1 == $yes) next     #are 2 & 3 too close
+ 
+    call HFDFR3(1,              #replace slot 1 data per range & bearing
+                j,              #detector index
+                BngB,           #angle between target bearings 2 & 3
+                BngC,           #angle between target bearings 1 & 2
+                irf)            #irf = $yes - slot 1 data has been replaced
+   }
+ 
+return
+end
+ 
+
+ 
+Subroutine HFDFR3(n,            #slot number possibly to be replaced
+                  j,            #detector index
+                  BngB,         #angle between 1 & 3 target bearings
+                  BngC,         #angle between 1 & 2 target bearings
+                  irf)          #irf = $yes - slot 2 data has been replaced
+ 
+########################################################
+#$%
+#$% Purpose:   HFDFR3 replaces slot two data
+#$%            per second range and angle.
+#$%
+#$% Called By: HFDFF3
+#$%
+#$% Calls:     None
+#$%
+#$% Tables:    None
+#$%
+#$% Date:      APRIL 81
+#$%
+#$% Author:    Tom Paulson
+#$%
+########################################################
+ 
+#
+# slot 2 data will be replaced if range3/sin(angb) is less than
+#    range2/sin(angc), where range2 and range3 are the distances
+#    respectively from the detector in slot 2 and the new detector
+#    being tested.  angb and angc are the corresponding angles
+#    between the bearings from these detectors to the target and
+#    the bearing from the detector in slot 1 to the target.
+#
+ 
+BBcommon
+HDcommon
+integer IRF,
+        N,
+        J                             # MJC 7/7/2K (E2145)
+real BNGC,
+     BNGB                             # MJC 7/7/2K (E2145)
+#$% set slot 2 indicator status
+irf = $no
+ 
+BngC = abs(slot[2,5] -slot[1,5])        #get angle angc
+ 
+if (BngC > $pi) BngC = 2.0*$pi - BngC
+ 
+if (rd/SIN(BngB)**2 < slot[n,4]/SIN(BngC)**2)
+   {
+    kslot[n] = j
+    lastdi = j
+ 
+    #$% load slot data
+    slot[n,1] = flatd
+    slot[n,2] = flond
+    slot[n,3] = DsLatD
+    slot[n,4] = rd
+    slot[n,5] = hd
+ 
+    #$% indicate that slot 2 data has been replaced
+    irf = $yes
+   }
+return
+end
+ 
+
+ 
+Subroutine HFDCMP
+ 
+########################################################
+#$%
+#$% Purpose:   HFDCMP computes target containment
+#$%            ellipse parameters if two detections                        .
+#$%            made.
+#$%
+#$% Called By: HFDDET
+#$%
+#$% Calls:     HFCMP1
+#$%
+#$% Tables:    None
+#$%
+#$% Date:      APRIL 81
+#$%
+#$% Author:    Tom Paulson
+#$%
+########################################################
+ 
+BBcommon
+HDcommon
+integer IJ,
+        JJ                                # MJC 7/7/2K (E2145)
+real SN1,
+     SN2,
+     B,
+     SNASQ,
+     TERM,
+     SIGU,
+     SIGV                                 # MJC 7/7/2K (E2145)
+real A,C,cs1,cs2,CsASq
+ 
+call HDCMP1(1,          #compute heading cos & sin divided by
+            cs1,        #   cross-track error for slot 1
+            sn1)
+ 
+call HDCMP1(2,          #do the same for
+            cs2,        #   slot 2
+            sn2)
+ 
+A = sn1**2 + sn2**2
+B = -2.0*(cs1*sn1 + cs2*sn2)
+C = cs1**2 + cs2**2
+ 
+ 
+#Blpha = 0.5 * QKATN2(A-C,B)                      # jb        8/16/88
+if(B==0 & (A-C)==0) Blpha = 0  #jb-Protect ATAN2 frm 2 zeroes 8/17/88
+else Blpha = 0.5  * ATAN2(B,A-C)                  # jb        8/17/88
+if(Blpha < 0)  Blpha = $twoPI             # jb; non-negative  8/16/88
+ 
+SnASq = SIN(Blpha)**2
+CsASq = 1. - SnASq                #cos squared
+ 
+term = CsASq - SnASq
+ 
+ij = 0                                  # <<<>>>        7/14/87
+if (A*CsASq - C*SnASq > .0001)          # <<<>>>        7/14/87
+    sigu = SQRT(term/(A*CsASq - C*SnASq))
+else ij = 1                             # <<<>>>        7/14/87
+ 
+jj = 0                                  # <<<>>>        7/14/87
+if (C*CsASq - A*SnASq > .0001)          # <<<>>>        7/14/87
+sigv = SQRT(term/(C*CsASq - A*SnASq))
+else jj = 1                             # <<<>>>        7/14/87
+ 
+#if (sigu >= sigv)
+if (sigu >= sigv | ij +jj > 0)          # <<<>>>        7/14/87
+   {
+    bmajor = sigu
+    bminor = sigv
+   }
+else
+   {
+    bmajor = sigv
+    bminor = sigu
+ 
+    Blpha = Blpha + $pi/2.
+ 
+    if (Blpha >= $pi) Blpha = Blpha - $pi
+   }
+ 
+Return
+End
+ 
+
+ 
+ 
+Subroutine HDCMP1(n,    #slot number - input
+                  Dn,   #cos(heading n)/(cross track err n)
+                  Sn)   #sin(heading n)/(cross track err n)
+ 
+########################################################
+#$%
+#$% Purpose:   HDCMP1 computes heading, cosine and
+#$%            sine, divided by cross-track error
+#$%            for a slot.
+#$%
+#$% Called By: HFDCMP
+#$%
+#$% Calls:     HFDHBW
+#$%
+#$% Tables:    None
+#$%
+#$% Date:      APRIL 81
+#$%
+#$% Author:    Tom Paulson
+#$%
+########################################################
+ 
+BBcommon
+HDcommon
+real HBW,
+     DN,
+     SN                                 # MJC 7/7/2K (E2145)
+integer N
+real HFDHBW                          # MJC 7/7/2K (E2145)
+ 
+hbw = HFDHBW(n)
+Dn = COS(slot[n,5])/(slot[n,4]*hbw)
+Sn = SIN(slot[n,5])/(slot[n,4]*hbw)
+ 
+Return
+End
+ 
+
+ 
+ 
+Function HFDHBW(n)
+ 
+########################################################
+#$%
+#$% Purpose:   HFDHBW determines half beamwidth
+#$%            for HFDF detections.
+#$%
+#$% Called By: HDCMP1     HFBGUP
+#$%
+#$% Calls:     NOne
+#$%
+#$% Tables:    None
+#$%
+#$% Date:      APRIL 81
+#$%
+#$% Author:    Tom Paulson
+#$%
+########################################################
+ 
+BBcommon
+HDcommon
+integer J,
+        N                                  # MJC 7/7/2K (E2145)
+real BW,
+     HFDHBW                                # MJC 7/7/2K (E2145)
+j = kslot[n]
+ 
+#$% if side is blue
+if (isd[j] == $blue$code)
+   {
+    #$% if detector is zero, set band width mobile
+    if (ihx[j] == 0)  bw = hfdf$bwidth$blue$mobile
+    #$% else set band width fixed
+    else              bw = hfdf$bwidth$blue$fixed
+   }
+else
+   {
+    #$% if detector is zero, set band width orange mobile
+    if (ihx[j] == 0)  bw = hfdf$bwidth$orange$mobile
+    #$% else set band width orange fixed
+    else              bw = hfdf$bwidth$orange$fixed
+   }
+ 
+#$% compute high beam width
+hfdhbw = .5 * bw
+ 
+return
+end
+ 
+
+ 
+ 
+Subroutine HFSTOR(Ixunit)       #unit index of detectee
+ 
+########################################################
+#$%
+#$% Purpose:   HFSTOR either updates the present
+#$%            track or it creates a new track.
+#$%
+#$% Called By: HFDDET
+#$%
+#$% Calls:     HFDFGT     HFDNEW     HFDSET
+#$%
+#$% Tables:    UNT        HFD
+#$%
+#$% Date:      APRIL 81
+#$%
+#$% Author:    Tom Paulson
+#$%
+########################################################
+ 
+BBcommon
+HDcommon
+BBDeclare  (UNT$Pointer,
+            UNT$Hfdftrack$I,
+            HFD$Pointer)                            # MJC 7/10/2K (E2145)
+integer IXUNIT,
+        IX                                          # MJC 7/10/2K (E2145)
+#$% set unit pointer to detected unit
+unt$pointer$to ixunit
+ 
+#$% get HFDF track
+unt$hfdftrack$i = xunt$hfdftrack$i
+ 
+if (unt$hfdftrack$i != 0)       #if detectee is currently held
+   {
+    #$% set HFDF pointer to the HFDF track
+    hfd$pointer$to unt$hfdftrack$i
+   }
+else                            #if new track required
+   {
+    #$% get and pass new track index
+    call HFDFGT(ix)
+ 
+    hfd$pointer$to ix
+ 
+    #$% call sets all fields in HFD entry required by new detection
+    call HFDNEW(hfd$pointer,ixunit)
+   }
+ 
+#$% calls sets all fields in HFD entry except those required by new detection
+call HFDSET(hfd$pointer,ixunit)
+ 
+return
+end
+ 
+
+ 
+Subroutine HFDNEW(hfd$pointer,ixunit)
+ 
+########################################################
+#$%
+#$% Purpose:   HFDNEW sets all fields in HFD entry
+#$%            required only by new detection.
+#$%
+#$% Called By: HFSTOR
+#$%
+#$% Calls:     None
+#$%
+#$% Tables:    HFD        UNT
+#$%
+#$% Date:      APRIL 81
+#$%
+#$% Author:    Dana Wlls
+#$%
+########################################################
+BBcommon
+HDcommon
+BBDeclare  (HFD$Color$I,
+            HFD$Sequencenmbr$I,
+            HFD$Detectee$I,
+            HFD$Uptime$F,
+            HFD$Pointer,
+            UNT$Pointer,
+            UNT$Hfdftrack$I)                        # MJC 7/10/2K (E2145)
+integer NMBRTR,
+        IXUNIT                                      # MJC 7/10/2K (E2145)
+NmbrTr = Hfdf$TrackCounter
+#$% if track number less than minimum or greater than maximum,
+#$% set track number to one
+If (NmbrTr <= 0 | NmbrTr >= 1000) NmbrTr = 1
+ 
+#$% increment track counter
+Hfdf$TrackCounter = NmbrTr + 1
+ 
+Hfd$Color$I = isd[kslot[1]]    #Set color to blue or orange
+putHfd$Color$I
+ 
+Hfd$SequenceNmbr$I = NmbrTr     #Set track number
+putHfd$SequenceNmbr$I
+ 
+Hfd$Detectee$I = Ixunit         #Index for radiator
+putHfd$Detectee$I
+ 
+hfd$UpTime$f = game$time
+puthfd$UpTime$f
+ 
+unt$pointer$to ixunit
+ 
+unt$hfdftrack$i = hfd$pointer$index   #store hfd index in detectee unit entry
+putunt$hfdftrack$i
+ 
+return
+end
+ 
+
+ 
+ 
+Subroutine HFDSET(hfd$pointer,ixunit)
+ 
+########################################################
+#$%
+#$% Purpose:   HFDSET sets all fields in HFD
+#$%            entry except those required                 .
+#$%            by new detection.
+#$%
+#$% Called By: HFSTOR
+#$%
+#$% Calls:     HFELUP     HFBGUP
+#$%
+#$% Tables:    HFD
+#$%
+#$% Date:      APRIL 81
+#$%
+#$% Author:    Tom Paulson
+#$%
+########################################################
+BBcommon
+HDcommon
+BBDeclare  (HFD$Detector1$I,
+            HFD$Pointer,
+            HFD$Frequency$I,
+            HFD$Lastdettime$F,
+            HFD$Truebearing$I,
+            HFD$Uptime$F,
+            HFD$Detector2$I)                  # MJC 7/10/2K (E2145)
+integer IXUNIT                                # MJC 7/10/2K (E2145)
+#$% set detector
+Hfd$Detector1$I = iux[kslot[1]]
+putHfd$Detector1$I
+ 
+#$% set frequency
+Hfd$Frequency$I = ifreq
+putHfd$Frequency$I
+ 
+#$% set last detection time
+hfd$LastDetTime$f = game$time
+puthfd$LastDetTime$f
+ 
+#$% compute true bearing
+Hfd$TrueBearing$i = (180./$pi) * slot[1,5] + .5
+if (hfd$truebearing$i > 359)
+    hfd$truebearing$i = hfd$truebearing$i - 360
+putHfd$TrueBearing$i
+ 
+if (xhfd$UpTime$f < xhfd$DownTime$f)    #if previously down
+   {
+    #$% set uptime
+    hfd$UpTime$f = game$time
+    puthfd$UpTime$f
+   }
+ 
+if (kslot[2] != 0)                      #if two detectors
+   {
+    Hfd$Detector2$I = iux[kslot[2]]
+    putHfd$Detector2$I
+ 
+    #$% call update the containment ellipse or store position of target
+    call HFELUP(hfd$pointer,ixunit)
+   }
+else                                    #if only one detector
+   {
+    #$% call stores apparent bearing data in the HFDF output table
+    call HFBGUP(hfd$pointer,ixunit)
+   }
+ 
+return
+end
+ 
+
+ 
+ 
+Subroutine HFELUP(Hfd$Pointer,Ixunit)
+ 
+########################################################
+#$%
+#$% Purpose:   HFELUP updates the containment
+#$%            ellipse and stores position of
+#$%            target.
+#$%
+#$% Called By: HFDSET
+#$%
+#$% Calls:     ELLOFF
+#$%
+#$% Tables:    HFD        UNT
+#$%
+#$% Date:      APRIL 81
+#$%
+#$% Author:    Tom Paulson
+#$%
+########################################################
+ 
+ 
+BBcommon
+HDcommon
+BBDeclare  (HFD$Elpsexists$I,
+            HFD$Pointer,
+            HFD$Elpssemimajoraxis$I,
+            HFD$Elpssemiminoraxis$I,
+            HFD$Elpsorientation$I,
+            HFD$Elpsoffsetlat$F,
+            HFD$Elpsoffsetlon$F,
+            HFD$Elpsuptime$F,
+            UNT$Pointer)                    # MJC 7/10/2K (E2145)
+integer IXUNIT                              # MJC 7/10/2K (E2145)
+unt$pointer$to ixunit           #unit index of target        ##xxx
+ 
+Hfd$ElpsExists$I = $yes     #Show there is an ellipse
+putHfd$ElpsExists$I
+ 
+Hfd$ElpsSemiMajorAxis$I = INT ((BMajor * 2 ) + 0.5)  #Set
+putHfd$ElpsSemiMajorAxis$I                           #  semi major
+ 
+Hfd$ElpsSemiMinorAxis$I = INT ((BMinor * 2) + 0.5)  #   and
+putHfd$ElpsSemiMinorAxis$I                          #   semi minor axes
+ 
+Hfd$ElpsOrientation$I = (180./$pi) * Blpha  #Set orientation of ellipse
+putHfd$ElpsOrientation$I
+ 
+#$% call ellipse offset routine
+call ELLOFF(bmajor,                        ##xxx
+            bminor,
+            blpha,
+            xunt$truelatitude$f,
+            xunt$truelongitude$f,
+            xunt$costruelat$f,
+            hfd$ElpsOffsetLat$f,
+            hfd$ElpsOffsetLon$f)
+ 
+hfd$ElpsUpTime$f = Game$Time        #Set ellipse update time
+puthfd$ElpsUpTime$f
+ 
+putHfd$ElpsOffsetLat$F
+#$% store ellipse offset latitude and longitude position data
+putHfd$ElpsOffsetLon$F
+ 
+Return
+End
+ 
+
+ 
+ 
+Subroutine HFBGUP(Hfd$Pointer,
+                  Ixunit)               #detectee unit index
+ 
+ 
+########################################################
+#$%
+#$% Purpose:   HFBGUP stores apparent bearing data
+#$%            in the HFDF output table.
+#$%
+#$% Called By: HFDSET
+#$%
+#$% Calls:     HFDHBW
+#$%
+#$% Tables:    HFD
+#$%
+#$% Date:      APRIL 81
+#$%
+#$% Author:    Tom Paulson
+#$%
+########################################################
+ 
+BBcommon
+HDcommon
+BBDeclare  (HFD$Appbearing$I,
+            HFD$Pointer,
+            HFD$Elpsexists$I)                  # MJC 7/10/2K (E2145)
+real RBRG,
+     HFDHBW,
+     RANDN                                     # MJC 7/10/2K (E2145)
+integer IXUNIT                                 # MJC 7/10/2K (E2145)
+rbrg = RANDN(slot[1,5],.5*HFDHBW(1))    #generate random bearing error
+ 
+#$% compute apparent bearing data
+Hfd$AppBearing$i = (180./$pi) * rbrg + .5
+if (hfd$appbearing$i > 359)
+    hfd$appbearing$i = hfd$appbearing$i - 360
+putHfd$AppBearing$i
+ 
+Hfd$ElpsExists$I = $no      #Show there is no ellipse
+putHfd$ElpsExists$I
+ 
+Return
+End
+ 
+
+ 
+ 
+ Subroutine HFDFGT(IndxS1)      #get and pass new track index
+ 
+#######################################################
+ #$%
+ #$% Purpose:   HFDFGT gets and passes a new
+ #$%            track index.
+ #$%
+ #$% Called By: HFSTOR
+ #$%
+ #$% Calls:     None
+ #$%
+ #$% Tables:    HFD        UNT
+ #$%
+ #$% Date:      APRIL 81
+ #$%
+ #$% Author:    Tom Paulson
+ #$%
+ #######################################################
+ BBcommon
+ HDcommon
+ BBDeclare  (HFD$Pointer,
+             HFD$Nextindx$I,
+             UNT$Pointer,
+             UNT$Hfdftrack$I)                     # MJC 7/10/2K (E2145)
+ integer INDXS1,
+         INDXS2                                   # MJC 7/10/2K (E2145)
+ indxs1 = Hfdf$First$Free               #save pointer index to first
+                                        #   free slot
+ Hfd$pointer$to indxs1                  #point to this slot
+ 
+ hfd$used = max(hfd$used, hfd$pointer$index * hfd$entry)
+ 
+ if (xhfd$detectee$i != 0)              #if slot occupied
+    {
+     unt$pointer$to xhfd$detectee$i
+ 
+     if (xunt$hfdftrack$i == indxs1)    #if pointing to this entry
+        {
+         unt$hfdftrack$i = 0
+         putunt$hfdftrack$i
+        }
+    }
+ 
+ indxs2 = xHfd$NextIndx$I                #save pointer index to next free
+                                        #   slot on chain.  this is now
+                                        #   pointer index to first free slot.
+ Hfd$NextIndx$I = 0                     #set the pointer index to the old
+ putHfd$NextIndx$I                      #   first free slot to zero since
+                                        #   it will now become the last
+ if (Hfdf$Last$Track != 0)              #if this is not the first track
+    {                                   #   ever then point to old last
+     Hfd$pointer$to Hfdf$Last$Track     #  track and link old last track
+     Hfd$NextIndx$I = indxs1            #   to new last track.  this new
+     putHfd$NextIndx$I                  #   last track was the first free
+    }
+ 
+ else
+    {
+     Hfdf$Last$Track = indxs1           #if this is the first track
+ 
+     Hfdf$First$Track = indxs1          #   indicies to the first slot
+    }
+ 
+ Hfdf$Last$Track = indxs1               #update last track
+ 
+ Hfdf$First$Free = indxs2               #update first free space
+ 
+ if (indxs1  == Hfdf$Last$Free)         #if the first and last free space
+    {
+     Hfdf$Last$Free = indxs2            #      pointer indicies are equal
+ 
+     if (indxs1 == Hfdf$First$Track)    #if the first free space pointer
+        {
+         Hfdf$First$Track = indxs2
+        }
+    }
+ 
+ Return
+ End
+ 
+
+ 
+ 
+ Subroutine HFCLNP
+ 
+#######################################################
+ #$%
+ #$% Purpose:   HFCLNP cleanup time, marks tracks
+ #$%            as not current, removes old tracks.
+ #$%
+ #$% Called By: HFDMOD
+ #$%
+ #$% Calls:     None
+ #$%
+ #$% Tables:    HFD        UNT
+ #$%
+ #$% Date:      APRIL 81
+ #$%
+ #$% Author:    Tom Paulson
+ #$%
+ #######################################################
+ 
+ BBcommon
+ HDcommon
+ BBDeclare  (HFD$Pointer,
+             HFD$Lastdettime$F,
+             UNT$Pointer,
+             HFD$Downtime$F,
+             HFD$Nextindx$I)                        # MJC 7/10/2K (E2145)
+ #$% if first slot empty, return
+ if (hfdf$first$track == 0)  return
+ 
+ hfd$pointer$to hfdf$first$track      # set HFDF pointer to first track
+ 
+ repeat
+    {
+     hfd$LastDetTime$f = xhfd$LastDetTime$f  # get last detection time
+ 
+     #$% if an old track
+     if (game$time - hfd$LastDetTime$f >= hfdf$time$track)
+        {
+         unt$pointer$to xhfd$detectee$i      # set unit pointer to the detectee
+         putunt$hfdftrack$i (0)              # set track to zero
+        }
+     else if (game$time - hfd$LastDetTime$f == model$interval)  # if track just gone down
+        {
+         hfd$DownTime$f = game$time
+         puthfd$DownTime$f
+        }
+ 
+     hfd$nextindx$i = xhfd$nextindx$i
+ 
+     if (hfd$nextindx$i == 0)  break
+ 
+     hfd$pointer$to hfd$nextindx$i
+    }
+ 
+return
+end
+ 
+
+ 
+ 
+ Subroutine HFDDLT(NmbrTr,      #number of track to be deleted
+                   MvFlag)      # = $no track not found, = $yes track found
+ 
+ 
+#######################################################
+ #$%
+ #$% Purpose:   HFDDLT determines the number of
+ #$%            the track to be detected.
+ #$%
+ #$% Called By:
+ #$%
+ #$% Calls:     HFDDL2
+ #$%
+ #$% Tables:    HFD
+ #$%
+ #$% Date:      APRIL 81
+ #$%
+ #$% Author:    Tom Paulson
+ #$%
+ #######################################################
+ 
+ #
+ # This routine changes the next chain index so that the slot is removed
+ #   from the track chain and inserted into the free chain.
+ #
+ 
+ BBcommon
+ HDcommon
+ BBDeclare  (HFD$Pointer,
+             HFD$Nextindx$I)                # MJC 7/10/2K (E2145)
+ integer MVFLAG,
+         INDX1,
+         NMBRTR,
+         INDX2,
+         INDXSV                             # MJC 7/10/2K (E2145)
+ #$% set flag to NO
+ MvFlag = $no
+ Indx1 = Hfdf$First$Track
+ 
+ #$% if zero, return
+ if (Indx1 == 0)  return
+ 
+ Hfd$Pointer$to Indx1
+ 
+ #$% if track number is sequence
+ if (nmbrtr == xHfd$sequencenmbr$i)
+    {
+     #$% get HFD next index
+     Hfdf$First$Track = xHfd$nextindx$i
+ 
+     call HFDDL2(Hfd$Pointer,        #put deleted slot into free chain
+                 indx1,
+                 mvflag)
+    }
+ 
+ else
+    {
+     repeat
+        {
+         indx2 = indx1
+ 
+         #$% set HFD next index
+         indx1 = xHfd$NextIndx$I
+         if (Indx1 == 0) break
+         Hfd$Pointer$to Indx1
+ 
+         #$% if track number is sequence number
+         if (NmbrTr == xHfd$SequenceNmbr$I)
+            {
+             #$% save next index
+             IndxSv = xHfd$NextIndx$i
+             Hfd$Pointer$to Indx2
+ 
+             Hfd$NextIndx$I = IndxSv
+             Hfd$Pointer$to Indx1
+             call HFDDL2(Hfd$Pointer,   #put deleted slot into free chain
+                         Indx1,
+                         mvflag)
+            }
+ 
+        }
+ 
+    }
+ 
+ Return
+ End
+ 
+
+ 
+ 
+ Subroutine HFDDL2(Hfd$Pointer,         #pntr to item to be deleted fr sos tbl
+                   indx1,               #index for same item
+                   mvflag)              #see sub sosdlt
+ 
+#######################################################
+ #$%
+ #$% Purpose:   HFDDL2 sets pointer to item to be
+ #$%            deleted from SOS table.
+ #$%
+ #$% Called By: HFDDLT
+ #$%
+ #$% Calls:     None
+ #$%
+ #$% Tables:    HFD
+ #$%
+ #$% Date:      APRIL (1
+ #$%
+ #$% Author:    Tom Paulson
+ #$%
+ #######################################################
+ 
+ BBcommon
+ HDcommon
+ BBDeclare (HFD$Nextindx$I,
+            HFD$Pointer)                      # MJC 7/10/2K (E2145)
+ integer INDX1,
+         MVFLAG                               # MJC 7/10/2K (E2145)
+ #$% set HFD next index to first free slot
+ Hfd$NextIndx$I = Hfdf$First$Free
+ putHfd$nextindx$i
+ 
+ #$% set first free slot to deleted track
+ Hfdf$First$Free = indx1
+ 
+ #$% set flag to YES
+ MvFlag = $yes
+ 
+ Return
+ End
+ 
+
+ 

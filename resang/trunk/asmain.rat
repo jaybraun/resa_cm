@@ -1,0 +1,2189 @@
+######   version 3.1(NWISS)  dated-  18oct82
+
+#####
+#####   Modified to allow Reverse-Video for ASTABs with changes
+#####
+#### smn prog    module         comments
+#### === ====    ======         ==============================================
+####     TPA     Reset_Flags    This subroutine was added to reset all flags
+####                            to deactivate reverse-video in the array
+####                            REV_Lines.
+####     TPA     Build_Flags    This subroutine compares an old BBSBI page to
+####                            a cycled BBSBI page.
+####     TPA     Flag_It        This subroutine flags any changes that occured
+####                            in a cycled page.
+####     TPA     Rev_1_Line     This subroutine changes the flags to reverse-
+####                            video and output to a VT100.
+####
+
+ 
+
+######################################################################
+#$%
+#$% Information on the programs and subroutines located in ASMAIN.RAT 
+#$% along with those that are called is provided in DOC.WHO.
+#$%
+#$% Flowcharts illustrating the interrelationships of the programs 
+#$% and subprograms for this program are contained in ASMAIN.HIR
+#$%
+######################################################################
+
+define ($lfc$HardCopyASTAB,66)
+
+include "stmain.inc"                            ## TPA
+include "bbctl.inc"         
+include "bbcode.inc"         
+include "bbsta.inc"         
+include "bbvue.inc"         
+include "bbsbi.inc"         
+include "ascii.inc"         
+include "macros.inc"         
+
+define (BBimplicit, IMPLICIT NONE)  # jb E2145  3/29/00
+
+undefine read
+undefine write
+undefine err
+
+define ($MAX_Boards, 6)
+define ($MAX_Col,   80)                 ## TPA
+define ($MAX_lines, 24)                 ## TPA
+
+define (AstabCommon,
+        integer         NbrASTABs, channels[$Max_Boards], sta$SBIIndex$i, 
+                        old_char[2,20], KeyPad_chan, KeyPad_len
+        integer*4       KeyPad_iosb[4], KeyPad_sta
+        character       work[ARB], KeyPad_buf[ARB], KeyPad_work[ARB]
+
+        integer         Pad_Len[$Max_Boards]
+        integer*4       Pad_iosb[4,$MAX_Boards]
+        character       Pad_buf[ARB,$MAX_Boards], Pad_work[ARB,$MAX_Boards]
+
+        character       OLD_Lines[$MAX_col,$MAX_lines], ## TPA
+                        NEW_Lines[$MAX_col,$MAX_lines],
+                        REV_Lines[$MAX_col,$MAX_lines]
+        integer         line_O, line_N
+
+
+        common /ASTAB/  NbrASTABs, channels, sta$SBIIndex$i, 
+                        old_char, 
+                        KeyPad_chan, KeyPad_len, 
+                        Pad_Len, line_O, line_N,   
+                        Pad_IOSB, Pad_buf,         
+                        KeyPad_iosb,  KeyPad_sta,  
+                        work, KeyPad_buf, KeyPad_work, 
+                        OLD_Lines, NEW_Lines, REV_Lines,  
+                        Pad_work
+       )
+
+
+Program Asmain  
+
+#######################################################
+#$%
+#$% Purpose:   ASMAIN is a multiple ASTAB generator
+#$%
+#$% Called By: NONE
+#$%
+#$% Calls:     GETSTA    OPEN_ASTABS    ASTAB   INITR4
+#$%            ENDR4
+#$%
+#$% Tables:    STA, SBI
+#$%
+#$% Date:      10-MAR-82
+#$%
+#$% Author:    Dana Wills
+#$%
+#######################################################
+use ifport
+bbcommon
+AstabCommon
+
+Integer n, ista     # jb E2145  3/29/00
+
+EXTERNAL   ERROR_HANDLER
+external   as_shutdown 
+BBDeclare (STA$Pointer, STA$AstabPid$i)
+#$% map in the blackboard
+BBmap
+
+#$% intialize all standrard files and variables
+call initr4
+ 
+#CALL LIB$ESTABLISH (ERROR_HANDLER)  # required for ALPHA capture of Errors
+#call init_errset                    # turn off Arithimetic Errors
+
+call getsta (ista)                      ## get the station number
+
+
+
+#call Assoc_STA_Event_Flags (ista)
+
+call open_astabs (ista)                 ## open the ASTAB with the station no.
+
+if (NbrASTABS != 0)                     ## if any ASTAB's exists...
+    {
+	sta$pointer$to ista
+	sta$AstabPid$i = getpid()				# Get astab controller process id and store in BB
+	PUTsta$AstabPid$i
+
+    call init_keypad (ista,0)
+
+    for (n = 1; n <= $MAX_Boards; n = n + 1)
+        {
+        if (channels[n] > 0) call init_keypad (ista,n)
+        }
+
+    call set_exit_handler(as_shutdown)  
+
+    call astabs (ista)  
+    }
+
+for (n = 1; n <= $MAX_Boards; n = n + 1)
+{
+    if (channels[n] > 0) call asdevice_close(channels[n], old_char[1,n])
+}
+
+call kill_workstation_processes(ista)
+
+
+call exit
+end
+
+
+
+Subroutine Getsta (ista)
+
+ ##########################################################################
+ #$%
+ #$% Purpose:   GETSTA gets the station number from the spawned process
+ #$%            name.  If no process name exists, a station number
+ #$%            can be entered on the command line when executing ASMAIN.
+ #$%
+ #$% Called By: ASMAIN
+ #$%
+ #$% Calls:     READ_PNAME_INDEX    TYPERR   GETARG   ENDR4
+ #$%
+ #$% Tables:    NONE
+ #$%
+ #$% Date:      10-MAR-82
+ #$%
+ #$% Author:    Dana Wills
+ #$%
+ ######################################################################
+BBcommon
+AstabCommon
+
+integer         ista, STA$Pointer   # jb E2145  3/29/00
+integer         ctoi, i
+#external        astab$_INVSTANUM
+
+VaxCharacter*64     Args[3], Params
+Integer*4           Arg_Len[3]  
+
+call read_arguments (3, Args, Arg_Len, Params) # read the command line
+
+if (args[1] != " ")                             # dew 9/16/91
+    {
+    i = 1 
+    ista = ctoi (%%ref(args[1]),i)
+    }
+else
+    {
+    call read_pname_index (ista)
+    }
+
+STA$Pointer$to ista
+
+if (! STA$Pointer$Valid )               ## within limits
+    {
+    #$% send error message
+#    call typerr (%%loc(astab$_INVSTANUM))
+    #$% close all open files and terminate program
+    call endr4
+    }
+
+return
+end
+
+
+
+Subroutine Open_Astabs (ista)
+
+ #####################################################################
+ #$%
+ #$% Purpose:   OPEN_ASTABS open the ASTABS with the station number
+ #$%            that is passed.
+ #$%
+ #$% Called By: ASMAIN
+ #$%
+ #$% Calls:     REMARK   SMOVHN   SMOV   TYPERR
+ #$%
+ #$% Tables:    STA, SBI
+ #$%
+ #$% Date:      10-MAR-82
+ #$%
+ #$% Author:    Dana Wills
+ #$%
+ #######################################################
+BBcommon
+AstabCommon
+
+LITERAL STA$KeypadAddr$C,CSTRIP8,SBI$AstabAddr$C    # jb  E2145  3/29/00
+integer         asdevice_open, rc,
+                kk,ista,icnt,nsbi,iview,        # jb  E2145  3/29/00
+                STA$Pointer, SBI$Pointer        # jb  E2145  3/29/00
+Integer*4       ichan, pid                      # dew E2149 8/1/00
+character       buf[ARB]
+character		display[17]
+character		geometry[50]
+character		title[20]
+
+if (ista == 0) return                   ## if no station number, return
+
+sta$pointer$to ista                     ## set STA pointer for appr ASTAB
+
+iview = Xsta$view$i                     ## get the view of ASTAB
+
+nbrASTABs = xsta$NbrASTABS$i            ## get number of ASTABs for view
+
+if (NbrASTABS == 0)                     ## if no ASTABS allocated
+    {
+    call remark_v ("Sorry, this Station has no ASTABs.")
+    return
+    }
+
+sta$KeyPadAddr$C = Xsta$KeyPadAddr$C    ## get KeyPad TTY Address (if present)
+KeyPad_chan      = 0
+KeyPad_len       = 0
+
+sta$SBIIndex$i = Xsta$SBIIndex$i        ## set the index
+
+#$% set possible "no usable ASTABs" error
+icnt = 0
+
+for (nsbi = 1; nsbi <= NbrASTABs; nsbi = nsbi + 1)
+    {
+    #$% set status board information pointer    
+    sbi$pointer$to (sta$SBIIndex$i + nsbi - 1)
+
+
+    kk = 0
+	if (Xsbi$ASTABaddr$i != 0)
+	{
+		call smovi( Xsbi$ASTABaddrIP1$i,display, kk)
+		call smov( PERIOD, display, kk)
+		call smovi( Xsbi$ASTABaddrIP2$i,display, kk)
+		call smov( PERIOD, display, kk)
+ 		call smovi( Xsbi$ASTABaddrIP3$i,display, kk)
+		call smov( PERIOD, display, kk)
+ 		call smovi( Xsbi$ASTABaddrIP4$i,display, kk)
+		call smov( COLON, display, kk)
+		call smov( $DIG0, display, kk)
+		call smov( EOS, display, kk)
+	}
+	else
+	{
+		call smov( COLON, display, kk)
+		call smov( DIG0, display, kk)
+		call smov( EOS, display, kk)
+	}
+
+	#-geometry 80x24+0+0			Upper left corner
+	#-geometry 80x24-0+0			Upper right corner
+	#-geometry 80x24-0-0			Lower right corner
+	#-geometry 80x24+0-0			Lower left corner
+	kk = 0
+	call smovv( "80x24", geometry, kk)
+	if      (nsbi == 1) call smovv( "+0+0", geometry, kk)
+	else if (nsbi == 2) call smovv( "+0-0", geometry, kk)
+	else if (nsbi == 3) call smovv( "-0+0", geometry, kk)
+	else if (nsbi == 4) call smovv( "-0-0", geometry, kk)
+	else                call smovv( "+0+100", geometry, kk)
+	call smov( EOS, geometry, kk)
+
+	kk = 0
+	call smovv( "Station ", title, kk)
+	call smovi( ista, title, kk)
+	call smovv( " ASTAB ", title, kk)
+	call smovi( nsbi, title, kk)
+	call smov( EOS, title, kk)
+
+    #$% open a channel for ASTABS
+    rc = asdevice_open(display, geometry, title, ichan, pid)
+
+    if (rc != 0) 
+        {
+        #$% send error message and set channel
+        call typerr (rc)
+        ichan = 0
+		pid = 0
+
+        putSBI$CurrPage$I  (0)          ## clear fields for DISPLAY
+        putSBI$CurrBoard$I (0)          ## ASTAB command    
+        putSBI$NbrLines$I  (0)          ## TPA 6/6/83
+        }
+    else 
+        {
+        #$% else increment the count
+        icnt = icnt + 1
+
+#        if (sta$KeyPadAddr$C == sbi$ASTABaddr$c) 
+            KeyPad_chan = ichan
+        }
+
+    #$% get channel number
+    channels[nsbi] = ichan
+	putSBI$PID$i(pid)					# Save pid for termination
+    }
+
+if (icnt != NbrASTABS)                  # if not correct nbr of ASTABs
+    {
+    #call getpnm (buf)
+    #call upper  (buf)
+    #call putlin (buf,ERROUT)
+
+    if (icnt == 0)                      # if no valid ASTAB's addresses
+        {
+        call remark_v (" has no Usable ASTABs.")
+        NbrASTABS = 0
+        }
+    else
+        {
+        call remark_v (" executing with fewer ASTABs.")
+        }
+    }
+
+return
+end
+
+
+
+Subroutine Init_KeyPad (ista,npad)
+
+#######################################################
+#$%
+#$% Purpose:   Init_KeyPad initiates the AST routines for KEYPAD
+#$%            input
+#$%
+#$% Called By: ASMAIN
+#$%
+#$% Calls:     
+#$%
+#$% Tables:    STA      SBI
+#$%
+#$% Date:      JULY 83
+#$%
+#$% Author:    Dane Wills
+#$%
+##############################################################
+BBCommon
+ASTABCommon
+
+integer*4       term_mask[2], rc, sys$qio
+integer*4       term_mask2[2]
+Integer         ista, npad, ifunct      # jb E2145  3/29/00
+external        AST_Keypad
+#                               qponmlkjihgfedcba0
+data            term_mask /0, 2%000010000000000000/     # term on Return ONLY!
+data            term_mask2/0, 2%010010000000000000/     # term on Return/^P
+
+return
+
+if (npad == 0)
+    {
+    if (KeyPad_chan <= 0) return            # no Keypad specified
+
+    #______________________________________________________________________
+    # Initialize KeyPad Buff, Et al.
+
+    KeyPad_Buf[1] = EOS
+    KeyPad_Buf[2] = EOS
+    KeyPad_Len    = 0
+
+    KeyPad_sta    = ista 
+
+    #______________________________________________________________________
+ 
+#    ifunct = IO$_READLBLK | IO$M_NOECHO | IO$M_TRMNOECHO
+
+#    rc = sys$qio (,%%val(KeyPad_chan),                      
+#                  %%val(ifunct),
+#                  Keypad_iosb,
+#                  AST_Keypad,%%val(npad),
+#                  Keypad_work,
+#                  %%val(ARB),                       #read max characters
+#                  ,                                 #timeout immediate
+#                  term_mask,                        #terminate on RETURN
+#                  ,)
+
+#    if (!rc) call put_console_err_v ("Could not initiate KeyPad input",rc)
+    }
+else
+    {
+    if (channels[npad] <= 0) return            # no astab here
+    if (channels[npad] == keypad_chan) return  # Duplicate channel
+
+    #______________________________________________________________________
+    # Initialize KeyPad Buff, Et al.
+
+    Pad_Buf[1,npad] = EOS
+    Pad_Buf[2,npad] = EOS
+    Pad_Len[npad]   = 0
+
+    KeyPad_sta      = ista 
+
+    #______________________________________________________________________
+ 
+#    ifunct = IO$_READLBLK | IO$M_NOECHO | IO$M_TRMNOECHO
+
+#    rc = sys$qio (,%%val(channels[npad]),                      
+#                  %%val(ifunct),
+#                  Pad_iosb[1,npad],
+#                  AST_Keypad,%%val(npad),
+#                  Pad_work[1,npad],
+#                  %%val(ARB),                       #read max characters
+#                  ,                                 #timeout immediate
+#                  term_mask2,                       #terminate on RETURN/^P
+#                  ,)
+
+#    if (!rc) call put_console_err_v ("Could not initiate Pad input",rc)
+    }
+
+return
+end
+
+
+
+Subroutine AST_KeyPad (arg)
+
+#######################################################
+#$%
+#$% Purpose:   AST_KeyPad moves the entered character data 
+#$%            to the KeyPad buffer and sets the wakeup Event Flag.
+#$%
+#$% Called By: 
+#$%
+#$% Calls:     
+#$%
+#$% Tables:     
+#$%
+#$% Date:      JULY 83
+#$%
+#$% Author:    Dane Wills
+#$%
+##############################################################
+BBCommon
+ASTABCommon
+
+integer*4   arg, npad
+Integer     i, ista, len      # jb E2145  3/29/00
+
+return
+
+npad = %%loc(arg)                       # s/b 0 if the primary KEYPAD
+
+if (npad == 0)
+    {
+    len = keypad_iosb[2] + 1                # get length of input (+1 for RETURN)
+
+    for (i=1; i <= len; i=i+1)              # move it to the buffer area
+        {
+        keypad_buf[i] = keypad_work[i]
+        }
+
+    keypad_buf[len+1] = EOS                 # terminate the string
+    keypad_len = len                        # save the length
+
+    ista = keypad_sta
+
+    call process_keypad (ista,npad)              # process KEYPAD Input
+    }
+else
+    {
+    len = pad_iosb[2,npad] + 1              # get length of input (+1 for RETURN)
+
+    for (i=1; i <= len; i=i+1)              # move it to the buffer area
+        {
+        pad_buf[i,npad] = pad_work[i,npad]
+        }
+
+    pad_buf[len+1,npad] = EOS               # terminate the string
+    pad_len[npad] = len                     # save the length
+
+    ista = keypad_sta
+    
+    call process_pad (ista,npad)              # process KEYPAD Input
+    }
+
+return
+end
+
+
+
+Subroutine Process_KeyPad (ista,npad)
+
+#######################################################
+#$%
+#$% Purpose:   Process_KeyPad decodes the information in 
+#$%            the KeyPad buffer for valid commands.
+#$%
+#$% Called By: ASTABS
+#$%
+#$% Calls:     
+#$%
+#$% Tables:    STA      SBI
+#$%
+#$% Date:      JULY 83
+#$%
+#$% Author:    Dane Wills
+#$%
+##############################################################
+BBCommon
+ASTABCommon
+
+Integer i,len,ista,npad, I_SWITCH_1      # jb E2145  3/29/00
+character       k_buf[ARB]
+
+#______________________________________________________________________
+# filter out garbage in buffer
+#
+#       This keeps only: 
+#               the characters: "0123456789." & 
+#               the codes for:  Up/Down/Right/Left &
+#               the functions:  A/B/C/D
+#
+#       Everything else is tossed out !
+#
+
+return
+
+call upper(KeyPad_Buf)
+
+len = 0
+for (i=1; i <= Keypad_len; i=i+1)
+    {
+    switch (KeyPad_Buf[i])
+        {
+        case $dig0-$dig9, $LETA-$LETC, $PERIOD:         # Keypad
+            {                                           #  clf 5/26/87
+            len = len + 1
+            k_buf[len] = KeyPad_buf[i]
+            }
+        case $LETE, $RETURN:                            # RETURN ==> ':'
+            {
+            len = len + 1
+            k_buf[len] = $COLON
+            }
+        case $LETP-$LETR:                               # PF1-PF3 ==> A/B/C
+            {
+            len = len + 1
+            k_buf[len] = KeyPad_buf[i] - $LETP + $LETA
+            }
+        case $LETS:                                     # PF4 ==> clear buffer
+            {
+            len = 0
+            }
+#       case $LETA-$LETC:                               # A / B / C
+#           {                                           #  clf 5/26/87  
+#           len = len + 1
+#           k_buf[len] = KeyPad_buf[i] - $LETC + $LETA
+#           }
+        case $LETD:                                     # D ==> clear buffer
+            {
+            len = 0
+            }
+        case $LETF:                                     # F ==> select display
+            {                                           #   clf 5/26/87
+            len = len + 1
+            k_buf[len] = $PERIOD
+            }
+        }    
+    }
+
+k_buf[len+1] = EOS                      # terminate string
+
+#______________________________________________________________________
+# if anything left in buffer...  execute it
+
+if (len != 0) 
+    {
+    call execute_keypad (ista, K_Buf, len)
+
+    # call remark (k_buf)               # temperary ???????
+    }
+
+#______________________________________________________________________
+# Re-Start KeyPad Input
+
+call init_keypad (ista,npad)
+
+return
+end
+
+
+
+Subroutine Process_Pad (ista,npad)
+
+#######################################################
+#$%
+#$% Purpose:   Process_Pad decodes the information in 
+#$%            the KeyPad buffer for valid commands.
+#$%
+#$% Called By: ASTABS
+#$%
+#$% Calls:     
+#$%
+#$% Tables:    STA      SBI
+#$%
+#$% Date:      Jan 90
+#$%
+#$% Author:    Dane Wills
+#$%
+##############################################################
+BBCommon
+ASTABCommon
+
+Integer     i,len,ista,npad, I_SWITCH_1, kdsply,  # jb  E2145  3/29/00
+            STA$Pointer, SBI$Pointer                # jb  E2145  3/29/00
+
+character       k_buf[ARB]
+
+#______________________________________________________________________
+# filter out garbage in buffer
+#
+#       This keeps only: 
+#               the characters: "0123456789" & 
+#               the codes for:  Up/Down/Right/Left &
+#               the functions:  A/B/C/D
+#
+#       Everything else is tossed out !
+#
+
+return
+
+sta$pointer$to ista
+
+call upper(Pad_Buf[1,npad])
+
+len = 0
+for (i=1; i <= pad_len[npad]; i=i+1)
+    {
+    switch (Pad_Buf[i,npad])
+        {
+        case $dig0-$dig9, $LETA-$LETC, $PERIOD:     # Keypad
+            {                                       
+            len = len + 1
+            k_buf[len] = Pad_buf[i,npad]
+            }
+        case $LETE, $RETURN:                        # RETURN ==> ':'
+            {
+            len = len + 1
+            k_buf[len] = $COLON
+            }
+        case $LETP-$LETR:                               # PF1-PF3 ==> A/B/C
+            {
+            len = len + 1
+            k_buf[len] = Pad_buf[i,npad] - $LETP + $LETA
+            }
+        case $CNTLP:                                    # ^P ==> Print Astab
+            {
+            SBI$Pointer$To (xSTA$SBIindex$I+npad-1)
+            putSBI$PrintRequest$I (YES)
+            len = 0					# ???
+            }
+        case $LETS:                                     # PF4 ==> clear buffer
+            {
+            len = 0
+            }
+        case $LETD:                                     # D ==> clear buffer
+            {
+            len = 0
+            }
+        case $LETF:                                     # F ==> select display
+            {                                           #   clf 5/26/87
+            len = len + 1
+            k_buf[len] = $PERIOD
+            }
+        }    
+    }
+
+k_buf[len+1] = EOS                      # terminate string
+
+#______________________________________________________________________
+# if anything left in buffer...  execute it
+
+if (len != 0) 
+    {
+    kdsply = XSTA$LastSBI$I     # save display
+
+    putSTA$LastSBI$I(npad)      # temperary display
+    call execute_keypad (ista, K_Buf, len)
+
+    putSTA$LastSBI$I(kdsply)    # restore display
+    }
+
+#______________________________________________________________________
+# Re-Start KeyPad Input
+
+call init_keypad (ista,npad)
+
+return
+end
+
+
+
+Subroutine ASTABS (ista)
+
+ #######################################################
+ #$%
+ #$% Purpose:   ASTAB updates status boards
+ #$%
+ #$% Called By: ASMAIN
+ #$%
+ #$% Calls:     FORMAT_ASTABS   PAINT_ASTAB   DELAY
+ #$%
+ #$% Tables:    STA   SBI
+ #$%
+ #$% Date:      10-MAR-82
+ #$%
+ #$% Author:    Dana Wills
+ #$%
+ #######################################################
+BBCommon
+ASTABCommon
+
+Real*4      CurrMin, LastMin
+
+Integer*4   ActualLines,RequestType
+integer*4   MyEventFlag
+
+Integer*4   StartLine[$Max_Boards]
+Integer*4   EndLine[$Max_Boards]
+Integer*4   LineTotal[$Max_Boards]
+
+Integer*4   LastStart[$Max_Boards]  / $Max_Boards * -1 /
+Integer*4   LastEnd[$Max_Boards]    / $Max_Boards * -1 / 
+Integer*4   LastTotal[$Max_Boards]  / $Max_Boards * -1 / 
+Integer*4   Screen_1, Last_SBI, SBI$MaxLines$I, K,
+        ista,Last_Screen,nsbi,     # jb E2145  3/29/00
+        STA$Pointer,                     # jb E2145  3/29/00
+        SBI$Pointer #,SBI$UpdateRequest$I  # jb E2145  3/29/00
+
+Integer*4   ichan                           # dew E2149 8/1/00
+Logical*1   Force_Update[$Max_Boards]
+Logical*1   Big_Continue[$Max_Boards]
+Logical*1   New_Geometry[$Max_Boards]
+
+
+sta$pointer$to ista                             # station pointer entered
+
+LastMin = Game$time - Time$Step                 # get previous game time
+
+putSTA$AstabWakeUp$i ($YES)  					# cycle ASTAB
+#_________________________________________________________________
+# Now we are ready
+#
+
+repeat                                          #establish control loop
+    {
+#    call sys$setast (%%val(1))                  # enable AST's during wait
+
+	while(xSTA$AstabWakeup$i == 0) call delay($WakeupDelay)
+	putSTA$AstabWakeUp$i ($NO)  				# clear astab wakeup flag
+    if (Xsta$HaltStation$i == $YES) 
+        break
+
+#    call sys$setast (%%val(0))                  # disable AST's during update
+
+    call Print_ASTABs (ista)                    # process any hardcopy requests
+
+    #$% get current game minute
+    CurrMin = Game$Time
+
+    #------------------------------------------------------------
+    #$% Determine EXTENDED astabs; #1 can never be extended
+
+    Last_Screen = 0                                 # prior valid ASTAB
+    Screen_1 = 0                                    # who may/can be extended
+
+    for (nsbi = 1; nsbi <= NbrASTABs; nsbi = nsbi + 1)
+        {
+        IF  (Channels[nsbi] == 0) next              # skip if no device here
+
+        if (Screen_1 == 0) Screen_1 = nsbi          # (in case #1 slot empty)
+
+        SBI$pointer$to (sta$SBIIndex$i + nsbi - 1)
+
+        LineTotal[nsbi]    = 0                      # Clear total line count
+        Force_Update[nsbi] = .false.                # used below
+        Big_Continue[nsbi] = .false.                # used below
+
+        SBI$MaxLines$I = xSBI$MaxLines$I            # number lines on this ASTAB
+
+        IF  (xSBI$ReqBoard$I != $Extension$Board)   # Is this ASTAB EXTENDed?
+            {                                       # NO NO NO
+            StartLine[nsbi] = 1                     # always start at 1
+            Screen_1 = nsbi                         # save this ASTAB
+            }
+        else                                        # This is an EXTENSION....
+            {
+            StartLine[nsbi] = EndLine[last_sbi] + 1 # Pick up where the last 
+
+            # if any EXTENSION board gets a continue, then continue Screen 1
+            if (Xsbi$UpdateRequest$i == $Continue$Code)
+                {
+                Big_Continue[Screen_1] = .true.
+                }
+
+            # if first page is changing, then update this page also
+            if (Force_Update [ Screen_1 ] )
+                {
+                Force_Update [ nsbi ] = .true.
+                }
+            }
+
+        # If this board has any kind of request....
+        if (Xsbi$UpdateRequest$i != $None$Code)
+            {
+            # Force an Update of all boards from the first (of group), to here
+
+            for (k = Screen_1; k <= nsbi; k=k+1) Force_Update[k] = .true.
+            }
+
+        EndLine [ Nsbi ] = StartLine [ Nsbi ] + SBI$MaxLines$I - 1
+        LineTotal[ Screen_1 ] = LineTotal[ Screen_1 ] + SBI$MaxLines$I
+
+        Last_Sbi = Nsbi
+        }
+
+    #------------------------------------------------------------
+    # check if any assignments changed from last time
+
+    for (nsbi = 1; nsbi <= NbrASTABs; nsbi = nsbi + 1)
+        {
+        # Carry line totals forward to each extended board
+        if (nsbi > 1 & LineTotal[nsbi] == 0)
+            LineTotal[nsbi] = LineTotal[nsbi-1]
+
+        New_Geometry[nsbi] = .false.
+
+        if (StartLine[nsbi] != LastStart[nsbi] | 
+            EndLine  [nsbi] != LastEnd  [nsbi] |
+            LineTotal[nsbi] != LastTotal[nsbi]  )
+            {
+            New_Geometry[nsbi] = .true.
+            Force_Update[nsbi] = .true.
+            }
+
+        LastStart[nsbi] = StartLine[nsbi]
+        LastEnd  [nsbi] = EndLine  [nsbi]
+        LastTotal[nsbi] = LineTotal[nsbi]
+        }
+
+    #------------------------------------------------------------
+    #$% for each status board information table up to the number of ASTABS
+    for (Nsbi = 1; Nsbi <= NbrASTABs; Nsbi = Nsbi + 1)
+        {
+        ichan = channels[nsbi]                  # get the TTY channel
+
+        if (ichan == 0) next                    # if none there, get next
+
+        sbi$pointer$to (sta$SBIIndex$i + nsbi - 1) # set status board info ptr
+
+        #$% if update not requested and current updating is OK, 
+        #$% get next entry
+
+        if (Xsbi$UpdateRequest$i == $None$code &
+            LastMin              == CurrMin    &
+            ! Force_Update [nsbi]                ) next
+
+        # Allow continue on any EXTENSION board to continue 1st one
+        if ((Xsbi$UpdateRequest$i == $Continue$code |
+             Xsbi$UpdateRequest$i == $None$code)    &  
+             Big_Continue[nsbi]                  ) 
+            {
+            PUTsbi$UpdateRequest$i ( $Continue$code )
+            }
+
+        #------------------------------------------------------------
+        IF  (StartLine[nsbi] == 1)    #$% new astab
+            {
+            if (Xsbi$UpdateRequest$i == $Find$Code)
+                {
+                call astab_find_text (sbi$pointer, sta$pointer,
+                                      LineTotal[nsbi],ActualLines,RequestType)
+                }
+            else
+                {
+                call format_astab (sbi$pointer, sta$pointer,LineTotal[nsbi],
+                                   ActualLines,RequestType)
+                }
+            }
+        else
+            {
+            PUTsbi$UpdateRequest$i ( $None$code )   # this needs to be cleared
+                                                    # for every SBI
+            }
+
+        #------------------------------------------------------------
+        # if geometry of displays changed.... NO Inverse Flags
+
+        if (New_Geometry[nsbi]) RequestType = $New$Code
+
+        Call Set_Flaggs(SBI$Pointer,StartLine[nsbi],RequestType)
+
+        call build_find_flags(SBI$Pointer)
+
+        #------------------------------------------------------------
+
+        Call Build_Buf(SBI$Pointer,StartLine[nsbi]) 
+
+        Call Save_State(SBI$Pointer)
+
+        # put astab/sbi data out to tty
+        Call Paint_Astab (Ichan, Sbi$Pointer)
+        }
+
+    LastMin = CurrMin                                   # update last time
+
+    # call delay (1500)                                 # delay 1.5 seconds
+ 
+    } until (halt$request == $yes)            # continue until game stopped
+
+return
+end
+
+
+
+Subroutine Set_Flaggs(SBI$Pointer,First_Line,RequestType)
+#######################################################
+#$%
+#$% Purpose:   Build_SBI performs routines for reverse
+#$%            highlighting
+#$%            Note:  It is important to remember that the purpose of
+#$%            the highlighting is to indicate only those changes due to
+#$%            the passage of time.  (NOT requested ASTAB changes)
+#$%
+#$% Calls:     RESET_FLAGS, BUILD_FLAGS
+#$%
+#$% Tables:    SBI
+#$%
+#$% Date:      March 1991
+#$%
+#$% Author:    H.D. Fisher
+#$%
+#######################################################
+BBCommon
+ASTABCommon
+Integer*4 First_Line,RequestType,
+          SBI$Pointer,SBI$AstabType$I     # jb E2145  3/29/00
+
+#$% reset all flags to deactivate reverse video
+call Reset_Flags
+
+SBI$AstabType$i = xSBI$AstabType$i 
+
+#$% if requested mode is not Continue and is not New and Astab Type is VT100
+if (RequestType != $Continue$Code &  
+    RequestType != $New$Code      & 
+    ( SBI$AstabType$i == $VT100$Code | SBI$AstabType$i == $VT300$Code) )
+    {
+    #$% compare old and new BB pages and flag differences
+
+    call Build_Flags(SBI$Pointer,First_Line)
+    }
+
+Return
+End
+
+
+
+Subroutine Print_astabs (ista)
+
+ ###################################################################
+ #$%
+ #$% Purpose:   PRINT_ASTABS outputs status board information 
+ #$%            data to the System Spooler.
+ #$%
+ #$% Called By: ASTAB
+ #$%
+ #$% Calls:     REV_1_LINE     DELAY
+ #$%
+ #$% Tables:    STA, SBI
+ #$%
+ #$% Date:      18-JAN-83
+ #$%
+ #$% Author:    Dana Wills
+ #$%
+ ###########################################################################
+##implicit integer (b,d-z)
+BBcommon
+ASTABCommon
+
+LITERAL     STA$ConfigID$C, CSTRIP8                       # jb E2145  3/29/00
+integer   iview, iside, q_len, f_len, class_len,
+        i2,k,m,n,jj,last_count,file_open,nsbi,ista,       # jb E2145  3/29/00
+        SBI$Pointer,SBI$NbrLines$I,SBI$LIN$Index,         # jb E2145  3/29/00
+        SBI$LIN$Length$I, STA$Pointer                     # jb E2145  3/29/00
+Integer*4   ichan                           # dew E2149 8/1/00
+ 
+
+character       line[100]   # jb (deleted , ) 3/29/00
+
+logical         First_error / .true. /
+integer         counter / 0 /
+vaxcharacter    q_name*40,f_name*40
+VaxCharacter*23 Date_Time
+VaxCharacter*100 nnode
+
+character       class [ARB] / ARB * EOS / 
+vaxcharacter    class_line*ARB
+
+if (class [1] == EOS)
+    {
+    call trnlog_v ("EXERCISE_CLASSIFICATION", class)
+
+    class_len = 0
+
+    if (class[1] == $SPACE & class[2] == EOS) continue
+    else
+        {
+        k = 0                                       # determine the real length
+        call vmovh (class,39,       class_line, k)  # of CLASS  (now in K)
+
+        # number of spaces needed is:   (80 - k)/2
+        n = (80 - K) / 2
+        while (n > 0) 
+            { 
+            n = n - 1
+            call vmovv (" ",class_line, class_len)
+            }
+
+        call vmov  ($esc,     class_line, class_len)  
+        call vmovv ("[1,4m",  class_line, class_len)  # bold
+        call vmovh (class,39, class_line, class_len)
+        call vmov  ($esc,     class_line, class_len)  
+        call vmovv ("[0m",    class_line, class_len)  # bold off
+        }
+    }
+
+#----------------------------------------------------------------------
+# This routine is called every time ASTAB cycles
+#----------------------------------------------------------------------
+
+last_count = counter                    # save this to restore if nothing done
+
+sta$pointer$to ista                     # set station pointer 
+    
+sta$ConfigId$c = Xsta$ConfigId$c
+
+#----------------------------------------
+# Build a unique file name & the appropriate Queue name
+
+iview = Xsta$View$i
+call whside(iview,iside)
+
+f_len = 0
+q_len = 0
+
+if      (iside == $neutral$code )   call vmovv ("CONTROL"   , q_name, q_len)
+else if (iside == $blue$code    )   call vmovv ("BLUE"      , q_name, q_len)
+else                                call vmovv ("ORANGE"    , q_name, q_len)
+
+if (counter >= 9999) counter = 0
+counter = counter + 1
+
+call vmovv (q_name[1:q_len] , f_name, f_len)
+call vmovv ("_astab_sta_"   , f_name, f_len)
+call vmovi (ista            , f_name, f_len)
+call vmovv ("_"             , f_name, f_len)
+call vmoviz(counter,4       , f_name, f_len)
+call vmovv (".tmp"          , f_name, f_len)
+
+call vmovv ("$ASTAB$QUEUE" , q_name, q_len)
+
+#----------------------------------------
+
+call hostname (nnode)
+call lib$date_time (date_time)
+
+# ifirst = YES
+file_open = NO                          # remember, the print file IS CLOSED
+
+# for each SBI entry assigned to this station
+for (nsbi = 1; nsbi <= NbrASTABs; nsbi = nsbi + 1)
+    {
+    ichan = channels[nsbi]              # check the channel assigned,
+    if (ichan == 0) next                # if none there, get next
+
+    sbi$pointer$to (sta$SBIIndex$i + nsbi - 1)  # set SBI pointer
+
+    if (Xsbi$PrintRequest$i == NO) next         # No print requested, skip it !
+
+    putSBI$PrintRequest$i (NO)
+
+    if (file_open == NO)
+        {
+         open (unit           = $lfc$HardCopyASTAB,
+               access         ='SEQUENTIAL',
+               form           ='FORMATTED',
+               file           = f_name[1:f_len],
+#               carriagecontrol='FORTRAN',
+               ERR            =8000,
+               status         ='NEW')
+
+        file_open = YES
+        }
+    else
+        {
+        if (class_len > 0) 
+            write ($LFC$HardCopyASTAB,9005) class_line(1:class_len)
+
+        9004 format (/,x,a,/////)      # this one for TOP of Page
+        9005 format (/////,x,a,/)      # this one for bottom
+
+        write ($LFC$HardCopyASTAB,9001)         # generate form feed
+
+        9001 format ('1')
+        }
+
+    #____________________________________________________________________
+    # print a one line heading using FORTRAN write statements
+
+    if (class_len > 0) 
+        write ($LFC$HardCopyASTAB,9004) class_line(1:class_len)
+
+    write ($LFC$HardCopyASTAB,9003) date_time,nnode,ista,sta$configId$C,nsbi
+
+    9003 format (3x,a,2x,a,8x,"Station #",i2,4x,a8,"   ASTAB #",i2,/)
+  
+    #____________________________________________________________________
+    # print the picture using FORTRAN write statements
+
+    SBI$NbrLines$I = xSBI$NbrLines$I            # Added the print 
+
+    for (k=1; k <= SBI$NbrLines$I; k = k+1)             # Loop for all the
+        {                                               # lines
+        #$% get line index number
+        SBI$LIN$Index = k                       
+
+        #$% get line length
+        SBI$LIN$Length$I = xSBI$LIN$Length$I            # move old page 
+
+        #$% get line address
+        i2 = SBI$LIN$Address+1
+
+        jj = 0          
+        call smovh (ibb[i2], SBI$LIN$Length$I, Line, jj)# Build the length
+                                                        # into array 'Line'
+
+        if (jj == 0) call smovv (" ", line, jj)  # save self from blank lines
+
+        write ($LFC$HardCopyASTAB,9002) (Line[m], m = 1, jj)
+
+        9002 format (x,130A1)                           # Write and Format 
+        }                                               # each line of array
+    }                                                   # 'Line'
+
+if (file_open == YES)
+    {                                                   # If still open,
+    if (class_len > 0) 
+        write ($LFC$HardCopyASTAB,9005) class_line(1:class_len)
+
+    #--------------------------------------------------
+    # Setup logical name for SYS$PRINT so that Close w/Print goes
+    # to the right print queue....
+
+    #call lib$Set_Logical ("SYS$PRINT",q_name[1:q_len],,,)
+
+
+    #--------------------------------------------------
+    # Close the report file (w/print)
+
+    close (unit     = $LFC$HardCopyASTAB,
+           err      = 8010,
+           status   = "Print/Delete")
+
+    repeat
+        {
+        break
+        8010 continue                   # error closing ASTAB file
+
+        close (unit = $LFC$HardCopyASTAB, err = 8012)        
+        8012 continue
+
+        if ( First_error )
+            {
+            First_error = .false. 
+
+            call echor
+            call echov ("Sorry, could not Queue the ASTAB hardcopy for you.")
+            call echor
+            call echov ("Check with the System Manager about logical name ")
+            call echov (q_name[1:q_len])
+            call echor
+            }
+        }
+
+    #--------------------------------------------------
+    # Remove the logical name for SYS$PRINT 
+
+    #call lib$Delete_Logical ("SYS$PRINT",)
+
+    last_count = counter
+    file_open = NO                                      # flag it
+    }
+
+repeat                                                  # Error....
+    {
+    break
+    8000 continue                   # error opening Local ASTAB File    
+    
+    if ( First_error )
+        {
+        First_error = .false. 
+
+        call echor
+        call echov ("Sorry, cannot open file for any ASTAB hardcopy")
+        call echov (".  Check with the System Manager.")
+        call echor
+        }
+    }
+
+counter = last_count
+
+return
+end
+
+
+
+Subroutine Paint_astab (ichan,sbi$pointer)
+
+ ###################################################################
+ #$%
+ #$% Purpose:   PAINT_ASTAB outputs status board information 
+ #$%            data to a TTY Channel.
+ #$%
+ #$% Called By: ASTAB
+ #$%
+ #$% Calls:     REV_1_LINE     DELAY
+ #$%
+ #$% Tables:    STA, SBI
+ #$%
+ #$% Date:      10-MAR-82
+ #$%
+ #$% Author:    Dana Wills
+ #$%
+ #$%            Modified 28 APRIL 84 to buffer all output for 1 I/O call (dew)
+ #$%
+ #$%
+ ###########################################################################
+
+#______________________________________________________________________
+
+# define buffering macros
+
+define ($bufsize,4000)
+define ($buflim ,900)
+
+define ($$chekit, 
+    {
+    if (c_cnt+@1 > $buflim) $$sendit
+    call lib$movc3 (@1,@2,c_buffer[c_cnt+1])
+    c_cnt = c_cnt + @1
+    })
+
+define ($$buffit, 
+    {
+    call lib$movc3 (@1,@2,c_buffer[c_cnt+1])
+    c_cnt = c_cnt + @1
+    })
+
+define ($$sendit,
+    {
+    rc = asdevice_out (ichan,c_buffer,c_cnt)
+    c_cnt = 0
+    })
+#______________________________________________________________________
+BBcommon     # jb E2145  3/29/00
+ASTABCommon
+
+integer asdevice_out,status_len,k,c_cnt, rc, 
+        i2,n,line,len,nlen,                   # jb  E2145  3/29/00
+        SBI$Pointer,SBI$AstabType$I,SBI$NbrLines$I, # jb  E2145  3/29/00
+        SBI$MaxCols$I,SBI$LIN$Index,SBI$MaxLines$I  # jb  E2145  3/29/00
+
+Integer*4       ichan                           # dew E2149 8/1/00
+character       vt_Home[3] / $esc, $LBRACK, $LETH/
+character       vt_ceol[3] / $esc, $lbrack, $letk/
+character       vt_ceop[3] / $esc, $lbrack, $letj/
+character       vt_nxln[3] / $return, $linefeed, 0 /
+
+character       vt3_enable  [5] / $esc, $lbrack, $dig2, $dollar, $tilde/
+character       vt3_status  [5] / $esc, $lbrack, $dig1, $dollar, $rbrace/
+character       vt3_display [5] / $esc, $lbrack, $dig0, $dollar, $rbrace/
+
+character       mk_Home[40]/ $formfeed, 39 * 0/
+character       mk_ceol[3] / 0, 0, 0/
+character       mk_ceop[3] / 0, 0, 0/
+character       mk_nxln[3] / $return, $linefeed, 0 /
+
+character       REV_work[300]                   ## TPA
+character       c_buffer[$bufsize]
+character       class [ARB] / ARB * EOS / 
+character       status_line[ARB]
+
+if (class [1] == EOS)
+    {
+    call trnlog_v ("EXERCISE_CLASSIFICATION", class)
+
+    status_len = 0
+
+    if (class[1] == $SPACE & class[2] == EOS) continue
+    else
+        {
+        k = 0                                       # determine the real length
+        call smovh (class,39,       status_line, k) # of CLASS  (now in K)
+
+        call smovh (vt3_enable,5 ,  status_line, status_len)
+        call smovh (vt3_status,5 ,  status_line, status_len)
+        call smovh (vt_home,3,      status_line, status_len)
+        call smovh (vt_ceol,3,      status_line, status_len)
+
+        # number of spaces needed is:   (40 - k)/2
+        n = (40 - K) / 2
+        while (n > 0) 
+            { 
+            n = n - 1
+            call smovv (" ",status_line, status_len)
+            }
+
+        call smov  ($esc,           status_line, status_len)
+        call smovv ("#6",         status_line, status_len)  # double width
+        call smov  ($esc,           status_line, status_len)
+        call smovv ("[1m",        status_line, status_len)  # bold
+        call smovh (class,39,       status_line, status_len)
+        call smov  ($esc,           status_line, status_len)
+        call smovv ("[0m",        status_line, status_len)  # bold off
+        call smovh (vt3_display,5,  status_line, status_len)
+		status_len = 0   		# Temporary - disable classification line
+        }
+    }
+
+
+#$% if no channel indicated, return
+if (ichan == 0) return          ######
+
+#$% get status board information data
+sbi$AstabType$i  = Xsbi$ASTABtype$i
+sbi$MAXlines$i   = Xsbi$MAXlines$i
+sbi$NbrLines$i   = Xsbi$NbrLines$i
+sbi$MaxCols$i    = Xsbi$MaxCols$i
+
+# codes for SBI$ASTABType$I
+#
+#       $VT100$code
+#       $VT300$code
+#       $Motorola$code
+#       $Ramtek$code
+#       $Omron$code
+#
+#############################################
+
+c_cnt = 0
+
+
+#$% if data being displayed on a VT100 terminal
+if (sbi$AstabType$i == $VT100$code |
+    sbi$AstabType$i == $VT300$code)
+    {
+    #$% set up VT100 with a clear screen starting in upper left of screen
+    $$buffit (3,vt_home)
+
+    if (sbi$AstabType$i == $VT300$code & status_len > 0)
+        {
+        $$buffit (status_len,status_line)
+        }
+
+    #$% for each line to max lines in status board information
+    for (line = 1; line <= sbi$MAXlines$i; line = line + 1)    
+        {
+        #$% set status board information index
+        sbi$lin$index = line
+
+        #$% get max line length
+        len = Xsbi$lin$Length$i
+
+        #$% get sbi line address
+        i2 = SBI$LIN$Address+1
+
+        #$% activate reverse video 
+        call rev_1_line (ibbb[1,i2],len,REV_Lines[1,line],REV_work,nlen) ##TPA
+
+        #$% set up VT100 to display reverse video
+        $$chekit (nlen,rev_work)                                # 28APR84
+                
+        #$% if display cursor is at the number of input lines, ie. all
+        #$% input lines have been displayed
+        if (line == sbi$NbrLines$i)
+            {
+            $$buffit (3,vt_ceop)                                # 28APR84
+
+            $$buffit (3,vt_home)                                # 28APR84
+
+            break
+            }
+        #$% else if there are more lines to be displayed
+        else
+            {
+            IF  (line == sbi$MAXlines$i & sbi$NBRLines$I >= sbi$MAXlines$i)
+                {
+                #$% clear display to end of line 
+                $$buffit (3,vt_ceol)                                # 28APR84
+                }
+            ELSE
+                {
+                #$% clear display to end of line & go to next line
+                $$buffit (3,vt_ceol)                                # 28APR84
+                $$buffit (2,vt_nxln)                                # 28APR84
+                }
+            }
+        }
+    }
+#$% else if astab type is Motorola
+else if (sbi$AstabType$i == $Motorola$code)
+    {
+    #$% set display cursor to home position and delay ten millisecs
+    $$chekit (40,mk_home)                                       # 28APR84
+    $$sendit                                                    # 28APR84
+    call delay (10)
+
+    #$% for each line up to max number of lines
+    for (line = 1; line <= sbi$MAXlines$i; line = line + 1)    
+        {
+        #$% get line index number
+        sbi$lin$index = line
+
+        #$% get line length
+        len = Xsbi$lin$Length$i
+
+        #$% get sbi address
+        i2 = SBI$LIN$Address+1
+
+        #$% if there are lines left to be displayed
+        if (line <= sbi$NbrLines$i)
+            {
+            #$% display lines and get return code status
+            $$chekit (len,ibb[i2])                              # 28APR84
+            }
+
+        #$% if cursor is at the number of input lines           
+        if (line == sbi$NbrLines$i)
+            {
+            #$% clear display to end of page
+            $$buffit (3,mk_ceop)                                # 28APR84
+            }
+        #$% else if lines left to be displayed
+        else
+            {
+            #$% clear display to end of line and go to next line
+
+            $$buffit (3,mk_ceol)                                # 28APR84
+
+            $$buffit (2,mk_nxln)                                # 28APR84
+            }
+        }
+    }
+
+if (c_cnt != 0) $$sendit                                        # 28APR84
+
+return
+end
+
+
+Subroutine AS_Shutdown
+
+##########################################################################
+#$%
+#$% Purpose:   AS_Shutdown is a procedure that gets executed on image exit
+#$%
+#$% Called By: ASMAIN via SET_EXIT_HANDLER  # jb  1/11/00
+#$%
+#$% Calls:     
+#$%
+#$% Tables:    NONE
+#$%
+#$% Date:      07-AUG-91
+#$%
+#$% Author:    Dane Wills
+#$%
+######################################################################
+BBcommon
+AstabCommon
+
+integer*4  rc,  nsbi,c_cnt, ASDEVICE_OUT,   # jb E2145  3/29/00
+                sbi$pointer, sbi$AstabType$i  
+Integer*4       ichan                           # dew E2149 8/1/00
+character       c_buffer[$bufsize]
+
+character       vt_Home[3] / $esc, $lbrack, $leth/
+character       vt_ceop[3] / $esc, $lbrack, $letj/
+character       xx_feed[40] / 40 * $linefeed /
+
+character       vt3_disable [5] / $esc, $lbrack, $dig0, $dollar, $tilde/
+
+#------------------------------------------------------------
+#$% for each status board information table up to the number of ASTABS
+for (Nsbi = 1; Nsbi <= NbrASTABs; Nsbi = Nsbi + 1)
+    {
+    c_cnt = 0                               # clear the buffer
+    ichan = channels[nsbi]                  # get the TTY channel
+
+    if (ichan == 0) next                    # if none there, get next
+
+    sbi$pointer$to (sta$SBIIndex$i + nsbi - 1) # set status board info ptr
+    sbi$AstabType$i  = Xsbi$ASTABtype$i
+
+    if (sbi$AstabType$i == $VT100$code |
+        sbi$AstabType$i == $VT300$code)
+        {
+        if (sbi$AstabType$i == $VT300$code)
+            {
+            $$buffit (5,vt3_disable)
+            }
+
+        #$% set up VT100 with a clear screen starting in upper left of screen
+
+        $$buffit (3,vt_home)
+        $$buffit (3,vt_ceop)
+        }
+    else
+        {
+        $$buffit (40,xx_feed)
+        }
+
+    if (c_cnt != 0) $$sendit
+    }
+
+call delay (3000)        # wait here to be terminated
+
+end
+
+
+
+Subroutine Rev_1_line(line,len,flag,REV_work,nlen)
+
+ ########################################################################
+ #$%
+ #$% Purpose:   Finds flags and replaces it with the requested escape 
+ #$%            characters to turn on/off reverse-video and the bold
+ #$%            attributes.
+ #$%
+ #$% Called By: PAINT_ASTAB
+ #$%
+ #$% Calls:     SMOVH, SMOV
+ #$%
+ #$% Tables:    NONE
+ #$%
+ #$% Date:      18-OCT-82
+ #$%
+ #$% Author:    Timothy P. Adamos
+ #$%
+ #########################################################################
+##implicit integer (b,d-z)
+BBimplicit  # jb   E2145    3/29/00
+
+integer   inv, len, nlen, icol  # jb E2145 (icol)   3/29/00
+character line[ARB], flag[ARB], REV_work[300]
+
+string turnON  "X[1;7m"         ## ESCAPE CHARACTERS TO ACTIVATE REV/BOLD
+string turnOFF "X[0m"           ## TURNS OFF REV/BOLD
+
+turnON [1] = 27
+turnOFF[1] = 27
+
+#$% initialize values
+inv  = NO
+nlen = 0
+
+for (icol = 1; icol <= len ; icol = icol + 1)   # FOR EACH COLUMN IN LENGTH
+    {
+    if (flag[icol] != inv)              # TURN ON FLAG
+        {
+        #$% if flag set for reverse/bold video
+        if (inv == NO)
+            {
+            #$% move "turnON" to REV_work array to turn on reverse/bold video
+            call smovh(turnON,ARB,REV_work,nlen)
+            }
+        #$% else reverse/bold video set for off
+        else
+            {
+            #$% move "turnOFF" to array to turn off reverse/bold video
+            call smovh(turnOFF,ARB,REV_work,nlen)
+            }
+        #$% get flag indicator (yes/no)
+        inv = flag[icol]
+        }
+
+    call smov(line[icol],REV_work,nlen) # OUTPUT CHARACTER
+    }
+
+if (inv == YES)                         # NO FLAG
+    {
+    #$% move "turnOFF" into array to turn off reverse/bold video
+    call smovh(turnOFF,ARB,REV_work,nlen)
+    }
+
+return
+end
+
+
+Subroutine Reset_Flags
+
+ ######################################################################
+ #$%
+ #$% Purpose:   Resets the flags in array REV_Lines.
+ #$%
+ #$% Called By: FORMAT_ASTAB
+ #$%
+ #$% Calls:     NONE
+ #$%
+ #$% Tables:    NONE
+ #$%
+ #$% Date:      18-OCT-82
+ #$%
+ #$% Author:    Timothy P. Adamos
+ #$%
+ ########################################################################
+BBimplicit  # jb    E2145   3/29/00
+ASTABCommon
+
+integer ipos, iline
+
+#$% for each line to max lines
+for (iline = 1; iline <= $MAX_Lines; iline = iline + 1)
+    {
+    #$% for each position (column) to max columns
+    for (ipos = 1; ipos <= $MAX_col; ipos = ipos + 1)
+        {
+        REV_Lines[ipos,iline] = NO
+        }
+    }    
+
+return
+end
+
+
+
+Subroutine Build_Flags(SBI$Pointer,First_Line)
+
+ ####################################################################
+ #$%
+ #$% Purpose:   Builds an array of flags to indicate reverse
+ #$%            video and/or bold attributes.
+ #$%
+ #$% Called By: FORMAT_ASTAB
+ #$%
+ #$% Calls:     SMOVH, SMOV, INDENT, REV_EACH_COL, CHECK_EACH_COL
+ #$%
+ #$% Tables:    SBI
+ #$%
+ #$% Date:      18-OCT-82
+ #$%
+ #$% Author:    Timothy P. Adamos
+ #$%            Modified March 1991 to handle multiple extension screens (hdf)
+ #$%
+ ####################################################################
+BBcommon
+ASTABCommon
+STATUScommon
+
+character CPAGE[arith($ST$Line$words,*,4),$Max$Lines]    ## page buffer
+equivalence (ipage, cpage)
+
+
+literal         findText, cstrip8
+
+character ctext[9]
+equivalence (ctext, findtext)
+
+
+Integer*4       First_Line, Offset
+
+integer         osize,                          ## size of word in line file1
+                nsize,                          ## size of word in line file2
+                sav_ind,                        ## save indentation of line
+                fword,                          ## points to first word in line
+               i2,k,kk,limit_N,limit_O,isav_O,             # jb E2145 3/29/00
+               SBI$Pointer,SBI$LIN$Length$I,SBI$LIN$Index  # jb E2145 3/29/00
+ 
+INTEGER         INDENT, GETWRD, EQUAL, almostequaluc   ## integer functions
+integer         klen, lastcol, icol
+character       first_wordO[ARB],               ## first word in line @ file 1
+                first_wordN[ARB]                ## first word in line @ file 2
+
+Offset = First_Line - 1
+
+for (k=1; k <= $MAX_Lines; k = k+1)     
+    {
+    if (First_Line == 1 & k <= 3)       # don't compare headers 
+        {
+        New_lines[1,k] = EOS
+        Old_lines[1,k] = EOS
+        next    
+        }
+
+    #$% get line index number
+    SBI$LIN$Index = k                   
+
+    #$% get line length
+    SBI$LIN$Length$I = xSBI$LIN$Length$I                ## move old page 
+
+    #$% get IBB address of the line's text 
+    i2 = SBI$LIN$Address+1
+
+    #_______________________________________________________
+    #$% move previous status board page into OLD_lines array
+
+    kk = 0              
+    call smovh (ibb[i2], SBI$LIN$Length$I, OLD_Lines[1,k], kk)
+    call smov (EOS,OLD_Lines[1,k], kk)          # terminate each line
+
+    #_______________________________________________________
+    #$% move current page into NEW_Lines array according to OFFSET into IPAGE 
+
+    kk = 0
+    call smovh (ipage[1,k + Offset ], linlen[k + Offset], NEW_Lines[1,k], kk)
+    call smov (EOS,NEW_Lines[1,k], kk)          # terminate each line
+    }  
+
+
+#------------------------------------------------------------
+limit_O = Xsbi$NbrLines$i       # number of old lines 
+limit_N = lincnt                # number of new lines
+
+line_O  = 1                     ## set the pointers
+line_N  = 1
+sav_ind = 1                     ## set indentation to column 1
+
+repeat
+    {                           ## if lineO is indented more than lineN
+    if (line_n > limit_n | line_n > $Max_Lines) break # time to quit this yet ?
+
+    if (INDENT(OLD_Lines[1,line_O]) > INDENT(NEW_Lines[1,line_N]))
+        {
+        line_O = line_O + 1     ## increment the pointer
+
+        #$% set max_lines to line_O if it is greater
+        if (line_O > limit_O) 
+            {
+            line_O = limit_O
+            }
+        else
+            {
+            next
+            }
+        }
+    #$% else if line_N is indented more than line_O
+    else if (INDENT(OLD_Lines[1,line_O]) < INDENT(NEW_Lines[1,line_N]))
+        {
+        #$% set a flag in the REV_Lines array for each column of line_N 
+        #$% in the NEW_Lines array 
+        call REV_Each_Col(  NEW_Lines[1,line_N],
+                            REV_Lines[1,line_N])
+
+        #$% increment line_N 
+        line_N = line_N + 1
+        
+        #$% if max lines are exceeded, break out of loop
+        if (line_N > $MAX_lines) break
+        }
+    
+    else
+        {
+        #$% find and save column where NEW_Lines is indented
+        sav_ind = INDENT(NEW_Lines[1,line_N])
+
+        #$% get size of first word in line_O 
+        fword = 1
+        osize = GETWRD(OLD_Lines[1,line_O],fword,first_wordO)
+
+        #$% get size of first word in line_N
+        fword = 1
+        nsize = GETWRD(NEW_Lines[1,line_N],fword,first_wordN)
+        
+        #$% if the two first words are equal
+        if (EQUAL(first_wordO,first_wordN) == YES)
+            {
+            #$% check OLD and NEW lines and flag differences in REV_lines     
+            call Check_Each_Col(OLD_Lines[1,line_O],
+                                NEW_Lines[1,line_N],
+                                REV_Lines[1,line_N])
+
+            #$% increment OLD and NEW lines
+            line_O = line_O + 1
+            line_N = line_N + 1
+
+            #$% continue until line_N reaches max then break
+            if (line_N > $MAX_lines) break
+
+            #$% while the indentation position of line_N is 
+            #$% beyond saved indentation column            
+            while(INDENT(NEW_Lines[1,line_N]) > sav_ind)
+                {
+                #$% if the indentation of line_O is same as line_N
+                if (INDENT(OLD_Lines[1,line_O]) == sav_ind)
+                    {
+                    #$% set a flag in the REV_Lines array for each column 
+                    #$% of line_N in the NEW_Lines array 
+                    call REV_Each_Col(  NEW_Lines[1,line_N],
+                                        REV_Lines[1,line_N])
+
+
+                    #$% increment line_N                    
+                    line_N = line_N + 1
+                
+                    #$% if max lines are exceeded, break out of two 
+                    #$% preceeding loops
+                    if (line_N > $MAX_lines) break 2
+
+                    next
+                    }
+               #$% check OLD and NEW lines and flag differences in 
+               #$% REV_lines     
+                call Check_Each_Col(OLD_Lines[1,line_O],
+                                    NEW_Lines[1,line_N],
+                                    REV_Lines[1,line_N])
+
+                #$% increment lines             
+                line_O = line_O + 1
+                line_N = line_N + 1
+
+                #$% if max lines are exceeded, break out of two 
+                #$% preceeding loops
+                if (line_N > $MAX_lines) break 2
+
+                next ## while
+                }
+
+            next ## while
+            }
+        }
+    ### the names were not equal
+
+    #$% save line number
+    isav_O = line_O
+
+    #$% for each line_O to max number of lines
+    for ( ; line_O <= $MAX_lines; line_O = line_O + 1)
+        {
+        #$% if indentation of old and new lines are the same
+        if (INDENT(OLD_Lines[1,line_O]) != INDENT(NEW_Lines[1,line_N]))
+            {
+            next
+            }
+
+        #$% get size of first word in line_O
+        fword = 1
+        osize = GETWRD(OLD_Lines[1,line_O],fword,first_wordO)
+
+        #$% get size of first word in line_N
+        fword = 1
+        nsize = GETWRD(NEW_Lines[1,line_N],fword,first_wordN)
+
+        #$% if first words in new and old lines are equal, next (twice)
+        if (EQUAL(first_wordO,first_wordN) == YES)
+            {
+            next 2
+            }
+        }
+
+    #$% get line number
+    line_O = isav_O
+
+    repeat
+        {
+        #$% set a flag in the REV_Lines array for each column of line_N 
+        #$% in the NEW_Lines array 
+        call REV_Each_Col(  NEW_Lines[1,line_N],
+                            REV_Lines[1,line_N])
+        #$% increment line number
+        line_N = line_N + 1
+                
+        #$% if max lines are exceeded, break 
+        if (line_N > $MAX_lines) break 
+
+        #$% repeat while the indentation of line_N is beyond the saved
+        #$% indentation column
+        }until (INDENT(NEW_Lines[1,line_N]) <= sav_ind)
+
+    } ## end repeat loop
+
+
+return
+end
+
+
+Subroutine Check_Each_Col(lineO,lineN,lineR)
+
+ ###################################################################
+ #$%
+ #$% Purpose:   Checks every column in each line to find 
+ #$%            any differences.
+ #$%
+ #$% Called By: BUILD_FLAGS
+ #$%
+ #$% Calls:     FLAG_IT
+ #$%
+ #$% Tables:    NONE
+ #$%
+ #$% Date:      18-OCT-82
+ #$%
+ #$% Author:    Timothy P. Adamos
+ #$%
+ #######################################################
+BBimplicit  # jb   E2145    3/29/00
+
+integer         lenO,
+                lenN,
+                icol
+INTEGER         LENGTH
+
+
+character       lineO[ARB],
+                lineN[ARB],
+                lineR[ARB]
+
+
+lenO = LENGTH(lineO)    ## get length of lines
+lenN = LENGTH(lineN)
+
+#$% for each column in lineN
+for (icol = 1; icol <= lenN; icol = icol + 1)
+    {   
+    #$% if character in a column of lineN is blank, get next column
+    if (lineN[icol] == $SPACE) next
+
+    #$% if the column is beyond the length of lineO or the columns 
+    #$% in linesO and N are not equal ie. match columns
+    if (icol > lenO | lineO[icol] != lineN[icol])
+        {
+        #$% flag that column (lineR)
+        call Flag_It(icol,lineN,lineR)
+        }
+    }
+
+return
+end
+
+
+
+Subroutine REV_Each_Col(lineN,lineR)
+
+ ###################################################################
+ #$%
+ #$% Purpose:   Sets a flag in each column of the line.
+ #$%            
+ #$%
+ #$% Called By: BUILD_FLAG
+ #$%
+ #$% Calls:     NONE
+ #$%
+ #$% Tables:    NONE
+ #$%
+ #$% Date:      18-OCT-82
+ #$%
+ #$% Author:    Timothy P. Adamos
+ #$%
+ #######################################################
+BBimplicit  # jb   E2145    3/29/00
+
+integer         lenN, icol
+INTEGER         LENGTH
+character       lineN[ARB],
+                lineR[ARB]
+
+#$% get length of lineN
+lenN = LENGTH(lineN)
+
+#$% for each column in lineN
+for (icol = 1; icol <= lenN; icol = icol + 1)
+    {   
+    #$% set flag
+    lineR[icol] = YES
+    }
+
+return
+end
+
+
+
+Subroutine Flag_It(col,line,flag)
+
+ #######################################################
+ #$%
+ #$% Purpose:   Flags a column.
+ #$%            
+ #$%
+ #$% Called By: CHECK_EACH_LINE
+ #$%
+ #$% Calls:     NONE
+ #$%
+ #$% Tables:    NONE
+ #$%
+ #$% Date:      18-OCT-82
+ #$%
+ #$% Author:    Timothy P. Adamos
+ #$%
+ #######################################################
+BBimplicit  # jb   E2145    3/29/00
+
+integer         col,
+                sav_col,
+                pos
+
+character       line[ARB], flag[ARB]
+
+#$% get the column
+sav_col  = col
+
+#$% for each position starting with the current column and 
+#$% decrementing until the begining of the word is reached
+for (pos = col; pos > 0 & line[pos] != BLANK; pos = pos - 1)
+    {
+    #$% set flag for each column
+    flag[pos] = YES
+    }
+
+#$% for each position starting with current position and 
+#$% incrementing until the end of the word is reached
+for (pos = sav_col; line[pos] != BLANK & line[pos] != EOS; pos = pos + 1)
+    {
+    #$% set flag for each column
+    flag[pos] = YES
+    }
+
+#$% decrement column position
+col = pos - 1
+
+
+return
+end
+
+
+
+Integer Function INDENT(line)   # jb E2145 (Integer) 3/29/00
+
+ #######################################################
+ #$%
+ #$% Purpose:   Finds the column where the indentation 
+ #$%            begins
+ #$%
+ #$% Called By: BUILD_FLAG
+ #$%
+ #$% Calls:     SKIPBL
+ #$%
+ #$% Tables:    NONE
+ #$%
+ #$% Date:      18-OCT-82
+ #$%
+ #$% Author:    Timothy P. Adamos
+ #$%
+ #######################################################
+BBimplicit  # jb   E2145    3/29/00
+
+Integer I   # jb   E2145    3/29/00
+character line[ARB]
+
+#$% if line one is end of string, return
+if (line[1] == EOS) return 0
+
+#$% start I at 1    
+I = 1
+
+#$% skip all blanks and tabs and stop in column with the first
+#$% character in it and record the column as I
+call skipbl(line,I)
+
+#$% return with the column number of indentation
+return I
+
+end
+
+
+# Dummy routines to get clean link
+
+Subroutine CHKFLT (_                   # search for aircraft/display options
+                    itype,              #    aircraft type name
+                    istatus,            #    returned status $YES=ok(found it)
+                    icnt)               #    number of slots available
+
+entry chkeq (itype,mqty,mname,istatus)
+
+return
+end
+
+Subroutine Build_Find_Flags(SBI$Pointer)
+
+ ####################################################################
+ #$%
+ #$% Purpose:   Builds an array of flags to indicate reverse
+ #$%            video and/or bold attributes.
+ #$%
+ #$% Called By: FORMAT_ASTAB
+ #$%
+ #$% Calls:     SMOVH, SMOV, INDENT, REV_EACH_COL, CHECK_EACH_COL
+ #$%
+ #$% Tables:    SBI
+ #$%
+ #$% Date:      AUG 07
+ #$%
+ #$% Author:    James O. Allen
+ #$%
+ ####################################################################
+BBcommon
+ASTABCommon
+STATUScommon
+
+character CPAGE[arith($ST$Line$words,*,4),$Max$Lines]    ## page buffer
+equivalence (ipage, cpage)
+
+
+literal         findText, cstrip8
+
+character ctext[9]
+equivalence (ctext, findtext)
+
+
+Integer*4       klen, almostequaluc, icol, lastcol
+
+BBDeclare       (sbi$pointer,
+                 sbi$CurrFindLine$i,
+                 sbi$CurrFindCol$i)
+
+# Highlight found text
+
+sbi$CurrFindLine$i = Xsbi$CurrFindLine$i
+sbi$CurrFindCol$i = Xsbi$CurrFindCol$i
+klen = 0
+call smovhn (Xsbi$AstabFindText$c, $$MaxLit, findText, klen)
+call smov   (EOS, findtext, klen)
+
+if (sbi$CurrFindLine$i != 0 &
+    sbi$CurrFindCol$i  != 0)
+{
+    if (almostequaluc(findText,
+        cpage[sbi$CurrFindCol$i, sbi$CurrFindLine$i]) == YES)
+    {
+        lastcol = sbi$CurrFindCol$i + klen - 2
+        for (icol = sbi$CurrFindCol$i; icol <= lastcol; icol = icol + 1)
+        {
+            REV_Lines[icol,sbi$CurrFindLine$i] = YES
+        }
+    }
+}
+
+return
+end

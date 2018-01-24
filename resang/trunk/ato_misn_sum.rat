@@ -1,0 +1,253 @@
+ 
+define (number_args, 5)         # prescript file name, outfile, replenish flag
+define (MAXPLATFORMS, 1000)
+define (MAXLOADITEMS, 20)
+ 
+undefine write   # use the standard fortran write statement
+undefine read
+undefine err
+ 
+program ATO_misn_sum
+#########################################################################
+#$%
+#$% Purpose:    This program summaries allocated resources for mission
+#$%
+#$% Calls:      initr4         <rlib.olb>
+#$%             read_arguments
+#$%             ctoi
+#$%             remark
+#$%             exit
+#$%             smov..
+#$%             echo..
+#$%             write
+#$%             close
+#$%
+#$% Tables:     global variables
+#$%
+#$% Date:       Aug 2012
+#$%
+#$% Author:     James O. Allen
+#$%
+#########################################################################
+implicit none
+integer          arg_len[number_args]
+vaxcharacter*80  args[number_args], params
+ 
+integer kk
+ 
+vaxcharacter*80  ato_root
+vaxcharacter*80  atoid
+vaxcharacter*80  atoid_update
+vaxcharacter*80  infile
+vaxcharacter*80  outfile
+ 
+vaxcharacter*80  atoid_dir
+ 
+call initR4
+ 
+call Read_Arguments (number_args, args, arg_len, params)
+ 
+ato_root     = args[1][1:arg_len[1]]
+atoid        = args[2][1:arg_len[2]]
+atoid_update = args[3][1:arg_len[3]]
+infile       = args[4][1:arg_len[4]]
+outfile      = args[5][1:arg_len[5]]
+ 
+# Get ato directory
+atoid_dir = ""
+kk = 0
+call smovvn(ato_root, atoid_dir, kk)
+call smovv("/", atoid_dir, kk)
+call smovvn(atoid, atoid_dir, kk)
+call smovv("/",atoid_dir, kk)
+call smovvn(atoid_update, atoid_dir, kk)
+call smovv("/", atoid_dir, kk)
+ 
+call do_misn_sum (atoid_dir, infile, outfile)
+ 
+End
+
+Subroutine do_misn_sum (atoid_dir, infile, outfile)
+implicit none
+vaxcharacter*80  atoid_dir
+vaxcharacter*80  infile
+vaxcharacter*80  outfile
+ 
+vaxcharacter*80  prefile
+vaxcharacter*80  tmpfile
+ 
+integer k, kk, i, ni
+integer ctoi
+integer name_len
+integer return_val
+integer t_len
+integer np
+integer my_nacI
+ 
+integer my_platform_len
+integer my_actype_len
+integer my_item_len
+ 
+vaxcharacter    a_line*120
+vaxcharacter    t_line_v*120
+character       t_line[120]
+equivalence     (t_line, t_line_v)
+vaxcharacter    spaces*100
+vaxcharacter    w1*120
+vaxcharacter    w2*120
+vaxcharacter    w3*120
+vaxcharacter    w4*120
+vaxcharacter    w5*120
+vaxcharacter    xx*120
+ 
+vaxcharacter    my_linetype*8
+vaxcharacter    my_platform*8
+vaxcharacter    my_nac*8
+vaxcharacter    my_actype*8
+vaxcharacter*8  my_qty[MaxLoadItems]
+integer         my_qtyI[MaxLoadItems]
+vaxcharacter*8  my_item[MaxLoadItems]
+ 
+spaces = " "
+ 
+prefile = ""
+kk = 0
+call smovvn(atoid_dir, prefile, kk)
+call smovvn(infile, prefile, kk)
+ 
+open(unit    =   10,                            #open input file
+     file    =   prefile,
+     status  =  'old',
+     access  =  'sequential',
+     recl    =   120,
+     iostat  =   return_val)
+ 
+if (return_val != 0)
+{
+    print *, "prescript file not found"
+    return
+}
+ 
+tmpfile = ""
+kk = 0
+call smovvn(atoid_dir, tmpfile, kk)
+call smovvn(outfile, tmpfile, kk)
+ 
+open(unit    =   11,                            #open output file
+     file    =   tmpfile,
+     status  =  'unknown',
+     access  =  'sequential',
+     recl    =   120,
+     iostat  =   return_val)
+ 
+if (return_val != 0)
+{
+    print *, "mission summary output file cannot be opened"
+    return
+}
+ 
+# Program tasks
+#    2)  Locate platform name from SCRAMBLE order
+#    4)  Locate aircraft quantity from SCRAMBLE order
+#    5)  Locate aircraft type from SCAMBLE order
+#    7)  Locate weapons load from LOAD order
+#    8)  Write one line for actype
+#    9)  Write one line for load
+ 
+repeat
+{
+    #read ATO summary line
+    read (10,9001,end=8002,err=8001) a_line
+    9001 format (A)
+    call Trim_Compress (a_line, t_line_v, kk)
+    t_len = kk
+	call smov(EOS, t_line, kk)
+    call upper (t_line)
+	t_line_v[kk:kk] = " "
+ 
+9002    format(A)
+ 
+    if (t_len == 0) next        # skip Blank line
+ 
+    call str_element (w1, 0, " ", t_line_v )
+    call str_element (w2, 1, " ", t_line_v )
+    call str_element (w3, 2, " ", t_line_v )
+    call str_element (w4, 3, " ", t_line_v )
+    call str_element (w5, 4, " ", t_line_v )
+ 
+#   !----------------------------------------
+#   ! (2)  Locate platform name from SCRAMBLE order
+    if ( w1 == "FOR" & w3 == "SCRAMBLE")
+    {
+        my_linetype = "launch"
+        my_platform = w2
+        my_nac = w4
+        my_actype = w5
+ 
+        k = 1
+        my_nacI = ctoi(%%ref(my_nac), k)
+        k = 0
+        a_line = my_platform[1:8] // " " //_
+                 my_linetype[1:6] // " " //_
+                 my_actype[1:8] // " " //_
+                 my_nac[1:2] // char(0)
+#        call upper (%%ref(a_line))
+        write (11,9002) a_line[1:len_trim(a_line)]
+        next
+    }
+ 
+#   !----------------------------------------
+#   !(7)  Locate weapons load from LOAD order
+    if (w1 == "LOAD")
+    {
+        my_linetype = "load"
+#       ! get qty & items out of ATO load info
+        kk = 1
+        ni = 0
+        repeat
+        {
+            #  Get my_nac from platform above
+            ni = ni + 1
+            if (ni > MAXLOADITEMS) break
+            my_qty[ni] = " "
+            my_item[ni] = " "
+            call str_element(my_qty[ni],kk," ",t_line_v)
+            call str_element(my_item[ni], kk+1," ",t_line_v)
+            call Trim_Compress (my_item[ni], xx, my_item_len)
+            if (my_item[ni] == " ") break
+            k = 1; my_qtyI[ni] = ctoi(%%ref(my_qty[ni]), k) * my_nacI
+            kk = kk + 2
+        }
+        for (kk=1; kk<=ni-1; kk=kk+1)
+        {
+            if (my_item[kk] == "JP") next
+ 
+            a_line = my_platform[1:8] // " " //_
+                     my_linetype[1:6] // " " //_
+                     my_item[kk][1:8] // " " //_
+                     my_qty[kk][1:3] // char(0)
+#            call upper (%%ref(a_line))
+            write (11,9002) a_line[1:len_trim(a_line)]
+        }
+    }
+}
+ 
+repeat
+{
+    break
+ 
+    8001 continue       # Comes here for ERROR on open or READ
+}
+repeat
+{
+    break
+ 
+    8002 continue       # Comes here for END
+}
+ 
+close (unit=10)
+close (unit=11)
+ 
+return
+end
+ 

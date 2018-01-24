@@ -1,0 +1,270 @@
+include "bbacc.inc"
+include "bbcmc.inc"
+include "bbctl.inc"
+include "bbcode.inc"
+include "bbdeq.inc"
+include "bbshc.inc"
+include "bbsta.inc"
+include "bbunt.inc"
+include "gcgam.inc"
+include "orders.inc"
+include "ptcolor.inc"
+include "wimain_eq.inc"
+ 
+define (BBImplicit, Implicit NONE)
+ 
+
+Subroutine PL_RADAR(nord,                       #receive order number
+                    ista,                       #receive station
+                    nargs,                      #receive number words
+                    args)                       #receive parameters
+ 
+###########################################################################
+#$%
+#$% Purpose:    PL_RADAR stores radar detection envelope request in STA$SEN
+#$%             sub-table or removed request from sub-table
+#$%
+#$% Called by:  PL_EXEORD
+#$%
+#$% Calls:      NONE
+#$%
+#$% Author:     James Allen
+#$%
+#$% Date:       February 2008
+#$%
+############################################################################
+ 
+BBcommon
+EqErr$Common
+ 
+integer     NARGS, ISTA, Nord, iarg
+literal     args[nargs]
+literal     CSTRIP8
+ 
+literal     ilex[19]
+integer     indx, indxShip
+integer     iview, i
+integer     predict_passive_range
+ 
+integer     course, altdepth
+integer     tgttype, color_indx
+integer     iwords, ionum, irc, indxdeq
+integer     isfound
+integer     jamming
+integer     untindx
+ 
+BBDeclare (STA$Pointer, UNT$Pointer)
+BBDeclare (acc$pointer, cmc$pointer, shc$pointer, deq$pointer)
+BBDEclare (sta$SENnum$i, sta$SEN$index, sta2$SEN$index)
+integer sta$SEN$index2
+ 
+STA$Pointer$To ista                             #get sta pointer
+iview = Xsta$View$i
+ 
+# 1     2                                   3
+#PLOT RADAR (detection envelope around) <force-name>
+ 
+#                4                       5    6
+#(using radar) <name> (with) [ JAMMING | NO JAMMING ] (for target type)
+ 
+#   7        8                              9                   10
+#[ AIR <aircraft-type> (relative course) <degrees> (altitude) <feet>
+ 
+#    7      8                         9                   10
+#| CRUISE <name> (relative course) <degrees> (altitude) <feet>
+ 
+#   7     8                          9
+#| SHIP <class> (relative course) <degrees>
+ 
+#   7    8                           9               10
+#| SUB <class> (relative course) <degrees> (depth) <feet> ]
+ 
+#     10-11                              11-12
+#[ | COLOR [ | ORANGE   | BROWN | YELLOW | GREY    | GREEN | MUDGREEN | NAVY  | PURPLE | MAGENTA |
+ 
+#    11-12       12-13
+#[ | DARK ] [ RED | BLUE ] |
+ 
+#   10-11   11-12
+#[ | OFF ] WHITE ] ];
+ 
+#  1      2               3
+# ERASE RADAR (for) <force-name>;
+ 
+if (args[1] == $LEX$PLOT$)
+{
+    #$% find the unit
+    call untfnd(iview,
+                args[3],
+                unt$POINTER)
+    if (! unt$pointer$Valid)
+    {
+        call echov ("plot radar force not found")
+        call echor
+        return
+    }
+ 
+    # Find radar on platform
+    isfound = 0
+    FOR_DEQ_CHAIN
+    {
+        if(xDEQ$IDENT$I == $RADAR$CODE)  #if radar
+        {
+            if (Xdeq$type$c == args[4])
+            {
+                isfound = 1
+                break
+            }
+        }
+    }
+ 
+    if (isfound == 0)           # Specified radar not found
+    {
+        call echov ("Plot radar detector does not have specified RADAR")
+        call echor
+        return
+    }
+ 
+    indxdeq = deq$pointer$index
+ 
+    if (args[5] == $LEX$JAMMING$)
+        jamming = $yes
+    else
+        jamming = $no
+ 
+    indxShip = 7
+ 
+    # verify target type/class
+    if (args[indxShip] == $LEX$AIR$)
+    {
+        cflg = NO
+        call eqfind($$ACC,0,args[indxShip+1],ACC$Pointer) # search ACC table for class
+        if (ACC$Pointer == 0)              # Aircraft type not in table
+        {
+            call echov ("plot radar aircraft type not found")
+            call echor
+            return
+        }
+        course = args[indxShip+2]
+        altdepth = args[indxShip+3]
+        tgttype = $air$code
+        indxShip = indxShip + 4
+    }
+    else if (args[indxShip] == $LEX$CRUISE$)
+    {
+        cflg = NO
+        call eqfind($$CMC,cmc$entry,args[indxShip+1],CMC$Pointer) # search CMC table for class
+        if (CMC$Pointer == 0)              # Cruise Missile type not in table
+        {
+            call echov ("plot radar cruise missile type not found")
+            call echor
+            return
+        }
+        course = args[indxShip+2]
+        altdepth = args[indxShip+3]
+        tgttype = $CruiseMissile$code
+        indxShip = indxShip + 4
+    }
+    else if (args[indxShip] == $LEX$SHIP$ | args[indxShip] == $LEX$SUB$)
+    {
+        cflg = NO
+        call eqfind($$SHC,0,args[indxShip+1],SHC$Pointer) # search SHC table for class
+        if (SHC$Pointer == 0)              # ship class is found in SHC table
+        {
+            call echov ("plot radar ship/sub class not found")
+            call echor
+            return
+        }
+        course = args[indxShip+2]
+        tgttype = $surface$code
+        altdepth = 0
+        if (args[indxShip] == $LEX$SUB$)
+        {
+            altdepth = args[indxShip+3]
+            tgttype = $sub$code
+            if (altdepth > XSHC$ScopeDepth$i)
+            {
+                call echov ("plot radar sub below periscope depth")
+                call echor
+                return
+            }
+            indxShip = indxShip + 4
+        }
+        else
+        {
+            indxShip = indxShip + 3
+        }
+    }
+ 
+    if (nargs >= indxShip+1)
+        call Trans_Color (args,indxShip+1,Color_indx)      # Get the color specified
+    else
+        Color_indx = $Color$Red
+ 
+    # Find empty slot
+    sta$SENnum$i = Xsta$SENnum$i
+    if (sta$SENnum$i >= sta$sen$slots)
+    {
+        call echov ("plot radar request exceeds max number of requests")
+        call echor
+        return
+    }
+    # Store request
+    sta$SENnum$i = sta$SENnum$i + 1
+    PUTsta$SENnum$i
+ 
+    sta$SEN$index = sta$SENnum$i
+    PUTsta$SEN$DEQIndx$i( indxDEQ )
+    PUTsta$SEN$TgtType$i( tgttype )
+    PUTsta$SEN$Color$i( color_indx )
+    PUTsta$SEN$UntIndx$i( unt$pointer$index )
+    PUTsta$SEN$RelativeCourse$i( course )
+    PUTsta$SEN$TgtAltDepth$i( altdepth )
+    PUTsta$SEN$ProbDet$i( 50 )
+    PUTsta$SEN$PlotJammed$i( jamming )
+ 
+    if (tgttype == $air$code)                PUTsta$SEN$ACCPntr$i( ACC$Pointer )
+    else if (tgttype == $CruiseMissile$code) PUTsta$SEN$CMCPntr$i( CMC$Pointer )
+    else if (tgttype == $surface$code)       PUTsta$SEN$SHCPntr$i( SHC$Pointer )
+    else if (tgttype == $sub$code)           PUTsta$SEN$SHCPntr$i( SHC$Pointer )
+ 
+}
+else if (args[1] == $LEX$ERASE$)
+{
+    #$% find the unit
+    call untfnd(iview,
+                args[3],
+                unt$POINTER)
+    if (! unt$pointer$Valid)
+    {
+        call echov ("plot radar force not found")
+        call echor
+        return
+    }
+ 
+    untindx = unt$pointer$index
+ 
+    # look for matching detector
+    sta$SENnum$i = Xsta$SENnum$i
+    for (sta$SEN$index = 1; sta$SEN$index <= sta$SENnum$i;
+         sta$SEN$index = sta$SEN$index + 1)
+    {
+        if (Xsta$SEN$UNTindx$i == untindx)
+        {
+            # Copy last entry to entry being deleted and decrement count
+            if (sta$SEN$index < sta$SENnum$i)
+            {
+                sta$sen$index2 = sta$SENnum$i
+                STA$SEN$Duplicate$STA2$SEN
+            }
+            sta$SENnum$i = sta$SENnum$i - 1
+        }
+    }
+    PUTsta$SENnum$i
+ 
+}
+ 
+ 
+return
+end
+ 

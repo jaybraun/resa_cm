@@ -1,0 +1,5549 @@
+######################################################################
+#$%
+#$%                    GAMEBOOK.RAT
+#$%
+######################################################################
+ 
+#####   version 1.0  dated-  July, 1992
+ 
+ 
+#######################################################################
+#$% PROGAM DESCRIPTION:
+#$%     This program consists of three top level subroutines
+#$%     namely FPBLUE, FPORANGE and FPCONTROL. These routines
+#$%     print out gamebook data for blue and orange forces, depending
+#$%     on the selection given in the FORCE program.  Refer to RESA's
+#$%     intimidating user manual for more info on the force program,
+#$%     but for now just keep in mind that these routines are being
+#$%     called by a subroutine named GAMEBOOK which is in the FORCE
+#$%     file. The flow chart shown next illustrates it.
+#$%
+#$%     FORCE -> PRINT -> GAMEBOOK -> FPBLUE     -------------->
+#$%                                -> FPORANGE   -------------->
+#$%                                -> FPCONTROL  -> FPBLUE ---->
+#$%                                              -> FPORANGE -->
+#$%
+#$%
+#$%     FPBLUE and FPORANGE share all of the following routines
+#$%
+#$%     FPGRDESM  =========> Collects RADAR/ESM data
+#$%     FPGJAMMER =========> Collects JAMMERS data
+#$%     FPGSHIP   =========>     "    SHIPS and SUBMARINES data
+#$%     FPGSHOREBASE ======>     "    SHORE BASES data
+#$%     FPGAIR    =========>     "    AIRCRAFT data
+#$%     FPGAML    =========>     "    AIRCRAFT  "
+#$%     FPGWEAP   =========>     "    WEAPONS   "
+#$%     FPGSENSOR =========>     "    SENSOR    "
+#$%     FPGEOB   ==========>     "    ELECTRONIC OF BATTLE data
+#$%     FPGTASK  ==========>     "    TASK ORGANIZATION numbers
+#$%
+#$%     The gamebook data consists of task organization numbers, aircraft
+#$%     weapons, sensors, ships, submarines, shore bases, etc.
+#$%     This data is collected from the characteristic files and loaded
+#$%     into arrays of structures for ships, shore bases, aircraft, etc.
+#$%     this makes things easy if we want to add or remove data fields.
+#$%
+#$%     The output data can go to a terminal or to a file. By default
+#$%     it creates a file name. the name is the same as the scenario
+#$%     file but with an "s.lis" appended to it.
+#$%
+#$%     As explained in the RESA manual each force color can have different
+#$%     "views", where each view can have up to some number of forces namely,
+#$%     ships, submarines and shore bases.  These units can have aircraft,
+#$%     boats, weapons, sonars, radars, sonobuoys, etc.  Weapons can be
+#$%     missiles, guns, bombs, etc.
+#$%
+#$%     It can be seen that the amount of information on a single ship
+#$%     can be huge, and that's where the gamebook comes into play.  The
+#$%     gamebook discloses key information in a format that the players
+#$%     can quickly access.
+#$%
+#$%
+#$% NOTES:
+#$%       1. There is no top level subroutine to handle Neutral forces
+#$%       2. Given the time there is always room for optimization
+#$%       3. New sobroutines can be added to collect frequencies
+#$%
+#######################################################################
+
+ 
+define ($highest$ascii,"zzzzzzzz")
+define (TENEX$MONITOR,%"30000%)
+define (TOPS20$MONITOR,%"40000%)
+define  ($DEBUGM,)
+ 
+include "bbcode.inc"
+include "plplay.inc"
+include "frmain.inc"
+include "ascii.inc"
+ 
+define ($MaxWidth,77)
+ 
+#$% these numbers were arbitrarly chosen
+#$% to play it safe refer to the RESA software GURUS
+define (max_weap, 100)
+define (max_cruz, 100)
+define (max_type, 100)
+define (max_torp, 100)
+define (max_sonar, 100)
+define (max_sonob, 100)
+define (max_views, 10)
+define (max_ships, 100)
+define (max_shores,100)
+define (max_boats,1000)    # Mr. Stockwell's educated guess    Alex V. 6/94
+define (max_sonars, 200)
+define (max_sonobs, 200)
+define (max_rdesms, 300)
+define (max_cruzs,  300)
+define (max_trpdos, 200)
+define (max_jammers,300)
+define (max_air, 200)
+define (max_rdesm, 20)
+define (max_jammer, 20)
+ 
+define($ship_rec_struct,
+ 
+         integer ship_n_weap[max_views,max_ships]
+         integer ship_n_cruz[max_views,max_ships]
+         integer ship_n_torp[max_views,max_ships]
+         integer ship_n_sonar[max_views,max_ships]
+         integer ship_n_sonob[max_views,max_ships]
+         integer ship_n_air[max_views,max_ships]
+         integer ship_n_rdesm[max_views,max_ships]
+         integer ship_n_jammer[max_views,max_ships]
+         literal ship_class_name[max_views,max_ships]
+         literal ship_weap[max_weap,max_views,max_ships]
+         integer ship_weap_qty[max_weap,max_views,max_ships]
+         literal ship_weap_type[max_weap,max_views,max_ships]
+         literal ship_type[max_type,max_views,max_ships]
+         literal ship_cruz[max_cruz,max_views,max_ships]
+         integer ship_cruz_qty[max_cruz,max_views,max_ships]
+         literal ship_cruz_type[max_cruz,max_views,max_ships]
+         literal ship_torp[max_torp,max_views,max_ships]
+         integer ship_torp_qty[max_torp,max_views,max_ships]
+         literal ship_sonar[max_sonar,max_views,max_ships]
+         literal ship_sonob[max_sonob,max_views,max_ships]
+         literal ship_sonob_type[max_sonob,max_views,max_ships]
+         integer ship_sonob_qty[max_sonob,max_views,max_ships]
+         literal ship_air[max_air,max_views,max_ships]
+         literal ship_rdesm[max_rdesm,max_views,max_ships]
+         literal ship_jammer[max_jammer,max_views,max_ships]
+         literal ship_link16[max_views,max_ships]
+         literal ship_cec[max_views,max_ships]
+     )
+ 
+define($shore_rec_struct,
+         integer shore_n_weap[max_views,max_shores]
+         integer shore_n_cruz[max_views,max_shores]
+         integer shore_n_torp[max_views,max_shores]
+         integer shore_n_sonar[max_views,max_shores]
+         integer shore_n_sonob[max_views,max_shores]
+         integer shore_n_air[max_views,max_shores]
+         integer shore_n_rdesm[max_views,max_shores]
+         integer shore_n_jammer[max_views,max_shores]
+         literal shore_class_name[max_views,max_shores]
+         literal shore_weap[max_weap,max_views,max_shores]
+         integer shore_weap_qty[max_weap,max_views,max_shores]
+         literal shore_weap_type[max_weap,max_views,max_shores]
+         literal shore_type[max_type,max_views,max_shores]
+         literal shore_cruz[max_cruz,max_views,max_shores]
+         integer shore_cruz_qty[max_cruz,max_views,max_shores]
+         literal shore_cruz_type[max_cruz,max_views,max_shores]
+         literal shore_torp[max_torp,max_views,max_shores]
+         integer shore_torp_qty[max_torp,max_views,max_shores]
+         literal shore_sonar[max_sonar,max_views,max_shores]
+         literal shore_sonob[max_sonob,max_views,max_shores]
+         literal shore_sonob_type[max_sonob,max_views,max_shores]
+         integer shore_sonob_qty[max_sonob,max_views,max_shores]
+         literal shore_air[max_air,max_views,max_shores]
+         literal shore_rdesm[max_rdesm,max_views,max_shores]
+         literal shore_jammer[max_jammer,max_views,max_shores]
+         literal shore_link16[max_views,max_shores]
+         literal shore_cec[max_views,max_shores]
+ 
+ 
+     )
+define($boat_rec_struct,
+ 
+         literal boat_name[max_boats]
+         literal boat_class[max_boats]
+         literal boat_base_name[max_boats]
+         integer boat_view_num[max_boats]
+     )
+ 
+define($air_rec_struct,
+ 
+         integer air_view_num[max_views,max_air]
+         integer air_n_sonar[max_views,max_air]
+         integer air_n_rdesm[max_views,max_air]
+         integer air_n_jammer[max_views,max_air]
+         literal air_class_name[max_views,max_air]
+         literal air_sonar[max_sonar,max_views,max_air]
+         literal air_rdesm[max_rdesm,max_views,max_air]
+         literal air_jammer[max_jammer,max_views,max_air]
+ 
+     )
+define($sonar_rec_struct,
+ 
+         literal sonar_name[max_sonars]
+         literal sonar_cat[max_sonars]
+         literal sonar_type[max_sonars]
+         integer sonar_freq[max_sonars]
+         integer sonar_range[4,max_sonars]
+ 
+     )
+ 
+define($sonob_rec_struct,
+ 
+         literal sonob_name[max_sonobs]
+         literal sonob_cat[max_sonobs]
+         literal sonob_type[max_sonobs]
+         integer sonob_freq[max_sonobs]
+         integer sonob_range[4,max_sonobs]
+ 
+     )
+ 
+define($rdesm_rec_struct,
+ 
+         integer rdesm_range[max_rdesms]
+         integer rdesm_freq[max_rdesms]
+         literal rdesm_name[max_rdesms]
+         literal rdesm_cat[max_rdesms]
+ 
+     )
+define($cruz_rec_struct,
+ 
+         integer cruz_range[max_cruzs]
+         integer cruz_speed[max_cruzs]
+         literal cruz_name[max_cruzs]
+         literal cruz_rdesm[max_cruzs]
+         literal cruz_jammer[max_cruzs]
+         literal cruz_type[max_cruzs]
+     )
+ 
+define($trpdo_rec_struct,
+ 
+         integer trpdo_range[max_trpdos]
+         integer trpdo_speed[max_trpdos]
+         literal trpdo_name[max_trpdos]
+         literal trpdo_targt[max_trpdos]
+         literal trpdo_rdesm[max_trpdos]
+         literal trpdo_jammer[max_trpdos]
+     )
+ 
+define($jammer_rec_struct,
+ 
+         literal jammer_name[max_jammers]
+         integer jammer_range[max_jammers]
+     )
+ 
+ 
+define(BookCommon,
+        $ship_rec_struct
+        $shore_rec_struct
+        $boat_rec_struct
+        $air_rec_struct
+        $sonar_rec_struct
+        $sonob_rec_struct
+        $rdesm_rec_struct
+        $jammer_rec_struct
+        $cruz_rec_struct
+        $trpdo_rec_struct
+        integer view_array[10,1500]   #av 7/92
+        integer view_force[10]        #av 7/92
+        integer num_views             #av 7/92
+        integer num_cruz              #av 8/92
+        integer num_jammer            #av 8/92
+        integer num_torp              #av 8/92
+        integer num_sonar             #av 8/92
+        integer num_sonob             #av 8/92
+        integer num_rdesm             #av 8/92
+        integer num_boats             #av 6/92
+        integer n_ship[100]           #av 8/92
+        integer n_boat[100]
+        integer n_shore[100]          #av 8/92
+        integer n_air[200]            #av 8/92
+ 
+ 
+        common /CBOOK/_
+         ship_n_weap,
+         ship_n_cruz,
+         ship_n_torp,
+         ship_n_sonar,
+         ship_n_sonob,
+         ship_n_air,
+         ship_n_rdesm,
+         ship_n_jammer,
+         ship_class_name,
+         ship_weap,
+         ship_weap_qty,
+         ship_weap_type,
+         ship_type,
+         ship_cruz,
+         ship_cruz_qty,
+         ship_cruz_type,
+         ship_torp,
+         ship_torp_qty,
+         ship_sonar,
+         ship_sonob,
+         ship_sonob_type,
+         ship_sonob_qty,
+         ship_air,
+         ship_rdesm,
+         ship_jammer,
+         ship_link16,
+         ship_cec,
+         shore_n_weap,
+         shore_n_cruz,
+         shore_n_torp,
+         shore_n_sonar,
+         shore_n_sonob,
+         shore_n_air,
+         shore_n_rdesm,
+         shore_n_jammer,
+         shore_class_name,
+         shore_weap,
+         shore_weap_qty,
+         shore_weap_type,
+         shore_type,
+         shore_cruz,
+         shore_cruz_qty,
+         shore_cruz_type,
+         shore_torp,
+         shore_torp_qty,
+         shore_sonar,
+         shore_sonob,
+         shore_sonob_type,
+         shore_sonob_qty,
+         shore_air,
+         shore_rdesm,
+         shore_jammer,
+         shore_link16,
+         shore_cec,
+         air_view_num,
+         air_n_sonar,
+         air_n_rdesm,
+         air_n_jammer,
+         air_class_name,
+         air_sonar,
+         air_rdesm,
+         air_jammer,
+         boat_name,
+         boat_class,
+         boat_base_name,
+         boat_view_num,
+         sonar_name,
+         sonar_cat,
+         sonar_type,
+         sonar_freq,
+         sonar_range,
+         sonob_name,
+         sonob_cat,
+         sonob_type,
+         sonob_freq,
+         sonob_range,
+         rdesm_range,
+         rdesm_freq,
+         rdesm_name,
+         rdesm_cat,
+         jammer_name,
+         jammer_range,
+         cruz_range,
+         cruz_speed,
+         cruz_name,
+         cruz_rdesm,
+         cruz_jammer,
+         cruz_type,
+         trpdo_range,
+         trpdo_speed,
+         trpdo_name,
+         trpdo_targt,
+         trpdo_rdesm,
+         trpdo_jammer,
+                     view_array,
+                     view_force,
+                     num_views,
+                     num_cruz,
+                     num_jammer,
+                     num_torp,
+                     num_sonar,
+                     num_sonob,
+                     num_rdesm,
+                     num_boats,
+                     n_ship,
+                     n_boat,
+                     n_shore,
+                     n_air)
+##########################################################################
+
+ 
+subroutine fpblue(nargs,args)
+#############################################################
+#$%
+#$% Purpose:    FPBLUE prints ship and shore base data
+#$%             aircraft, weapon and sensor capabilities for
+#$%             blue forces
+#$%
+#$% Called by:  FPGAMEBOOK
+#$%
+#$% calls:
+#$%
+#$% Tables:     Force
+#$%
+#$% Date:       July 92
+#$%
+#$% Author:     Alex Vagus
+#$%
+##############################################################
+IMPLICIT NONE   # jb    E2145   4/11/00
+ForceCommon
+BookCommon
+ 
+literal args[$max$args]     # jb E2145 (Removed ', taskn'   4/11/00
+literal force_color
+integer nargs
+ 
+#$% Note the order in which these calls are made is important
+#$% do not alter it
+force_color = 'BLUE'
+call fpheadpage(force_color)
+call fpgtaskblue(nargs,args)
+call fpgrdesm(nargs,args,force_color)
+call fpgjammer(nargs,args,force_color)
+ 
+call fpgbml(nargs,args,force_color)
+call fpgship(nargs, args, force_color)
+call fpgshorebase(nargs,args,force_color)
+call fpgair(nargs,args,force_color)
+call fpgaml(nargs,args, force_color)
+call fpgweap(nargs,args,force_color)
+call fpgsensor(nargs,args,force_color)
+call fpgeob(nargs,args,force_color)
+ 
+ 
+return
+end
+
+ 
+subroutine fporange(nargs,args)
+#############################################################
+#$%
+#$% Purpose:    FPORANGE prints ship and shore base data
+#$%             aircraft, weapon and sensor capabilities
+#$%             for orange forces
+#$%
+#$% Called by:  FPGAMEBOOK
+#$%
+#$% calls:
+#$%
+#$% Tables:     Force
+#$%
+#$% Date:       July 92
+#$%
+#$% Author:     Alex Vagus
+#$%
+##############################################################
+IMPLICIT NONE   # jb    E2145   4/11/00
+ForceCommon
+BookCommon
+ 
+integer nargs
+literal args[$max$args]     # jb E2145 (Removed ', taskn'   4/11/00
+literal force_color
+ 
+#$% Note the order in which these calls are made is important
+#$% do not alter it
+force_color = 'ORANGE'
+call fpheadpage(force_color)
+call fpgtaskorange(nargs,args)
+call fpgrdesm(nargs,args,force_color)
+call fpgjammer(nargs,args,force_color)
+ 
+call fpgbml(nargs,args,force_color)
+call fpgship(nargs, args, force_color)
+call fpgshorebase(nargs,args,force_color)
+call fpgair(nargs,args, force_color)
+call fpgaml(nargs, args, force_color)
+call fpgweap(nargs,args,force_color)
+call fpgsensor(nargs,args,force_color)
+call fpgeob(nargs,args,force_color)
+ 
+return
+end
+
+ 
+subroutine fpgtaskblue(nargs, args)
+#############################################################
+#$%
+#$% Purpose:    FPGTASKBLUE prints ship and shore base task designations
+#$%             for blue forces in ascending order
+#$%
+#$% Called by:  FPBLUE
+#$%
+#$% calls:      none
+#$%
+#$% Tables:     Force
+#$%
+#$% Date:       July 92
+#$%
+#$% Author:     Alex Vagus
+#$%
+##############################################################
+IMPLICIT NONE   # jb    E2145   4/11/00
+ForceCommon
+BookCommon
+ 
+literal args[$max$args], taskn # jb Note: args is an unused ARGUMENT 4/18/00
+integer nargs, irec1[1500]    # jb Note: nargs is an unused ARGUMENT 4/18/00
+Integer i,j,k,icnt,iprev_task,i_task2,iship,    # jb  E2145  4/11/00
+        ibase_cnt,imax,force$Index              # jb  E2145  4/11/00
+ 
+ 
+9000 format (/"       Task Designations For BLUE " )
+ 
+ 9001 format (/,
+  "             BLUE ",x,"View ",i2,/,
+  "            Task Organization ",/,
+  "            ================= ",/)
+ 9002 format (
+  "           Ships and Submarines ", /,
+  "                    RESA ")
+ 9003 format (
+  "      Task #        Name        Class ",/,
+  "    ---------       --------    -------- ")
+# 0         1         2         3         4         5         6         7
+# 0123456789012345678901234567890123456789012345678901234567890123456789012
+ 
+9006 format (/,
+  "           Shore Bases ", /,
+  "      Task #        Name  ",/,
+  "    ---------       -------- ")
+9008 format (
+  "      ******* None ******** ",/)
+ 
+ 9004 format (4x,a8,7x,a8,3x,a8)
+ 9007 format (4x,a8,7x,a8,2x)
+ 
+top$page
+#$% write header record
+write (35, 9000)
+ 
+#$% set count to zero
+icnt = 0
+#$% for each force entry
+for (force$index=1; force$index <= nforce; force$index=force$index+1)
+   {
+    #$% for each save array slot
+    for (j = 1; j<= icnt; j=j+1)
+       {
+        #$% if force entry is not in save array slot, get next
+        if (wiforce[$halfquad,1,irec[$halfquad,j]] <= force$task) next
+ 
+        #$% shift save array entries to the right
+        call fsrite (rrec,j,j+1,nforce)
+        #$% break loop
+        break
+       }
+ 
+    #$% save force index
+    irec[$halfquad,j] = force$index
+    #$% increment counter
+    icnt = icnt + 1
+   }
+ 
+#$% get blue forces
+num_views = 0
+icnt = 0
+iprev_task = 0
+ 
+for (j=1; j<= nforce; j=j+1)
+  {
+   force$index = irec[$halfquad,j]
+   call fgtask(force$task, taskn)
+   i_task2 = force$task/1000
+   if(i_task2 >= 50)
+      break
+   if(i_task2 != iprev_task)
+      {
+       if(num_views != 0)
+         view_force[num_views] = icnt
+       icnt = 1
+       num_views = num_views + 1
+       view_array[num_views, icnt] = force$index
+       icnt = icnt + 1
+      }
+   else
+     {
+      view_array[num_views, icnt] = force$index
+      icnt = icnt + 1
+     }
+ 
+   iprev_task = i_task2
+  }
+ 
+#$% note the number of forces in the last view
+ if(num_views !=0)
+   view_force[num_views] = icnt
+ 
+#$% for each view
+for (i=1; i<= num_views; i=i+1)
+  {
+   #$%write blue header
+   write(35, 9001) i
+   write(35, 9002)
+   write(35, 9003)
+ 
+   iship = 0
+   ibase_cnt = 1
+   imax = view_force[i]
+   #$% for each force save array entry
+   for (j=1; j< imax; j=j+1)
+    {
+     force$index = view_array[i,j]
+ 
+     #$% get task number
+     call fgtask (force$task,taskn)
+ 
+     if(force$class == 0)
+      {
+       irec1[ibase_cnt] = force$index
+       ibase_cnt = ibase_cnt + 1
+      }
+     else
+      {
+       #$% else write ship data
+       write (35, 9004) taskn, force$name, force$class
+       iship = iship + 1
+      }
+     }
+ 
+  if(iship == 0)
+   write(35,9008)
+ 
+  #$% write shore base data
+  write(35, 9006)
+ 
+  if(ibase_cnt == 1)
+   write(35,9008)
+ 
+  for(k=1; k< ibase_cnt; k=k+1)
+   {
+    force$index = irec1[k]
+    call fgtask(force$task, taskn)
+    write(35, 9007) taskn, force$name
+   }
+ 
+  #$% send a page break
+  top$page
+ 
+ }
+ 
+return
+end
+
+ 
+subroutine fpgtaskorange(nargs, args)
+#############################################################
+#$%
+#$% Purpose:    FPGTASK prints ship and shore base task designations
+#$%             for blue forces in ascending task numbers
+#$%
+#$% Called by:  FPORANGE
+#$%
+#$% calls:      none
+#$%
+#$% Tables:     Force
+#$%
+#$% Date:       July 92
+#$%
+#$% Author:     Alex Vagus
+#$%
+##############################################################
+IMPLICIT NONE   # jb    E2145   4/11/00
+ForceCommon
+BookCommon
+ 
+literal args[$max$args], taskn # jb Note: args is an unused ARGUMENT 4/18/00
+integer nargs, irec1[1500]    # jb Note: nargs is an unused ARGUMENT 4/18/00
+Integer i,j,k,icnt,iprev_task,i_task2,iship,    # jb  E2145  4/11/00
+        ibase_cnt,imax,force$Index              # jb  E2145  4/11/00
+ 
+ 
+9000 format (/"       Task Designations For ORANGE " )
+ 
+ 9001 format (/,
+  "             ORANGE ",x,"View ",i2,/,
+  "            Task Organization ",/,
+  "            ================= ",/)
+ 9002 format (
+  "           Ships and Submarines ", /,
+  "                    RESA ")
+ 9003 format (
+  "      Task #        Name        Class ",/,
+  "    ---------       --------    -------- ")
+# 0         1         2         3         4         5         6         7
+# 0123456789012345678901234567890123456789012345678901234567890123456789012
+ 
+9006 format (/,
+  "           Shore Bases ", /,
+  "      Task #        Name  ",/,
+  "    ---------       -------- ")
+9008 format (
+  "       ******* None *******  ",/)
+ 
+# 0         1         2         3         4         5         6         7
+# 0123456789012345678901234567890123456789012345678901234567890123456789012
+ 
+ 9004 format (4x,a8,7x,a8,3x,a8)
+ 9007 format (4x,a8,7x,a8,2x)
+ 
+top$page
+#$% write header record
+write (35, 9000)
+ 
+#$% set count to zero
+icnt = 0
+#$% for each force entry
+for (force$index=1; force$index <= nforce; force$index=force$index+1)
+   {
+    #$% for each save array slot
+    for (j = 1; j<= icnt; j=j+1)
+       {
+        #$% if force entry is not in save array slot, get next
+        if (wiforce[$halfquad,1,irec[$halfquad,j]] <= force$task) next
+ 
+        #$% shift save array entries to the right
+        call fsrite (rrec,j,j+1,nforce)
+        #$% break loop
+        break
+       }
+ 
+    #$% save force index
+    irec[$halfquad,j] = force$index
+    #$% increment counter
+    icnt = icnt + 1
+   }
+ 
+#$% get orange forces
+num_views = 0
+icnt = 0
+iprev_task = 0
+ 
+for (j=1; j<= nforce; j=j+1)
+  {
+   force$index = irec[$halfquad, j]
+   call fgtask(force$task, taskn)
+   i_task2 = force$task/1000
+   if(i_task2 < 50)
+      next
+ #  if(i_task2 >= 80)
+    if(i_task2 >= 90)      # E1592  Alex V. July/96
+     break
+   if(i_task2 != iprev_task)
+      {
+       if(num_views != 0)
+          view_force[num_views] = icnt
+       icnt = 1
+       num_views = num_views + 1
+       view_array[num_views, icnt] = force$index
+       icnt = icnt + 1
+      }
+   else
+     {
+      view_array[num_views, icnt] = force$index
+      icnt = icnt + 1
+     }
+   iprev_task = i_task2
+  }
+ 
+ #$% note number of forces of the last view
+ if(num_views != 0)
+  view_force[num_views] = icnt
+ 
+#$% for each view
+for (i=1; i<= num_views; i=i+1)
+  {
+   #$%write orange header
+   write(35, 9001) i
+   write(35, 9002)
+   write(35, 9003)
+ 
+   iship = 0
+   ibase_cnt = 1
+   imax = view_force[i]
+ 
+   #$% for each force save array entry
+   for (j=1; j< imax; j=j+1)
+    {
+     force$index = view_array[i,j]
+ 
+     #$% get task number
+     call fgtask (force$task,taskn)
+     if(force$class == 0)
+       {
+        irec1[ibase_cnt] = force$index
+        ibase_cnt = ibase_cnt + 1
+       }
+     else
+       {
+        #$%  write ship data
+        write (35, 9004) taskn, force$name, force$class
+        iship = iship + 1
+       }
+     }
+ 
+  if(iship ==0)
+   write(35, 9008)
+ 
+  #$% write shore base data
+  write(35, 9006)
+ 
+  if (ibase_cnt == 1)
+   write(35, 9008)
+ 
+  for(k=1; k < ibase_cnt; k=k+1)
+   {
+    force$index = irec1[k]
+    call fgtask(force$task, taskn)
+    write(35, 9007) taskn, force$name
+   }
+ 
+  #$% send a page break
+  top$page
+ 
+  }
+ 
+return
+end
+
+ 
+subroutine fpgship(nargs, args, force_color)
+#############################################################
+#$%
+#$% Purpose:    FPGSHIP prints a listing in alphabetical
+#$%             order all blue/orange ships and submarines data
+#$%
+#$% Called by:  FPBLUE FPORANGE
+#$%
+#$% calls:      FRPGCHARSHIP
+#$%
+#$% Tables:     none
+#$%
+#$% Date:       July 92
+#$%
+#$% Author:     Alex Vagus
+#$%
+##############################################################
+IMPLICIT NONE   # jb    E2145   4/11/00
+ForceCommon
+BookCommon
+ 
+literal args[$max$args] # jb Note:  args is an unused ARGUMENT 4/18/00
+literal xshp[2,2], force_color
+integer nargs           # jb Note: nargs is an unused ARGUMENT 4/18/00
+ 
+ 
+DATA xshp/'BUOY', 4,
+          'WEAP', 4/
+ 
+ 
+#$% The idea of having this top level routine is
+#$% to prepare for future additions, so it doesn't hurt
+#$% to have this one handy just in case
+ 
+ call frpgcharship(class$file,xshp,2,nclass,wrclass,"Ship Class",force_color)
+ 
+ 
+return
+end
+
+ 
+subroutine frpgcharship(opt,xfld,nfld,nchar,wchar,title, force_color)
+#############################################################
+#$%
+#$% Purpose:    FRPGCHAR prints a listing in alphabetical
+#$%             order all blue/orange ships and submarines data
+#$%             Note. there is a page break per view
+#$%
+#$% Called by:  FPSHIP
+#$%
+#$% calls:      order1  fgetr   fdOPEN
+#$%
+#$% Tables:     none
+#$%
+#$% Date:       July 92
+#$%
+#$% Author:     Alex Vagus
+#$%
+##############################################################
+IMPLICIT NONE   # jb    E2145   4/11/00
+ForceCommon
+BookCommon
+ 
+literal xfld[2,3] # jb E2145 (Removed opt,latn,longn,ilatn,ilongn) 4/11/00
+literal wrchar[5,$class],wchar[5,$class],rfld,rfld_type #jb 180 vs 140  2/89
+literal force_color
+literal xname[$class], xn1[$class], xn2[$class]
+ 
+integer kwords,nfld,nchar,wichar[$intrealmatch,5,$class]  # 2/8/89
+equivalence (wichar,wrchar)
+ 
+integer ship_cnt, weap_cnt, torp_cnt, cruz_cnt, sonar_cnt, sonob_cnt, air_cnt
+integer rdesm_cnt, jammer_cnt, b_knt
+integer ix[$class], ixcnt[$class], ixptr[$class,2]
+ 
+integer ijam, it,is,isb,ir,itype,force$index,   # jb E2145 4/18/00
+        ijtids,icec,ifld,ilen,imi,ipnt,istat,lfcB,lfcS  # jb E2145 4/18/00
+Integer i,k,m,ig,ii,iv,jg,k2,k5,k9,icnt,imax,knt,lcv,iship, # jb E2145 4/18/00
+         kk                                             # jb E2145  4/18/00
+vaxcharacter*(*) opt, title # (title; unused ARGUMENT)  # jb E2145  4/18/00
+logical iesm, iradar, iair, ijammr, imiss, itrpdo, iweap, isonar, ibuoy
+logical ilat, ilong, irdesm                             # jb E2145 4/18/00
+Logical IS_A_RADAR, IS_ALPHA_NUMERIC                    # jb E2145 4/18/00
+ 
+ 
+for (k = 1; k <= nchar; k=k+1)                  # move to local array with
+    {                                           # integer and real overlay
+    for (k5 = 1; k5 <= 5; k5=k5+1)
+        {
+        wrchar[k5,k] = wchar[k5,k]
+        }
+    }
+ 
+ 
+#$% if characteristic is less than one, return
+if (nchar < 1) return
+ 
+#$% skip lines
+skip$lines (2)
+start$line
+space$over 10; mv$sn(force_color, 7)
+space$over 1; mv$v("Ships, Boats and Submarines")
+write$line
+start$line
+skip$lines(2)
+ 
+icnt = 0
+knt = 0
+for(m=1; m<=nchar; m=m+1)
+    {
+    knt = knt + 1
+    xname[knt] = wrchar[1,m]
+    }
+ 
+call order1 (xname, ix, knt)
+ 
+#$% for each view
+for(ig=1; ig<=num_views; ig=ig+1)
+    {
+    iv= ig
+    imax = view_force[ig]
+ 
+    space$over 15; mv$sn(force_color,7)
+    space$over 1; mv$v("View ")
+    mv$n(iv,3)
+    write$line
+    start$line
+    knt = 0
+    icnt =0
+ 
+    #$% set counter arrays to zero
+    for(i=1; i<= nchar; i=i+1)
+        {
+        ixcnt[i] = 0
+        xn1[i] = 0
+        xn2[i] = 0
+        }
+ 
+    ship_cnt = 0
+ 
+    #$% for each view collect names
+    for(jg=1; jg<imax; jg=jg+1)
+        {
+        force$index = view_array[ig,jg]
+        xn1[jg] = force$class
+        xn2[jg] = force$name
+ 
+        #$% if not a shore base then is a ship
+        if(force$class != 0)
+            {
+            iship = iship +1
+            }
+        }
+ 
+    #$% for each view collect boat names
+ 
+    b_knt= 0 #set up counter
+ 
+    #$% go through entire boat list to get their names
+    for(ii=1; ii<=num_boats; ii=ii+1)
+        {
+        #$% if boat belongs to this view get its name and class
+        if(boat_view_num[ii] == ig)
+            {
+            xn1[imax+b_knt] = boat_class[ii]
+            xn2[imax+b_knt] = boat_name[ii]
+ 
+            b_knt = b_knt + 1
+ 
+            }
+        }
+ 
+    if(iship == 0)
+        {
+        space$over 13
+        mv$v("***** None *****")
+        write$line
+        start$line
+        }
+ 
+    #$% imax used to represent the number of forces in each view
+    #$% now, just locally we'll treat boats as an addition number of forces
+    #$% to simplify things boats are added to imax
+ 
+    imax = imax + b_knt - 1  # add the damm boats in this view
+ 
+    #$% for each ship class
+    for(m=1; m<=nchar; m=m+1)
+        {
+        k2 = ix[m]
+        rfld = xname[k2]
+ 
+        #$% count duplicates and mark duplicates
+        for(i=1; i<=imax; i=i+1)
+            {
+            if(xn1[i] == rfld)
+                {
+                ixcnt[m] = ixcnt[m] + 1
+                }
+            }
+        }
+ 
+    knt = 0
+ 
+    #$% for each ship class count the RESA names of that class
+    for(m=1; m<=nchar; m=m+1)
+        {
+        if(ixcnt[m] != 0)
+            {
+            knt = knt + 1
+            ixptr[knt,1] = ix[m]      #points to the right index
+            ixptr[knt,2] = ixcnt[m]   #how many instances of a particular class
+            }
+        }
+ 
+ 
+    #$% for each entry
+    for (k9=1; k9<=knt; k9=k9+1)
+        {
+        m = ixptr[k9,1]
+ 
+        if (wichar[$halfquad,2,m] != 0)             # if entry is in BUILD File
+            {
+            #$% open build file
+            call FDopen ($read,build$name,$litc,opt,32*4,lfcB,istat)
+            #$% set record
+            kwords = wichar[$halfquad,2,m]
+            #$% get build record
+            call fgetr (lfcB,kwords,16,rrec)
+            }
+        else if (wichar[$halfquad,4,m] != 0)        # else if entry in FORCE File
+            {
+            #$% open sceanario file
+            call FDopen ($read,scenario$name,$lits,opt,32*4,lfcS,istat)
+            #$% set record
+            kwords = wichar[$halfquad,4,m]
+            #$% get scenario record
+            call fgetr (lfcS,kwords,16,rrec)
+            }
+        #$% else get next
+        else next
+ 
+        #$% this part added later (besides who would it though that
+        #$% this primitive language supports an abstract data type
+        #$% called structure.
+        #######################################
+        weap_cnt = 0
+        cruz_cnt = 0
+        torp_cnt = 0
+        sonar_cnt = 0
+        sonob_cnt = 0
+        air_cnt = 0
+        rdesm_cnt = 0
+        jammer_cnt = 0
+        ship_cnt = ship_cnt + 1
+        ship_class_name[ig,ship_cnt] = wrchar[1,m]
+        #########################################
+ 
+        #$% format record
+        write$line
+ 
+        #$% removed in ufl95 Alex V.
+        # skip$lines (1)
+ 
+        start$line
+        mv$n(ixptr[k9,2],3)
+ 
+        if(wrchar[5,m] == 'BOAT')
+            {
+            space$over 1; mv$sn(rrec[3],$$MaxName)
+            space$over 2; mv$v("Class (boat)")
+            }
+        else if(wrchar[5,m] == 'SURF')
+            {
+            space$over 1; mv$sn(rrec[3],$$MaxName)
+            space$over 2; mv$v("Class (ship)")
+            }
+        else
+            {
+            space$over 1; mv$sn(rrec[3],$$MaxName)
+            space$over 2; mv$v("Class (sub) ")
+            }
+ 
+        mv$v(":")
+        KK = lenbf
+ 
+        for(lcv=0; lcv<=imax; lcv=lcv + 1)
+            {
+            if(xn1[lcv] == rrec[3])
+                {
+                if (lenbf + (1 + 1 * $$MaxName) > $MaxWidth)
+                    {
+                    write$line
+                    start$line; lenbf = kk
+                    }
+                space$over 1; mv$sn(xn2[lcv],$$MaxName)
+                }
+            }
+ 
+        write$line
+ 
+        #$% set the flags
+        irdesm = $yes
+        iair = $yes
+        ilat = $yes
+        ilong = $yes
+        itype = $yes
+ 
+        #$% these start out with no
+        iesm = $no
+        iradar = $no
+        itrpdo = $no
+        isonar = $no
+        ibuoy = $no
+        ijammr = $no
+        imiss = $no
+        iweap = $no
+        ijtids = $no
+        icec = $no
+ 
+        #$% for each entry
+        for (ipnt = 2; ipnt <= rrec[1]; ipnt = ipnt + ilen)
+            {
+ 
+            #$% get length
+            call fglen (ipnt,xfld,nfld,ilen)
+ 
+            $debugp call echor
+            $debugp call echoV(" ipnt=")    # jb E2144  (echoV) 4/11/00
+            $debugp call echoi(ipnt)
+            $debugp call echoV(" ilen=")    # jb E2144  (echoV) 4/11/00
+            $debugp call echoi(ilen)
+ 
+            #$% for each length entry
+            for (k=0; k<ilen ; k=k+1)
+                {
+                #$% set field
+                rfld = rrec[ipnt+k]
+ 
+                #if(is_alpha_numeric(rfld) == YES)
+                    #{
+                    if(rfld == 'VMAX')
+                        {
+                        start$line
+                        mv$v("MAX SPEED:")
+                        ifld = rrec[ipnt+k+1]
+                        space$over 2;  mv$n(ifld,5)
+                        space$over 2; mv$v("knots")
+                        }
+ 
+                    else if(rfld == 'RDESM')
+                        {
+                        rdesm_cnt = rdesm_cnt + 1
+                        rfld = rrec[ipnt+k+1]
+                        if(is_a_radar(rfld))
+                            {
+                            iradar = $yes
+                            }
+                         else
+                            {
+                            iesm = $yes
+                            }
+                        ship_rdesm[rdesm_cnt,ig,ship_cnt] = rfld
+                        }
+ 
+                    #$% collect sonar data
+                    else if (rfld == 'SONAR')
+                        {
+                        isonar = $yes
+                        sonar_cnt = sonar_cnt + 1
+                        rfld = rrec[ipnt+k+1]
+                        ship_sonar[sonar_cnt,ig,ship_cnt] = rfld
+                        }
+ 
+                    #$% collect air data
+                    else if (rfld == 'AIR')
+                        {
+                        air_cnt = air_cnt + 1
+                        rfld = rrec[ipnt+k+1]
+                        ship_air[air_cnt,ig,ship_cnt] = rfld
+                        }
+ 
+                    #$% collect missile data
+                    else if(rfld == 'MISS')
+                        {
+                        imiss = $yes
+                        cruz_cnt = cruz_cnt + 1
+                        ifld = rrec[ipnt+k+3]
+                        ship_cruz_qty[cruz_cnt,ig,ship_cnt] = ifld
+                        rfld = rrec[ipnt+k+1]
+                        ship_cruz[cruz_cnt,ig,ship_cnt] = rfld
+                        rfld = rrec[ipnt+k+2]
+                        ship_cruz_type[cruz_cnt,ig,ship_cnt] = rfld
+                        }
+ 
+                    #$% collect jammer data
+                    else if(rfld == 'JAMMR')
+                        {
+                        ijammr = $yes
+                        jammer_cnt = jammer_cnt + 1
+                        rfld = rrec[ipnt+k+1]
+                        ship_jammer[jammer_cnt,ig, ship_cnt] = rfld
+                        }
+ 
+                    #$% collect sonobuoy data
+                    else if(rfld == 'BUOY')
+                        {
+                        ibuoy = $yes
+                        sonob_cnt = sonob_cnt + 1
+                        ifld = rrec[ipnt+k+3]
+                        ship_sonob_qty[sonob_cnt,ig,ship_cnt] = ifld
+                        rfld = rrec[ipnt+k+1]
+                        ship_sonob[sonob_cnt,ig,ship_cnt] = rfld
+                        rfld = rrec[ipnt+k+2]
+                        ship_sonob_type[sonob_cnt,ig,ship_cnt] = rfld
+                        }
+ 
+                    #$% collect torpedo data
+                    else if(rfld == 'TRPDO')
+                        {
+                        itrpdo = $yes
+                        torp_cnt = torp_cnt + 1
+                        ifld = rrec[ipnt+k+2]
+                        rfld = rrec[ipnt+k+1]
+                        ship_torp[torp_cnt,ig,ship_cnt] = rfld
+                        ship_torp_qty[torp_cnt,ig,ship_cnt] = ifld
+                        }
+ 
+                    #$% collect weapon data
+                    else if(rfld == 'WEAP')
+                        {
+                        iweap = $yes
+                        weap_cnt = weap_cnt + 1
+                        ifld = rrec[ipnt+k+3]
+                        ship_weap_qty[weap_cnt,ig,ship_cnt] = ifld
+                        rfld = rrec[ipnt+k+1]
+                        ship_weap[weap_cnt,ig,ship_cnt] = rfld
+                        rfld = rrec[ipnt+k+2]
+                        ship_type[weap_cnt,ig,ship_cnt] = rfld
+                        ship_weap_type[weap_cnt,ig,ship_cnt] = rfld
+                        }
+ 
+                    else if(rfld == 'JTIDS') # clk 11/95 (E1469)
+                        {
+                        ijtids = $yes
+                        rfld = rrec[ipnt+k+1]
+                        ship_link16[ig,ship_cnt] = rfld
+                        }
+                    else if(rfld == 'CEC') # clk 10/96 (E1695)
+                        {
+                        icec = $yes
+                        rfld = rrec[ipnt+k+1]
+                        ship_cec[ig,ship_cnt] = rfld
+                        }
+                    #}   # end of if the field is alphanumeric
+                }
+            }
+ 
+        write$line
+        start$line
+ 
+        #$% print out weapons
+        if (iweap)
+            {
+            start$line
+            mv$v("WEAPONS  :")
+            for(iweap=1; iweap<=weap_cnt; iweap=iweap+1)
+                {
+                ifld =  ship_weap_qty[iweap,ig,ship_cnt]
+                rfld =  ship_weap[iweap,ig,ship_cnt]
+                rfld_type =  ship_weap_type[iweap,ig,ship_cnt]
+                if (lenbf + (9 + 2 * $$MaxName) > $MaxWidth)
+                    {
+                    write$line
+                    start$line; space$over 10
+                    }
+                KK = lenbf
+                space$over 2; mv$n(ifld,5)
+                space$over 2; mv$sn(rfld,$$MaxName)
+                mv$v(" ("); mv$sn(rfld_type,$$MaxName); mv$v(")")
+                lenbf = kk + (9 + 2 * $$MaxName)
+                }
+ 
+            write$line
+            start$line
+            }
+ 
+        #$% print out missiles
+        if (imiss)
+            {
+            start$line
+            mv$v("MISSILES :")
+            for(imi=1; imi<=cruz_cnt; imi=imi+1)
+                {
+                ifld = ship_cruz_qty[imi,ig,ship_cnt]
+                rfld = ship_cruz[imi,ig,ship_cnt]
+                rfld_type = ship_cruz_type[imi,ig,ship_cnt]
+                if (lenbf + (9 + 2*$$maxName) > $MaxWidth)
+                    {
+                    write$line
+                    start$line; space$over 10
+                    }
+                KK = lenbf
+                space$over 2; mv$n(ifld,5)
+                space$over 2; mv$sn(rfld,$$MaxName)
+                mv$v(" ("); mv$sn(rfld_type,$$MaxName); mv$v(")")
+                lenbf = kk + (9 + 2 * $$MaxName)
+                }
+ 
+            write$line
+            start$line
+            }
+ 
+        #$% print out sonobuoys
+        if (ibuoy)
+            {
+            start$line
+            mv$v("BUOYS    :")
+            for(isb=1; isb<=sonob_cnt; isb=isb+1)
+                {
+                rfld = ship_sonob[isb,ig,ship_cnt]
+                ifld = ship_sonob_qty[isb,ig,ship_cnt]
+                rfld_type = ship_sonob_type[isb,ig,ship_cnt]
+                if (lenbf + ( 9 + 2 * $$maxName) > $MaxWidth)
+                    {
+                    write$line
+                    start$line; space$over 10
+                    }
+                KK = lenbf
+                space$over 2; mv$n(ifld,5)
+                space$over 2; mv$sn(rfld,$$MaxName)
+                mv$v(" ("); mv$sn(rfld_type,$$MaxName); mv$v(")")
+                lenbf = kk + (9 + 2 * $$MaxName)
+                }
+ 
+            write$line
+            start$line
+            }
+ 
+        #$% print out torpedoes
+        if(itrpdo)
+            {
+            start$line
+            mv$v("TORPEDOES:")
+            for(it=1; it<=torp_cnt; it=it+1)
+                {
+                rfld = ship_torp[it,ig,ship_cnt]
+                ifld = ship_torp_qty[it,ig,ship_cnt]
+ 
+                if (lenbf + (9 + 1 * $$maxName) > $MaxWidth)
+                    {
+                    write$line
+                    start$line; space$over 10
+                    }
+ 
+                space$over 2; mv$n(ifld,5)
+                space$over 2; mv$s(rfld,$$MaxName)
+                }
+ 
+            write$line
+            start$line
+            }
+ 
+        #$% print out sonars
+        if(isonar)
+            {
+            start$line
+            mv$v("SONARS   :")
+            for(is=1; is<=sonar_cnt; is=is+1)
+                {
+                rfld = ship_sonar[is,ig,ship_cnt]
+                if (lenbf + (2 + $$maxName) > $MaxWidth)
+                    {
+                    write$line
+                    start$line; space$over 10
+                    }
+                space$over 2; mv$sn(rfld,$$MaxName)
+                }
+ 
+            write$line
+            start$line
+            }
+ 
+        #$% print out jammers
+        if (ijammr)
+            {
+            start$line
+            mv$v("JAMMERS  :")
+            for(ijam=1; ijam<=jammer_cnt; ijam=ijam+1)
+                {
+                rfld = ship_jammer[ijam,ig, ship_cnt]
+                if (lenbf + (2 + $$maxName) > $MaxWidth)
+                    {
+                    write$line
+                    start$line; space$over 10
+                    }
+                space$over 2; mv$sn(rfld,$$MaxName)
+                }
+ 
+            write$line
+            start$line
+            }
+ 
+        #$% print out radars
+        if(iradar)
+            {
+            start$line
+            mv$v("RADARS   :")
+            for(ir=1; ir<=rdesm_cnt; ir=ir+1)
+                {
+                rfld = ship_rdesm[ir,ig,ship_cnt]
+                if(is_a_radar(rfld))
+                    {
+                    if (lenbf + (2 + 1 * $$maxName) > $MaxWidth)
+                        {
+                        write$line
+                        start$line; space$over 10
+                        }
+                    space$over 2; mv$sn(rfld,$$MaxName)
+                    }
+                }
+ 
+            write$line
+            start$line
+            }
+ 
+        #$% print out esm
+        if(iesm)
+            {
+            start$line
+            mv$v("ESM      :")
+            for(ir=1; ir<=rdesm_cnt; ir=ir+1)
+                {
+                rfld = ship_rdesm[ir,ig,ship_cnt]
+                if(!(is_a_radar(rfld)))
+                    {
+                    if (lenbf + (2 + 1 * $$maxName) > $MaxWidth)
+                        {
+                        write$line
+                        start$line; space$over 10
+                        }
+                    space$over 2; mv$sn(rfld,$$MaxName)
+                    }
+                }
+ 
+            write$line
+            start$line
+            }
+ 
+        #$% print out link-16 capable - clk 11/95 (E1469)
+        if (ijtids == $yes)
+            {
+            start$line
+            if (ship_link16[ig,ship_cnt] == 'YES')
+                {
+                mv$v("LINK-16 CAPABLE")
+                write$line
+                start$line
+                }
+            }
+ 
+        #$% print out CEC capable - clk 10/96 (E1695)
+        if (icec == $yes)
+            {
+            start$line
+            if (ship_cec[ig,ship_cnt] == 'YES')
+                {
+                mv$v("CEC CAPABLE")
+                write$line
+                start$line
+                }
+            }
+ 
+        mv$v("-------------------------------------------------------")
+ 
+        #$% this part was added later for the sturcture thing
+        #######################################
+        ship_n_weap[ig,ship_cnt] = weap_cnt
+        ship_n_cruz[ig,ship_cnt] = cruz_cnt
+        ship_n_torp[ig,ship_cnt] = torp_cnt
+        ship_n_sonar[ig,ship_cnt] = sonar_cnt
+        ship_n_sonob[ig,ship_cnt] = sonob_cnt
+        ship_n_air[ig,ship_cnt] = air_cnt
+        ship_n_rdesm[ig,ship_cnt] = rdesm_cnt
+        ship_n_jammer[ig,ship_cnt] = jammer_cnt
+        #######################################
+        }
+ 
+    top$page
+    start$line
+    skip$lines(1)
+ 
+    #$% part added later
+    #########################
+    n_ship[ig] = ship_cnt
+    #########################
+    }
+ 
+for (k = 1; k <= nchar; k=k+1)              # move to call array from
+    {                                       # integer and real overlay
+    for (k5 = 1; k5 <= 5; k5=k5+1)
+        {
+        wchar[k5,k] = wrchar[k5,k]
+        }
+    }
+ 
+#$% for testing purposes only, please do not remove
+# call print_ship()
+ 
+return
+end
+
+ 
+subroutine fpgrdesm(nargs, args, force_color)
+#############################################################
+#$%
+#$% Purpose:    FPGRDESM Collects radar/esm data
+#$%             for blue/orange forces
+#$%
+#$% Called by:  FPBLUE FPGORANGE
+#$%
+#$% calls:      FPGCHR
+#$%
+#$% Tables:     none
+#$%
+#$% Date:       August 92
+#$%
+#$% Author:     Alex Vagus
+#$%
+##############################################################
+IMPLICIT NONE   # jb    E2145   4/11/00
+ForceCommon
+BookCommon
+ 
+literal args[$max$args]  # jb Note: args is an unused ARGRUMENT 4/18/00
+literal xsen[2,2], force_color  #  ... and so is force_color    4/18/00
+literal title
+integer nargs           # jb Note: nargs is an unused ARGRUMENT 4/18/00
+ 
+DATA xsen/'MFUNC', 11,
+          'MODEA', 11/
+ 
+#$% collect radar/esm data
+title = 'rdesm'
+call fpgchr(sensor$file,xsen,2,nsenso,wrsenso, title)
+ 
+return
+end
+
+ 
+subroutine fpgjammer(nargs, args, force_color)
+#############################################################
+#$%
+#$% Purpose:    FPGJAMMER Collects jammer data
+#$%             for blue/orange forces
+#$%
+#$% Called by:  FPBLUE FPGORANGE
+#$%
+#$% calls:      FPGCHR
+#$%
+#$% Tables:     none
+#$%
+#$% Date:       August 92
+#$%
+#$% Author:     Alex Vagus
+#$%
+##############################################################
+IMPLICIT NONE   # jb    E2145   4/11/00
+ForceCommon
+BookCommon
+ 
+literal args[$max$args] # jb Note: args is an unused ARGRUMENT 4/18/00
+literal xnul[2,1], force_color  # ... and, so is force_color   4/18/00
+literal title
+integer nargs          # jb Note: nargs is an unused ARGRUMENT 4/18/00
+ 
+DATA xnul/$BLANKLIT, 0/
+ 
+ 
+#$% collect jammer data
+title = 'jammer'
+call fpgchr(jammer$file,xnul,0,njamme,wrjamme, title)
+ 
+return
+end
+
+ 
+logical function is_a_member(x_name, x_view)
+#############################################################
+#$%
+#$% Purpose:    IS_A_MEMBER is general purpose function. It
+#$%             returns yes/no depending on whether or not the given
+#$%             name is in that view.
+#$%
+#$%
+#$% Called by:  FRPGCHAR FRPGSENSOR
+#$%
+#$% calls:      none
+#$%
+#$% Tables:     none
+#$%
+#$% Date:       August 92
+#$%
+#$% Author:     Alex Vagus
+#$%
+##############################################################
+IMPLICIT NONE   # jb    E2145   4/11/00
+forcecommon
+bookcommon
+ 
+literal x_name, g_name
+integer x_view
+Integer j, k, LITCMP        # jb E2145  4/17/00
+ 
+#$% to optimize this rouitne we can do the following
+#$% add a third parameter called "type"
+#$% then build a case intruction
+#$% and it will only compare to each case
+#$% namely weap, torp, cruz, sonar, sonob
+#$% now be prepare to add that third parameter
+#$% every where this routine is called
+ 
+#$% for every ship in this view
+for(j=1; j<=n_ship[x_view];  j=j+1)
+  {
+     #$% do the weapons
+     for(k=1; k<= ship_n_weap[x_view,j]; k=k+1)
+       {
+        g_name = ship_weap[k,x_view,j]
+        if(litcmp(x_name, g_name) == 0)
+         {
+          is_a_member = $yes
+          return
+         }
+       }
+ 
+      #$% do the cruz missiles
+     for(k=1; k<=ship_n_cruz[x_view,j]; k=k+1)
+        {
+         g_name = ship_cruz[k,x_view,j]
+         if(litcmp(x_name, g_name) == 0)
+           {
+            is_a_member = $yes
+            return
+           }
+        }
+ 
+      #$% do the torpedoes
+      for(k=1; k<=ship_n_torp[x_view,j]; k=k+1)
+        {
+          g_name = ship_torp[k,x_view,j]
+          if(litcmp(x_name, g_name) == 0)
+            {
+             is_a_member = $yes
+             return
+            }
+        }
+ 
+      #$% do the sonars
+      for(k=1; k<=ship_n_sonar[x_view,j]; k=k+1)
+        {
+          g_name = ship_sonar[k,x_view,j]
+          if(litcmp(x_name, g_name) == 0)
+            {
+             is_a_member = $yes
+             return
+            }
+        }
+ 
+      #$% do the sonobouys
+      for(k=1; k<=ship_n_sonob[x_view,j]; k=k+1)
+        {
+          g_name = ship_sonob[k,x_view,j]
+          if(litcmp(x_name, g_name) == 0)
+            {
+             is_a_member = $yes
+             return
+            }
+        }
+ 
+     #$% do the aircraft
+     for(k=1; k<= ship_n_air[x_view,j]; k=k+1)
+       {
+        g_name = ship_air[k,x_view,j]
+        if(litcmp(x_name, g_name) == 0)
+         {
+          is_a_member = $yes
+          return
+         }
+        }
+ 
+ }
+ 
+#$% for every shore in this view
+for(j=1; j<=n_shore[x_view];  j=j+1)
+  {
+     #$% do the weapons
+     for(k=1; k<= shore_n_weap[x_view,j]; k=k+1)
+       {
+        g_name = shore_weap[k,x_view,j]
+        if(litcmp(x_name, g_name) == 0)
+         {
+          is_a_member = $yes
+          return
+         }
+       }
+ 
+      #$% do the cruz missiles
+     for(k=1; k<=shore_n_cruz[x_view,j]; k=k+1)
+        {
+         g_name = shore_cruz[k,x_view,j]
+         if(litcmp(x_name, g_name) == 0)
+           {
+            is_a_member = $yes
+            return
+           }
+        }
+ 
+      #$% do the torpedoes
+      for(k=1; k<=shore_n_torp[x_view,j]; k=k+1)
+        {
+          g_name = shore_torp[k,x_view,j]
+          if(litcmp(x_name, g_name) == 0)
+            {
+             is_a_member = $yes
+             return
+            }
+        }
+ 
+      #$% do the sonars
+      for(k=1; k<=shore_n_sonar[x_view,j]; k=k+1)
+        {
+          g_name = shore_sonar[k,x_view,j]
+          if(litcmp(x_name, g_name) == 0)
+            {
+             is_a_member = $yes
+             return
+            }
+        }
+ 
+      #$% do the sonobouys
+      for(k=1; k<=shore_n_sonob[x_view,j]; k=k+1)
+        {
+          g_name = shore_sonob[k,x_view,j]
+          if(litcmp(x_name, g_name) == 0)
+            {
+             is_a_member = $yes
+             return
+            }
+        }
+ 
+      #$% do the aircraft
+      for(k=1; k<= shore_n_air[x_view,j]; k=k+1)
+        {
+         g_name = shore_air[k,x_view,j]
+         if(litcmp(x_name, g_name) == 0)
+          {
+           is_a_member = $yes
+           return
+          }
+        }
+ 
+  }
+ 
+ is_a_member = $no
+return
+end
+
+ 
+logical function is_it_on_side (x_name)
+#############################################################
+#$%
+#$% Purpose:    IS_IT_ON_SIDE is general purpose function,
+#$%             which determines  whether or not the given
+#$%             name is on the side.
+#$%
+#$%
+#$% Called by:  FRPGCHAR FRPGSENSOR
+#$%
+#$% calls:      none
+#$%
+#$% Tables:     none
+#$%
+#$% Date:       August 92
+#$%
+#$% Author:     Alex Vagus
+#$%
+##############################################################
+IMPLICIT NONE   # jb    E2145   4/11/00
+forcecommon
+bookcommon
+ 
+literal x_name, g_name
+integer x_view
+Integer j, k, LITCMP        # jb E2145  4/17/00
+ 
+#$% to optimize this rouitne we can do the following
+#$% add a third parameter called "type"
+#$% then build a case intruction
+#$% and it will only compare to each case
+#$% namely weap, torp, cruz, sonar, sonob
+#$% now be prepare to add that third parameter
+#$% every where this routine is called
+ 
+for (x_view = 1; x_view <= num_views; x_view = x_view + 1)
+  {
+#$% for every ship in this view
+for(j=1; j<=n_ship[x_view];  j=j+1)
+  {
+     #$% do the weapons
+     for(k=1; k<= ship_n_weap[x_view,j]; k=k+1)
+       {
+        g_name = ship_weap[k,x_view,j]
+        if(litcmp(x_name, g_name) == 0)
+         {
+          is_it_on_side = $yes
+          return
+         }
+       }
+ 
+      #$% do the cruz missiles
+     for(k=1; k<=ship_n_cruz[x_view,j]; k=k+1)
+        {
+         g_name = ship_cruz[k,x_view,j]
+         if(litcmp(x_name, g_name) == 0)
+           {
+            is_it_on_side = $yes
+            return
+           }
+        }
+ 
+      #$% do the torpedoes
+      for(k=1; k<=ship_n_torp[x_view,j]; k=k+1)
+        {
+          g_name = ship_torp[k,x_view,j]
+          if(litcmp(x_name, g_name) == 0)
+            {
+             is_it_on_side = $yes
+             return
+            }
+        }
+ 
+      #$% do the sonars
+      for(k=1; k<=ship_n_sonar[x_view,j]; k=k+1)
+        {
+          g_name = ship_sonar[k,x_view,j]
+          if(litcmp(x_name, g_name) == 0)
+            {
+             is_it_on_side = $yes
+             return
+            }
+        }
+ 
+      #$% do the sonobouys
+      for(k=1; k<=ship_n_sonob[x_view,j]; k=k+1)
+        {
+          g_name = ship_sonob[k,x_view,j]
+          if(litcmp(x_name, g_name) == 0)
+            {
+             is_it_on_side = $yes
+             return
+            }
+        }
+ 
+     #$% do the aircraft
+     for(k=1; k<= ship_n_air[x_view,j]; k=k+1)
+       {
+        g_name = ship_air[k,x_view,j]
+        if(litcmp(x_name, g_name) == 0)
+         {
+          is_it_on_side = $yes
+          return
+         }
+        }
+ 
+ }
+ 
+#$% for every shore in this view
+for(j=1; j<=n_shore[x_view];  j=j+1)
+  {
+     #$% do the weapons
+     for(k=1; k<= shore_n_weap[x_view,j]; k=k+1)
+       {
+        g_name = shore_weap[k,x_view,j]
+        if(litcmp(x_name, g_name) == 0)
+         {
+          is_it_on_side = $yes
+          return
+         }
+       }
+ 
+      #$% do the cruz missiles
+     for(k=1; k<=shore_n_cruz[x_view,j]; k=k+1)
+        {
+         g_name = shore_cruz[k,x_view,j]
+         if(litcmp(x_name, g_name) == 0)
+           {
+            is_it_on_side = $yes
+            return
+           }
+        }
+ 
+      #$% do the torpedoes
+      for(k=1; k<=shore_n_torp[x_view,j]; k=k+1)
+        {
+          g_name = shore_torp[k,x_view,j]
+          if(litcmp(x_name, g_name) == 0)
+            {
+             is_it_on_side = $yes
+             return
+            }
+        }
+ 
+      #$% do the sonars
+      for(k=1; k<=shore_n_sonar[x_view,j]; k=k+1)
+        {
+          g_name = shore_sonar[k,x_view,j]
+          if(litcmp(x_name, g_name) == 0)
+            {
+             is_it_on_side = $yes
+             return
+            }
+        }
+ 
+      #$% do the sonobouys
+      for(k=1; k<=shore_n_sonob[x_view,j]; k=k+1)
+        {
+          g_name = shore_sonob[k,x_view,j]
+          if(litcmp(x_name, g_name) == 0)
+            {
+             is_it_on_side = $yes
+             return
+            }
+        }
+ 
+      #$% do the aircraft
+      for(k=1; k<= shore_n_air[x_view,j]; k=k+1)
+        {
+         g_name = shore_air[k,x_view,j]
+         if(litcmp(x_name, g_name) == 0)
+          {
+           is_it_on_side = $yes
+           return
+          }
+        }
+ 
+  }
+}
+ 
+is_it_on_side = $no
+ 
+return
+end
+
+ 
+logical function is_it_passive(x_name)
+#############################################################
+#$%
+#$% Purpose:    IS_IT_PASSIVE it returns yes if the given
+#$%             sonar is passive else returns no
+#$%
+#$% Called by:  FRPGSENSOR
+#$%
+#$% calls:      none
+#$%
+#$% Tables:     none
+#$%
+#$% Date:       August 92
+#$%
+#$% Author:     Alex Vagus
+#$%
+##############################################################
+IMPLICIT NONE   # jb    E2145   4/11/00
+forcecommon
+bookcommon
+ 
+literal x_name
+literal sonar_vds, sonar_phull, sonar_towed, sonar_comm
+Integer LITCMP        # jb E2145  4/17/00
+ 
+ 
+#$% list of known passive sonars
+sonar_vds = 'VDS'
+sonar_phull = 'PHULL'
+sonar_towed = 'TOWED'
+sonar_comm = 'COMM'
+ 
+if(litcmp(sonar_vds, x_name) == 0)
+  {
+   is_it_passive = $yes
+   return
+  }
+if(litcmp(sonar_phull, x_name) == 0)
+  {
+   is_it_passive = $yes
+   return
+  }
+if(litcmp(sonar_towed, x_name) == 0)
+  {
+   is_it_passive = $yes
+   return
+  }
+if(litcmp(sonar_comm, x_name) == 0)
+  {
+   is_it_passive = $yes
+   return
+  }
+ 
+is_it_passive = $no
+ 
+return
+end
+
+ 
+logical function is_it_active(x_name)
+#############################################################
+#$%
+#$% Purpose:    IS_IT_ACTIVE It returns yes if the given sonar
+#$%             is active else returns no
+#$%
+#$% Called by:  FRPGSENSOR
+#$%
+#$% calls:      none
+#$%
+#$% Tables:     none
+#$%
+#$% Date:       August 92
+#$%
+#$% Author:     Alex Vagus
+#$%
+##############################################################
+IMPLICIT NONE   # jb    E2145   4/11/00
+forcecommon
+bookcommon
+ 
+literal x_name
+literal sonar_lfa, sonar_ahull
+ 
+Integer LITCMP        # jb E2145  4/17/00
+ 
+ 
+#$% list of known active sonars
+sonar_lfa = 'LFA'
+sonar_ahull = 'AHULL'
+ 
+ if(litcmp(sonar_lfa, x_name) == 0)
+   {
+    is_it_active = $yes
+    return
+   }
+ if(litcmp(sonar_ahull, x_name) == 0)
+   {
+    is_it_active = $yes
+    return
+   }
+ 
+ is_it_active = $no
+ 
+return
+end
+
+ 
+logical function is_a_radar(x_name)
+#############################################################
+#$%
+#$% Purpose:    IS_A_RADAR It returns yes if the given name
+#$%             is a radar else returns no
+#$%
+#$% Called by:  FRPGSENSOR
+#$%
+#$% calls:      none
+#$%
+#$% Tables:     none
+#$%
+#$% Date:       August 92
+#$%
+#$% Author:     Alex Vagus
+#$%
+##############################################################
+IMPLICIT NONE   # jb    E2145   4/11/00
+forcecommon
+bookcommon
+ 
+literal x_name, r_type, g_name, g_cat
+Integer i, LITCMP        # jb E2145  4/17/00
+ 
+ r_type = 'RADAR'
+ 
+#$% search in rdesm array the name of the radar/esm
+ 
+ for(i=1; i<= num_rdesm; i=i+1)
+   {
+    g_name = rdesm_name[i]
+    if(litcmp(g_name, x_name) == 0)
+     {
+      g_cat = rdesm_cat[i]
+      if(litcmp(g_cat, r_type) == 0)
+        {
+         is_a_radar = $yes
+         return
+        }
+     }
+   }
+ 
+ is_a_radar = $no
+ 
+return
+end
+
+ 
+subroutine fpgshorebase(nargs, args, force_color)
+#############################################################
+#$%
+#$% Purpose:    FPGSHOREBASE prints a listing in alphabetical
+#$%             order all blue/orange shore base data
+#$%
+#$% Called by:  FPBLUE FPORANGE
+#$%
+#$% calls:      none
+#$%
+#$% Tables:     none
+#$%
+#$% Date:       July 92
+#$%
+#$% Author:     Alex Vagus
+#$%
+##############################################################
+IMPLICIT NONE   # jb    E2145   4/11/00
+ForceCommon
+BookCommon
+ 
+literal args[$max$args] # jb Note: args is an unused ARGRUMENT 4/18/00
+literal xshr[2,2], force_color
+integer nargs          # jb Note: nargs is an unused ARGRUMENT 4/18/00
+ 
+DATA xshr/'BUOY', 4,
+          'WEAP', 4/
+ 
+#$% keep this top level routine for future additions
+ 
+ call frpgcharshore(shore$file,xshr,2,nshore,wrshore,"Shore Base",force_color)
+ 
+ 
+return
+end
+
+ 
+subroutine frpgcharshore(opt,xfld,nfld,nchar,wchar,title, force_color)
+#############################################################
+#$%
+#$% Purpose:    FRPGCHARSHORE prints a listing in alphabetical
+#$%             order all blue/orange ships and submarines data
+#$%
+#$% Called by:  FPGSHOREBASE
+#$%
+#$% calls:      none
+#$%
+#$% Tables:     none
+#$%
+#$% Date:       July 92
+#$%
+#$% Author:     Alex Vagus
+#$%
+##############################################################
+IMPLICIT NONE   # jb    E2145   4/11/00
+ForceCommon
+BookCommon
+ 
+VMSchar*(*) opt
+literal xfld[2,3],latn  # jb Removed longn,ilatn,ilongn 4/17/00
+literal xname[$shore], xn1[$class], xn2[$class]
+literal force_color
+literal wrchar[5,$shore],wchar[5,$shore],rfld,rfld_type #jb 180 vs 140 2/89
+ 
+integer kwords,nfld,nchar,wichar[$intrealmatch,5,$shore]  # 2/8/89
+equivalence (wichar,wrchar)
+ 
+integer ix[$shore], ixcnt[$shore], ixptr[$shore,2]
+integer shore_cnt, weap_cnt, torp_cnt, cruz_cnt, sonar_cnt, sonob_cnt
+integer air_cnt, rdesm_cnt, jammer_cnt
+Integer Force$Index                                # jb E2145  4/18/00
+#$% jb E2145  (Three lines of integers added:)       4/17/00
+Integer i,ilen,k,k2,k5,k9,m,ig,iv,jg,icnt,imi,ipnt,imax,ishore,knt,
+        ifld,istat,itype,lfcB,lfcS,irdesm,ijam,ir,is,isb,it
+Integer kk                            # jb E2145    4/18/00
+INTEGER IS_ALPHA_NUMERIC
+ 
+ 
+VMSchar title*(*)
+logical is_a_radar
+logical iradar, iesm, iair, ijammr, imiss, itrpdo, iweap, isonar, ibuoy
+logical ilat, ilong
+ 
+ 
+for (k = 1; k <= nchar; k=k+1)                  # move to local array with
+    {                                           # integer and real overlay
+    for (k5 = 1; k5 <= 5; k5=k5+1)
+        {
+        wrchar[k5,k] = wchar[k5,k]
+        }
+    }
+ 
+#$% if characteristic is less than one, return
+if (nchar < 1) return
+ 
+#$% skip lines
+skip$lines (2)
+start$line
+ 
+space$over 15; mv$sn(force_color, 7)
+space$over 1; mv$v("Shore Bases")
+write$line
+start$line
+skip$lines(2)
+ 
+icnt = 0
+knt = 0
+for(m=1; m<=nchar; m=m+1)
+    {
+    knt = knt + 1
+    xname[knt] = wrchar[1,m]
+    }
+ 
+call order1 (xname, ix, knt)
+ 
+#$% for each view
+for(ig=1; ig<=num_views; ig=ig+1)
+    {
+    iv= ig
+    imax = view_force[ig]
+ 
+    space$over 15; mv$sn(force_color,7)
+    space$over 1; mv$v("View ")
+    mv$n(iv,3)
+    write$line
+    start$line
+    knt = 0
+    icnt =0
+ 
+    for(i=1; i<= nchar; i=i+1)
+        {
+        ixcnt[i] = 0
+        xn1[i] = 0
+        xn2[i] = 0
+        }
+ 
+    shore_cnt = 0
+    ishore = 0
+ 
+    #$% for each view collect names
+    for(jg=1; jg<imax; jg=jg+1)
+        {
+        force$index = view_array[ig,jg]
+        xn1[jg] = force$name       #watch when optimize
+        xn2[jg] = force$name
+ 
+        if(force$class == 0)
+            {
+            ishore = ishore + 1
+            }
+        }
+ 
+    if(ishore == 0)
+        {
+        space$over 13
+        mv$v("***** None *****")
+        write$line
+        start$line
+        }
+ 
+    for(m=1; m<=nchar; m=m+1)
+        {
+        k2 = ix[m]
+        rfld = xname[k2]
+        for(i=1; i<imax; i=i+1)
+            {
+            if(xn1[i] == rfld)
+                {
+                ixcnt[m] = ixcnt[m] + 1
+                }
+            }
+        }
+ 
+    knt = 0
+ 
+    #$% for each shore base
+    for(m=1; m<=nchar; m=m+1)
+        {
+        if(ixcnt[m] != 0)
+            {
+            knt = knt + 1
+            ixptr[knt,1] = ix[m]
+            ixptr[knt,2] = ixcnt[m]
+            }
+        }
+ 
+    #$% for each entry
+    for (k9=1; k9<=knt; k9=k9+1)
+        {
+        m = ixptr[k9,1]
+ 
+        if (wichar[$halfquad,2,m] != 0)             # if entry is in BUILD File
+            {
+            #$% open build file
+            call FDopen ($read,build$name,$litc,opt,32*4,lfcB,istat)
+            #$% set record
+            kwords = wichar[$halfquad,2,m]
+            #$% get build record
+            call fgetr (lfcB,kwords,16,rrec)
+            }
+        else if (wichar[$halfquad,4,m] != 0)        # else if entry in FORCE File
+            {
+            #$% open sceanario file
+            call FDopen ($read,scenario$name,$lits,opt,32*4,lfcS,istat)
+            #$% set record
+            kwords = wichar[$halfquad,4,m]
+            #$% get scenario record
+            call fgetr (lfcS,kwords,16,rrec)
+            }
+        #$% else get next
+        else next
+ 
+        weap_cnt = 0
+        cruz_cnt = 0
+        torp_cnt = 0
+        sonar_cnt = 0
+        sonob_cnt = 0
+        air_cnt = 0
+        rdesm_cnt = 0
+        jammer_cnt = 0
+        shore_cnt = shore_cnt + 1
+        shore_class_name [ig,shore_cnt] = wrchar[1,m]
+ 
+        #$% format record
+        write$line
+        start$line
+ 
+        mv$v(title)
+        space$over 2; mv$s(rrec[3],$$MaxName)
+ 
+        #$% set the flags
+        irdesm = $yes
+        iair = $yes
+        ilat = $yes
+        ilong = $yes
+        itype = $yes
+ 
+ 
+        ijammr = $no
+        imiss = $no
+        itrpdo = $no
+        iweap = $no
+        isonar= $no
+        ibuoy = $no
+        iradar = $no
+        iesm = $no
+ 
+        write$line
+        start$line
+ 
+        #$% for each entry
+        for (ipnt = 2; ipnt <= rrec[1]; ipnt = ipnt + ilen)
+            {
+ 
+            #$% get length
+            call fglen (ipnt,xfld,nfld,ilen)
+ 
+            $debugp call echor
+            $debugp call echoV(" ipnt=")    # jb E2144  (echoV) 4/11/00
+            $debugp call echoi(ipnt)
+            $debugp call echoV(" ilen=")    # jb E2144  (echoV) 4/11/00
+            $debugp call echoi(ilen)
+ 
+            #$% for each length entry
+            for (k=0; k<ilen ; k=k+1)
+                {
+                #$% set field
+                rfld = rrec[ipnt+k]
+ 
+                #if(is_alpha_numeric(rfld) == YES)
+                    #{
+                    if(rfld == 'LAT')
+                        {
+                        if(ilat)
+                            {
+                            ilat = $no
+                            start$line
+                            mv$v("POSITION :")
+                            }
+                        ifld = rrec[ipnt+k+1]
+                        call fglat(ifld,latn)
+                        space$over 2; mv$s(latn,8)
+                        }
+                    else if(rfld == 'LONG')
+                        {
+                        if (ilong)
+                            {
+                            ilong = $no
+                            }
+                        ifld = rrec[ipnt+k+1]
+                        call fglong(ifld,latn)
+                        space$over 2; mv$s(latn,8)
+                        }
+ 
+                    else if(rfld == 'RDESM')
+                        {
+                        rdesm_cnt = rdesm_cnt + 1
+                        rfld = rrec[ipnt+k+1]
+                        if(is_a_radar(rfld))
+                            {
+                            iradar = $yes
+                            }
+                        else
+                            {
+                            iesm = $yes
+                            }
+                        shore_rdesm[rdesm_cnt,ig,shore_cnt] = rfld
+                        }
+ 
+                    #$% collect sonar data
+                    else if (rfld == 'SONAR')
+                        {
+                        isonar = $yes
+                        sonar_cnt = sonar_cnt + 1
+                        rfld = rrec[ipnt+k+1]
+                        shore_sonar[sonar_cnt,ig,shore_cnt] = rfld
+                        }
+ 
+                    #$% collect air data
+                    else if (rfld == 'AIR')
+                        {
+                        air_cnt = air_cnt + 1
+                        rfld = rrec[ipnt+k+1]
+                        shore_air[air_cnt,ig,shore_cnt] = rfld
+                        }
+ 
+                    #$% collect missile data
+                    else if(rfld == 'MISS')
+                        {
+                        imiss = $yes
+                        cruz_cnt = cruz_cnt + 1
+                        ifld = rrec[ipnt+k+3]
+                        shore_cruz_qty[cruz_cnt,ig,shore_cnt] = ifld
+                        rfld = rrec[ipnt+k+1]
+                        shore_cruz[cruz_cnt,ig,shore_cnt] = rfld
+                        rfld = rrec[ipnt+k+2]
+                        shore_cruz_type[cruz_cnt,ig,shore_cnt] = rfld
+                        }
+ 
+                    #$% collect jammer data
+                    else if(rfld == 'JAMMR')
+                        {
+                        ijammr = $yes
+                        jammer_cnt = jammer_cnt + 1
+                        rfld = rrec[ipnt+k+1]
+                        shore_jammer[jammer_cnt,ig, shore_cnt] = rfld
+                        }
+ 
+                    #$% collect sonobuoy data
+                    else if(rfld == 'BUOY')
+                        {
+                        ibuoy = $yes
+                        sonob_cnt = sonob_cnt + 1
+                        ifld = rrec[ipnt+k+3]
+                        shore_sonob_qty[sonob_cnt,ig,shore_cnt] = ifld
+                        rfld = rrec[ipnt+k+1]
+                        shore_sonob[sonob_cnt,ig,shore_cnt] = rfld
+                        rfld = rrec[ipnt+k+2]
+                        shore_sonob_type[sonob_cnt,ig,shore_cnt] = rfld
+                        }
+ 
+                    #$% collect torpedo data
+                    else if(rfld == 'TRPDO')
+                        {
+                        itrpdo = $yes
+                        torp_cnt = torp_cnt + 1
+                        ifld = rrec[ipnt+k+2]
+                        rfld = rrec[ipnt+k+1]
+                        shore_torp[torp_cnt,ig,shore_cnt] = rfld
+                        shore_torp_qty[torp_cnt,ig,shore_cnt] = ifld
+                        }
+ 
+                    #$% collect weapon data
+                    else if(rfld == 'WEAP')
+                        {
+                        iweap = $yes
+                        weap_cnt = weap_cnt + 1
+                        ifld = rrec[ipnt+k+3]
+                        shore_weap_qty[weap_cnt,ig,shore_cnt] = ifld
+                        rfld = rrec[ipnt+k+1]
+                        shore_weap[weap_cnt,ig,shore_cnt] = rfld
+                        rfld = rrec[ipnt+k+2]
+                        shore_type[weap_cnt,ig,shore_cnt] = rfld
+                        shore_weap_type[weap_cnt,ig,shore_cnt] = rfld
+                        }
+                    #}
+                }
+            }
+ 
+        write$line
+        start$line
+ 
+        #$% print out weapons
+        if (iweap)
+            {
+            start$line
+            mv$v("WEAPONS  :")
+            for(iweap=1; iweap<=weap_cnt; iweap=iweap+1)
+                {
+                ifld =  shore_weap_qty[iweap,ig,shore_cnt]
+                rfld =  shore_weap[iweap,ig,shore_cnt]
+                rfld_type =  shore_weap_type[iweap,ig,shore_cnt]
+                if (lenbf + (9 + 2 * $$MaxName) > $MaxWidth)
+                    {
+                    write$line
+                    start$line; space$over 10
+                    }
+                KK = lenbf
+                space$over 2; mv$n(ifld,5)
+                space$over 2; mv$sn(rfld,$$MaxName)
+                mv$v(" ("); mv$sn(rfld_type,$$MaxName); mv$v(")")
+                lenbf = kk + (9 + 2 * $$MaxName)
+                }
+            write$line
+            start$line
+            }
+ 
+        #$% print out missiles
+        if (imiss)
+            {
+            start$line
+            mv$v("MISSILES :")
+            for(imi=1; imi<=cruz_cnt; imi=imi+1)
+                {
+                ifld = shore_cruz_qty[imi,ig,shore_cnt]
+                rfld = shore_cruz[imi,ig,shore_cnt]
+                rfld_type = shore_cruz_type[imi,ig,shore_cnt]
+                if (lenbf + (9 + 2 * $$MaxName) > $MaxWidth)
+                    {
+                    write$line
+                    start$line; space$over 10
+                    }
+                KK = lenbf
+                space$over 2; mv$n(ifld,5)
+                space$over 2; mv$sn(rfld,$$MaxName)
+                mv$v(" ("); mv$sn(rfld_type,$$MaxName); mv$v(")")
+                lenbf = kk + (9 + 2 * $$MaxName)
+                }
+            write$line
+            start$line
+            }
+ 
+        #$% print out sonobuoys
+        if (ibuoy)
+            {
+            start$line
+            mv$v("BUOYS    :")
+            for(isb=1; isb<=sonob_cnt; isb=isb+1)
+                {
+                rfld = shore_sonob[isb,ig,shore_cnt]
+                ifld = shore_sonob_qty[isb,ig,shore_cnt]
+                rfld_type = shore_sonob_type[isb,ig,shore_cnt]
+                if (lenbf + (9 + 2 * $$MaxName) > $MaxWidth)
+                    {
+                    write$line
+                    start$line; space$over 10
+                    }
+                KK = lenbf
+                space$over 2; mv$n(ifld,5)
+                space$over 2; mv$sn(rfld,$$MaxName)
+                mv$v(" ("); mv$sn(rfld_type,$$MaxName); mv$v(")")
+                lenbf = kk + (9 + 2 * $$MaxName)
+                }
+            write$line
+            start$line
+            }
+ 
+        #$% print out torpedoes
+        if(itrpdo)
+            {
+            start$line
+            mv$v("TORPEDOES:")
+            for(it=1; it<=torp_cnt; it=it+1)
+                {
+                rfld = shore_torp[it,ig,shore_cnt]
+                ifld = shore_torp_qty[it,ig,shore_cnt]
+                if (lenbf + (9 + 1 * $$MaxName) > $MaxWidth)
+                    {
+                    write$line
+                    start$line; space$over 10
+                    }
+                space$over 2; mv$n(ifld,5)
+                space$over 2; mv$s(rfld,$$MaxName)
+                }
+            write$line
+            start$line
+            }
+ 
+        #$% print out sonars
+        if(isonar)
+            {
+            start$line
+            mv$v("SONARS   :")
+            for(is=1; is<=sonar_cnt; is=is+1)
+                {
+                rfld = shore_sonar[is,ig,shore_cnt]
+                if (lenbf + (2 + 1 * $$MaxName) > $MaxWidth)
+                    {
+                    write$line
+                    start$line; space$over 10
+                    }
+                space$over 2; mv$sn(rfld,$$MaxName)
+                }
+            write$line
+            start$line
+            }
+ 
+        #$% print out jammers
+        if (ijammr)
+            {
+            start$line
+            mv$v("JAMMERS  :")
+            for(ijam=1; ijam<=jammer_cnt; ijam=ijam+1)
+                {
+                rfld = shore_jammer[ijam,ig, shore_cnt]
+                if (lenbf + (2 + 1 * $$MaxName) > $MaxWidth)
+                    {
+                    write$line
+                    start$line; space$over 10
+                    }
+                space$over 2; mv$sn(rfld,$$MaxName)
+                }
+            write$line
+            start$line
+            }
+ 
+        #$% print out radars
+        if(iradar)
+            {
+            start$line
+            mv$v("RADARS   :")
+            for(ir=1; ir<=rdesm_cnt; ir=ir+1)
+                {
+                rfld = shore_rdesm[ir,ig,shore_cnt]
+                if(is_a_radar(rfld))
+                    {
+                    if (lenbf + (2 + 1 * $$MaxName) > $MaxWidth)
+                        {
+                        write$line
+                        start$line; space$over 10
+                        }
+                    space$over 2; mv$sn(rfld,$$MaxName)
+                    }
+                }
+            write$line
+            start$line
+            }
+ 
+        #$% print out esm
+        if(iesm)
+            {
+            start$line
+            mv$v("ESM      :")
+            for(ir=1; ir<=rdesm_cnt; ir=ir+1)
+                {
+                rfld = shore_rdesm[ir,ig,shore_cnt]
+                if(!(is_a_radar(rfld)))
+                    {
+                    if (lenbf + (2 + 1 * $$MaxName) > $MaxWidth)
+                        {
+                        write$line
+                        start$line; space$over 10
+                        }
+                    space$over 2; mv$sn(rfld,$$MaxName)
+                    }
+                }
+            write$line
+            start$line
+            }
+ 
+        mv$v("-------------------------------------------------------")
+ 
+        #$% part added later for the structure thing
+        #############################################################
+        shore_n_weap [ig,shore_cnt] = weap_cnt
+        shore_n_cruz [ig,shore_cnt] = cruz_cnt
+        shore_n_torp [ig,shore_cnt] = torp_cnt
+        shore_n_sonar [ig,shore_cnt] = sonar_cnt
+        shore_n_sonob [ig,shore_cnt] = sonob_cnt
+        shore_n_air [ig,shore_cnt] = air_cnt
+        shore_n_rdesm [ig,shore_cnt] = rdesm_cnt
+        shore_n_jammer [ig,shore_cnt] = jammer_cnt
+        ##############################################################
+        }
+ 
+    top$page
+    start$line
+    skip$lines(1)
+ 
+    #$% same here
+    ##############################################################
+    n_shore[ig] = shore_cnt
+    ##############################################################
+    }
+ 
+#$% for testing purposes. please don't remove
+# call print_ship()
+ 
+for (k = 1; k <= nchar; k=k+1)                  # move to call array from
+    {                                            # integer and real overlay
+    for (k5 = 1; k5 <= 5; k5=k5+1)
+        {
+        wchar[k5,k] = wrchar[k5,k]
+        }
+    }
+ 
+return
+end
+
+ 
+subroutine print_ship()
+##########################################################
+# for testing purposes
+##########################################################
+IMPLICIT NONE   # jb    E2145   4/11/00
+forcecommon
+bookcommon
+ 
+literal g_name, g_type
+Integer i, j, k     # jb E2145  4/17/00
+ 
+for(i=1; i<= num_views; i=i+1)
+ {
+   mv$v("-----------")
+      write$line
+      start$line
+  for(j=1; j<=n_shore[i]; j=j+1)
+    {
+      mv$s(shore_class_name[i,j],8)
+      write$line
+      start$line
+    for(k=1; k<=shore_n_torp[i,j]; k=k+1)
+         {
+          g_name = shore_torp[k,i,j]
+          mv$s(g_name,8)
+         }
+      write$line
+      start$line
+     for(k=1; k<=shore_n_cruz[i,j]; k=k+1)
+        {
+         g_name = shore_cruz[k,i,j]
+         mv$s(g_name,8)
+        }
+      write$line
+      start$line
+     for(k=1; k<=shore_n_weap[i,j]; k=k+1)
+        {
+         g_name = shore_weap[k,i,j]
+         mv$s(g_name,8)
+         g_type = shore_type[k,i,j]
+         mv$s(g_type,8)
+        }
+      write$line
+      start$line
+    }
+ }
+return
+end
+
+ 
+subroutine fpgair(nargs, args, force_color)
+#############################################################
+#$%
+#$% Purpose:    FPGAIR prints aircraft data
+#$%             for blue/orange forces
+#$%
+#$% Called by:  FPBLUE FPORANGE
+#$%
+#$% calls:      FRPGCHARAIR
+#$%
+#$% Tables:     Force
+#$%
+#$% Date:       July 92
+#$%
+#$% Author:     Alex Vagus
+#$%
+##############################################################
+IMPLICIT NONE   # jb    E2145   4/11/00
+ForceCommon
+BookCommon
+ 
+literal args[$max$args]     # jb Note: args is an unused ARGUMENT   4/18/00
+literal xair[2,2], force_color
+integer nargs              # jb Note: nargs is an unused ARGUMENT   4/18/00
+ 
+DATA xair/'BUOY', 4,
+          'WEAPO', 4/
+ 
+#$% keep this extra top level routine for future additions
+ 
+ call frpgcharair(air$file,xair,2,nair,wrair,"Aircraft  ", force_color)
+ 
+return
+end
+
+ 
+subroutine frpgcharair(opt,xfld,nfld,nchar,wchar,title, force_color)
+#############################################################
+#$%
+#$% Purpose:    FRPGCHARAIR prints aircraft data
+#$%             for blue forces
+#$%
+#$% Called by:  FPGAIR
+#$%
+#$% calls:      none
+#$%
+#$% Tables:     Force
+#$%
+#$% Date:       July 92
+#$%
+#$% Author:     Alex Vagus
+#$%
+##############################################################
+IMPLICIT NONE   # jb    E2145   4/11/00
+ForceCommon
+BookCommon
+ 
+literal xfld[2,3]   # jb E2145 (for new ,opt, see below)     4/18/00
+literal xname[$air], force_color, air_name, air_cat, ryes
+literal wrchar[5,$air],wchar[5,$air],rfld  #jb 180 vice 140  2/8/89
+ 
+integer kwords,nfld,nchar,wichar[$intrealmatch,5,$air] # 2/8/89
+equivalence (wichar,wrchar)
+ 
+integer sonar_cnt, jammer_cnt, rdesm_cnt, air_cnt[max_views]
+integer ix_recorded[$air], print_data, air_index    # clk
+integer ix[$air]
+Integer i,k,k5,k9,m,iv,icnt,ifld,ilen,ipnt,knt,i_cnt, # jb E2145  4/18/00
+                  istat,lfcB,lfcS,ilat,ilong          # jb E2145  4/18/00
+Integer IS_ALPHA_NUMERIC, LITCMP                      # jb E2145  4/18/00
+ 
+logical irdesm, iair, ijammr, imiss, itrpdo, iweap, isonar, ibuoy
+logical IS_A_MEMBER                                   # jb E2145  4/18/00
+vaxcharacter*(*) opt,                               # jb E2145  4/18/00
+                 title  # jb Note: unused ARGUMENT              4/18/00
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+  for (k = 1; k <= nchar; k=k+1)              # move to local array with
+    {                                         # integer and real overlay
+     for (k5 = 1; k5 <= 5; k5=k5+1)
+       wrchar[k5,k] = wchar[k5,k]
+    }
+ 
+  ryes = 'YES'
+  #$% if characteristic is less than one, return
+  if (nchar < 1)
+    return
+ 
+  skip$lines (2)
+  start$line
+  space$over 15; mv$s(force_color,7)
+  space$over 1; mv$v("Aircraft Characteristics")
+  write$line
+  start$line
+  skip$lines(2)
+ 
+  icnt = 0
+  knt = 0
+ 
+  for(m=1; m<=nchar; m=m+1)
+    {
+     knt = knt +1
+     xname[knt] = wrchar[1, m]
+    }
+ 
+  call order1 (xname,ix,knt)
+ 
+  for (i = 1; i <= 400; i = i+1)
+    ix_recorded[i] = $no
+ 
+  for (i = 1; i <= num_views; i = i + 1)
+    air_cnt[i] = 0
+ 
+  #$% for each entry
+  for (k9=1; k9<=knt; k9=k9+1)
+    {
+     m = ix[k9]
+ 
+     if (wichar[$halfquad,2,m] != 0)             # if entry is in BUILD File
+       {
+        #$% open build file
+        call FDopen ($read,build$name,$litc,opt,32*4,lfcB,istat)
+        #$% set record
+        kwords = wichar[$halfquad,2,m]
+        #$% get build record
+        call fgetr (lfcB,kwords,16,rrec)
+       }
+     else if (wichar[$halfquad,4,m] != 0)        # else if entry in FORCE File
+       {
+        #$% open sceanario file
+        call FDopen ($read,scenario$name,$lits,opt,32*4,lfcS,istat)
+        #$% set record
+        kwords = wichar[$halfquad,4,m]
+        #$% get scenario record
+        call fgetr (lfcS,kwords,16,rrec)
+       }
+     else
+       next
+ 
+     air_name = rrec[3]
+     air_cat = wrchar[5,m]
+ 
+     for (iv = 1; iv <= num_views; iv = iv + 1)    # loop though all the views
+       {
+        if (!(is_a_member(air_name, iv)))
+          next
+ 
+        if (ix_recorded[k9] == $no)
+          {
+           print_data = $yes
+           ix_recorded[k9] = $yes
+          }
+        else
+          print_data = $no
+ 
+        #############################################
+        sonar_cnt = 0
+        jammer_cnt = 0
+        rdesm_cnt = 0
+        air_cnt[iv] = air_cnt[iv] + 1
+        air_index = air_cnt[iv]
+        air_class_name[iv, air_index] = air_name
+        ##############################################
+ 
+        i_cnt = i_cnt + 1
+ 
+        if (print_data == $yes)
+          {
+           #$% format record
+           start$line
+           mv$v ("----------")
+           write$line
+           start$line
+           space$over 2; mv$s(rrec[3],$$MaxName)
+           if (air_cat == 'HELO')
+             {
+              space$over 4; mv$v("(helicopter)")
+             }
+          }
+ 
+        #$% set flags
+        irdesm = $yes
+        iair = $yes
+        ijammr = $yes
+        imiss = $yes
+        itrpdo = $yes
+        iweap = $yes
+        isonar= $yes
+        ibuoy = $yes
+        ilat = $yes
+        ilong = $yes
+ 
+        #$% for each entry of the characteristics record
+        for (ipnt = 2; ipnt <= rrec[1]; ipnt = ipnt + ilen)
+          {
+           #$% get length
+           call fglen (ipnt,xfld,nfld,ilen)
+ 
+           $debugp call echor
+           $debugp call echoV(" ipnt=")    # jb E2144  (echoV) 4/11/00
+           $debugp call echoi(ipnt)
+           $debugp call echoV(" ilen=")    # jb E2144  (echoV) 4/11/00
+           $debugp call echoi(ilen)
+ 
+           #$% for each length entry
+           for (k=0; k<ilen ; k=k+1)
+             {
+              #$% set field
+              rfld = rrec[ipnt+k]
+ 
+              #if(is_alpha_numeric(rfld) == YES)
+                #{
+                 if(rfld == 'VMAX' & print_data == $yes)
+                   {
+                    write$line
+                    start$line
+                    mv$v("    Max Speed   :")
+                    ifld = rrec[ipnt+k+1]
+                    mv$n(ifld,8)
+                    space$over 2; mv$v("knots")
+                   }
+ 
+                 else if(rfld == 'AMAX' & print_data == $yes)
+                   {
+                    write$line
+                    start$line
+                    mv$v("    Max Altitude:")
+                    ifld = rrec[ipnt+k+1]
+                    mv$n(ifld,8)
+                    space$over 2; mv$v("feet")
+                   }
+ 
+                 else if(rfld == 'VCRU' & print_data == $yes)
+                   {
+                    write$line
+                    start$line
+                    mv$v("    Cruise Speed:")
+                    ifld = rrec[ipnt+k+1]
+                    mv$n(ifld,8)
+                    space$over 2; mv$v("knots")
+                   }
+ 
+                 else if(rfld == 'VECSP' & print_data == $yes)
+                   {
+                    write$line
+                    start$line
+                    mv$v("    Vector Speed:")
+                    ifld = rrec[ipnt+k+1]
+                    mv$n(ifld,8)
+                    space$over 2; mv$v("knots")
+                   }
+                 else if(rfld == 'LOTSP' & print_data == $yes)
+                   {
+                    write$line
+                    start$line
+                    mv$v("    Loiter Speed:")
+                    ifld = rrec[ipnt+k+1]
+                    mv$n(ifld,8)
+                    space$over 2; mv$v("knots")
+                   }
+                 else if(rfld == 'QMAX' & print_data == $yes)
+                   {
+                    write$line
+                    start$line
+                    mv$v("    Max Speed at Sea Level:")
+                    ifld = rrec[ipnt+k+1]
+                    mv$n(ifld,8)
+                    space$over 2; mv$v("knots")
+                   }
+                 else if(rfld == 'RANGE' & print_data == $yes)
+                   {
+                    write$line
+                    start$line
+                    mv$v("    Range at Cruise Speed :")
+                    ifld = rrec[ipnt+k+1]
+                    mv$n(ifld,8)
+                    space$over 2; mv$v("nmi")
+                   }
+                 else if(rfld == 'MAD' & print_data == $yes)
+                   {
+                    rfld = rrec[ipnt+k+1]
+                    if(litcmp(rfld, ryes)==0)
+                      {
+                       write$line
+                       start$line
+#                       mv$v("Magnetic Anomaly Detector (MAD)     ")
+                       mv$v ("    MAD")
+                      }
+                   }
+                 else if(rfld == 'UAV' & print_data == $yes)
+                   {
+                    rfld = rrec[ipnt+k+1]
+                    if(litcmp(rfld, ryes)==0)
+                      {
+                       write$line
+                       start$line
+#                       mv$v("Unmanned Aerial Vehicle (UAV)       ")
+                       mv$v ("    (unmanned)")
+                      }
+                   }
+                 else if(rfld == 'LIDAR' & print_data == $yes)
+                   {
+                    rfld = rrec[ipnt+k+1]
+                    if(litcmp(rfld, ryes)==0)
+                      {
+                       write$line
+                       start$line
+#                       mv$v("Light Detection and Ranging (LIDAR) ")
+                       mv$v ("    LIDAR")
+                      }
+                   }
+                 else if(rfld == 'ISAR' & print_data == $yes)
+                   {
+                    rfld = rrec[ipnt+k+1]
+                    if(litcmp(rfld, ryes)==0)
+                      {
+                       write$line
+                       start$line
+#                       mv$v("Shore-Indent Capability (ISAR)       ")
+                        mv$v("    ISAR")
+                      }
+                   }
+                 else if(rfld == 'ZOOM' & print_data == $yes)
+                   {
+                    write$line
+                    start$line
+#                    mv$v("Optical Range Multiplier (ZOOM)     ")
+                    mv$v ("    Optical Range Multiplier (")
+                    ifld = rrec[ipnt+k+1]
+                    mv$n(ifld,1)
+                    mv$v ("x)")
+                   }
+                 else if(rfld == 'HFDF' & print_data == $yes)
+                   {
+                    write$line
+                    start$line
+                    mv$v ("    HFDF        :")
+                    ifld = rrec[ipnt+k+1]
+                    space$over 2; mv$s(rfld,$$MaxName)
+                   }
+                 else if(rfld == 'SWEEP' & print_data == $yes)
+                   {
+                    rfld = rrec[ipnt+k+1]
+                    if(litcmp(rfld, ryes)==0)
+                      {
+                       write$line
+                       start$line
+                       mv$v("    Capable of Minesweeping")
+                      }
+                   }
+                 else if(rfld == 'FLIR' & print_data == $yes)
+                   {
+                    rfld = rrec[ipnt+k+1]
+                    if(litcmp(rfld, ryes)==0)
+                      {
+                       write$line
+                       start$line
+#                       mv$v("Foward-looking Infra Red (FLIR)     ")
+                       mv$v ("    FLIR")
+                      }
+                   }
+                else if(rfld == 'JTIDS' & print_data == $yes) # clk 11/95 (E1469)
+                  {
+                    rfld = rrec[ipnt+k+1]
+                    if(litcmp(rfld, ryes)==0)
+                      {
+                       write$line
+                       start$line
+                       mv$v ("    Link-16 Capable")
+                      }
+                  }
+                else if(rfld == 'CEC' & print_data == $yes) # clk 10/96 (E1695)
+                  {
+                    rfld = rrec[ipnt+k+1]
+                    if(litcmp(rfld, ryes)==0)
+                      {
+                       write$line
+                       start$line
+                       mv$v ("    CEC Capable")
+                      }
+                  }
+ 
+                 else if(rfld == 'RDESM')
+                   {
+                    if (print_data == $yes)
+                      {
+                       if(irdesm)
+                         {
+                          write$line
+                          start$line
+                          mv$v("    Radar/ESM   :")
+                          irdesm = $no
+                         }
+                      }
+                    rdesm_cnt = rdesm_cnt + 1
+                    rfld = rrec[ipnt+k+1]
+                    if (print_data == $yes)
+                      {
+                       space$over 2; mv$sn(rfld,$$MaxName)
+                      }
+                    air_rdesm[rdesm_cnt,iv,air_index] = rfld
+                   }
+ 
+                 else if (rfld == 'SONAR')
+                   {
+                    if (print_data == $yes)
+                      {
+                       if(isonar)
+                         {
+                          write$line
+                          start$line
+                          mv$v("    Sonars      :")
+                          isonar = $no
+                         }
+                      }
+                    sonar_cnt = sonar_cnt + 1
+                    rfld = rrec[ipnt+k+1]
+                    if (print_data == $yes)
+                      {
+                       space$over 2; mv$sn(rfld,$$MaxName)
+                      }
+                    air_sonar[sonar_cnt,iv,air_index] = rfld
+                   }
+ 
+                 else if(rfld == 'JAMMR')
+                   {
+                    if (print_data == $yes)
+                      {
+                       if (ijammr)
+                         {
+                          write$line
+                          start$line
+                          mv$v("    Jammers     :")
+                          ijammr = $no
+                         }
+                      }
+                    jammer_cnt = jammer_cnt + 1
+                    rfld = rrec[ipnt+k+1]
+                    if (print_data == $yes)
+                      {
+                       space$over 2; mv$sn(rfld,$$MaxName)
+                      }
+                    air_jammer[jammer_cnt,iv,air_index] = rfld
+                   }
+                #}       # end of is_alpha_numeric (rfld)
+             }          # end of loop through length entry
+          }             # end of loop through aircraft characteristics
+ 
+        write$line
+        start$line
+ 
+        #####################################
+        air_n_sonar[iv,air_index] = sonar_cnt
+        air_n_jammer[iv,air_index] = jammer_cnt
+        air_n_rdesm[iv,air_index] = rdesm_cnt
+ 
+        n_air[iv] = air_index
+        #####################################
+       }                # end of loop through views
+ 
+#     start$line
+ 
+    }                   # end of loop through all aircraft entries
+ 
+  if (i_cnt == 0)
+    {
+     space$over 19; mv$v("***** None *****")
+     write$line
+     start$line
+    }
+ 
+  start$line
+  mv$v ("----------")
+  write$line
+  top$page
+ 
+  for (k = 1; k <= nchar; k=k+1)                 # move to call array from
+    {                                            # integer and real overlay
+     for (k5 = 1; k5 <= 5; k5=k5+1)
+       wchar[k5,k] = wrchar[k5,k]
+    }
+ 
+return
+end
+
+ 
+subroutine fpgaml (nargs,args, force_color)
+##################################################################
+#$%
+#$% Purpose:   FPGAML prints the Aircraft Capabilities of blue forces
+#$%            or orange forces
+#$%
+#$% Called By: FPBLUE FPORANGE
+#$%
+#$% Calls:     None
+#$%
+#$% Tables:    AML
+#$%
+#$% Date:      July 92
+#$%
+#$% Author:    Alex Vagus
+#$%
+##################################################################
+IMPLICIT NONE   # jb    E2145   4/11/00
+ForceCommon
+bookCommon
+ 
+# jb  Note: nargs is an unused ARGUMENT 4/18/00
+ 
+literal args[$max$args], force_color
+literal gb_name, gb_type, gb_sidenum
+integer nargs, force$index                  # jb E2145  4/18/00
+integer i_air_num, i_prev_num, diff_one, ctoi, ipos,
+        i,j,imax,knt,isideknt, LITCMP,      # jb E2145  4/18/00
+        AML$Pointer,AML$Address             # jb E2145  4/18/00
+ 
+vaxcharacter v_air_name*8, v_prev_name*8    # jb E2141  4/18/00
+character c_air_name, c_prev_name
+literal prev_name, prev_sidenum
+equivalence (v_air_name, c_air_name)
+equivalence (v_prev_name, c_prev_name)
+ 
+ 
+skip$lines(2)
+start$line
+ 
+space$over 10; mv$s(force_color,7)
+mv$v(" Aircraft Availability")
+write$line
+start$line
+skip$lines(1)
+ 
+#$% include search all possible air events
+ args[3] = 'AA000'
+ args[4] = 'ZZ999'
+ 
+#$% for each view
+ for(i=1; i<=num_views; i=i+1)
+  {
+   imax = view_force[i]
+#   space$over 15; mv$s(force_color,7)
+#   space$over 1; mv$v("View ")
+#   mv$n(i,3)
+#   write$line
+#   start$line
+   knt = 0
+   prev_name = 0
+   isideknt =0
+ 
+#$% for each force in that view
+   for(j=1; j<imax; j=j+1)
+    {
+     force$index = view_array[i,j]
+     gb_name = force$name
+ 
+     #$% for each AML entry
+     for (aml$pointer$first; aml$pointer$valid; aml$pointer$next)
+      {
+       aml$map
+       #$% if AML slot not in use, break loop
+       if (aml$InUse == $no) break
+       #$% if side number is less than entry, get next
+       if (litcmp(aml$sidenumber, args[3]) < 0) next
+       #$% if side number is greater than entry, break loop
+       if (litcmp(aml$sidenumber, args[4]) > 0) break
+ 
+       #$% if name is found then call Alex
+       #$% or figure it out your self
+       if(gb_name == aml$basename)
+         {
+          knt = knt + 1
+          if(prev_name != gb_name)
+            {
+              if(isideknt > 0)
+                {
+                 mv$n(isideknt, 5)
+                 space$over 1; mv$s(gb_type,$$MaxName)
+                 mv$v(":")
+                 space$over 2; mv$sn(gb_sidenum,$$MaxName)
+ 
+                 if(isideknt > 1)
+                    {
+                    space$over 1; mv$v("to")
+                    space$over 1; mv$s(prev_sidenum,$$MaxName)
+                    }
+                 write$line
+                 start$line
+                 }
+ 
+              mv$v("-----------------------------")
+              write$line
+              start$line
+              space$over 3; mv$s(gb_name,$$MaxName)
+              write$line
+              start$line
+ 
+              isideknt = 1
+              gb_type = aml$type
+              gb_sidenum = aml$sidenumber
+           }
+         else
+           {
+            write(v_air_name, '(a5)') aml$sidenumber
+            ipos = 3
+            i_air_num = ctoi(c_air_name, ipos)
+ 
+            write(v_prev_name, '(a5)') prev_sidenum
+            ipos = 3
+            i_prev_num = ctoi(c_prev_name, ipos)
+ 
+            diff_one = i_air_num - i_prev_num
+ 
+            if(diff_one != 1 | gb_type != aml$type)
+              {
+                mv$n(isideknt, 5)
+                space$over 1; mv$s(gb_type,$$MaxName)
+                mv$v(":")
+                space$over 2; mv$sn(gb_sidenum,$$MaxName)
+                if(isideknt > 1)
+                  {
+                  space$over 1; mv$v("to")
+                  space$over 1; mv$s(prev_sidenum,$$MaxName)
+                  }
+                write$line
+                start$line
+ 
+               isideknt = 1
+               gb_type = aml$type
+               gb_sidenum = aml$sidenumber
+ 
+              }
+ 
+            else
+             isideknt = isideknt + 1
+ 
+          }
+ 
+         prev_name = gb_name
+         prev_sidenum = aml$sidenumber
+ 
+        }
+ 
+      }
+    }
+   #$% print the last entry
+    if(isideknt > 0)
+      {
+       mv$n(isideknt, 5)
+       space$over 1; mv$s(gb_type,$$MaxName)
+       mv$v(":")
+       space$over 2; mv$sn(gb_sidenum,$$MaxName)
+       if(isideknt > 1)
+          {
+          space$over 1; mv$v("to")
+          space$over 1; mv$s(prev_sidenum,$$MaxName)
+          }
+       write$line
+       start$line
+      }
+ 
+#  if(knt == 0)
+#     {
+#      space$over 15; mv$v("***** None *****")
+#      write$line
+#      start$line
+#     }
+#  top$page
+ 
+ 
+  }
+ 
+return
+end
+
+ 
+subroutine fpgweap(nargs, args, force_color)
+############################################################
+#$%
+#$% Purpose:    FPGWEAP prints weapons capabilities
+#$%             of blue/orange forces
+#$%
+#$% Called by:  FPBLUE FPGORANGE
+#$%
+#$% calls:      FRPGCHARWEAP
+#$%
+#$% Tables:     none
+#$%
+#$% Date:       August 92
+#$%
+#$% Author:     Alex Vagus
+#$%
+##############################################################
+IMPLICIT NONE   # jb    E2145   4/11/00
+ForceCommon
+BookCommon
+ 
+literal args[$max$args] # jb  Note: args is an unused ARGUMENT 4/18/00
+literal xnul[2,1], force_color
+literal title
+integer nargs       # jb  Note: nargs is an unused ARGUMENT 4/18/00
+ 
+DATA xnul/$BLANKLIT, 0/
+ 
+ 
+#$% see what I mean?? now we had to call these two guys first
+#$% before calling frpgcharweap
+ 
+#$% collect cruise missile data
+title = 'cruz'
+call fpgchr(cruise$file,xnul,0,ncruis,wrcruis, title)
+ 
+#$% collect torpedo data
+title = 'torp'
+call fpgchr(trpdo$file,xnul,0,ntrpdo,wrtrpdo, title)
+ 
+#$% print weapon capabilities
+ call frpgcharweap(weapon$file,xnul,0,nweap,wrweap,"Weapon    ",force_color)
+ 
+ 
+return
+end
+
+ 
+subroutine frpgcharweap(opt,xfld,nfld,nchar,wchar,title, force_color)
+#############################################################
+#$%
+#$% Purpose:    FRPGCHARWEAP prints weapons capabilities
+#$%             of blue/orange forces
+#$%
+#$% Called by:  FPGWEAP
+#$%
+#$% calls:      IS_A_MEMBER
+#$%
+#$% Tables:     none
+#$%
+#$% Date:       August 92
+#$%
+#$% Author:     Alex Vagus
+#$%
+##############################################################
+IMPLICIT NONE   # jb    E2145   4/11/00
+ForceCommon
+BookCommon
+ 
+literal xfld[2,3]           # jb E2145 (Removed,opt; see below) 4/18/00
+literal force_color, category[10], rname, rcat, rarm, gen_name, repu, targt
+literal xname[$weapons], xcat[10,$weapons]
+ 
+vmschar*8 category_v[10]
+equivalence (category, category_v)
+ 
+literal wrchar[5,$weapons],wchar[5,$weapons],rfld, rfld1  #jb 180 vice 140  2/8/89
+integer kwords,nfld,nchar,wichar[$intrealmatch,5,$weapons]   # 2/8/89
+equivalence (wichar,wrchar)
+ 
+vmschar*8 wrchar_v[5, $weapons]
+equivalence (wrchar_v,wrchar)
+ 
+vmschar*8 rfld_v
+equivalence (rfld_v, rfld)
+ 
+real*4      fepu
+ 
+Integer k,k5,k9,m,iv,ilen,ipnt,im,in,icat,icnt,i_flag,knt,lcv, # jb E2145 4/00
+        imxrng,isalvo,ifrate,isimul,ialt,imaxeff,iepu,ipayld   # jb E2145 4/00
+integer temp_len, ncat, ifld,lfcB,istat,lfcS, IS_ALPHA_NUMERIC # jb E2145 4/00
+integer ix[$weapons], ixptr[$weapons]        # jb E2145 Removed ixcnt[400] 1/20/99
+vaxcharacter*(*)    opt, title # jb  (but title is an unused ARG) E2145 4/18/00
+character   temp_buf[40]
+logical IS_A_MEMBER, IS_IT_ON_SIDE                # jb E2145 4/18/00
+ 
+ 
+for (k = 1; k <= nchar; k=k+1)                  # move to local array with
+   {                                            # integer and real overlay
+    for (k5 = 1; k5 <= 5; k5=k5+1)
+       {
+        wrchar[k5,k] = wchar[k5,k]
+       }
+   }
+ 
+ 
+#$% intialize categories
+ncat = 10
+category_v[1]= "AAM  "
+category_v[2]= "SAM  "
+category_v[3]= "ASM  "
+category_v[4]= "CIWS "
+category_v[5]= "BOMB "
+category_v[6]= "TORP "
+category_v[7]= "GUN  "
+category_v[8]= "SSM  "   # needs to be included
+category_v[9]= "MINE "
+category_v[10]= "CRUZ "
+ 
+#$% if characteristic is less than one, return
+if (nchar < 1) return
+ 
+#$% skip lines
+skip$lines (2)
+start$line
+space$over 15; mv$s(force_color, 7)
+space$over 1; mv$v("Weapon Capabilities")
+write$line
+start$line
+skip$lines(2)
+ 
+knt = 0
+for(m=1; m<=nchar; m=m+1)
+  {
+    knt = knt + 1
+    xname[knt] = wrchar[1,m]
+  }
+ 
+call order1 (xname, ix, knt)
+ 
+#$% for each category
+ for(icat=1; icat<=ncat; icat=icat + 1)
+   {
+     icnt = 0
+     rfld1 = category[icat]
+     #$% search all names with this category
+     for(in=1; in<=knt; in=in+1)
+       {
+        im = ix[in]
+        gen_name = wrchar[1,im]
+#        if(is_a_member(gen_name, iv))
+        if(is_it_on_side(gen_name) | rfld1 == 'MINE')
+         {
+          if(wrchar[5,im]== rfld1 )
+           {
+            icnt = icnt + 1
+            xcat[icat,icnt] = wrchar[1,im]
+            ixptr[icnt] = im
+           }
+         }
+       }
+ 
+    if(icnt == 0)   # none was found
+      next
+ 
+    if(rfld1 == 'AAM')
+      {
+       space$over 10; mv$v(" Air-to-Air Missiles")
+       write$line
+       start$line
+      space$over 8; mv$v("=========================")
+       write$line
+       start$line
+       mv$v("              MAX                   FIRING")
+       write$line
+       start$line
+       mv$v("NAME         RANGE      SALVO        RATE")
+       write$line
+       start$line
+      }
+ 
+    if(rfld1 == 'SAM')
+      {
+       space$over 9; mv$v("Surface-to-Air Missiles")
+       write$line
+       start$line
+      space$over 8; mv$v("=========================")
+       write$line
+       start$line
+       mv$v("              MAX       SIMULTANEOUS       MAX")
+       write$line
+       start$line
+       mv$v("NAME         RANGE       ENGAGEMENT      ALTITUDE")
+       write$line
+       start$line
+      }
+    if(rfld1 == 'CIWS')
+      {
+       space$over 9; mv$v("Close-In-Weapon System")
+       write$line
+       start$line
+      space$over 8; mv$v("=========================")
+       write$line
+       start$line
+       mv$v("              MAX       SIMULTANEOUS")
+       write$line
+       start$line
+       mv$v("NAME         RANGE       ENGAGEMENT")
+       write$line
+       start$line
+      }
+    if(rfld1 == 'GUN')
+      {
+       space$over 9; mv$v("        Guns           ")
+       write$line
+       start$line
+      space$over 8; mv$v("=========================")
+       write$line
+       start$line
+       mv$v("              MAX                    MAX")
+       write$line
+       start$line
+       mv$v("NAME         RANGE       SALVO       EFF")
+       write$line
+       start$line
+      }
+   if(rfld1 == 'ASM')
+      {
+       space$over 9; mv$v("Air-to-Surface Missiles")
+       write$line
+       start$line
+      space$over 8; mv$v("=========================")
+       write$line
+       start$line
+       mv$v("              MAX                         ")
+       write$line
+       start$line
+       mv$v("NAME         RANGE      SALVO      EPU       ARM")
+       write$line
+       start$line
+      }
+  if(rfld1 == 'BOMB')
+      {
+       space$over 10; mv$v("       Bombs          ")
+       write$line
+       start$line
+      space$over 8; mv$v("=========================")
+       write$line
+       start$line
+       mv$v("NAME          EPU")
+       write$line
+       start$line
+      }
+ 
+  if(rfld1 == 'MINE')
+      {
+       space$over 10; mv$v("       Mines          ")
+       write$line
+       start$line
+      space$over 8; mv$v("=========================")
+       write$line
+       start$line
+#                     1         2         3         4
+#            1234567890123456789012345678901234567890
+       mv$v("NAME     PAYLD MXRNGYDS TARGT")
+       write$line
+       start$line
+      }
+ 
+ #$% add here the SSM category
+ 
+ 
+  #$% for each entry
+  for (k9=1; k9<=icnt; k9=k9+1)
+    {
+     m = ixptr[k9]
+ 
+     if (wichar[$halfquad,2,m] != 0)             # if entry is in BUILD File
+       {
+        #$% open build file
+        call FDopen ($read,build$name,$litc,opt,32*4,lfcB,istat)
+        #$% set record
+        kwords = wichar[$halfquad,2,m]
+        #$% get build record
+        call fgetr (lfcB,kwords,16,rrec)
+       }
+    else if (wichar[$halfquad,4,m] != 0)        # else if entry in FORCE File
+       {
+        #$% open sceanario file
+        call FDopen ($read,scenario$name,$lits,opt,32*4,lfcS,istat)
+        #$% set record
+        kwords = wichar[$halfquad,4,m]
+        #$% get scenario record
+        call fgetr (lfcS,kwords,16,rrec)
+       }
+ 
+    #$% else get next
+    else next
+ 
+    #$% for each entry
+    for (ipnt = 2; ipnt <= rrec[1]; ipnt = ipnt + ilen)
+       {
+        #$% get length
+        call fglen (ipnt,xfld,nfld,ilen)
+ 
+        $debugp call echor
+        $debugp call echoV(" ipnt=")    # jb E2144  (echoV) 4/11/00
+        $debugp call echoi(ipnt)
+        $debugp call echoV(" ilen=")    # jb E2144  (echoV) 4/11/00
+        $debugp call echoi(ilen)
+ 
+        #$% for each length entry
+        for (k=0; k<ilen; k=k+1)
+           {
+            #$% set field
+            rfld = rrec[ipnt+k]
+ 
+           #if(is_alpha_numeric(rfld) == YES)
+             #{
+               if(rfld == 'NAME')
+                 {
+                  rfld = rrec[ipnt+k+1]
+                  rname = rfld
+                 }
+ 
+               else if(rfld == 'CAT')
+                 {
+                  rfld = rrec[ipnt+k+1]
+                  rcat = rfld
+                 }
+ 
+               else if(rfld == 'MXRNG')
+                 {
+                     ifld = rrec[ipnt+k+1]
+                     imxrng = ifld
+                 }
+               else if(rfld == 'MXRNGYDS')
+                 {
+                     ifld = rrec[ipnt+k+1]
+                     imxrng = ifld
+                 }
+               else if(rfld == 'TARGT')
+                 {
+                     rfld = rrec[ipnt+k+1]
+                     targt = rfld
+                 }
+               else if(rfld == 'SALVO')
+                 {
+                      ifld = rrec[ipnt+k+1]
+                      isalvo = ifld
+                 }
+               else if(rfld == 'FRATE')
+                 {
+                     ifld = rrec[ipnt+k+1]
+                     ifrate = ifld
+                 }
+               else if(rfld == 'SIMUL')
+                 {
+                     ifld = rrec[ipnt+k+1]
+                     isimul = ifld
+                 }
+               else if(rfld == 'ALT1')    # added in ufl95 Alex V.
+                 {
+                     ifld = rrec[ipnt+k+1]
+                     ialt = ifld
+                 }
+               else if(rfld == 'ALT2')  # added in ufl95 Alex V.
+                 {
+                     ifld = rrec[ipnt+k+1]
+                     ialt = ifld
+                 }
+               else if(rfld == 'ALT3')  # added in ufl95 Alex V.
+                 {
+                     ifld = rrec[ipnt+k+1]
+                     ialt = ifld
+                 }
+               else if(rfld == 'ALT4')  #added in ufl95 Alex V.
+                 {
+                     ifld = rrec[ipnt+k+1]
+                     ialt = ifld
+                 }
+               else if(rfld == 'ALT5')  #added in ufl Alex V.
+                 {
+                     ifld = rrec[ipnt+k+1]
+                     ialt = ifld
+                 }
+               else if(rfld == 'EPU')
+                 {
+                    ifld = rrec[ipnt+k+1]
+                    iepu = ifld
+                 }
+              else if(rfld == 'PAYLD')
+                 {
+                    ifld = rrec[ipnt+k+1]
+                    ipayld = ifld
+                 }
+             else if(rfld == 'ARM')
+                 {
+                     rfld = rrec[ipnt+k+1]
+                     rarm = rfld
+                 }
+             else if(rfld == 'MAXEF')
+                 {
+                     ifld = rrec[ipnt+k+1]
+                     imaxeff = ifld
+                 }
+ 
+              #} #end if is_alpha_numeric
+         } # end k loop
+      } # end fields in record loop
+ 
+     if (iepu==0)
+      {
+       repu = float(ipayld)/100.0
+      }
+     else
+       repu = float(iepu)
+ 
+     fepu = repu
+     temp_len = 0
+     call smovV(" ",temp_buf, temp_ len)    # jb E2144  8/15/00
+     call smovf(fepu, 903, temp_buf,temp_len)
+     temp_len = temp_len - 1
+ 
+     if(rcat == 'AAM')
+         {
+          mv$s(rname,$$MaxName)
+          space$over 4; mv$n(imxrng,5)
+          space$over 5; mv$n(isalvo,5)
+          space$over 8; mv$n(ifrate,5)
+          write$line
+          start$line
+         }
+     if(rcat == 'CIWS')
+         {
+          mv$s(rname,$$MaxName)
+          space$over 4; mv$n(imxrng,5)
+          space$over 8; mv$n(isimul,5)
+          write$line
+          start$line
+         }
+      if(rcat == 'SAM')
+         {
+          mv$s(rname,$$MaxName)
+          space$over 4; mv$n(imxrng,5)
+          space$over 8; mv$n(isimul,5)
+          if(ialt==0) ialt = 100000
+          space$over 13; mv$n(ialt,6)    # added in ufl95 Alex V.
+          write$line
+          start$line
+         }
+      if(rcat == 'GUN')
+         {
+          mv$s(rname,$$MaxName)
+          space$over 4; mv$n(imxrng,5)
+          space$over 6; mv$n(isalvo,5)
+          space$over 6; mv$n(imaxeff,5)
+          write$line
+          start$line
+         }
+      if(rcat == 'ASM')
+         {
+          mv$s(rname,$$MaxName)
+          space$over 4; mv$n(imxrng,5)
+          space$over 5; mv$n(isalvo,5)
+          space$over 3; mv$s(temp_buf,temp_len)
+          space$over 6; mv$s(rarm,$$MaxName)
+          write$line
+          start$line
+         }
+     if(rcat == 'BOMB')
+         {
+          mv$s(rname,$$MaxName)
+          space$over 1; mv$s(temp_buf,temp_len)
+          write$line
+          start$line
+         }
+     if(rcat == 'MINE')
+         {
+          mv$s(rname,$$MaxName)
+          space$over 1; mv$n(ipayld,5)
+          space$over 1; mv$n(imxrng,5)
+          space$over 4; mv$s(targt,$$MaxName)
+          write$line
+          start$line
+         }
+ 
+     imxrng = 0
+     isalvo = 0
+     ifrate = 0
+     isimul = 0
+     ialt =  0      # added in ufl95 Alex V.
+     imaxeff = 0
+     iepu = 0
+     ipayld = 0
+     rarm = $BLANKLIT
+     targt = $BLANKLIT
+ 
+     #$% add here the SSM
+ 
+    }
+ 
+#$% because torp also comes in a separate file
+#$% we have to ignore just the torpedo
+  if(rcat != 'TORP')
+   {
+    write$line
+    start$line
+    mv$v("-------------------------------------------------------")
+    write$line
+    start$line
+   }
+ }
+ 
+   #$% now  do torpedoes
+   #$% check if there are any
+   i_flag = 0
+   for(lcv=1; lcv<=num_torp; lcv= lcv+1)
+     {
+      for(iv=1; iv<=num_views; iv=iv+1)     # search all the views
+        {
+         if(is_a_member(trpdo_name[lcv], iv))
+           {
+            i_flag = 1
+            break
+           }
+        }
+     }
+ 
+   if(i_flag == 1)
+    {
+        space$over 10; mv$v("     Torpedoes ")
+        write$line
+        start$line
+        space$over 8; mv$v("=========================")
+        write$line
+        start$line
+        mv$v("              MAX       TARGET        ")
+        write$line
+        start$line
+        mv$v("NAME         RANGE       TYPE          SPEED")
+        write$line
+        start$line
+ 
+        for(lcv=1; lcv<=num_torp; lcv= lcv+1)
+          {
+             if(is_it_on_side(trpdo_name[lcv]))
+                {
+                 mv$s(trpdo_name[lcv],$$MaxName)
+                 space$over 3; mv$n(trpdo_range[lcv],5)
+                 space$over 9; mv$s(trpdo_targt[lcv],$$MaxName)
+                 space$over 5; mv$n(trpdo_speed[lcv],5)
+                 write$line
+                 start$line
+                }
+          }
+ 
+      mv$v("-------------------------------------------------------")
+      write$line
+      start$line
+    }
+ 
+   #$% do cruise missiles
+   #$% check if there are any
+    i_flag = 0
+    for(lcv=1; lcv<=num_cruz; lcv= lcv+1)
+      {
+       for(iv=1; iv<=num_views; iv=iv+1)     # search all the views
+         {
+          if(is_a_member(cruz_name[lcv], iv))
+            {
+             i_flag = 1
+             break
+            }
+         }
+      }
+ 
+   if(i_flag == 1)
+     {
+       space$over 10; mv$v("     Missiles")
+       write$line
+       start$line
+       space$over 8; mv$v("=========================")
+       write$line
+       start$line
+       mv$v("              MAX                   ")
+       write$line
+       start$line
+       mv$v("NAME         RANGE      SPEED       TYPE")
+       write$line
+       start$line
+ 
+       for(lcv=1; lcv<=num_cruz; lcv= lcv+1)
+         {
+            if(is_it_on_side(cruz_name[lcv]))
+                {
+                 mv$s(cruz_name[lcv],$$MaxName)
+                 space$over 4; mv$n(cruz_range[lcv],5)
+                 space$over 7; mv$n(cruz_speed[lcv],5)
+                 space$over 7; mv$s(cruz_type[lcv],$$MaxName)
+                 write$line
+                 start$line
+                }
+         }
+ 
+      mv$v("-------------------------------------------------------")
+      write$line
+      start$line
+     }
+ 
+top$page
+ 
+for (k = 1; k <= nchar; k=k+1)                  # move to call array from
+   {                                            # integer and real overlay
+    for (k5 = 1; k5 <= 5; k5=k5+1)
+       {
+        wchar[k5,k] = wrchar[k5,k]
+       }
+   }
+ 
+return
+end
+ 
+
+ 
+subroutine fpgsensor(nargs, args, force_color)
+#############################################################
+#$%
+#$% Purpose:    FPGSENSOR prints sensor capabilities
+#$%             for blue/orange forces
+#$%
+#$% Called by:  FPBLUE FPGORANGE
+#$%
+#$% calls:      FRPGCHARSENSOR
+#$%
+#$% Tables:     none
+#$%
+#$% Date:       August 92
+#$%
+#$% Author:     Alex Vagus
+#$%
+##############################################################
+IMPLICIT NONE   # jb    E2145   4/11/00
+ForceCommon
+BookCommon
+ 
+literal args[$max$args]     # Note:  args is an unused ARGUMENT     4/18/00
+literal xnul[2,1], force_color
+literal title
+integer nargs              # Note:  nargs is an unused ARGUMENT     4/18/00
+ 
+DATA xnul/$BLANKLIT, 0/
+ 
+#$% collect sonar data
+title = 'sonar'
+call fpgchr(sonar$file,xnul,0,nsonar,wrsonar, title)
+ 
+#$% collect sonobuoys data
+title = 'sonob'
+call fpgchr(sonob$file,xnul,0,nsonob,wrsonob, title)
+ 
+#$% print sensor capabilities
+ call frpgcharsensor(force_color)
+ 
+return
+end
+
+ 
+subroutine fpgchr(opt,xfld,nfld,nchar,wchar,title)
+#############################################################
+#$%
+#$% Purpose:    FPGCHR It collects data and puts it in a
+#$%             structure array. The data that collects
+#$%             can be sonar, sonobuoys, cruise missiles
+#$%             torpedoes, the title parameter gives
+#$%             the name
+#$%
+#$% Called by:  FPGSENSOR FPGWEAP
+#$%
+#$% calls:      none
+#$%
+#$% Tables:     none
+#$%
+#$% Date:       August 92
+#$%
+#$% Author:     Alex Vagus
+#$%
+##############################################################
+IMPLICIT NONE   # jb    E2145   4/11/00
+ForceCommon
+BookCommon
+ 
+literal xname[$weapons], g_name
+literal xfld[2,3],title
+literal rname, rtargt, romni, rcat, rrdesm, rjammer, rradar
+ 
+literal wrchar[5,$weapons],wchar[5,$weapons],rfld  #jb 180 vice 140  2/8/89
+integer kwords,nfld,nchar,wichar[$intrealmatch,5,$weapons] # 2/8/89
+equivalence (wichar,wrchar)
+ 
+integer  k,k5,k9,m,icnt,ilen,ipnt,istat,knt,lfcB,lfcS, # jb E2145  4/18/00
+        ivcru,ispeed,ifldur,iruntm,ifreq,              # jb E2145  4/18/00
+        irange,irange1,irange2,irange3,irange4         # jb E2145  4/18/00
+integer ix[$weapons], IS_ALPHA_NUMERIC                      # jb E2145  4/18/00
+VMSchar*(*) opt
+ 
+for (k = 1; k <= nchar; k=k+1)                  # move to local array with
+   {                                            # integer and real overlay
+    for (k5 = 1; k5 <= 5; k5=k5+1)
+       {
+        wrchar[k5,k] = wchar[k5,k]
+       }
+   }
+ 
+#$% if characteristic is less than one, return
+ if (nchar < 1) return
+ 
+knt = 0
+for(m=1; m<=nchar; m=m+1)
+  {
+    knt = knt + 1
+    xname[knt] = wrchar[1,m]
+  }
+ 
+call order1 (xname, ix, knt)
+ 
+ icnt = 0
+ 
+  #$% for each entry
+  for (k9=1; k9<=knt; k9=k9+1)
+    {
+     m = ix[k9]
+ 
+     if (wichar[$halfquad,2,m] != 0)             # if entry is in BUILD File
+       {
+        #$% open build file
+        call FDopen ($read,build$name,$litc,opt,32*4,lfcB,istat)
+        #$% set record
+        kwords = wichar[$halfquad,2,m]
+        #$% get build record
+        call fgetr (lfcB,kwords,16,rrec)
+       }
+    else if (wichar[$halfquad,4,m] != 0)        # else if entry in FORCE File
+       {
+        #$% open sceanario file
+        call FDopen ($read,scenario$name,$lits,opt,32*4,lfcS,istat)
+        #$% set record
+        kwords = wichar[$halfquad,4,m]
+        #$% get scenario record
+        call fgetr (lfcS,kwords,16,rrec)
+       }
+    #$% else get next
+    else next
+ 
+    g_name = wrchar[1,m]
+    icnt = icnt + 1
+ 
+    irange = 0      # jb E2186  Initl'z Ballistic Missile range 2/16/00
+ 
+    #$% for each entry
+    for (ipnt = 2; ipnt <= rrec[1]; ipnt = ipnt + ilen)
+       {
+        #$% get length
+        call fglen (ipnt,xfld,nfld,ilen)
+ 
+        #$% for each length entry
+        for (k=0; k<ilen; k=k+1)
+           {
+            #$% set field
+            rfld = rrec[ipnt+k]
+ 
+           #if(is_alpha_numeric(rfld) == YES)
+             #{
+               if(rfld == 'NAME')
+                 {
+                  rname = rrec[ipnt+k+1]
+                 }
+ 
+              else if(rfld == 'VCRU')
+                 {
+                  ivcru = rrec[ipnt+k+1]
+                 }
+              else if(rfld == 'SPEED')
+                 {
+                  ispeed = rrec[ipnt+k+1]
+                 }
+              else if(rfld == 'FLDUR')
+                 {
+                  ifldur = rrec[ipnt+k+1]
+                 }
+              else if(rfld == 'RANGE') # jb E2186 Ballistic Miss. Range 2/16/00
+                 {
+                  irange = rrec[ipnt+k+1]   # jb (set characteristic range)
+                 }
+              else if(rfld == 'RUNTM')
+                 {
+                  iruntm = rrec[ipnt+k+1]
+                 }
+              else if(rfld == 'TARGT')
+                 {
+                  rtargt = rrec[ipnt+k+1]
+                 }
+              else if(rfld == 'CAT')
+                 {
+                  rcat = rrec[ipnt+k+1]
+                 }
+              else if(rfld == 'RMAX')
+                 {
+                   irange1 = rrec[ipnt+k+1]
+                   irange2 = rrec[ipnt+k+2]
+                   irange3 = rrec[ipnt+k+3]
+                   irange4 = rrec[ipnt+k+4]
+                 }
+               else if(rfld == 'CFREQ')
+                  {
+                   ifreq = rrec[ipnt+k+1]
+                  }
+               else if(rfld == 'OMNI')
+                  {
+                   romni = rrec[ipnt+k+1]
+                  }
+               else if(rfld == 'RDESM')
+                  {
+                   rrdesm = rrec[ipnt+k+1]
+                  }
+               else if(rfld == 'RADAR')
+                  {
+                   rradar = rrec[ipnt+k+1]
+                  }
+               else if(rfld == 'JAMMR')
+                  {
+                   rjammer = rrec[ipnt+k+1]
+                  }
+              #}
+         }
+    }
+ 
+   if(title == 'cruz')
+    {
+     if (irange <= 0) #jb E2186 If BALLISTIC range not already set, then:
+        irange = (ivcru * ifldur)/60 # jb OTHER cruise-missile range) 2/16/00
+     cruz_name[icnt] = g_name
+     cruz_range[icnt] = irange
+     cruz_speed[icnt] = ivcru
+     cruz_rdesm[icnt] = rradar
+     cruz_jammer[icnt] = rjammer
+     cruz_type[icnt] = rcat
+    }
+ 
+   if(title == 'torp')
+    {
+     irange = (ispeed * iruntm)/60
+     trpdo_name[icnt] = g_name
+     trpdo_range[icnt] = irange
+     trpdo_speed[icnt] = ispeed
+     trpdo_targt[icnt] = rtargt
+    }
+ 
+   if(title == 'sonar')
+    {
+     sonar_name[icnt] = rname
+     sonar_type[icnt] = rcat
+     sonar_cat[icnt] = rcat
+     sonar_freq[icnt] = ifreq
+     sonar_range[1,icnt] = irange1
+     sonar_range[2,icnt] = irange2
+     sonar_range[3,icnt] = irange3
+     sonar_range[4,icnt] = irange4
+    }
+   if(title == 'sonob')
+    {
+     sonob_name[icnt] = rname
+     sonob_type[icnt] = romni
+     sonob_cat[icnt] = rcat
+     sonob_freq[icnt] = ifreq
+     sonob_range[1,icnt] = irange1
+     sonob_range[2,icnt] = irange2
+     sonob_range[3,icnt] = irange3
+     sonob_range[4,icnt] = irange4
+    }
+   if(title == 'rdesm')
+    {
+     rdesm_name[icnt] = rname
+     rdesm_cat[icnt] = rcat
+    }
+   if(title == 'jammer')
+    {
+     jammer_name[icnt] = rname
+     jammer_range[icnt] = irange
+    }
+ 
+ 
+ 
+ }  #end for each entry av 8/94
+ 
+  if(title == 'cruz')
+   {
+     num_cruz = icnt
+   }
+  if(title == 'torp')
+   {
+    num_torp = icnt
+   }
+  if(title == 'sonar')
+    {
+     num_sonar = icnt
+    }
+  if(title == 'sonob')
+    {
+     num_sonob = icnt
+    }
+  if(title == 'rdesm')
+    {
+     num_rdesm = icnt
+    }
+ 
+  if(title == 'jammer')
+    {
+     num_jammer = icnt
+    }
+ 
+for (k = 1; k <= nchar; k=k+1)                  # move to call array from
+   {                                            # integer and real overlay
+    for (k5 = 1; k5 <= 5; k5=k5+1)
+       {
+        wchar[k5,k] = wrchar[k5,k]
+       }
+   }
+ 
+return
+end
+
+ 
+subroutine frpgcharsensor(force_color)
+#############################################################
+#$%
+#$% Purpose:    FPGWEAP prints sensor capabilities
+#$%             of blue/orange forces
+#$%
+#$% Called by:  FPBLUE FPGORANGE
+#$%
+#$% calls:      IS_IT_PASSIVE IS_IT_ACTIVE
+#$%
+#$% Tables:     none
+#$%
+#$% Date:       August 92
+#$%
+#$% Author:     Alex Vagus
+#$%
+##############################################################
+IMPLICIT NONE   # jb    E2145   4/11/00
+forcecommon
+bookcommon
+ 
+literal force_color, pasivo, activo, g_name, tipo1, tipo2
+literal si
+Integer i_cnt,jg, LITCMP                            # jb E2145  4/18/00
+LOGICAL IS_IT_ON_SIDE, IS_IT_ACTIVE, IS_IT_PASSIVE  # jb E2145  4/18/00
+ 
+pasivo = 'PASS'
+activo = 'ACT'
+tipo1 = 'OMNI'
+tipo2 = 'DIFAR'
+si = 'YES'
+ 
+#$% skip lines
+skip$lines (2)
+start$line
+ 
+space$over 10; mv$sn(force_color, 7)
+space$over 1; mv$v("Sensor Capabilities")
+write$line
+start$line
+skip$lines(2)
+ 
+#$% for each view
+#for(iv=1; iv<=num_views; iv=iv+1)
+#  {
+#    space$over 15; mv$s(force_color,7)
+#    space$over 1; mv$v("View ")
+#    mv$n(iv,3)
+#    write$line
+#    start$line
+#    skip$lines(1)
+ 
+    space$over 7; mv$v("ACTIVE SONARS")
+    write$line
+    start$line
+    mv$v("                        +------------- MAXIMUM"//"  RANGE -----------+")
+    write$line
+    start$line
+    mv$v("NAME         FREQ       RANGE1      RANGE2"//"      RANGE3      RANGE4")
+    write$line
+    start$line
+ 
+    i_cnt = 0
+    for(jg=1; jg<= num_sonar; jg=jg+1)
+      {
+       g_name = sonar_name[jg]
+       if(is_it_on_side(g_name))
+         {
+           if(is_it_active(sonar_cat[jg]))
+             {
+              i_cnt = i_cnt + 1
+              mv$s(sonar_name[jg],$$MaxName)
+              space$over 2; mv$n(sonar_freq[jg], 7)
+              space$over 4; mv$n(sonar_range[1,jg], 6)
+              space$over 6; mv$n(sonar_range[2,jg], 6)
+              space$over 6; mv$n(sonar_range[3,jg], 6)
+              space$over 6; mv$n(sonar_range[4,jg], 6)
+              write$line
+              start$line
+             }
+         }
+ 
+      }
+#    if(i_cnt == 0)
+#     {
+#      space$over 17; mv$v("***** None *****")
+#      write$line
+#      start$line
+#     }
+ 
+    skip$lines(1)
+    start$line
+    space$over 7; mv$v("PASSIVE SONARS")
+    write$line
+    start$line
+    mv$v("                        +------------- MAXIMUM"//"  RANGE -----------+")
+    write$line
+    start$line
+    mv$v("NAME         TYPE       RANGE1      RANGE2"//"      RANGE3      RANGE4")
+    write$line
+    start$line
+ 
+    i_cnt = 0
+    for(jg=1; jg<= num_sonar; jg=jg+1)
+      {
+       g_name = sonar_name[jg]
+       if(is_it_on_side(g_name))
+         {
+          if(is_it_passive(sonar_cat[jg]))
+            {
+             i_cnt = i_cnt + 1
+             mv$s(sonar_name[jg],$$MaxName)
+             space$over 5; mv$s(sonar_type[jg],$$MaxName)
+             write$line
+             start$line
+            }
+         }
+ 
+      }
+ 
+    #$% do the sonobuoys
+    space$over 7; mv$v("ACTIVE SONOBUOYS")
+    write$line
+    start$line
+    mv$v("                        +------------- MAXIMUM"//"  RANGE -----------+")
+    write$line
+    start$line
+    mv$v("NAME         FREQ       RANGE1      RANGE2"//"      RANGE3      RANGE4")
+    write$line
+    start$line
+ 
+    i_cnt = 0
+    for(jg=1; jg<= num_sonob; jg=jg+1)
+      {
+       g_name = sonob_name[jg]
+       if(is_it_on_side(g_name))
+        {
+         if(litcmp(sonob_cat[jg], activo)== 0)
+          {
+           i_cnt = i_cnt + 1
+           mv$s(sonob_name[jg],$$MaxName)
+           space$over 2; mv$n(sonob_freq[jg], 7)
+           space$over 4; mv$n(sonob_range[1,jg], 6)
+           space$over 6; mv$n(sonob_range[2,jg], 6)
+           space$over 6; mv$n(sonob_range[3,jg], 6)
+           space$over 6; mv$n(sonob_range[4,jg], 6)
+           write$line
+           start$line
+          }
+        }
+ 
+      }
+ 
+    skip$lines(1)
+    start$line
+    space$over 7; mv$v("PASSIVE SONOBUOYS")
+    write$line
+    start$line
+    mv$v("                        +------------- MAXIMUM"//"  RANGE -----------+")
+    write$line
+    start$line
+    mv$v("NAME         TYPE       RANGE1      RANGE2"//"      RANGE3      RANGE4")
+    write$line
+    start$line
+ 
+    i_cnt = 0
+    for(jg=1; jg<= num_sonob; jg=jg+1)
+      {
+       g_name = sonob_name[jg]
+       if(is_it_on_side(g_name))
+        {
+         if(litcmp(sonob_cat[jg], pasivo)==0)
+          {
+           i_cnt = i_cnt + 1
+           mv$s(sonob_name[jg],$$MaxName)
+           if(litcmp(sonob_type[jg], si)==0)
+              {
+               space$over 5; mv$s (tipo1,$$MaxName)
+              }
+           else
+              {
+                space$over 5; mv$s (tipo2,$$MaxName)
+              }
+ 
+           write$line
+           start$line
+          }
+        }
+ 
+      }
+ 
+   top$page
+   write$line
+   start$line
+ 
+return
+end
+
+ 
+subroutine fpgeob(nargs, args, force_color)
+#############################################################
+#$%
+#$% Purpose:    FPGEOB prints electronic order of battle
+#$%             for blue/orange forces
+#$%
+#$% Called by:  FPBLUE FPORANGE
+#$%
+#$% calls:
+#$%
+#$% Tables:     none
+#$%
+#$% Date:       August 92
+#$%
+#$% Author:     Alex Vagus
+#$%
+##############################################################
+IMPLICIT NONE   # jb    E2145   4/11/00
+ForceCommon
+BookCommon
+ 
+    # jb Note:  args and nargs are unused ARGUMENTS     4/18/00
+literal args[$max$args], g_name, force_color
+integer nargs, IS_IT_IN_BUFFER,LITCMP, # jb E2145 4/00
+        j,k,ir,iv,i_cnt,iflag,itab,jflag,jtab # jb E2145 4/18/00
+logical is_a_radar, is_it_on_side, is_a_member
+ 
+space$over 10; mv$sn(force_color, 7)
+space$over 1; mv$v("Electronic Order of Battle")
+write$line
+start$line
+skip$lines(2)
+ 
+    space$over 5; mv$v("RADARS")
+    write$line
+    start$line
+    space$over 5; mv$v("======")
+    write$line
+    start$line
+ 
+    #$% do the radars
+    i_cnt = 0
+    for(k=1; k<=num_rdesm; k=k+1)
+        {
+        if(is_a_radar(rdesm_name[k]))
+            {
+            mv$s(rdesm_name[k],$$MaxName)
+            mv$v(": ")
+            iflag = 0
+            itab = 0
+            #$% do the ships
+            for(iv=1; iv<=num_views; iv=iv+1)
+                {
+                #$% do the ships
+                for(j=1; j<=n_ship[iv]; j=j+1)
+                    {
+                    for(ir=1; ir<=ship_n_rdesm[iv,j]; ir=ir+1)
+                        {
+                        if(litcmp(rdesm_name[k], ship_rdesm[ir,iv,j]) == 0)
+                            {
+                            if(is_it_in_buffer(ship_class_name[iv,j], linebf, lenbf)) next
+                            mv$sn(ship_class_name[iv,j],$$MaxName)
+                            space$over 1
+                            iflag = 1
+                            i_cnt = i_cnt + 1
+                            itab = itab + 1
+                            if(itab == 7)
+                                {
+                                write$line
+                                start$line
+                                space$over 10
+                                itab = 0
+                                }
+                            break
+                            }
+                        }
+                    }
+                } # end for ships
+ 
+            if(iflag == 1)
+                {
+                space$over 1; mv$v("Class Vessel ")
+                write$line
+                start$line
+                space$over 10
+                }
+ 
+            iflag = 0
+            itab = 0
+ 
+            #$% do Shore Bases
+            for(iv=1; iv<=num_views; iv=iv+1)
+                {
+                for(j=1; j<=n_shore[iv]; j=j+1)
+                    {
+                    for(ir=1; ir<=shore_n_rdesm[iv,j]; ir=ir+1)
+                        {
+                        if(litcmp(rdesm_name[k], shore_rdesm[ir,iv,j]) == 0)
+                            {
+                            if(is_it_in_buffer(shore_class_name[iv,j], linebf, lenbf)) next
+                            mv$sn(shore_class_name[iv,j],$$MaxName)
+                            space$over 1
+                            iflag = 1
+                            i_cnt = i_cnt + 1
+                            itab = itab + 1
+                            if(itab == 7)
+                                {
+                                write$line
+                                start$line
+                                space$over 10
+                                itab = 0
+                                }
+                            break
+                            }
+                        }
+                    }
+                } # end for shore bases
+ 
+            if(iflag == 1)
+                {
+                space$over 1; mv$v("Shore Base ")
+                write$line
+                start$line
+                space$over 10
+                }
+ 
+            iflag = 0
+            itab = 0
+ 
+            #$% do aircraft
+            for(iv=1; iv<=num_views; iv=iv+1)
+                {
+                for(j=1; j<=n_air[iv]; j=j+1)
+                    {
+                    for(ir=1; ir<=air_n_rdesm[iv,j]; ir=ir+1)
+                        {
+                        if(litcmp(rdesm_name[k], air_rdesm[ir,iv,j]) == 0)
+                            {
+                            if(is_it_in_buffer(air_class_name[iv,j], linebf, lenbf)) next
+                            mv$sn(air_class_name[iv,j],$$MaxName)
+                            space$over 1
+                            iflag = 1
+                            i_cnt = i_cnt + 1
+                            itab = itab + 1
+                            if(itab == 7)
+                                {
+                                write$line
+                                start$line
+                                space$over 10
+                                itab = 0
+                                }
+                            break
+                            }
+                        }
+                    }
+                } # end for AC
+ 
+            if(iflag == 1)
+                {
+                mv$v(" Aircraft")
+                write$line
+                start$line
+                space$over 10
+                }
+ 
+            #$% do the missiles
+            iflag = 0
+            itab = 0
+ 
+            for(j=1; j<=num_cruz; j=j+1)
+                {
+                g_name = cruz_name[j]
+                if(is_it_on_side(g_name))
+                    {
+                    if(litcmp(rdesm_name[k], cruz_rdesm[j]) == 0)
+                        {
+                        mv$sn(g_name,$$MaxName)
+                        space$over 1
+                        iflag = 1
+                        i_cnt = i_cnt + 1
+                        itab = itab + 1
+                        if(itab == 7)
+                            {
+                            write$line
+                            start$line
+                            space$over 10
+                            itab = 0
+                            }
+                        }
+                    }
+                }
+            if(iflag == 1)
+                {
+                space$over 1; mv$v("Cruise Missile ")
+                write$line
+                start$line
+                space$over 10
+                }
+ 
+            start$line
+            }           # end if is a radar
+ 
+        } # end of loop through the radar emitters
+ 
+ 
+#  if(i_cnt == 0)
+#   {
+#    space$over 3; mv$v("***** None *****")
+#    write$line
+#    start$line
+#   }
+ 
+    write$line
+    start$line
+    skip$lines(1)
+ 
+    space$over 5; mv$v("JAMMERS")
+    write$line
+    start$line
+    space$over 5; mv$v("=======")
+    write$line
+    start$line
+ 
+ 
+#   j_cnt = 0
+    for(k=1; k<=num_jammer; k=k+1)
+     {
+      jflag = 0
+      jtab = 0
+      mv$s(jammer_name[k],$$MaxName)
+      mv$v(": ")
+ 
+      #$% do the ships
+      for(iv=1; iv<=num_views; iv=iv+1)
+        {
+         for(j=1; j<=n_ship[iv]; j=j+1)
+           {
+            for(ir=1; ir<=ship_n_jammer[iv,j]; ir=ir+1)
+              {
+               if(litcmp(jammer_name[k], ship_jammer[ir,iv,j]) == 0)
+                 {
+                  if(is_it_in_buffer(ship_class_name[iv,j], linebf, lenbf)) next
+                  mv$sn(ship_class_name[iv,j],$$MaxName)
+                  space$over 1
+                  jflag = 1
+                  i_cnt = i_cnt + 1
+                  jtab = jtab + 1
+                  if(jtab == 7)
+                    {
+                     write$line
+                     start$line
+                     space$over 10
+                     jtab = 0
+                    }
+                  break
+                 }
+              }
+           }
+        }
+ 
+       if(jflag == 1)
+           {
+            space$over 1; mv$v("Class Vessel ")
+            write$line
+            start$line
+            space$over 10
+           }
+ 
+ 
+       #$% do Shore Bases
+       jflag = 0
+       jtab = 0
+       for(iv=1; iv<=num_views; iv=iv+1)
+        {
+          for(j=1; j<=n_shore[iv]; j=j+1)
+           {
+            for(ir=1; ir<=shore_n_jammer[iv,j]; ir=ir+1)
+              {
+               if(litcmp(jammer_name[k], shore_jammer[ir,iv,j]) == 0)
+                 {
+                  if(is_it_in_buffer(shore_class_name[iv,j], linebf, lenbf)) next
+                  mv$sn(shore_class_name[iv,j],$$MaxName)
+                  space$over 1
+                  jflag = 1
+                  i_cnt = i_cnt + 1
+                  jtab = jtab + 1
+                  if(jtab == 7)
+                    {
+                     write$line
+                     start$line
+                     space$over 10
+                     jtab = 0
+                    }
+                  break
+                 }
+              }
+           }
+         }
+ 
+         if(jflag == 1)
+           {
+            space$over 1; mv$v("Shore Base ")
+            write$line
+            start$line
+            space$over 10
+           }
+ 
+         #$% do aircraft
+         jflag = 0
+         jtab = 0
+       for(iv=1; iv<=num_views; iv=iv+1)
+        {
+         for(j=1; j<=n_air[iv]; j=j+1)
+           {
+            for(ir=1; ir<=air_n_jammer[iv,j]; ir=ir+1)
+              {
+               if(litcmp(jammer_name[k], air_jammer[ir,iv,j]) == 0)
+                 {
+                  if(is_it_in_buffer(air_class_name[iv,j], linebf, lenbf)) next
+                  mv$sn(air_class_name[iv,j],$$MaxName)
+                  space$over 1
+                  jflag = 1
+                  i_cnt = i_cnt + 1
+                  jtab = jtab + 1
+                  if(jtab == 7)
+                    {
+                     write$line
+                     start$line
+                     space$over 10
+                     jtab = 0
+                    }
+                  break
+                 }
+              }
+           }
+        }
+       if(jflag == 1)
+        {
+         space$over 1; mv$v("Aircraft ")
+         write$line
+         start$line
+         space$over 10
+        }
+ 
+         #$% do the missiles
+         jflag = 0
+         jtab = 0
+         for(j=1; j<=num_cruz; j=j+1)
+           {
+            g_name = cruz_name[j]
+            if(is_a_member(g_name, iv))
+              {
+               if(litcmp(jammer_name[k], cruz_jammer[j]) == 0)
+                 {
+                  mv$sn(g_name,$$MaxName)
+                  space$over 1
+                  jflag = 1
+                  i_cnt = i_cnt + 1
+                  jtab = jtab + 1
+                  if(jtab == 7)
+                    {
+                     write$line
+                     start$line
+                     space$over 10
+                     jtab = 0
+                    }
+                 }
+              }
+           }
+         if(jflag == 1)
+           {
+            space$over 1; mv$v("Cruise Missile ")
+            write$line
+            start$line
+            space$over 10
+           }
+ 
+           start$line
+ 
+ 
+   }                     # end of loop through jammers
+ 
+ 
+  if (i_cnt == 0)
+   {
+    space$over 3; mv$v("***** None *****")
+    write$line
+    start$line
+   }
+ 
+  top$page
+ 
+return
+end
+
+ 
+subroutine fpcontrol(nargs,args)
+#############################################################
+#$%
+#$% Purpose:    FPCONTROL prints game book for blue, orange and
+#$%             neutral forces
+#$%
+#$% Called by:  FPGAMEBOOK
+#$%
+#$% calls:      FPBLUE FPORANGE FPNEUTRAL
+#$%
+#$% Tables:     none
+#$%
+#$% Date:       July 92
+#$%
+#$% Author:     Alex Vagus
+#$%
+##############################################################
+IMPLICIT NONE   # jb    E2145   4/11/00
+ForceCommon
+BookCommon
+ 
+literal args[$max$args]
+integer nargs
+ 
+call fpblue(nargs, args)
+call fporange(nargs, args)
+call fpneutral(nargs,args)   # AV 8/92
+ 
+return
+end
+
+ 
+subroutine fpheadpage(force_color)
+###################################################################
+#$%
+#$%  Purpose:   FPHEADPAGE prints the heading page of the gamebook
+#$%
+#$%  Called by: FPBLUE FPORANGE FPNEUTRAL
+#$%
+#$%  Calls:     None
+#$%
+#$%  Date:      July 92
+#$%
+#$%
+#$%  Author:    Alex Vagus
+#$%
+#$%
+####################################################################
+IMPLICIT NONE   # jb    E2145   4/11/00
+ForceCommon
+ 
+literal force_color
+ 
+top$page
+skip$lines(7)
+start$line
+space$over 10; mv$v("************************************")
+write$line
+start$line
+space$over 10; mv$v("*                                  *")
+write$line
+start$line
+space$over 10; mv$v("*             GAMEBOOK             *")
+write$line
+start$line
+space$over 10; mv$v("*               FOR                *")
+write$line
+start$line
+space$over  10; mv$v("*             ")
+mv$s(force_color, 7)
+mv$v("              *")
+write$line
+start$line
+space$over 10; mv$v("*                                  *")
+write$line
+start$line
+space$over 10; mv$v("************************************")
+write$line
+start$line
+skip$lines(2)
+ 
+space$over 15; mv$v("---- ")
+mv$v(mdate)
+space$over 1; mv$v("----")
+write$line
+start$line
+skip$lines(4)
+ 
+space$over 10; mv$v("- Task Organization")
+write$line
+start$line
+space$over 10; mv$v("- Ships and Submarines")
+write$line
+start$line
+space$over 10; mv$v("- Shore Bases")
+write$line
+start$line
+space$over 10; mv$v("- Aircraft Characteristics")
+write$line
+start$line
+space$over 10; mv$v("- Aircraft Capabilities")
+write$line
+start$line
+space$over 10; mv$v("- Weapon Capabilities")
+write$line
+start$line
+space$over 10; mv$v("- Sensor Capabilities")
+write$line
+start$line
+space$over 10; mv$v("- Electronic Order of Battle")
+write$line
+start$line
+ 
+return
+end
+
+ 
+ 
+subroutine fpgbml(nargs,args,force_color)
+###################################################################
+#$%
+#$%  Purpose:   To collect all information pertaining to boats
+#$%
+#$%  Called by: FPBLUE, FPORANGE
+#$%
+#$%  Calls:     GET_VIEW, PUT_BOAT_NUMBER
+#$%
+#$%  Date:      June 1994
+#$%
+#$%
+#$%  Author:    Alex Vagus
+#$%
+#$%
+####################################################################
+IMPLICIT NONE   # jb    E2145   4/11/00
+ForceCommon
+BookCommon
+ 
+    # jb Note:  args and nargs are unused ARGUMENTS     4/18/00
+literal args[$max$args], force_color, lexical_cmp_A, lexical_cmp_Z
+literal temporal_name
+integer side, nargs, boat_cnt,
+        LITCMP,  BML$Pointer,BML$Address        # jb  E2145  4/18/00
+integer GET_VIEW     # integer function to determine view
+ 
+#%$ search through all boats
+lexical_cmp_A = 'A'
+lexical_cmp_Z = 'ZZZZZ'
+ 
+#$% get side
+if(force_color == 'BLUE') side = 1
+if(force_color == 'ORANGE') side = 2
+if(force_color == 'NEUTRAL') side = 3
+ 
+boat_cnt = 0    #set up boat counter variable
+ 
+#$% for each BML entry
+for (BML$Pointer$First; BML$Pointer$Valid; BML$Pointer$Next)
+    {
+     BML$map
+     #$% if BML slot not in use, break loop
+     if (BML$InUse == $no) break
+ 
+     #$% if boat name is less than entry, get next
+     if (litcmp(BML$name, lexical_cmp_A) < 0) next
+     #$% if boat name is greater than entry, break loop
+     if (litcmp(BML$name, lexical_cmp_Z) > 0) break
+ 
+     boat_cnt = boat_cnt + 1
+ 
+     #$% save boat information in a data structure named boat
+     #$% the max number of boats allowed so far is 1000
+     boat_name[boat_cnt] = bml$name
+     boat_class[boat_cnt] = bml$class
+     temporal_name = bml$basename
+     boat_base_name[boat_cnt] = bml$basename
+ 
+     #$% Given the basename, get_view will return the view number the boat belongs to
+     boat_view_num[boat_cnt] = get_view(temporal_name)
+ 
+ 
+   }
+ 
+   #$% save total number of boats, num_boats is in the BookCommon block
+   num_boats = boat_cnt
+ 
+   #$% It figures out the number of boats per view and note it in n_boat[view] array
+   call put_boat_number(boat_cnt)
+ 
+ 
+return
+end
+
+integer function get_view(basename)
+###################################################################
+#$%
+#$%  Purpose:   To find out which view a boat belongs to
+#$%
+#$%  Called by: FPGBML
+#$%
+#$%  Calls:     None
+#$%
+#$%  Date:      June 1994
+#$%
+#$%
+#$%  Author:    Alex Vagus
+#$%
+#$%
+####################################################################
+ForceCommon
+BookCommon
+ 
+literal basename, temp_name
+integer vw, sh, imax,
+        LITCMP, force$index     # jb E2145  5/16/00
+ 
+ 
+#$% search through all views
+for (vw=0; vw<=num_views; vw=vw+1)
+  {
+    #get number of forces
+    imax = view_force[vw]
+ 
+    #find force that owns this this boat
+    for(sh=1; sh<imax; sh=sh+1)
+      {
+        force$index = view_array[vw,sh]
+        temp_name = force$name
+        if(litcmp(basename,temp_name)== 0)
+          {
+            get_view = vw
+            return
+          }
+      }
+ 
+ 
+  }
+ 
+get_view = 0  #nothing was found
+ 
+return
+end
+ 
+subroutine put_boat_number(boat_knt)
+###################################################################
+#$%
+#$%  Purpose:   To find out how many boats are there in each view
+#$%
+#$%  Called by: FPGBML
+#$%
+#$%  Calls:     None
+#$%
+#$%  Date:      June 194
+#$%
+#$%
+#$%  Author:    Alex Vagus
+#$%
+#$%
+####################################################################
+ForceCommon
+BookCommon
+ 
+integer boat_knt
+integer vw, b
+ 
+ 
+#$%go through each view
+for(vw=1; vw<=num_views; vw=vw+1)
+  {
+   n_boat[vw] = 0  #initialize counter
+ 
+   #$% go through boat list
+   for(b=1; b<=boat_knt; b=b+1)
+     {
+       if(boat_view_num[b] == vw)
+        {
+          n_boat[vw] = n_boat[vw] + 1
+ 
+        }
+ 
+     }
+  }
+ 
+return
+end
+ 
+subroutine fpneutral(nargs,args)
+#############################################################
+#$%
+#$% Purpose:    FPNEUTRAL prints ship and shore base data
+#$%             aircraft, weapon and sensor capabilities for
+#$%             Neutral forces
+#$%
+#$% Called by:  FPGAMEBOOK
+#$%
+#$% calls:
+#$%
+#$% Tables:     Force
+#$%
+#$% Date:       August 94
+#$%
+#$% Author:     Alex Vagus
+#$%
+##############################################################
+ForceCommon
+BookCommon
+ 
+integer nargs
+literal args[$max$args]
+literal force_color
+ 
+#$% Note the order in which these calls are made is important
+#$% do not alter it
+force_color = 'NEUTRAL'
+call fpheadpage(force_color)
+call fpgtaskneutral(nargs,args)
+call fpgrdesm(nargs,args,force_color)
+call fpgjammer(nargs,args,force_color)
+ 
+call fpgbml(nargs,args,force_color)
+call fpgship(nargs, args, force_color)
+call fpgshorebase(nargs,args,force_color)
+call fpgair(nargs,args,force_color)
+call fpgaml(nargs,args, force_color)
+call fpgweap(nargs,args,force_color)
+call fpgsensor(nargs,args,force_color)
+call fpgeob(nargs,args,force_color)
+ 
+ 
+return
+end
+
+subroutine fpgtaskneutral(nargs, args)
+#############################################################
+#$%
+#$% Purpose:    FPGTASKNEUTRAL prints ship and shore base task designations
+#$%             for NEUTRAL forces in ascending order
+#$%
+#$% Called by:  FPNEUTRAL
+#$%
+#$% calls:      none
+#$%
+#$% Tables:     Force
+#$%
+#$% Date:       August 94
+#$%
+#$% Author:     Alex Vagus
+#$%
+##############################################################
+IMPLICIT NONE   # jb    E2145   4/11/00
+ForceCommon
+BookCommon
+ 
+    # jb Note:  args and nargs are unused ARGUMENTS     4/18/00
+Literal args[$max$args], taskn
+integer nargs, irec1[1500],
+       i,j,k,icnt,ibase_cnt,force$Index,           # jb  E2145  4/18/00
+       iprev_task,i_task2,iship,imax               # jb  E2145  4/18/00
+ 
+ 
+9000 format (/"       Task Designations For NEUTRAL " )
+ 
+ 9001 format (/,
+  "             NEUTRAL ",x,"View ",i2,/,
+  "            Task Organization ",/,
+  "            ================= ",/)
+ 9002 format (
+  "           Ships and Submarines ", /,
+  "                    RESA ")
+ 9003 format (
+  "      Task #        Name        Class ",/,
+  "    ---------       --------    -------- ")
+# 0         1         2         3         4         5         6         7
+# 0123456789012345678901234567890123456789012345678901234567890123456789012
+ 
+9006 format (/,
+  "           Shore Bases ", /,
+  "      Task #        Name  ",/,
+  "    ---------       -------- ")
+9008 format (
+  "      ******* None ******** ",/)
+ 
+ 9004 format (4x,a8,7x,a8,3x,a8)
+ 9007 format (4x,a8,7x,a8,2x)
+ 
+top$page
+#$% write header record
+write (35, 9000)
+ 
+#$% set count to zero
+icnt = 0
+#$% for each force entry
+for (force$index=1; force$index <= nforce; force$index=force$index+1)
+   {
+    #$% for each save array slot
+    for (j = 1; j<= icnt; j=j+1)
+       {
+        #$% if force entry is not in save array slot, get next
+        if (wiforce[$halfquad,1,irec[$halfquad,j]] <= force$task) next
+ 
+        #$% shift save array entries to the right
+        call fsrite (rrec,j,j+1,nforce)
+        #$% break loop
+        break
+       }
+ 
+    #$% save force index
+    irec[$halfquad,j] = force$index
+    #$% increment counter
+    icnt = icnt + 1
+   }
+ 
+#$% get neutral forces
+num_views = 0
+icnt = 0
+iprev_task = 0
+ 
+for (j=1; j<= nforce; j=j+1)
+  {
+   force$index = irec[$halfquad,j]
+   call fgtask(force$task, taskn)
+   i_task2 = force$task/1000
+ #  if(i_task2 < 80)
+    if(i_task2 < 90)    # E1592 Alex V. July/96
+      next
+   if(i_task2 != iprev_task)
+      {
+       if(num_views != 0)
+         view_force[num_views] = icnt
+       icnt = 1
+       num_views = num_views + 1
+       view_array[num_views, icnt] = force$index
+       icnt = icnt + 1
+      }
+   else
+     {
+      view_array[num_views, icnt] = force$index
+      icnt = icnt + 1
+     }
+ 
+   iprev_task = i_task2
+  }
+ 
+#$% note the number of forces in the last view
+ if(num_views !=0)
+   view_force[num_views] = icnt
+ 
+#$% for each view
+for (i=1; i<= num_views; i=i+1)
+  {
+   #$%write blue header
+   write(35, 9001) i
+   write(35, 9002)
+   write(35, 9003)
+ 
+   iship = 0
+   ibase_cnt = 1
+   imax = view_force[i]
+   #$% for each force save array entry
+   for (j=1; j< imax; j=j+1)
+    {
+     force$index = view_array[i,j]
+ 
+     #$% get task number
+     call fgtask (force$task,taskn)
+ 
+     if(force$class == 0)
+      {
+       irec1[ibase_cnt] = force$index
+       ibase_cnt = ibase_cnt + 1
+      }
+     else
+      {
+       #$% else write ship data
+       write (35, 9004) taskn, force$name, force$class
+       iship = iship + 1
+      }
+     }
+ 
+  if(iship == 0)
+   write(35,9008)
+ 
+  #$% write shore base data
+  write(35, 9006)
+ 
+  if(ibase_cnt == 1)
+   write(35,9008)
+ 
+  for(k=1; k< ibase_cnt; k=k+1)
+   {
+    force$index = irec1[k]
+    call fgtask(force$task, taskn)
+    write(35, 9007) taskn, force$name
+   }
+ 
+  #$% send a page break
+  top$page
+ 
+ }
+ 
+return
+end
+
+logical function is_it_in_buffer(unit_name, buffer, buff_len)
+###################################################################
+#$%
+#$%  Purpose:   To avoid duplicate names in buffer
+#$%
+#$%  Called by: FPGEOB
+#$%
+#$%  Calls:     None
+#$%
+#$%  Date:      August 1994
+#$%
+#$%
+#$%  Author:    Alex Vagus
+#$%
+#$%
+####################################################################
+IMPLICIT NONE   # jb    E2145   4/11/00
+ForceCommon
+BookCommon
+ 
+literal unit_name
+literal dummy
+integer buff_len, buffptr
+Integer i, LITCMP               # jb E2145  4/18/00
+character buffer[132]
+character temp_name[8]
+ 
+equivalence(dummy,temp_name)
+ 
+ 
+    buffptr = 8
+    while(buffptr < buff_len)
+      { dummy = $BLANKLIT
+        for(i=1;i<=5;i=i+1)
+          temp_name[i]= buffer[buffptr + i]
+        if(litcmp(unit_name,dummy)==0)
+         {
+          is_it_in_buffer = $yes
+          return
+         }
+        buffptr = buffptr + 6
+      }
+ 
+    is_it_in_buffer = $no
+ 
+return
+end
+
+ 

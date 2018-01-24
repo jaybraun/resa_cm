@@ -1,0 +1,607 @@
+# Modification:  Carol Kropp - 4/94
+# Archiving the MegaTek, RamTek and CPM graphics.
+ 
+include "csf.inc"
+ 
+include "bbown.inc"
+include "bbunt.inc"                   # jb Replaces bbDUP   4/4/89
+include "bblin.inc"                   # jb LINEseq./POLYGONs 11/15/89
+include "bbplc.inc"
+include "bbmrk.inc"
+include "bbbmk.inc"
+ 
+include "bbctl.inc"
+include "bbcode.inc"
+include "bbsta.inc"                                     ## 3 Aug TDB
+include "bbsbi.inc"
+include "ascii.inc"
+ 
+include "plplay.inc"
+include "wsmain.inc"
+#include "orders.inc" #(included by PLPLAY.INC)         # For $lex$...$ def's
+ 
+define (BBimplicit, IMPLICIT NONE)
+ 
+
+subroutine pl_setup (sta$pointer)               ## 3 Aug TDB
+#$%
+#$% Modified:  James Allen - 12/97 (E1852)
+#$%            Added for a tech control level workstation.
+#$%
+ 
+bbcommon
+SetupCommon
+Qual$Common
+ 
+integer         ista, sta$pointer, iview, iside, jj, mbx_id
+literal         sta$configid$c, cstrip8
+character       config_file[64],
+                meg_name[32],
+                ichar
+data            plot_on / .FALSE. /
+data            astab_on / .FALSE. /
+ 
+plot_on = .false.
+astab_on = .false.
+ 
+ista = sta$pointer$index                                ## 3 Aug TDB
+ 
+stationindx = ista
+ 
+### figure out config file name ____________________________________
+ 
+STA$ConfigId$C = XSTA$ConfigId$C
+ 
+call make_sta_config_name (STA$ConfigId$C,config_file)
+ 
+#________________________________________________________________________
+# Process the configuration file
+ 
+call config (STA$pointer,config_file)                   ## STA 3 Aug TDB
+ 
+call pl_set_tty (sta$pointer)                   # assign the OP I/O tty
+ 
+#iview = Xsta$view$i
+#call whside(iview,iside)
+#if (xSTA$TechControlFlag$I == $yes)   # joa 12/97 (E1852)
+#    iside = $TechControl$Code
+#call check_password(iside) # if there's a password, verify user
+ 
+ 
+#                   spawn PLOT as sub-process (with argument list)
+#                   set PLOT_ON true, save PLOTs process id
+ 
+ 
+PUTsta$PlotCopy$I ($No)                     # clear any old setting
+ 
+call pl_start_plot (sta$pointer)
+ 
+ 
+#________________________________________________________________________
+# if any ASTABs,    spawn ASTAB as sub-process (with argument list)
+#                   set ASTAB_ON true, save ASTABs Process id
+ 
+if (XSTA$NbrASTABS$i == 0)                              ## XSTA 3 Aug TDB
+    {
+    call remark_v ("No Automatic Status Boards (ASTABs) configured.")
+    }
+else
+    {
+    call pl_start_astab (sta$pointer)
+    }
+ 
+#________________________________________________________________________
+# if a Script,     spawn SCRIPT as sub-process (with argument list)
+#                  set SCRIPT_ON true, save SCRIPTs Process id
+ 
+if (Qual_Script != " ")                              ## XSTA 3 Aug TDB
+    {
+    call pl_start_script (sta$pointer, Qual_Script)
+    }
+ 
+call remark_v (" ")                               # All set
+ 
+return
+end
+
+ 
+subroutine recycle_plot (sta$pointer)
+ 
+integer*4   sta$pointer
+ 
+call pl_stop_plot (sta$pointer)
+ 
+call delay (1200)       # wait for the process to clear out....
+ 
+call pl_start_plot (sta$pointer)
+ 
+return
+end
+
+ 
+subroutine pl_set_tty (sta$pointer)
+bbcommon
+ 
+character       iname[FILENAMESIZE],
+                oname[FILENAMESIZE]
+integer         sta$pointer, kk
+literal         cstrip8, sta$KeyboardAddr$C, sta$MessageAddr$C
+ 
+sta$KeyboardAddr$C = Xsta$KeyboardAddr$C        # Addr. for Keyboard
+ 
+kk = 0
+call smovhn (sta$KeyboardAddr$C,$$MaxLit,iname,kk) # SMM 8/99 E2141
+if (kk == 0) call smovv ("TT",iname,kk)
+call smov (EOS,iname,kk)
+ 
+sta$MessageAddr$C  = Xsta$MessageAddr$C         # Addr. for Messages
+ 
+kk = 0
+call smovhn (sta$MessageAddr$C,$$MaxLit,oname,kk) # SMM 8/99 E2141
+if (kk == 0) call smovv ("TT",oname,kk)
+call smov (EOS,oname,kk)
+ 
+#call tty_set_devices (iname,oname)
+ 
+return
+end
+
+ 
+subroutine pl_start_script (sta$pointer, script_file)
+ 
+return				# needs to be re-written for Linux
+ 
+end
+
+ 
+subroutine pl_stop_script
+bbcommon
+SetupCommon
+ 
+integer         kill_process, rc
+string error_msg  "Could not stop Script.@n"
+ 
+return				# Temporary
+if (script_on)                    # if script is on, kill the process
+    {
+    rc = kill_process (id_script)
+ 
+    if (rc != 0)
+        {
+        call remark (error_msg)
+        call typerr (rc)
+        }
+ 
+    script_on = .false.
+    }
+ 
+return
+end
+
+ 
+subroutine pl_start_plot (sta$pointer)
+ 
+#$%  Modified:  Carol Kropp - 12/96 (E1723)
+#$%             Removed graphics types VT125, TK4100 and TK4200 from
+#$%             the switch statement to create the geo type.
+#$%
+#$%             James Allen - 7/96 (E1602)
+#$%             Added graphics stations of type MDM for new graphics.
+ 
+bbcommon
+SetupCommon
+ 
+integer         ista, sta$pointer
+literal         cstrip8
+integer         rc, kk
+character       work[ARB]
+ 
+    plot_on = .true.
+ 
+ista = sta$pointer$index
+ 
+kk = 0                                                      # dew 8/16/91
+call smovv ("ptmain.run < /dev/null >& /dev/null ",    work, kk)
+call smovi (ista,             work, kk)
+call smovv (" &",             work, kk)
+call smov  (EOS,              work, kk)
+ 
+call do_sys_command (work, rc)
+ 
+if (rc != 0) call typerr (rc)
+else
+    {
+    plot_on = .true.
+    call putlin (work,ERROUT)
+    call remark_v (" Spawned.")
+    }
+ 
+return
+end
+
+ 
+subroutine pl_stop_plot (sta$pointer )
+bbcommon
+SetupCommon
+integer         ista, sta$pointer
+ 
+ista = sta$pointer$index
+ 
+call kill_workstation_processes(ista)
+ 
+PLOT_on = .false.
+ 
+return
+end
+
+ 
+subroutine pl_start_astab (sta$pointer)
+bbcommon
+SetupCommon
+ 
+integer         ista, sta$pointer
+integer         rc, kk
+character       work[ARB]
+ 
+ista = sta$pointer$index
+ 
+kk = 0                                                      # dew 8/16/91
+call smovv ("asmain.run ", work, kk)
+call smovi (ista,          work, kk)
+call smovv (" &",          work, kk)
+call smov  (EOS,           work, kk)
+ 
+call do_sys_command (work, rc)
+ 
+if (rc != 0) call typerr (rc)
+else
+    {
+    ASTAB_on = .true.
+    call putlin (work,ERROUT)
+    call remark_v (" Spawned.")
+    }
+ 
+return
+end
+
+ 
+subroutine pl_stop_astab (sta$pointer)
+bbcommon
+SetupCommon
+ 
+integer         ista, sta$pointer
+ 
+ista = sta$pointer$index
+ 
+call kill_workstation_processes(ista)
+ 
+ 
+ASTAB_on = .false.
+ 
+return
+end
+
+ 
+subroutine pl_shutdown
+bbcommon
+SetupCommon
+ 
+string down_msg  "Station #   has shutdown.@n"
+integer     sta$pointer
+ 
+sta$pointer$to stationindx
+ 
+if (sta$pointer$valid)
+    {
+	PUTsta$PlayerOn$i (NO)
+    PUTsta$HaltStation$i (YES)
+ 
+	putSTA$PlotWakeup$i ($YES)
+	putSTA$AstabWakeup$i ($YES)
+ 
+    call delay (3000)
+ 
+    PUTsta$HaltStation$i (NO)
+    }
+ 
+call pl_stop_plot (sta$pointer)
+#call pl_stop_script
+call pl_stop_astab (sta$pointer)
+ 
+if (stationindx > 9) down_msg[10] = (stationindx/10) + $dig0
+else                 down_msg[10] = $space
+down_msg[11] = mod(stationindx,10) + $dig0
+call remark (down_msg)                    # tell everyone we're done
+ 
+##______________________________________________________________________
+## turn OFF Slooooow Scroll (assuming I/O is to a VT100)    # DEW 8/17/88
+#call echo ($ESC)                                           # DEW 8/17/88
+#call echoh ("[?4l",4)
+ 
+#______________________________________________________________________
+ 
+if (sta$pointer$valid)
+    call inform_control (stationindx,"is down.")   # tell control we are down
+ 
+if (auto$logout == $yes) call logout
+ 
+call exit
+ 
+return
+end
+ 
+
+include "iodef.inc"
+# include "sys_defs:ssdef.inc"
+ 
+subroutine inform_control (n_sta, msg)       # tell control we are up/down
+#$%
+#$% Modified:  James Allen - 12/97 (E1852)
+#$%            Added for a tech control level workstation.
+#$%
+bbcommon
+ 
+integer             sta$pointer, its_view
+integer             n_sta           # this is me
+vaxcharacter*(*)    msg
+character           mbx_name[64]
+integer             ista
+integer*2           iosb[4]
+integer*4           rc, sys$assign
+integer*4           mbx_chan  / 0 /                 # E2153 DEW 10/99
+character           my_msg[ARB]
+integer*4           my_len
+ 
+#------------------------------------------------------------
+# Build the message to send to control station(s)
+ 
+my_len = 0
+call smovv ("!########################",my_msg,my_len)
+call smovv (" Status Change: Station #",my_msg,my_len)
+call smovi (n_sta,                          my_msg,my_len)
+call smovv (" (",                         my_msg,my_len)
+ 
+sta$pointer$to n_sta
+its_view = Xsta$View$i
+ 
+if (its_view == $First$View)
+    {
+    if (xSTA$TechControlFlag$I == $yes)    # joa 12/97 (E1825)
+        call smovv ("Tech Control", my_msg, my_len)
+    else
+        call smovv ("Control", my_msg, my_len)
+    }
+else if (its_view < $FirstOrange$View)
+    {
+    call smovv ("Blue ",my_msg,my_len)
+    call smovi (its_view-$FirstBlue$view+1,my_msg,my_len)
+    }
+else
+    {
+    call smovv ("Orange ",my_msg,my_len)
+    call smovi (its_view-$FirstOrange$view+1,my_msg,my_len)
+    }
+ 
+call smovv (") ",                         my_msg,my_len)
+call smovv (msg,                            my_msg,my_len)
+call smov  (EOS,                            my_msg,my_len)
+ 
+#------------------------------------------------------------
+# If we have not already found him,
+# Look for FIRST Tech Control station           # E2153    dew 10/99
+ 
+#if (mbx_chan == 0)
+#  {
+#  for (sta$pointer$first; sta$pointer$valid; sta$pointer$next)
+#    {
+#    if (Xsta$view$i != $first$view) next        # send to control
+ 
+#    if (Xsta$PlayerOn$i == NO) next             # that is still ON
+ 
+#    if (xSTA$TechControlFlag$I != $yes) next    # Tech Control ONLY (DEW 8/99)
+ 
+#    ista = sta$pointer$index
+#    if (ista == n_sta) next                     # skip self
+ 
+#    call make_sta_mbx_name (ista, mbx_name)
+ 
+    #------------------------------------------------------------
+    # try to open a channel to his mailbox...
+ 
+ 
+#    if ( rc )       # open successfull ?
+#        {
+#        break                                   # E2153     DEW 10/99
+#        }
+#    }
+#  } # endif (mbx_chan == 0)
+ 
+#------------------------------------------------------------
+# If we have a channel, tell him                # E2153    DEW 10/99
+ 
+#if (mbx_chan != 0)
+#    {
+#    call write_Mailbox (mbx_chan, iosb, my_msg, 0)
+ 
+    # leave the channel open for another message later
+#    }
+ 
+return
+end
+
+ 
+Subroutine init_sta (sta$pointer,iview)  # initialize PLOT Center Point
+ 
+########################################################
+#$%
+#$% Purpose:   INIT_STA initializes the STA information (PLOT order)
+#$%
+#$% Called By: rc_station
+#$%
+#$% Calls:     None
+#$%
+#$% Tables:    STA      UNT     OWN
+#$%
+#$% Date:      NOV 80
+#$%
+#$% Author:    Dana Wills
+#$%
+########################################################
+ 
+#RCCommon
+bbcommon
+ 
+BBDeclare  (STA$Pointer,
+            STA$Plotsourcetype$I,
+            STA$Plotsource$I,
+            STA$Plotradius$I,
+            UNT$Pointer,
+            OWN$Pointer,
+            PLC$Pointer,
+            MRK$Pointer,
+            BMK$Pointer,
+            LIN$Pointer)                            # MJC 5/31/2K (E2145)
+integer     IVIEW,
+            ISTA                                    # MJC 5/31/2K (E2145)
+ 
+PUTsta$InpWrite$i  (1)                  # Initialize I/O area indices
+PUTsta$Msgwrite$i  (1)
+ 
+PUTsta$InpRead$i  (Xsta$InpWrite$i)     # empty the I/O areas
+PUTsta$MsgRead$i  (Xsta$MsgWrite$i)
+ 
+if (Xsta$view$i == iview) return        # If the same view, return
+ 
+if (iview < 1) return
+ 
+#________________________________________________________________________
+# Initialize Default PLOT settings
+ 
+ista = sta$pointer
+ 
+PUTsta$BearingSource$I (UNT$SLOTS+1)
+PUTsta$Label$I         ($Yes)
+PUTsta$PlotType$i      ($All$code)
+PUTsta$PlotCategory$i  ($All$Code)
+PUTsta$PlotAll$i       (!NO)
+PUTsta$PlotESM$i       (!NO)
+PUTsta$PlotSonar$i     (!NO)
+PUTsta$PlotSonobuoy$i  (!NO)
+PUTsta$PlotChaff$i     (!NO)
+PUTsta$PlotMap$i       (YES)
+PUTsta$PlotTerrain$i   (YES)
+PUTsta$PlotRivers$i    (NO)
+PUTsta$PlotBoundaries$i(NO)
+PUTsta$PlotGhostSide$i (!NO)
+PUTsta$PlotMissileObject$i (!NO)
+ 
+putSTA$PlotGhostUnits$I (!NO)  # clk 1/94 - so that ghosts will immediately plot
+putSTA$PlotGhostGroundBase$i (NO)		# Only stations supporing CAS need these ground units
+putSTA$PlotGhostGroundCombat$i (NO)
+putSTA$PlotGhostGroundSupport$i (NO)
+putSTA$PlotGhostGroundConvoy$i (NO)
+putSTA$PlotGhostGroundSUnit$i (NO)
+putSTA$PlotGhostUnits1$I (!NO)  # clk 1/94 - so that ghosts will immediately plot
+PUTsta$PlotGhostGroundSize$i (!NO)
+putSTA$PlotSpeed$I      (!no)   # clk 1/94 - so that speed vectors immediately plot
+ 
+# Default if copy all for each control station
+if (iview == $neutral$view) putSTA$Copy$i          ($Yes)
+ 
+#________________________________________________________________________
+# Find someone to be at the center...
+ 
+if (iview == $neutral$view)                     # For CONTROL
+    {
+    #$% for each unit in the game
+    for (UNT$pointer$first; UNT$pointer$Valid; UNT$pointer$next)
+        {
+        if (xUNT$View$i == iview) break # grab the first unit in view
+        }
+ 
+    if (!UNT$pointer$valid)                     # if CONTROL has none
+        {
+        UNT$pointer$first                       # grab the first unit
+        }
+ 
+    if (UNT$pointer$valid)                      # .....if there is one
+        {
+        #$% get and save view data
+        sta$PlotSourceType$i = $true$code
+        PUTsta$PlotSourceType$i
+ 
+        sta$PlotSource$i = UNT$pointer$index
+        PUTsta$PlotSource$i
+ 
+        sta$PlotRadius$i = 200
+        PUTsta$PlotRadius$i
+        }
+    }
+else                                        # for non-control view
+    {
+    putSTA$PlotNeutralSite$i ($no)    # player views should only see their own
+    putSTA$PlotEnemySite$i ($no)      # hide sites (overrides the plotall above)
+                                      # clk 10/97 (E1513)
+    for (own$pointer$first; own$pointer$ok; own$pointer$next)
+        {
+        if (xown$View$i == iview) break     # grab the first unit in view
+        }
+ 
+    if (own$pointer$ok)                     # .....if there is one
+        {
+        #$% get and save view data
+        sta$PlotSourceType$i = $OwnForce$code
+        PUTsta$PlotSourceType$i
+ 
+        sta$PlotSource$i = own$pointer$index
+        PUTsta$PlotSource$i
+ 
+        sta$PlotRadius$i = 200
+        PUTsta$PlotRadius$i
+        }
+    }
+ 
+#________________________________________________________________________
+# Erase any Circles/Xmarks for the Station
+ 
+for (plc$pointer$first; plc$pointer$ok; plc$pointer$next)
+    {
+    if (Xplc$Station$i != ista) next
+ 
+    plc$zero
+    }
+ 
+#________________________________________________________________________
+# Erase any Marked Tracks for the Station
+ 
+for (mrk$pointer$first; mrk$pointer$ok; mrk$pointer$next)
+    {
+    if (Xmrk$Station$i != ista) next
+ 
+    mrk$zero
+    }
+ 
+#________________________________________________________________________
+# Erase any Marked Bearings for the Station
+ 
+for (bmk$pointer$first; bmk$pointer$ok; bmk$pointer$next)
+    {
+    if (Xbmk$Station$i != ista) next
+ 
+    bmk$zero
+    }
+ 
+#________________________________________________________________________
+# Erase any LINEsequences/POLYGONs for the Station  jb            11/15/89
+ 
+for (lin$pointer$first; lin$pointer$ok; lin$pointer$next)
+    {
+    if (Xlin$Station$i != ista) next
+ 
+    lin$zero
+    }
+ 
+return
+end
+ 
+ 

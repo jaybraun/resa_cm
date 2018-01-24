@@ -1,0 +1,2519 @@
+ include "orders.inc"             # $LEX$ definitions...
+ include "bbcode.inc"             #def for blackboard & miscellaneous constants
+ include "bbctl.inc"              #def for basic blackboard parameters
+ include "bbmfd.inc"
+ include "bbnam.inc"              #def for Name Table - Retasking ID - clk 3/97 (E1781)
+ include "bbord.inc"              #def for ORDERs
+ include "bbprt.inc"              #def for plotted routes
+ include "bbrte.inc"              #def for ROUTEs
+ include "bbrto.inc"              #def for ROUTE sub-orders
+ include "bbswp.inc"              #def for Sweep Area
+ include "bbunt.inc"              #UNiT table definitions
+ include "bbvue.inc"
+ include "plplay.inc"             #For orders
+ 
+ # Route table common
+ define (RTEcommon,
+   integer specifiedorder           # Order number specifed in add/change
+   integer addOrder                 # YES if add order
+   integer beforeOrder              # YES if add before order
+   common/commonRTE/ specifiedOrder, addOrder, beforeOrder
+ )
+ 
+ define(BBImplicit, Implicit NONE)                          # MJC 5/4/2000 (E2145)
+
+Subroutine OROUTE(IONUM,
+                  UNT$POINTER,
+                  Nargs,
+                  ILEX,
+                  ID)
+ 
+########################################################
+#$%
+#$% Purpose:   OROUTE processes execute route commands inside and outside
+#$%            routes
+#$%
+#$% Called By: EXEORD
+#$%
+#$% Calls:     FNDORD     RRB2LL     FCOS
+#$%
+#$% Tables:    ORD        UNT
+#$%            ACC
+#$%
+#$% Date:      September 2005
+#$%
+#$% Author:    James O.Allen
+#$%
+########################################################
+ 
+BBcommon
+ 
+integer   NARGS,IBLUE,IORANGE,INEUTRAL,
+          ID,K,IONUM,NAMSLOT,IOKAY,JJ,IPNT,
+          ORD$Pointer, ORD$Phase$I,
+          UNT$Status$I, UNT$Pointer,
+          ACC$Pointer, SHC$Pointer,
+          RTE$Pointer, RTE$View$I,
+          UNT$View$I, UNT$Rteindx$I,
+          UNT$OrderedAltDepth$i,
+          UNT$Type$I
+integer   iseq,icnt,ilen,rseq,i, nord, nrem, nremH
+literal   UNT$Name$C,
+          CSTRIP8
+logical a_route
+logical foundSpeed
+integer idnum, ista
+integer ordUsedB, ordUsedH, ordFull
+integer IsNestedRoute
+real    rtime
+integer game_DTG
+literal ILEX[nargs]
+Literal iinp[$order$array$size]
+character msg1[60]
+BBDeclare (rto$wrd$$c, vue$pointer, rto$wrd$index, rto$pointer)
+BBDeclare (ord$wrd$index,ord$wrd$$c)
+BBDeclare (UNT$RouteInReverseFlag$I)
+ 
+#$% 11/22/89 Added for route sharing.
+iblue = $no
+iorange = $no
+ineutral = $no
+ 
+unt$Status$i = Xunt$Status$i
+call fndord (id,ord$pointer)                    # find the order in ORD
+ 
+if (ord$pointer != 0)                           # Is this a multi-phase order?
+{                                            #   YES
+   PUTord$phase$i (0)              # Yes.....
+}
+ 
+Unt$View$i = XUnt$View$i
+ 
+#$% route sharing among like views.
+if (Unt$View$i >= $FirstBlue$View & Unt$View$i <= $LastBlue$View)
+{
+    iblue = $yes
+}
+ 
+else if (Unt$View$i >= $FirstOrange$View & Unt$View$i <= $LastOrange$View)
+{
+    iorange = $yes
+}
+else if (Unt$View$i == $Neutral$View)
+{
+    ineutral = $yes
+}
+ 
+#Now to see if the route specified exists. The route must also belong to
+#the proper view, to prevent the Blue player from using his opponent's
+#routes, and vice-versa, thus discovering attack plans, etc.
+ 
+NAMslot = 0
+#$% Modifying the following for route sharing among like views.
+for (Rte$Pointer$First; Rte$Pointer$OK; Rte$Pointer$Next)
+{
+    if (xrte$Name$c != ILEX[3]) next
+ 
+    rte$View$i = xrte$View$i
+ 
+    iokay = $no
+    if (iblue == $yes &
+       (rte$View$i >= $FirstBlue$View & rte$View$i <= $LastBlue$View))
+    {
+        iokay = $yes
+    }
+ 
+    else if (iorange == $yes &
+            (rte$View$i >= $FirstOrange$View &
+            rte$View$i <= $LastOrange$View ))
+    {
+        iokay = $yes
+    }
+    # neutral stuff added 2/4/91, reh
+    else if (ineutral == $yes &
+             rte$View$i == $Neutral$View )
+    {
+        iokay = $yes
+    }
+ 
+    if (iokay == $yes)
+    {
+        NAMslot = Rte$Pointer$Index
+        break
+    }
+ 
+}       # End FOR;  search completed for route
+ 
+if (NAMslot == 0)           # If name-match not found
+{
+    UNT$Name$c = xUNT$Name$c
+    jj = 0
+    #$% move data to msg1 format for display
+    call smovhn(Unt$Name$c,$$MaxLit,msg1,jj)
+    call smovv(" doesn't recognize route named ",msg1,jj)
+    call smovhn(ilex[3],$$MaxLit,msg1,jj)
+    #$% send msg to view for display
+    call send_(Unt$View$i,0,jj,msg1)
+ 
+    ord$phase$i = 0         #Allow the order to be deleted from the stack
+    PUTord$phase$i
+ 
+    return
+}
+ 
+nrem = 0
+IsNestedRoute = $no
+if (Xord$count$i > 1)      # Route is inside route or repeat
+{
+    if (Xunt$RouteLoopFlag$i == $YES & Xrte$ImmediateFlag$i == $YES)
+    {
+        UNT$Name$c = xUNT$Name$c
+        jj = 0
+        #$% move data to msg1 format for display
+        call smovhn(Unt$Name$c,$$MaxLit,msg1,jj)
+        call smovv(" has illegal route nesting in route ",msg1,jj)
+        call smovhn(ilex[3],$$MaxLit,msg1,jj)
+        #$% send msg to view for display
+        call send_(Unt$View$i,0,jj,msg1)
+ 
+        ord$phase$i = 0         #Allow the order to be deleted from the stack
+        PUTord$phase$i
+ 
+        return
+    }
+    PUTunt$RouteLoopFlag$i( $YES )
+ 
+    if (Xrte$ContinuousFlag$i == $YES & ionum != REPEAT$order)
+    {
+        UNT$Name$c = xUNT$Name$c
+        jj = 0
+        #$% move data to msg1 format for display
+        call smovhn(Unt$Name$c,$$MaxLit,msg1,jj)
+        call smovv(" may not nest continuous route ",msg1,jj)
+        call smovhn(ilex[3],$$MaxLit,msg1,jj)
+        #$% send msg to view for display
+        call send_(Unt$View$i,0,jj,msg1)
+ 
+        ord$phase$i = 0         #Allow the order to be deleted from the stack
+        PUTord$phase$i
+ 
+        return
+    }
+    # Determine remaining orders after route
+    nrem = Xord$Count$i - Xord$Sequence$i
+    IsNestedRoute = $yes
+}
+ 
+UNT$RouteInReverseFlag$I = $NO
+if (nargs >= 4)                 # Backwards
+{
+    if (Xrte$ContinuousFlag$i == $YES)
+    {
+        jj = 0
+        #$% move data to msg1 format for display
+        call smovv("Repeated route ",msg1,jj)
+        call smovhn(ilex[3],$$MaxLit,msg1,jj)
+        call smovv(" may not be executed backward. ",msg1,jj)
+        #$% send msg to view for display
+        call send_(Unt$View$i,0,jj,msg1)
+ 
+        ord$phase$i = 0         #Allow the order to be deleted from the stack
+        PUTord$phase$i
+ 
+        return
+    }
+    UNT$RouteInReverseFlag$I = $YES
+}
+ordUsedH = ord$used     # Remember used words in ord table in case table fills
+ordFull = $NO
+ 
+if (nargs < 4) #If we're following the route forwards, start
+{              #at the beginning.
+    rto$pointer = Xrte$rtoPntr$i
+    rto$wrd$index = 7               # Number of sub-orders
+    icnt = Xrto$wrd$$c
+ 
+    repeat
+    {
+        rto$wrd$index = 6           # sub-order sequence number
+        iseq = Xrto$wrd$$c
+        ilen = Xrto$NbrArgs$i
+        for (i=1; i<= ilen; i = i + 1)
+        {
+            rto$wrd$index = i
+            iinp[i] = Xrto$wrd$$c
+        }
+        $ord$cnt = $ord$cnt + nrem    # Increase count, if additional orders after plan
+        $ord$addr = -1              # Use unt name
+        ista = 0
+        #$% set ID number to next plan order ID and increment counter
+        idnum = next$planorder$id
+        next$planorder$id = next$planorder$id + 1
+        vue$pointer$to Xunt$view$i
+        ordUsedB = ord$used
+        call addord (unt$view$i,ista,0,unt$pointer,Xvue$circuit$i,
+                     Xvue$embarkindx$i,idnum,ilen-1,iinp)
+        if (ordUsedB == ord$used) ordfull = $yes        # Ord Table is full
+        rto$pointer = rto$pointer + rto$entry
+    } until (iseq >= icnt)
+}
+else                    #If we're not following the route forwards, then
+{                       #we must be going backwards, so start at the end
+    rto$pointer = Xrte$rtoPntr$i
+    rto$wrd$index = 7               # Number of sub-orders
+    icnt = Xrto$wrd$$c
+    for (rseq = icnt; rseq > 0; rseq = rseq - 1)
+    {
+        rto$pointer = Xrte$rtoPntr$i
+        iseq = 1
+        # Skip to requested sequence number (rseq)
+        while (iseq < rseq)
+        {
+            rto$pointer = rto$pointer + rto$entry
+            rto$wrd$index = 6           # sub-order sequence number
+            iseq = Xrto$wrd$$c
+        }
+        ilen = Xrto$NbrArgs$i
+        for (i=1; i<= ilen; i = i + 1)
+        {
+            rto$wrd$index = i
+            iinp[i] = Xrto$wrd$$c
+        }
+        $ord$seq = icnt - iseq + 1    # Reverse sequence number
+        $ord$cnt = $ord$cnt + nrem    # Increase count, if additional orders after plan
+        $ord$addr = -1              # Use unt name
+        ista = 0
+        #$% set ID number to next plan order ID and increment counter
+        idnum = next$planorder$id
+        next$planorder$id = next$planorder$id + 1
+        vue$pointer$to Xunt$view$i
+        ordUsedB = ord$used
+        call addord (unt$view$i,ista,0,unt$pointer,Xvue$circuit$i,
+                     Xvue$embarkindx$i,idnum,ilen-1,iinp)
+        if (ordUsedB == ord$used) ordfull = $yes        # Ord Table is full
+    }
+}
+ 
+# Copy remaining orders in plan after route
+nremH = nrem
+while (nrem > 0)
+{
+    nrem = nrem - 1
+    ord$pointer$next
+ 
+    ilen = Xord$NbrArgs$i
+    for (i=1; i<= ilen; i = i + 1)
+    {
+        ord$wrd$index = i
+        ord$wrd$$c = Xord$wrd$$c
+        iinp[7+i] = ord$wrd$$c
+    }
+    if (Xord$DTGStart$i == $yes)
+    {
+        $ord$start = -xORD$Start$i			# Flag as dtg to addord
+    }
+    else
+    {
+        $ord$start = Xord$Start$i
+    }
+    $ord$len = ord$entry
+    $ord$num = Xord$code$i
+    $ord$addr = Xord$addressee$C
+    $ord$seq = icnt  + nremH - nrem
+    $ord$cnt = icnt + nremH    # Increase count, if additional orders after plan
+    ista = 0
+    #$% set ID number to next plan order ID and increment counter
+    idnum = next$planorder$id
+    next$planorder$id = next$planorder$id + 1
+    vue$pointer$to Xunt$view$i
+    ordUsedB = ord$used
+    call addord (unt$view$i,ista,0,unt$pointer,Xvue$circuit$i,
+                 Xvue$embarkindx$i,idnum,ilen+7-1,iinp)
+    if (ordUsedB == ord$used) ordfull = $yes        # Ord Table is full
+ 
+    # Mark original orders after route as complete
+    PUTord$Phase$i( 0 )
+    PUTord$Status$i ($BeingDeleted$code)
+}
+ 
+if (ordFull == $YES)
+{
+    ord$used = ordUsedH                 # restore end of ord table
+ 
+    UNT$Name$c = xUNT$Name$c
+    jj = 0
+    #$% move data to msg1 format for display
+    call smovhn(Unt$Name$c,$$MaxLit,msg1,jj)
+    call smovv(" did not execute route ",msg1,jj)
+    call smovhn(ilex[3],$$MaxLit,msg1,jj)
+    call smovv(". Order table is full.",msg1,jj)
+    #$% send msg to view for display
+    call send_(Unt$View$i,0,jj,msg1)
+ 
+    return
+ 
+}
+ 
+UNT$Status$I = xUNT$Status$I
+ 
+if (UNT$Status$I != $Sinking$Code &
+    UNT$Status$I != $DeadInWater$Code &
+    UNT$Status$I != $UnderTow$Code  )
+{
+    PutUnt$Status$i ($PROCEEDING$CODE)
+}
+ 
+if (isNestedRoute == $no)      # If Route is not nested, update route name
+{
+	call clear_maneuver_all (ionum, id, xUNT$View$I, UNT$Pointer)
+    Unt$RteIndx$i = Rte$Pointer$index
+    PutUnt$RteIndx$i
+    PUTUNT$RouteInReverseFlag$I
+}
+ 
+return
+end    # End  OROUTE
+ 
+ 
+
+Subroutine bldrte (iview,ista,ilen,iinp,rteindx)
+ 
+######################################################################
+#$%
+#$% Purpose: bldrte processes the define route order
+#$%
+#$% Called By:  BLDORD
+#$%
+#$% Calls:      DMS2rad  SMOVH   SMOVHN  SMOVI   SEND
+#$%
+#$% Tables:    RTE        RTO
+#$%
+#$% Date:      June 2005
+#$%
+#$% Author:    James O. Allen
+#$%
+########################################################
+ 
+BBcommon
+ 
+character msg1[ARB]
+integer dview, onerfl
+real  DMS2rad
+ 
+integer  side_of_route, RTE2$Pointer, RTE$NextRTEIndx$I   # clk 6/97 (E1818)
+integer  fndrte
+ 
+integer  IVIEW,ista,K,ILEN,litcmp,rteindx,
+         NAMSLOT,MTSLOT,J, nord, nargs,
+         ORD$Pointer,
+         RTE$Pointer,
+         RTE$View$I
+literal  RTE2$Name$C,
+         RTE$Name$C,
+         CSTRIP8                                            # MJC 5/4/2000 (E2145)
+Literal iinp[$order$array$size]
+ 
+BBdeclare (rte$rtoPntr$i)
+ 
+Literal ilex[$order$array$size]
+ 
+Rte2$Name$C = iinp[7+3]                # 3rd word is proposed NAME
+rteindx = 0
+ 
+if (iview == $Neutral$View)     #If the order came from the control view, check
+    {                           #to see what view the route is intended for.
+    if (int(iinp[7+4]) == $Lex$NEUTRAL$) #Is the route intended for NEUTRAL?
+        {                               #If so, do this...
+        dview = $Neutral$View           #The desired view is the neutral view
+        }
+    else if (int(iinp[7+4]) == $Lex$BLUE$) #Is the route intended for BLUE?
+        {                               #If so, verify the view number
+        k = int(iinp[7+5])
+        dview = $FirstBlue$View - 1 + k #Compute the desired view number
+ 
+        if (dview > $LastBlue$View)
+            {
+            dview = $LastOrange$View + 1
+            }
+        else if (dview < $FirstBlue$View)
+            {
+            dview = $LastOrange$View + 1
+            }
+        } # end of if (...$Lex$BLUE$)
+    else                                #The route must be intended for ORANGE
+        {                               #So verify the view number
+        k = int(iinp[7+5])
+        dview = $FirstOrange$View - 1 + k       #Compute desired view number
+ 
+        if (dview > $LastOrange$View)
+            {
+            dview = $LastOrange$View + 1
+            }
+        else if (dview < $FirstOrange$View)
+            {
+            dview = $LastOrange$View + 1
+            }
+        } # end of if (...$Lex$ORANGE$)
+    if (dview > $LastOrange$View)       #Was the view specification invalid?
+        {                               #If so, do this...
+        ilen = 0
+        call smovv (" Invalid view specification for ROUTE ",msg1,ilen)
+        call smovhn (Rte2$Name$c,$$MaxName,msg1,ilen) # SMM 8/99 E2141
+        call send_ (iview,0,ilen,msg1)   #Send an error message.
+        return
+        }
+    } # end of if (iview == 0)
+else    #If the order didn't come from CONTROL, then the desired view is the
+    {   #same as the view that issued the order.
+    dview = iview
+    }
+ 
+## Find whether the specified NAME (already?) exists.  IF SO, refuse
+## the command.
+ 
+NAMslot = fndrte (rte2$name$c)
+ 
+# Check for available slot at end of table
+rte$pointer = rte$last + 1
+if (rte$pointer$valid)
+    MTslot = rte$pointer$index
+else
+    MTslot  = 0
+ 
+if (NAMslot > 0)
+    {
+#    if (iview == $neutral$view)     # Control order
+#        {
+#        # Delete route even if in use
+#        #{539,ABQ }  DELETE ROUTE (named) <route-name> (order number)
+#        #                          [ ALL | <number> (thru) [ | <number>] ];
+#        ilex[1] = $lex$DELETE$
+#        ilex[2] = $lex$ROUTE$
+#        ilex[3] = rte2$name$c
+#        ilex[4] = $lex$ALL$
+#        nargs = 4
+#        nord = 0
+#        call delRTE (nord, iview, nargs, ilex)
+#
+#        ilen = 0
+#        call smovv(" Replacing ROUTE ",msg1,ilen)
+#        call smovhn(Rte2$Name$c,$$MaxName,msg1,ilen)
+#        call send_(iview,0,ilen,msg1)
+#        }
+#    else
+        {
+        ilen = 0
+        call smovv(" Existing ROUTE already named ",msg1,ilen)
+        call smovhn(Rte2$Name$c,$$MaxName,msg1,ilen) # SMM 8/99 E2141
+        call send_(iview,0,ilen,msg1)
+        return
+        }
+    }
+else if (MTslot == 0)
+    {
+    ilen = 0
+    call smovv(" RTE table full:  no room for new ROUTE ",msg1,ilen)
+    call smovhn(Rte2$Name$c,$$MaxName,msg1,ilen)
+    call send_(iview,0,ilen,msg1)
+    return
+    }
+ 
+Rte$Pointer$TO (MTslot)
+rteindx = MTslot
+ 
+# Initial DEFINE order:
+#  [1] $lex$DEFINE$     [2]     $lex$ROUTE$
+#  [3]  Name
+#
+# If the order came from the CONTROL (NEUTRAL) view, then a view specification
+# must have been made, saying who is allowed to use the route.
+#
+#  [4] $lex$NEUTRAL$ | $lex$BLUE$ | $lex$ORANGE$
+#
+# If the view was not neutral, then a view number must have been specified.
+#
+#  [5]  View Number
+#
+#
+Rte$View$i = dview
+PutRte$View$i           #Save the view that can use this route
+Rte$Name$c = Rte2$Name$c
+PutRte$Name$c           #Save the name of this route
+ 
+# Assign starting word in RTO table for route orders
+rte$rtoPntr$i = rto$last + 1
+PUTrte$rtoPntr$i
+ 
+IF ( RTE$Pointer > RTE$Last )                  # 1/19/90, reh, set high mark
+    {
+    RTE$Used = RTE$Pointer + RTE$ENTRY - RTE$Base
+    }
+ 
+return
+end
+
+Subroutine addrte (rteindx,iview,ista,ilen,iinp)
+######################################################################
+#$%
+#$% Purpose: addrte processes the define route sub-orders
+#$%
+#$% Called By:  BLDORD
+#$%
+#$% Calls:      DMS2rad  SMOVH   SMOVHN  SMOVI   SEND
+#$%
+#$% Tables:    RTE        RTO
+#$%
+#$% Date:      June 2005
+#$%
+#$% Author:    James O. Allen
+#$%
+########################################################
+ 
+BBcommon
+ 
+Literal iinp[$order$array$size]
+literal rteName, cstrip8
+integer rteindx, rte2indx, iview, ista, klen, ilen, iseq, icnt
+BBdeclare (rte$pointer, rte$rtoPntr$i, rto$pointer, rto$NbrArgs$i, rto$wrd$$c)
+BBdeclare (rte2$pointer)
+integer ineed, iavail, rto$wrd$index, okord
+integer fndrte, cntrte
+character msg[ARB]
+ 
+# Note also that the STOP order is simply intended to let the WORKSTATION
+# program (subroutine HANRTE, PLPLAY.rat) know that you've finished entering
+# the route; it is not transmitted to the wargame's orders processor.
+ 
+ 
+# The 1st order is the DEFINE ROUTE order. The remainder are flight plan order
+# set.
+ 
+rte$pointer$to rteindx
+ 
+okord = $yes
+ 
+ 
+if ($ord$seq == $ord$cnt & $ord$cnt == 2)  #Route is single order
+{
+    if ($ord$num == REPEAT$order)
+    {
+        klen = 0
+        call smovv ("Route ", msg, klen)
+        call smovhn (Xrte$name$c, $$MaxLit, msg, klen)
+        call smovv (" has no orders prior to REPEAT.",msg, klen)
+        call smovv (" Route not defined.", msg, klen)
+        call send_ (iview,0,klen,msg)
+        okord = $no
+    }
+}
+ 
+ineed = ord$Maxentry + 8
+iavail = rto$size - (rto$last - rto$base + 1)
+ 
+#$% if need is greater than availability
+if (ineed > iavail)
+{
+    klen = 0
+    call smovv ("Route ", msg, klen)
+    call smovhn (Xrte$name$c, $$MaxLit, msg, klen)
+    call smovv (" not defined.  No room for all sub-orders.", msg, klen)
+    call send_ (iview,0,klen,msg)
+    rto$used = rto$size + 1        # Flag table overflow
+    return
+}
+ 
+# Check for reference to undefined route or same route
+if ($ord$num == PROCEEDROUTE$order)
+{
+    rteName = iinp(7+3)
+    rte2indx = fndrte(rteName)
+    if (rte2indx == 0 | rteName == Xrte$name$c)
+    {
+        klen = 0
+        call smovv ("Route ", msg, klen)
+        call smovhn (Xrte$name$c, $$MaxLit, msg, klen)
+        call smovv (" attempted to reference route that is not defined.",msg, klen)
+        call smovv (" Execute order deleted.", msg, klen)
+        call send_ (iview,0,klen,msg)
+        okord = $no
+    }
+    else
+    {
+        icnt = $ord$cnt - $ord$seq
+        rte2$pointer$to rte2indx
+        call nested_route_check (rte$pointer, rte2$pointer, icnt, iview, okord)
+    }
+}
+ 
+if (okord == $yes)
+{
+    rto$pointer = rto$Last + 1      #Add to end of table
+    rto$NbrArgs$i = ilen
+    PUTrto$NbrArgs$i
+ 
+    for (rto$wrd$index=1; rto$wrd$index<=ilen; rto$wrd$index=rto$wrd$index+1)
+    {
+        rto$wrd$$c = iinp(rto$wrd$index)
+        PUTrto$wrd$$c
+    }
+ 
+    rto$used = rto$used + rto$entry
+}
+ 
+# Is last order is resume, flag route as continuous
+if ($ord$seq == $ord$cnt)
+{
+    if ($ord$num == REPEAT$order)   PUTrte$ContinuousFlag$i( $YES )
+    else                            PUTrte$ContinuousFlag$i( $NO  )
+ 
+    icnt = cntRte(rte$pointer)
+    if ($ord$num == REPEAT$order & icnt == 1)
+    {
+        rte$used = rte$used - rte$entry
+        rto$used = rto$used - rto$entry
+        PUTrte$Name$c(0)
+        return
+    }
+ 
+    # resequence orders
+    if (icnt == 0)
+    {
+        rte$used = rte$used - rte$entry
+        PUTrte$Name$c(0)
+        return
+    }
+ 
+    iseq = 0
+    for (rto$pointer = Xrte$RTOpntr$i; rto$pointer$ok; rto$pointer$next)
+    {
+        iseq = iseq + 1
+        rto$wrd$index = 6
+        rto$wrd$$c = iseq
+        PUTrto$wrd$$c
+ 
+        rto$wrd$index = 7
+        rto$wrd$$c = icnt
+        PUTrto$wrd$$c
+        if (iseq == icnt) break
+    }
+ 
+    PUTrte$NumOrders$i (icnt)
+ 
+    call set_immediate_flag (rte$pointer)
+}
+ 
+return
+end
+ 
+
+subroutine nested_route_check (rte$pointer, rte2pntr, icnt, iview, okord)
+ 
+######################################################################
+#$%
+#$% Purpose: nested_route_check follows nested routes and totals orders
+#$%
+#$% Called By: addrte
+#$%
+#$% Calls:      SMOVH   SMOVHN  SEND
+#$%
+#$% Tables:    RTE, RTO
+#$%
+#$% Date:      March 2006
+#$%
+#$% Author:    James O. Allen
+#$%
+########################################################
+BBcommon
+BBdeclare (rte$pointer, rte2$pointer, rto$pointer, rto$wrd$index)
+literal rteName, cstrip8
+integer rte2pntr, rte2indx
+integer icnt, iview, okord, fndrte
+integer nest_level, nord
+integer klen
+integer iseq, jcnt, i
+define (MAX_ROUTE_NEST_LEVELS,5)
+integer stack_rte[MAX_ROUTE_NEST_LEVELS]
+integer stack_rto[MAX_ROUTE_NEST_LEVELS]
+integer stack_seq[MAX_ROUTE_NEST_LEVELS]
+integer stack_cnt[MAX_ROUTE_NEST_LEVELS]
+character msg[ARB]
+ 
+# initialize stack
+nest_level = 1
+rte2$pointer = rte2pntr
+stack_rte[nest_level] = rte2$pointer
+stack_rto[nest_level] = Xrte2$RTOpntr$i
+stack_seq[nest_level] = 0
+stack_cnt[nest_level] = Xrte2$NumOrders$i
+ 
+# Follow references to routes
+while (nest_level > 0)
+{
+    rte2$pointer = stack_rte[nest_level]
+    # Loop through orders in referenced route looking for execute route order
+    for (rto$pointer = stack_rto[nest_level]; rto$pointer$ok; rto$pointer$next)
+    {
+        stack_seq[nest_level] = stack_seq[nest_level] + 1
+        if (stack_seq[nest_level] > stack_cnt[nest_level]) break
+        rto$wrd$index = 3
+        nord = Xrto$wrd$$c
+        if (nord == PROCEEDROUTE$order)
+        {
+            rto$wrd$index = 7+3
+            rteName = Xrto$wrd$$c
+            rte2indx = fndrte(rteName)
+            if (rte2indx == 0 | rteName == Xrte$name$c)
+            {
+                klen = 0
+                call smovv ("Route ", msg, klen)
+                call smovhn (Xrte$name$c, $$MaxLit, msg, klen)
+                call smovv (" attempted to reference route that is not defined.",msg, klen)
+                call smovv (" Execute order deleted.", msg, klen)
+                call send_ (iview,0,klen,msg)
+                okord = $no
+                break 2
+            }
+ 
+            # Found route order. Save next order in stack to continue
+            rto$pointer$next
+            stack_rto[nest_level] = rto$pointer
+ 
+            # push stack
+            nest_level = nest_level + 1
+            if (nest_level > MAX_ROUTE_NEST_LEVELS)
+            {
+                klen = 0
+                call smovv ("Route ", msg, klen)
+                call smovhn (Xrte$name$c, $$MaxLit, msg, klen)
+                call smovv (" attempted to reference route exceeds max nest level.",msg, klen)
+                call smovv (" Execute order deleted.", msg, klen)
+                call send_ (iview,0,klen,msg)
+                okord = $no
+                break 2
+            }
+            rte2$pointer$to rte2indx
+            stack_rte[nest_level] = rte2$pointer
+            stack_rto[nest_level] = Xrte2$RTOpntr$i
+            stack_seq[nest_level] = 0
+            stack_cnt[nest_level] = Xrte2$NumOrders$i
+ 
+            # Expansion of referenced route and remaining orders may not exceed count limit
+            jcnt = icnt
+            for (i=1; i <= nest_level; i=i+1)
+                jcnt = jcnt + stack_cnt[i] - stack_seq[i]
+ 
+            if (jcnt > Ord$count$size)
+            {
+                klen = 0
+                call smovv ("Route ", msg, klen)
+                call smovhn (Xrte$name$c, $$MaxLit, msg, klen)
+                call smovv (" attempted to reference route ",msg, klen)
+                call smovhn (Xrte2$name$c, $$MaxLit, msg, klen)
+                call smovv (" totaling too many orders.",msg, klen)
+                call smovv (" Execute order deleted.", msg, klen)
+                call send_ (iview,0,klen,msg)
+                okord = $no
+                break 2
+            }
+            break
+        }    # end proceedroute order
+    }   # end rto loop
+    # pop stack
+    nest_level = nest_level - 1
+ 
+}   # end nest level loop
+ 
+return
+end
+
+Subroutine delRTE (nord, iview, nargs, args)
+ 
+######################################################################
+#$%
+#$% Purpose: delRTE deletes route or orders within route
+#$%          nord = 0 means do not send route not found error message
+#$%
+#$% Called By: EXEORD
+#$%
+#$% Calls:      DMS2rad   SMOVH   SMOVHN  SEND    WGOERR
+#$%
+#$% Tables:    RTE
+#$%
+#$% Date:      June 2005
+#$%
+#$% Author:    James O. Allen
+#$%
+########################################################
+BBcommon
+integer useRteList[unt$slots]
+ 
+common /scratch$pad/ useRteList
+ 
+BBdeclare (rte$pointer, rte$NumOrders$i, rto$pointer, rto$wrd$$c)
+BBdeclare (swp$pointer)
+integer   NARGS,IVIEW,NORD
+integer   fndrte, refrte, rteindex, klen, rteOK, iside, rteSide
+integer   useRteListCount
+integer   lowOrdNumber, hiOrdNumber, deleteRoute
+integer   iseq, icnt, rto$wrd$index
+Literal   ARGS[nargs], CSTRIP8
+literal   rteNAME
+character msg[ARB]
+ 
+#{539,ABQ }  DELETE ROUTE (named) <route-name> (order number)
+#                          [ ALL | <number> (thru) [ | <number>] ];
+ 
+# Find Route
+rteName = args[3]
+rteindex = fndrte (rteName)
+rte$pointer$to rteindex
+rteOK = $no
+if (rte$pointer$ok)
+{
+    call whside(iview, iside)
+    call whside(Xrte$view$i, rteSide)
+    if (iside == rteSide | iside == $Neutral$code)
+        rteOk = $yes
+}
+ 
+# Issue error message
+if (rteOK == $no)
+{
+    if (nord != 0) # skip sending error message, if nord = 0
+    {
+        klen = 0
+        call smovv ("Route ", msg, klen)
+        call smovhn (rteName, $$MaxLit, msg, klen)
+        call smovv (" not found to delete.", msg, klen)
+        call send_ (iview,0,klen,msg)
+    }
+    return
+}
+ 
+# Get number of orders in route
+rte$NumOrders$i = Xrte$NumOrders$i
+ 
+# Issue error message, if invalid order number range
+if (args[4] != $lex$ALL$)
+{
+    lowOrdNumber = args[4]
+    if (nargs >= 5)
+        hiOrdNumber = args[5]
+    else
+        hiOrdNumber = lowOrdNumber
+ 
+    if (lowOrdNumber > hiOrdNumber |
+        lowOrdNumber > rte$NumOrders$i |
+        hiOrdNumber  > rte$NumOrders$i)
+    {
+        klen = 0
+        call smovv ("Route ", msg, klen)
+        call smovhn (rteName, $$MaxLit, msg, klen)
+        call smovv (" orders not deleted.  Bad order range.", msg, klen)
+        call send_ (iview,0,klen,msg)
+        return
+    }
+}
+ 
+else
+{
+    lowOrdNumber = 1
+    hiOrdNumber  = rte$NumOrders$i
+}
+ 
+# Deleting all orders in a route is equivalent to deleting route
+if (rte$NumOrders$i == (hiOrdNumber - lowOrdNumber + 1))
+    deleteRoute = $YES
+else
+    deleteRoute = $NO
+ 
+# Do not all only order remaining to be REPEAT order
+if (deleteRoute == $NO & Xrte$ContinuousFlag$i == $YES)
+{
+    if ((hiOrdNumber - lowOrdNumber + 2) == rte$NumOrders$i)
+    {
+        klen = 0
+        call smovv ("Route ", msg, klen)
+        call smovhn (rteName, $$MaxLit, msg, klen)
+        call smovv (" orders not deleted.  Only REPEAT order would remain.",
+                     msg, klen)
+        call send_ (iview,0,klen,msg)
+        return
+    }
+}
+ 
+if (iview != $Neutral$view)     # Control can delete routes in use for inflight
+{
+    # Get list of all units currently following route
+    call userte (rteindex, useRteList, useRteListCount)
+ 
+    # Issue error message, if delete entire route and still referenced
+    if (deleteRoute == $YES)
+    {
+        if (useRteListCount != 0)
+        {
+            klen = 0
+            call smovv ("Route ", msg, klen)
+            call smovhn (rteName, $$MaxLit, msg, klen)
+            call smovv (" not deleted.  Still in use.", msg, klen)
+            call send_ (iview,0,klen,msg)
+            return
+        }
+        if (refrte(rteindex) == $yes)
+        {
+            klen = 0
+            call smovv ("Route ", msg, klen)
+            call smovhn (rteName, $$MaxLit, msg, klen)
+            call smovv (" not deleted.  Still referenced in one or more routes.", msg, klen)
+            call send_ (iview,0,klen,msg)
+            return
+        }
+    }
+}
+ 
+# Move up subsequent orders and update starting pointer to routes
+call pckrto (rte$pointer, lowOrdNumber, hiOrdNumber)
+ 
+# If entire route is being deleted, Move up subsequent routes
+if (deleteRoute == $YES)
+{
+    if (Xrte$QrouteFlag$i == $yes)  # Delete sweep areas associated with route
+    for (swp$pointer$first; swp$pointer$ok; swp$pointer$next)
+    {
+        if (Xswp$RTEIndx$i != rteindex) next
+        call delete_sweeparea (swp$pointer)
+    }
+ 
+    rte$zero
+    call pltrtezero (rte$pointer)
+    call rterefadj (rte$pointer)
+    call pckrte (rte$pointer)
+ 
+}
+else
+{
+    # Adjust sequence and count for remaining orders
+    icnt = rte$NumOrders$i - (hiOrdNumber - lowOrdNumber + 1)
+    iseq = 0
+    for (rto$pointer = Xrte$RTOpntr$i; rto$pointer$ok; rto$pointer$next)
+    {
+        iseq = iseq + 1
+        rto$wrd$index = 6
+        rto$wrd$$c = iseq
+        PUTrto$wrd$$c
+ 
+        rto$wrd$index = 7
+        rto$wrd$$c = icnt
+        PUTrto$wrd$$c
+        if (iseq == icnt) break
+    }
+ 
+    PUTrte$NumOrders$i (icnt)
+ 
+    call set_immediate_flag (rte$pointer)
+ 
+    # Get current order in route being executed
+ 
+    # If can not resume, send error message
+ 
+    # resume route from current effective order, so altered route will be used.
+}
+ 
+return
+end
+
+Subroutine ochrte (iview,ista,ilen,iinp,rteindx,rto$pointer)
+ 
+######################################################################
+#$%
+#$% Purpose: ochRTE adds or changes orders to an existing route
+#$%
+#$% Called By: bldord
+#$%
+#$% Calls:      DMS2rad   SMOVH   SMOVHN  SEND    WGOERR
+#$%
+#$% Tables:    RTE
+#$%
+#$% Date:      June 2005
+#$%
+#$% Author:    James O. Allen
+#$%
+########################################################
+BBcommon
+RTEcommon
+ 
+integer   IVIEW,ista,K,ILEN,litcmp,rteindx
+integer   fndrte, klen, rteOK, iside, rteSide
+literal   rteNAME
+Literal   iinp[$order$array$size]
+character msg[ARB]
+BBDeclare (rte$pointer, rto$pointer, rte2$Name$c, rte$NumOrders$i)
+ 
+#{539,ABQ } ADD (to) ROUTE (named) <route-name>
+#                           [ BEFORE | AFTER ] (order number) <number>;
+#{539,ABQ } CHANGE ROUTE (named) <route-name> (order number) <number>;
+ 
+Rte2$Name$C = iinp[7+3]                # 3rd word is proposed NAME
+rteindx = 0
+ 
+# Find Route
+rteindx = fndrte (rte2$Name$c)
+rte$pointer$to rteindx
+rteOK = $no
+if (rte$pointer$ok)
+{
+    call whside(iview, iside)
+    call whside(Xrte$view$i, rteSide)
+    if (iside == rteSide | iside == $Neutral$code)
+        rteOk = $yes
+}
+ 
+# Issue error message, if route not found.
+if (rteOK == $no)
+{
+    klen = 0
+    call smovv ("Route ", msg, klen)
+    call smovhn (rteName, $$MaxLit, msg, klen)
+    call smovv (" not found to modify.", msg, klen)
+    call send_ (iview,0,klen,msg)
+    return
+}
+ 
+# Is order number in range?
+rte$NumOrders$i = Xrte$NumOrders$i
+ 
+if (iinp[7+1] == $lex$CHANGE$)
+{
+    specifiedOrder = iinp[7+4]
+    addOrder = $NO
+}
+else
+{
+    specifiedOrder = iinp[7+5]
+    addOrder = $YES
+    if (iinp[7+4] == $lex$BEFORE$)
+        beforeOrder = $YES
+    else
+    {
+        beforeOrder = $NO
+        if (specifiedOrder == rte$NumOrders$i)  # Can't add after terminating order
+        {
+            klen = 0
+            call smovv ("Route ", msg, klen)
+            call smovhn (rteName, $$MaxLit, msg, klen)
+            call smovv (" not modified. Attempting to add after last order", msg, klen)
+            call send_ (iview,0,klen,msg)
+            rteindx = 0
+            return
+        }
+    }
+}
+ 
+if (specifiedOrder < 1 | specifiedOrder > rte$NumOrders$i)
+{
+    klen = 0
+    call smovv ("Route ", msg, klen)
+    call smovhn (rteName, $$MaxLit, msg, klen)
+    call smovv (" not modified. Specified order out of range.", msg, klen)
+    call send_ (iview,0,klen,msg)
+    rteindx = 0
+    return
+}
+ 
+# Save location of initial order at end of rto table.
+# Orders will be moved after all sub-orders have been stored.
+rto$pointer = rto$Last + 1 + ord$Maxentry * $play$stack$max
+ 
+return
+end
+ 
+
+Subroutine modifyrte (rteindx,rto2$pointer,iview,ista,ilen,iinp)
+######################################################################
+#$%
+#$% Purpose: modify processes the modify route sub-orders
+#$%
+#$% Called By:  BLDORD
+#$%
+#$% Calls:      DMS2rad  SMOVH   SMOVHN  SMOVI   SEND
+#$%
+#$% Tables:    RTE        RTO
+#$%
+#$% Date:      June 2005
+#$%
+#$% Author:    James O. Allen
+#$%
+########################################################
+ 
+BBcommon
+RTEcommon
+ 
+Literal iinp[$order$array$size], rteName
+integer rteindx, rte2indx, iview, ista, klen, ilen, iseq, icnt
+integer nseq, ncnt, subOrdLen, nmove, ihi, i1, i2, k
+integer chgOrdLen, nChgOrders
+integer fndrte
+BBdeclare (rte$pointer, rte$rtoPntr$i, rto$pointer, rto$NbrArgs$i, rto$wrd$$c)
+BBDeclare (rto2$pointer)
+BBdeclare (rte2$name$c, rte$numOrders$i)
+integer ineed, iavail, rto$wrd$index, nsubOrders
+integer illegal_order
+character msg[ARB]
+literal cstrip8
+ 
+# Note also that the STOP order is simply intended to let the WORKSTATION
+# program (subroutine HANRTE, PLPLAY.rat) know that you've finished entering
+# the route; it is not transmitted to the wargame's orders processor.
+ 
+rte$pointer$to rteindx
+ 
+# The 1st order is the Modify ROUTE order. The remainder are flight plan order
+# set.
+ 
+# Get sequence and count
+iseq = iinp[6] - 1
+icnt = iinp[7] - 1
+ 
+# Initialize temporary store point for new orders
+if (iseq == 1)
+{
+    rto$pointer = rto2$pointer
+    illegal_order = $no
+}
+ 
+ineed = ord$Maxentry + 8
+iavail = rto$size - (rto$pointer - rto$base + 1)
+ 
+#$% if need is greater than availability
+if (ineed > iavail)
+{
+    klen = 0
+    call smovv ("Route ", msg, klen)
+    call smovhn (Xrte$name$c, $$MaxLit, msg, klen)
+    call smovv (" not defined.  No room for all sub-orders.", msg, klen)
+    call send_ (iview,0,klen,msg)
+    rto$used = rto$size + 1        # Flag table overflow
+    return
+}
+ 
+rto$NbrArgs$i = ilen
+PUTrto$NbrArgs$i
+ 
+for (rto$wrd$index=1; rto$wrd$index<=ilen; rto$wrd$index=rto$wrd$index+1)
+{
+    rto$wrd$$c = iinp(rto$wrd$index)
+    PUTrto$wrd$$c
+}
+ 
+# Subtract 1 from sequence and count
+rto$wrd$index = 6
+iseq = Xrto$wrd$$c
+iseq = iseq - 1
+rto$wrd$$c = iseq
+PUTrto$wrd$$c
+rto$wrd$index = 7
+icnt = Xrto$wrd$$c
+icnt = icnt - 1
+rto$wrd$$c = icnt
+PUTrto$wrd$$c
+ 
+rto$pointer = rto$pointer + rto$entry
+ 
+# Get length of sub-orders
+subordLen = (rto$pointer - rto2$pointer)
+ 
+if (iseq <= icnt)       # Check for illegal ADD orders
+{
+    if (addOrder == $YES)        # Add order
+    {
+        if (iinp[7+1] == $lex$MOOR$ |
+            iinp[7+1] == $lex$BINGO$ |
+            iinp[7+1] == $lex$REPEAT$)
+        {
+            illegal_order = $yes
+            klen = 0
+            call smovv ("Route ", msg, klen)
+            call smovhn (Xrte$name$c, $$MaxLit, msg, klen)
+            call smovv (" not changed. Attempting to insert terminating order.", msg, klen)
+            call send_ (iview,0,klen,msg)
+            return
+        }
+    }
+}
+ 
+if (iseq == icnt & illegal_order == $no)  # End of sub-orders for add/change
+{
+    nsubOrders = icnt
+    nchgOrders = 0
+    chgOrdLen = 0
+    if (addOrder == $NO)        # Change order
+    {
+        # Check for proper terminating order
+        if ((specifiedOrder + nsubOrders - 1) < Xrte$NumOrders$i)
+        {
+            if (iinp[7+1] == $lex$MOOR$ |
+                iinp[7+1] == $lex$BINGO$ |
+                iinp[7+1] == $lex$REPEAT$)
+            {
+                klen = 0
+                call smovv ("Route ", msg, klen)
+                call smovhn (Xrte$name$c, $$MaxLit, msg, klen)
+                call smovv (" not changed.  Illegal terminating order.", msg, klen)
+                call send_ (iview,0,klen,msg)
+                return
+            }
+        }
+ 
+        #Set move start point
+        nseq = 1
+        ncnt = min(Xrte$NumOrders$i, specifiedOrder + nsubOrders - 1)
+        nchgOrders = ncnt - specifiedOrder + 1
+        for (rto$pointer = Xrte$RTOPntr$i; nseq <= ncnt; rto$pointer$next)
+        {
+            if (nseq >= specifiedOrder) chgOrdLen = chgOrdLen + rto$entry
+            nseq = nseq + 1
+        }
+    }
+    else
+    {
+        #Set move start point
+        if (beforeOrder == $YES)
+            nseq = 1
+        else
+            nseq = 0
+        for (rto$pointer = Xrte$RTOPntr$i; nseq < specifiedOrder;
+             rto$pointer$next)
+        {
+            nseq = nseq + 1
+        }
+    }
+ 
+ 
+    nmove = rto$last - rto$pointer + 1  #Number of words to move
+ 
+    if (subordlen > chgordlen)
+    {
+        # Move down existing orders
+        i1 = rto$last
+        i2 = rto$last + subordlen - chgordlen
+        for (k = nmove; k >= 1; k = k - 1)
+        {
+            ibb[i2] = ibb[i1]
+            i1 = i1 - 1
+            i2 = i2 - 1
+        }
+    }
+    else if (subordlen < chgordlen)
+    {
+        # Move up existing orders
+        i1 = rto$pointer
+        i2 = rto$pointer + subordlen - chgordlen
+        for (k = nmove; k >= 1; k = k - 1)
+        {
+            ibb[i2] = ibb[i1]
+            i1 = i1 + 1
+            i2 = i2 + 1
+        }
+    }
+    #$% Insert added orders
+    for (k = 0; k < subOrdLen; k = k + 1)
+    {
+        #$% increment entry
+        i1 = rto$pointer - chgOrdLen + k
+        i2 = rto2$pointer + k
+ 
+        ibb[i1] = ibb[i2]
+    }
+ 
+    # Resequence orders in modified set
+    iseq = 1
+    icnt = Xrte$NumOrders$i + nsubOrders - nchgOrders
+    for (rto$pointer = Xrte$RTOPntr$i; iseq <= icnt; rto$pointer$next)
+    {
+        rto$wrd$index = 6
+        rto$wrd$$c = iseq
+        PUTrto$wrd$$c
+ 
+        rto$wrd$index = 7
+        rto$wrd$$c = icnt
+        PUTrto$wrd$$c
+ 
+        iseq = iseq + 1
+    }
+ 
+    # Update number of orders in modified set
+    PUTrte$Numorders$i (icnt)
+ 
+    # update starting order pointer in subsequent routes
+    for (rte$pointer$to (rteindx+1); rte$pointer$ok; rte$pointer$next)
+    {
+        rte$RTOpntr$i = Xrte$RTOpntr$i
+        rte$RTOpntr$i = rte$RTOpntr$i + subordlen - chgOrdLen
+        PUTrte$RTOpntr$i
+    }
+ 
+    # Update end of RTO table
+    rto$used = rto$used + subordlen - chgOrdLen
+ 
+    call set_immediate_flag (rte$pointer)
+ 
+    # Get list of all unit currently following route
+ 
+    # resume route from current effective order, so altered route will be used.
+        #defer
+}
+ 
+return
+end
+ 
+ 
+
+ 
+Subroutine userte (rteindex, useRteList, useRteListCount)
+BBcommon
+ 
+BBdeclare (unt$pointer)
+integer rteindex, useRteList[unt$slots], useRteListCount
+ 
+useRteListCount = 0
+for (unt$pointer$first; unt$pointer$ok; unt$pointer$next)
+{
+    if (Xunt$rteindx$i == rteindex)
+    {
+        useRteListCount = useRteListCount + 1
+        useRteList[useRteListCount] = unt$pointer
+    }
+}
+ 
+return
+end
+ 
+
+ 
+Integer Function refrte (rteindex)   # Is route referenced in another route?
+BBcommon
+ 
+BBdeclare (rte$pointer,rto$pointer, rto$wrd$index, rte$name$c)
+integer rteindex, isref, iseq, icnt, litcmp
+literal cstrip8
+ 
+rte$pointer$to rteindex
+rte$name$c = Xrte$name$c
+ 
+isref = 0
+for (rte$pointer$first; rte$pointer$ok; rte$pointer$next)
+{
+    if (rte$pointer$index == rteindex)  next    # skip self
+ 
+    iseq = 1
+    icnt = Xrte$NumOrders$i
+    for (rto$pointer = Xrte$RTOpntr$i; iseq <= icnt; rto$pointer$next)
+    {
+        iseq = iseq + 1
+ 
+        rto$wrd$index = 3
+        if (Xrto$wrd$$C != ProceedRoute$order) next
+ 
+        rto$wrd$index = 10
+        if (litcmp(Rte$Name$c, Xrto$wrd$$C) == 0)
+        {
+            isref = $yes
+            break 2
+        }
+    }
+}
+ 
+ 
+return (isref)
+end
+ 
+
+ 
+subroutine pckrto (rte2$pointer, lowOrderNumber, hiOrderNumber)
+BBcommon
+ 
+BBdeclare (rte$pointer, rte2$pointer, rto$pointer, rto2$pointer)
+BBdeclare (rte$RTOpntr$i)
+integer lowOrderNumber, hiOrderNumber
+integer i, k, ihi, ilen, i1, i2, irng
+ 
+rto$pointer = Xrte2$RTOpntr$i
+rto2$pointer = rto$pointer
+ 
+#Set rto$pointer to first order to delete
+#Set rto2$pointer to last order to delete
+for (i=1; i<=hiOrderNumber; i= i+1)
+{
+    if (i < lowOrderNumber)
+    {
+        rto$pointer$next
+        rto2$pointer$next
+    }
+    else
+    {
+        rto2$pointer$next
+    }
+}
+ 
+ 
+#$% set order length
+ilen = rto2$pointer - rto$pointer
+ihi  = rto$pointer + ilen
+ 
+#$% set order range
+irng = rto$last - ihi + 1
+ 
+#$% for each rto word
+for (k = 0; k < irng; k = k + 1)
+{
+    #$% increment entry
+    i1 = rto$pointer + k
+    i2 = ihi + k
+ 
+    ibb[i1] = ibb[i2]
+}
+ 
+#$% set last order to last minus length
+rto$used = rto$used - ilen
+ 
+#Adjust starting point of orders in routes
+rte$pointer = rte2$pointer
+for (rte$pointer$next; rte$pointer$ok; rte$pointer$next)
+{
+    rte$RTOpntr$i = Xrte$RTOpntr$i
+    rte$RTOpntr$i = rte$RTOpntr$i - ilen
+    PUTrte$RTOpntr$i
+}
+ 
+return
+end
+ 
+
+ 
+subroutine pckrte (rteptr)
+BBcommon
+ 
+BBdeclare (rte$pointer, rte2$pointer)
+integer rteptr
+ 
+rte$pointer = rteptr
+rte2$pointer = rte$pointer
+for (rte2$pointer$next; rte2$pointer$ok; rte2$pointer$next)
+{
+    RTE$Duplicate$RTE2
+    rte$pointer$next
+}
+ 
+rte$used = rte$used - rte$entry
+ 
+return
+end
+ 
+
+ 
+Subroutine ORESUME(IONUM, UNT$POINTER, Nargs, ILEX, ID)
+########################################################
+#$%
+#$% Purpose:   ORESUME processes resume route command.
+#$%
+#$% Called By: EXEORD
+#$%
+#$% Calls:     SMOVHN   SMOVH   SEND
+#$%
+#$% Tables:    UNT      RTE     ACC
+#$%
+#$% Date:      NOVEMBER 1992
+#$%
+#$% Author:    Kirk Chang
+#$%
+#$% Modified:  James Allen - 12/97 (E1370)
+#$%            Added clear_maneuver_all call.
+#$%
+########################################################
+BBcommon
+BBDeclare (rto$wrd$$c, vue$pointer, rto$wrd$index, rto$pointer)
+integer   NARGS,ID,IBLUE,IORANGE,
+          INEUTRAL,JJ,IOKAY,IONUM,
+          rseq, i, icnt, iseq, ilen, ista, idnum,
+          ORD$Pointer, ORD$Phase$I,
+          UNT$Pointer, UNT$Status$I,
+          UNT$View$I,
+          UNT$RouteInReverseFlag$I,
+          RTE$Pointer, RTE$View$I               # MJC 5/2/2000 (E2145)
+integer   ordUsedH, ordUsedB, ordFull
+literal   UNT$Name$C,
+          CSTRIP8                               # MJC 5/4/2000 (E2145)
+literal   ilex[nargs]
+Literal iinp[$order$array$size]
+character msg1[60]
+ 
+# FOR <addressee> RESUME (route name) <route-name>
+#                      (at order) <number> [ | SPEED <knots> ]
+#                      [ | BACK ] TIME <start-minute>;
+ 
+    # Get the order, since the ORD$Phase is potentially set below
+    call FNDORD (id, ORD$Pointer)                      # clk 1/96
+ 
+    UNT$Name$C   = xUNT$Name$C
+    UNT$Status$I = xUNT$Status$I
+    UNT$View$I   = xUNT$View$I
+ 
+    iblue = $no         # initialize flags
+    iorange = $no
+    ineutral = $no
+ 
+    #$% route sharing among like views.
+    if (Unt$View$i >= $FirstBlue$View & Unt$View$i <= $LastBlue$View)
+        iblue = $yes
+    else if (Unt$View$i >= $FirstOrange$View & Unt$View$i <= $LastOrange$View)
+        iorange = $yes
+    else if (Unt$View$i == $Neutral$View)
+        ineutral = $yes
+ 
+    # Check to see if the route exists and belongs to the players side.
+    for (Rte$Pointer$First; Rte$Pointer$Valid; Rte$Pointer$Next)
+    {
+       if (xrte$Name$c != ILEX[2])   # check for name match
+         next
+ 
+       rte$View$i = xrte$View$i      # check to see if same side match
+       iokay = $no
+       if ((iblue == $yes &
+            (rte$View$i >= $FirstBlue$View & rte$View$i <= $LastBlue$View))      |
+           (iorange == $yes &
+            (rte$View$i >= $FirstOrange$View & rte$View$i <= $LastOrange$View))  |
+           (ineutral == $yes & rte$View$i == $Neutral$View))
+         break     # route side matched station side, so route has been found
+    }       # End FOR;  search completed for NAMslot
+ 
+    if (!Rte$Pointer$Valid)           # If route was NOT located
+    {
+       jj = 0
+       call smovhn (Unt$Name$c, $$MaxLit, msg1, jj)
+       call smovv  (" doesn't recognize route named ", msg1, jj)
+       call smovhn (ilex[2], $$MaxLit, msg1, jj)
+       call send_   (Unt$View$i, 0, jj, msg1)
+ 
+       ord$phase$i = 0         #Allow the order to be deleted from the stack
+       PUTord$phase$i
+       return
+    }
+ 
+    rseq = ilex[3]              # Requested resume point number
+    if (rseq == 0 | rseq > xRte$NumOrders$I)      # If starting point out of bound
+    {
+       jj = 0
+       call smovhn (Unt$Name$c, $$MaxLit, msg1, jj)
+       call smovv  (":  Route resume point not in route. ", msg1, jj)
+       call send_   (Unt$View$i, 0, jj, msg1)
+ 
+       ord$phase$i = 0
+       PUTord$phase$i
+       return
+    }
+ 
+    # At this point, the Rte$Pointer is pointing to the right entry (because
+    # of the BREAK in the above loop)
+ 
+    # Determine if the key word BACK was entered...
+    UNT$RouteInReverseFlag$I = $no
+    if (nargs >= 4)
+    {
+        if (ilex[4] == $Lex$BACK$)
+           UNT$RouteInReverseFlag$I = $yes
+        else if (nargs >= 6)
+        {
+            if (ilex[6] == $Lex$BACK$)
+               UNT$RouteInReverseFlag$I = $yes
+        }
+    }
+ 
+if (unt$RouteInReverseFlag$i == $yes)
+{
+    if (Xrte$ContinuousFlag$i == $YES)
+    {
+        jj = 0
+        #$% move data to msg1 format for display
+        call smovv("Repeated route ",msg1,jj)
+        call smovhn(ilex[2],$$MaxLit,msg1,jj)
+        call smovv(" may not be resumed backward. ",msg1,jj)
+        #$% send msg to view for display
+        call send_(Unt$View$i,0,jj,msg1)
+ 
+        ord$phase$i = 0         #Allow the order to be deleted from the stack
+        PUTord$phase$i
+ 
+        return
+    }
+}
+ 
+    ordUsedH = ord$used
+    ordFull = $NO
+ 
+    #Copy orders to order table starting in forward or backward direction
+    if (UNT$RouteInReverseFlag$i == $no) #If we're following the route forwards, start
+        {                       #at the rseq.
+        rto$pointer = Xrte$rtoPntr$i
+        rto$wrd$index = 7           # Number of sub-orders
+        icnt = Xrto$wrd$$c
+        iseq = 1
+        while (iseq < rseq)
+        {
+            rto$pointer = rto$pointer + rto$entry
+            rto$wrd$index = 6           # sub-order sequence number
+            iseq = Xrto$wrd$$c
+        }
+ 
+        repeat
+        {
+            ilen = Xrto$NbrArgs$i
+            # Copy to working array
+            for (i=1; i<= ilen; i = i + 1)
+            {
+                rto$wrd$index = i
+                iinp[i] = Xrto$wrd$$c
+            }
+ 
+            ista = 0
+            iseq = $ord$seq
+            $ord$addr = -1
+            #$% set ID number to next plan order ID and increment counter
+            idnum = next$planorder$id
+            next$planorder$id = next$planorder$id + 1
+            vue$pointer$to Xunt$view$i
+            ordUsedB = ord$used
+            call addord (unt$view$i,ista,0,unt$pointer,Xvue$circuit$i,
+                         Xvue$embarkindx$i,idnum,ilen-1,iinp)
+            if (ordUsedB == ord$used) ordFull = $YES
+            rto$pointer = rto$pointer + rto$entry
+        } until (iseq >= icnt)
+    }
+    else                        #If we're not following the route forwards, then
+    {                       #we must be going backwards, so start at the end
+        rto$pointer = Xrte$rtoPntr$i
+        rto$wrd$index = 7           # Number of sub-orders
+        icnt = Xrto$wrd$$c
+        for (; rseq > 0; rseq = rseq - 1)
+        {
+            rto$pointer = Xrte$rtoPntr$i
+            iseq = 1
+            # Skip to requested sequence number (rseq)
+            while (iseq < rseq)
+            {
+                rto$pointer = rto$pointer + rto$entry
+                rto$wrd$index = 6           # sub-order sequence number
+                iseq = Xrto$wrd$$c
+            }
+            ilen = Xrto$NbrArgs$i
+            for (i=1; i<= ilen; i = i + 1)
+            {
+                rto$wrd$index = i
+                iinp[i] = Xrto$wrd$$c
+            }
+            $ord$seq = icnt - iseq + 1    # Reverse sequence number
+            $ord$addr = -1
+            ista = 0
+            #$% set ID number to next plan order ID and increment counter
+            idnum = next$planorder$id
+            next$planorder$id = next$planorder$id + 1
+            vue$pointer$to Xunt$view$i
+            ordUsedB = ord$used
+            call addord (unt$view$i,ista,0,unt$pointer,Xvue$circuit$i,
+                         Xvue$embarkindx$i,idnum,ilen-1,iinp)
+            if (ordUsedB == ord$used) ordFull = $YES
+        }
+    }
+ 
+    if (ordFull == $YES)
+    {
+        ord$used = ordUsedH
+ 
+        UNT$Name$c = xUNT$Name$c
+        jj = 0
+        #$% move data to msg1 format for display
+        call smovhn(Unt$Name$c,$$MaxLit,msg1,jj)
+        call smovv(" did not execute route ",msg1,jj)
+        call smovhn(ilex[2],$$MaxLit,msg1,jj)
+        call smovv(". Order table is full.",msg1,jj)
+        #$% send msg to view for display
+        call send_(Unt$View$i,0,jj,msg1)
+ 
+        return
+    }
+ 
+    if (UNT$Status$I != $Sinking$Code     &
+        UNT$Status$I != $DeadInWater$Code &
+        UNT$Status$I != $UnderTow$Code)
+       putUNT$Status$I  ($Proceeding$Code)
+ 
+    if (nargs > 4)
+        if(ILEX[4] == $lex$SPEED$)     # if speed specified...
+            putUNT$OrderedSpeed$F  (ilex[5])
+ 
+    call clear_maneuver_all (ionum, id, xUNT$View$I, UNT$Pointer)
+    putUNT$RteIndx$I  (RTE$Pointer$Index)    # set up the units route info
+    putUNT$RouteInReverseFlag$I
+ 
+ 
+return
+end    # End of ORESUME
+ 
+
+ 
+Subroutine OREPEAT(IONUM, UNT$POINTER, Nargs, ILEX, ID)
+########################################################
+#$%
+#$% Purpose:   OREPEAT processes repeat route command.
+#$%
+#$% Called By: EXEORD
+#$%
+#$% Calls:     SMOVHN   SMOVH   SEND
+#$%
+#$% Tables:    UNT      RTE     ACC
+#$%
+#$% Date:      September 2005
+#$%
+#$% Author:    James O. Allen
+#$%
+########################################################
+BBcommon
+ 
+integer   NARGS,ID,IBLUE,IORANGE,
+          INEUTRAL,JJ,IOKAY,IONUM, kargs,
+          ORD$Pointer, ORD$Phase$I,
+          UNT$Pointer, UNT$Status$I,
+          UNT$View$I,
+          UNT$RouteInReverseFlag$I,
+          RTE$Pointer, RTE$View$I
+literal   UNT$Name$C,
+          CSTRIP8
+literal   ilex[nargs]
+literal   args[10]
+character msg1[60]
+ 
+# REPEAT (route at first order);
+ 
+Unt$View$i = XUnt$View$i
+ 
+if (Xunt$RouteLoopFlag$i == $YES)
+{
+    UNT$Name$c = xUNT$Name$c
+    jj = 0
+    #$% move data to msg1 format for display
+    call smovhn(Unt$Name$c,$$MaxLit,msg1,jj)
+    call smovv(" has illegal repeating route ",msg1,jj)
+    call smovhn(ilex[3],$$MaxLit,msg1,jj)
+    #$% send msg to view for display
+    call send_(Unt$View$i,0,jj,msg1)
+ 
+    call FNDORD (id, ORD$Pointer)
+    if (ord$pointer$ok)
+    {
+        ord$phase$i = 0         #Allow the order to be deleted from the table
+        PUTord$phase$i
+    }
+ 
+    return
+}
+ 
+# call execute route
+rte$pointer$to Xunt$RTEIndx$i
+if (rte$pointer$ok)
+{
+    args[1] = $lex$execute$
+    args[2] = $lex$route$
+    args[3] = Xrte$Name$c
+    kargs = 3
+    call OROUTE(IONUM,          # ionum should be repeat$order
+                UNT$POINTER,
+                kargs,
+                args,
+                ID)
+}
+ 
+return
+end    # End of OREPEAT
+ 
+
+ 
+subroutine set_immediate_flag (rte$pointer)
+BBcommon
+ 
+BBDeclare (rte$pointer,rte2$pointer,rte$ImmediateFlag$i,
+           rto$pointer,rto$wrd$index)
+ 
+literal OrderStart, OrderNumber, rteName, cstrip8
+integer iseq, icnt, rte2index, nord, kargs
+integer IsDelayOrder, fndrte
+ 
+iseq = 1
+icnt = Xrte$NumOrders$i
+rte$ImmediateFlag$i = $YES
+ 
+for (rto$pointer = Xrte$RTOPntr$i; iseq <= icnt; rto$pointer$next)
+{
+    # Is there a delay in the time?
+    rto$wrd$index = 4
+    OrderStart = Xrto$wrd$$c
+    if (OrderStart > 0.0)
+    {
+        rte$ImmediateFlag$i = $NO
+        break
+    }
+ 
+    # Is there a delay in the referenced route?
+    rto$wrd$index = 3
+    OrderNumber = Xrto$wrd$$c
+    if (OrderNumber == PROCEEDROUTE$Order)
+    {
+        rto$wrd$index = 7 + 3
+        rteName = Xrto$wrd$$c
+        rte2index = fndrte (rteName)
+        if (rte2index != 0 )
+        {
+            rte2$pointer$to rte2index
+            if (Xrte2$ImmediateFlag$i == $NO)
+            {
+                rte$ImmediateFlag$i = $NO
+                break
+            }
+        }
+    }
+ 
+    # Is there a delay in the current order?
+    rto$wrd$index = 3           # Order Number
+    nord = Xrto$wrd$$c
+    kargs = Xrto$NbrArgs$i - 7
+    if (isDelayOrder(iseq, nord, kargs, Xrto$args$i) == $YES)
+    {
+        rte$ImmediateFlag$i = $NO
+        break
+    }
+ 
+    iseq = iseq + 1
+}
+ 
+PUTrte$ImmediateFlag$i
+ 
+return
+end
+ 
+
+ 
+integer function isDelayOrder(iseq, nord, nargs, args)
+ 
+##########################################################
+#$%
+#$% Purpose:    isDelayOrder (for route) looks for order that take
+#$%             more than 1 cycle to complete
+#$%
+#$% Called By:   set_immediate_flag
+#$%
+#$% Calls:
+#$%
+#$% Tables:
+#$%
+#$% Date:       6 Sep 05
+#$%
+#$% Author:     James O. Allen
+#$%
+##########################################################
+implicit NONE
+ 
+integer iseq, nord, nargs, isok
+literal args[ARB]
+ 
+isok = $no
+ 
+if (nargs < 1) return              # Null order
+ 
+if (nord == pair$order)
+{
+    if (nargs >= 5)
+    {
+        if (args[5] == $lex$position$) isok = $yes    #Drop Mine
+    }
+}
+ 
+else if (nord == strike$order  |
+         nord == proceed$order |
+         nord == take$order    )
+{
+    isok = $yes
+}
+ 
+else if (nord == barrier$order)
+{
+    if (args[1] == $lex$barrier$)
+        isok = $yes
+}
+ 
+return (isok)
+end
+ 
+
+ 
+integer function cntrte(rte$pointer)
+ 
+##########################################################
+#$%
+#$% Purpose:    cntrte counts the number of orders in a route
+#$%             It is assumed the orders for the route are last in RTO
+#$%
+#$% Called By:  addrte
+#$%
+#$% Calls:
+#$%
+#$% Tables:
+#$%
+#$% Date:       6 Sep 05
+#$%
+#$% Author:     James O. Allen
+#$%
+##########################################################
+BBcommon
+ 
+BBdeclare (rte$pointer, rto$pointer)
+ 
+integer icnt
+ 
+icnt = 0
+ 
+for (rto$pointer = Xrte$RTOpntr$i; rto$pointer$ok; rto$pointer$next)
+{
+    if (Xrto$NbrArgs$i == 0) break          # Empty order
+    icnt = icnt + 1
+}
+ 
+return (icnt)
+end
+ 
+
+ 
+subroutine pltrtezero (rte$pointer)     # erase routes being deleted
+BBcommon
+BBdeclare (rte$pointer, prt$pointer)
+integer rteindx
+ 
+rteindx = rte$pointer$index
+ 
+for (PRT$Pointer$First; PRT$Pointer$ok; PRT$Pointer$Next)
+{
+    if (xPRT$RTE_Index$i == rteindx)
+    {
+        PRT$ZERO
+    }
+}
+ 
+return
+end
+ 
+
+ 
+subroutine rterefadj(rte$pointer)
+ 
+##########################################################
+#$%
+#$% Purpose:    rterefadj adjusts references to routes after deletion of route
+#$%
+#$%
+#$% Called By:  delrte
+#$%
+#$% Calls:
+#$%
+#$% Tables:
+#$%
+#$% Date:       18 Mar 06
+#$%
+#$% Author:     James O. Allen
+#$%
+##########################################################
+BBcommon
+ 
+BBdeclare (rte$pointer, prt$pointer, unt$pointer, prt$rte_index$i,
+            unt$rteindx$i)
+integer rteindx
+ 
+rteindx = rte$pointer$index
+ 
+# Decrement rte references in PRT when beyond route being deleted
+for (PRT$Pointer$First; PRT$Pointer$ok ; PRT$Pointer$Next)
+{
+    PRT$RTE_Index$i = xPRT$RTE_Index$i
+    if (PRT$RTE_Index$i > rteindx)
+    {
+        PRT$RTE_Index$i = PRT$RTE_Index$i - 1
+        PUTPRT$RTE_Index$i
+    }
+}
+ 
+# Decrement rte references in UNT when beyond route being deleted
+for (UNT$Pointer$First; UNT$Pointer$ok ; UNT$Pointer$Next)
+{
+    UNT$RTEIndx$i = xUNT$RTEIndx$i
+    if (UNT$RTEIndx$i > rteindx)
+    {
+        UNT$RTEIndx$i = UNT$RTEIndx$i - 1
+        PUTUNT$RTEIndx$i
+    }
+}
+ 
+return
+end
+ 
+
+Subroutine oMarkRTE (nord, iview, nargs, args)
+ 
+######################################################################
+#$%
+#$% Purpose: oMarkRTE marks a route as a Q route for minefields.
+#$%          For each position leg of the route a sweep area is created
+#$%          using given sweep width. Sweep area reference is added to
+#$%          all overlapping minefields
+#$%
+#$% Called By: EXEORD
+#$%
+#$% Calls:      DMS2rad   SMOVH   SMOVHN  SEND    WGOERR
+#$%
+#$% Tables:    RTE
+#$%
+#$% Date:      March 2007
+#$%
+#$% Author:    James O. Allen
+#$%
+########################################################
+BBcommon
+ 
+BBdeclare (rte$pointer, rte$NumOrders$i, rto$pointer, rto$wrd$$c)
+BBdeclare (rte$SweepWidth$i)
+BBdeclare (swp$pointer)
+integer   NARGS,IVIEW,NORD
+integer   fndrte, refrte, rteindex, klen, rteOK, iside, rteSide
+integer   useRteListCount
+integer   lowOrdNumber, hiOrdNumber, deleteRoute
+integer   iseq, icnt, rto$wrd$index, ilen, i
+Literal   ARGS[nargs], CSTRIP8, iinp[$order$array$size]
+literal   rteNAME
+real      pntlat[64]
+real      pntlon[64]
+real      DMS2RAD
+integer   npnts
+character msg[ARB]
+ 
+#{542,ABQ  } MARK ROUTE (named) <name> (as Q route);
+#{542,ABQ  } UNMARK ROUTE (named) <name> (as Q route);
+ 
+#if (args[1] == $Lex$Unmark$)
+#{
+#    klen = 0
+#    call smovv ("UNMARK ROUTE order has been disabled for UFG08.", msg, klen)
+#    call send_ (iview,0,klen,msg)
+#    return
+#}
+ 
+#klen = 0
+#call smovv ("MARK ROUTE order has been disabled for UFG08.", msg, klen)
+#call send_ (iview,0,klen,msg)
+#return
+ 
+ 
+call oUnMarkRTE (nord, iview, nargs, args)
+if (args[1] == $Lex$Unmark$)
+{
+    return
+}
+# Find Route
+rteName = args[3]
+rteindex = fndrte (rteName)
+rte$pointer$to rteindex
+rteOK = $no
+if (rte$pointer$ok)
+{
+    call whside(iview, iside)
+    call whside(Xrte$view$i, rteSide)
+    if (iside == rteSide | iside == $Neutral$code)
+        rteOk = $yes
+}
+ 
+# Issue error message, if route not found.
+if (rteOK == $no)
+{
+    klen = 0
+    call smovv ("Route ", msg, klen)
+    call smovhn (rteName, $$MaxLit, msg, klen)
+    call smovv (" not found. Route not marked as Q route.", msg, klen)
+    call send_ (iview,0,klen,msg)
+    return
+}
+ 
+ 
+# Set sweep width in yards
+rte$SweepWidth$i = 800              # Default is 800 yards
+PUTrte$SweepWidth$i
+ 
+#Extract orders in route
+rto$pointer = Xrte$rtoPntr$i
+rto$wrd$index = 7               # Number of sub-orders
+icnt = Xrto$wrd$$c
+npnts = 0
+ 
+repeat
+{
+    rto$wrd$index = 6           # sub-order sequence number
+    iseq = Xrto$wrd$$c
+    ilen = Xrto$NbrArgs$i
+    for (i=1; i<= ilen; i = i + 1)
+    {
+        rto$wrd$index = i
+        iinp[i] = Xrto$wrd$$c
+    }
+    rto$pointer = rto$pointer + rto$entry
+ 
+    # Only process proceed postion
+    if (ilen < 11) next
+    if (iinp[8] != $lex$PROCEED$ | iinp[9] != $lex$POSITION$) next
+    npnts = npnts + 1
+    pntlat[npnts] = DMS2RAD (iinp[10])
+    pntlon[npnts] = DMS2RAD (iinp[11])
+ 
+} until (iseq >= icnt)
+ 
+if (npnts < 2)
+{
+    klen = 0
+    call smovv ("Route ", msg, klen)
+    call smovhn (rteName, $$MaxLit, msg, klen)
+    call smovv (" needs at least 2 PROCEED POSITION orders.", msg, klen)
+    call smovv (" Not marked as Q route.", msg, klen)
+    call send_ (iview,0,klen,msg)
+    return
+}
+# Create sweep area for each leg of path
+call create_sweeparea ( rte$pointer, iview,
+                        npnts, pntlat, pntlon, rte$SweepWidth$i,
+                        swp$pointer )
+ 
+if (!swp$pointer$valid) return
+ 
+# Mark route as Q route
+PUTrte$QRouteFlag$i ($yes)
+ 
+return
+end
+
+Subroutine oUnMarkRTE (nord, iview, nargs, args)
+ 
+######################################################################
+#$%
+#$% Purpose: oUnMarkRTE marks a route as a non- Q route for minefields.
+#$%          Sweep areas associated with route are removed from overlapping
+#$%          minefields and sweep area is deleted.
+#$%
+#$% Called By: EXEORD
+#$%
+#$% Calls:      DMS2rad   SMOVH   SMOVHN  SEND    WGOERR
+#$%
+#$% Tables:    RTE, SWP
+#$%
+#$% Date:      March 2007
+#$%
+#$% Author:    James O. Allen
+#$%
+########################################################
+BBcommon
+ 
+BBdeclare (rte$pointer, rte$NumOrders$i, rto$pointer, rto$wrd$$c)
+BBdeclare (rte$SweepWidth$i)
+BBdeclare (swp$pointer)
+integer   NARGS,IVIEW,NORD
+integer   fndrte, refrte, rteindex, klen, rteOK, iside, rteSide
+Literal   ARGS[nargs], CSTRIP8
+literal   rteNAME
+integer   SWPIndex
+integer   hMfdSwpIndex
+ 
+character msg[ARB]
+ 
+#{542,ABQ  } MARK ROUTE (named) <name> (as Q route with width) [|<yards>];
+#{542,ABQ  } UNMARK ROUTE (named) <name> (as Q route);
+ 
+# Find Route
+rteName = args[3]
+rteindex = fndrte (rteName)
+rte$pointer$to rteindex
+rteOK = $no
+if (rte$pointer$ok)
+{
+    call whside(iview, iside)
+    call whside(Xrte$view$i, rteSide)
+    if (iside == rteSide | iside == $Neutral$code)
+        rteOk = $yes
+}
+ 
+# Don't issue error message if not a true unmark order
+if (rteOK == $no & args[1] != $lex$unmark$) return
+ 
+# Issue error message, if route not found.
+if (rteOK == $no)
+{
+    klen = 0
+    call smovv ("Route ", msg, klen)
+    call smovhn (rteName, $$MaxLit, msg, klen)
+    call smovv (" not found. Route not unmarked as Q route.", msg, klen)
+    call send_ (iview,0,klen,msg)
+    return
+}
+ 
+# For each sweep area associated with rte, remove references in overlapping
+#  minefields
+ 
+for (swp$pointer$first; swp$pointer$ok; swp$pointer$next)
+{
+    if (Xswp$RTEIndx$i != rteindex) next
+ 
+    call delete_sweeparea (swp$pointer)
+}
+ 
+# Erase Qroute if plotted
+call pltrtezero (rte$pointer)
+ 
+# Mark route as Q route
+PUTrte$QRouteFlag$i ($no)
+ 
+return
+end
+
+ 
+Subroutine create_sweeparea ( rte$pointer, iview,
+                              npnts, pntlat, pntlon, SweepWidth,
+                              swp$pointer )
+######################################################################
+#$%
+#$% Purpose: For each leg of Q route, create a sweep area using end points
+#$%          and sweepwidth.  Associate sweep area with all overlapping
+#$%          minefields.  Ensure sweep are covers Q route by projecting
+#$%          start back by the sweep width length.
+#$%
+#$% Called By: omarkRTE
+#$%
+#$% Calls:     polygon_overlap
+#$%
+#$% Tables:    RTE, SWP
+#$%
+#$% Date:      March 2007
+#$%
+#$% Author:    James O. Allen
+#$%
+########################################################
+BBcommon
+ 
+BBDeclare (rte$pointer)
+BBDeclare (mfd$pointer, mfd$ver$index, mfd$NSweepAreas$i, mfd$swp$index)
+BBDeclare (swp$pointer, swp$Name$c, swp$Side$i, swp$ver$index, swp$SweepWidth$i)
+real pntlat[64], pntlon[64]          #Radians
+real tcos1, tcos2, range, bear, tcrs, SweepWidthNM
+real tlat, tlon, tlath, tlonh
+integer SweepWidth, iview, npnts, overlap
+integer i, kk, klen
+character msg[ARB]
+ 
+SweepWidthNM = float(SweepWidth) / $Yds$Per$Mile
+ 
+for (i=1; i<npnts; i=i+1)
+{
+    # Find available sweep area slot
+    for (swp$pointer$first; swp$pointer$valid; swp$pointer$next)
+    {
+        if (Xswp$InUse$i == 0) break
+    }
+    if (!swp$pointer$valid)
+    {
+        klen = 0
+        call smovv ("Sweep Area table full.", msg, klen)
+        call send_ (iview,0,klen,msg)
+        return
+    }
+    if (!swp$pointer$ok) swp$used = swp$pointer$index * swp$entry
+ 
+    kk = 0
+    call smovv ("SWP",swp$Name$c, kk)
+    call smoviz(swp$pointer$index,5,swp$Name$c, kk)
+    PUTswp$Name$c
+ 
+    call whside(iview,swp$Side$i)
+    PUTswp$Side$i
+ 
+    PUTswp$RTEIndx$i (rte$pointer$index)
+    PUTswp$GhostedUnit$i ($NO)
+    PUTswp$Status$I ($Complete$Code)     # No delay to complete sweep
+    PUTswp$Points$I (4)                 # Always rectangle
+    PUTswp$ALSPId$i (0)
+    PUTswp$TimeCreated$f (game$time)
+ 
+    # Compute vertices of sweeparea
+    tcos1 = cos(pntlat[i])
+    tcos2 = cos(pntlat[i+1])
+    call rll2rb(pntlat[i],pntlon[i], tcos1,
+                pntlat[i+1],pntlon[i+1], tcos2,
+                range,bear)
+    tlath = pntlat[i]; tlonh = pntlon[i]
+    if (i > 1)          # Project start point back by sweep width
+    {
+        tcrs = bear + $PI
+        $ang2pi(bear)
+        call RRB2LL(tlath,tlonh,SweepWidthNM,0.0,tcrs,tcos1)
+    }
+    # 1st point
+    bear = bear - $PIOver2
+    $ang2pi(bear)
+    tlat = tlath; tlon = tlonh
+    call RRB2LL(tlat,tlon,SweepWidthNM,0.0,bear,tcos1)
+    swp$ver$index = 1
+    PUTswp$Ver$Latitude$f (tlat)
+    PUTswp$Ver$Longitude$f (tlon)
+ 
+    # 2nd point
+    bear = bear + $PI
+    $ang2pi(bear)
+    call RRB2LL(tlat,tlon,SweepWidthNM*2,0.0,bear,tcos1)
+    swp$ver$index = 2
+    PUTswp$Ver$Latitude$f (tlat)
+    PUTswp$Ver$Longitude$f (tlon)
+ 
+    tlath = pntlat[i+1]; tlonh = pntlon[i+1]
+    # 3rd point
+    $ang2pi(bear)
+    tlat = tlath; tlon = tlonh
+    call RRB2LL(tlat,tlon,SweepWidthNM,0.0,bear,tcos2)
+    swp$ver$index = 3
+    PUTswp$Ver$Latitude$f (tlat)
+    PUTswp$Ver$Longitude$f (tlon)
+ 
+    # 4th point
+    bear = bear - $PI
+    $ang2pi(bear)
+    call RRB2LL(tlat,tlon,SweepWidthNM*2,0.0,bear,tcos2)
+    swp$ver$index = 4
+    PUTswp$Ver$Latitude$f (tlat)
+    PUTswp$Ver$Longitude$f (tlon)
+ 
+    # Associate with minefields that overlap sweeparea
+    call overlapping_minefields (swp$pointer, iview)
+}
+ 
+return
+end
+
+subroutine overlapping_minefields (swp$pointer, iview)
+ 
+BBcommon
+ 
+BBDeclare (swp$pointer, swp$ver$index, mfd$pointer, mfd$NSweepareas$i)
+BBDeclare (mfd$ver$index, mfd$swp$index)
+ 
+integer n1, n2
+real x1[10], y1[10], x2[10], y2[10]
+integer SweepWidth, iview, npnts, overlap
+integer i, kk, klen
+character msg[ARB]
+ 
+n1 = 4
+ 
+for (swp$ver$index=1; swp$ver$index <= n1; swp$ver$index = swp$ver$index+1)
+{
+    x1[swp$ver$index] = Xswp$ver$Longitude$f
+    y1[swp$ver$index] = Xswp$ver$Latitude$f
+}
+for (mfd$pointer$first; mfd$pointer$ok; mfd$pointer$next)
+{
+    n2 = Xmfd$Points$i
+    for (mfd$ver$index=1; mfd$ver$index <= n2; mfd$ver$index = mfd$ver$index+1)
+    {
+        x2[mfd$ver$index] = Xmfd$ver$Longitude$f
+        y2[mfd$ver$index] = Xmfd$ver$Latitude$f
+    }
+    call polygon_overlap(_
+                 n1,                            #number of vertices of polygon1
+                 x1,y1,                         #arrays of vertices of polygon1
+                 n2,                            #number of vertices of polygon1
+                 x2,y2,                         #arrays of vertices of polygon1
+                 overlap)                       #yes/no flag for overlap
+ 
+    if (overlap == $yes)
+    {
+        mfd$NSweepAreas$i = Xmfd$NSweepAreas$i + 1
+        mfd$swp$index = mfd$NSweepAreas$i
+        if (mfd$swp$index > mfd$swp$slots)          # sub-table full
+        {
+            klen = 0
+            call smovv ("Minefield Sweep Area sub-table full.", msg, klen)
+            call send_ (iview,0,klen,msg)
+            next
+        }
+        PUTmfd$Swp$SWPIndx$i (SWP$Pointer$Index)
+        PUTmfd$NSweepAreas$i
+    }
+}
+ 
+return
+end
+ 
+
+ 
+Subroutine delete_sweeparea (swp$pointer)
+######################################################################
+#$%
+#$% Purpose: Specified sweep area is deleted and all associations with
+#$%          minefield are removed.
+#$%
+#$% Called By: ounmarkRTE, delRTE
+#$%
+#$% Calls:
+#$%
+#$% Tables:    RTE, SWP
+#$%
+#$% Date:      March 2007
+#$%
+#$% Author:    James O. Allen
+#$%
+########################################################
+BBcommon
+ 
+BBdeclare (swp$pointer)
+BBdeclare (mfd$pointer)
+BBdeclare (mfd$swp$index, mfd$NSweepAreas$i, mfd$swp$swpindx$i)
+Literal   CSTRIP8
+integer   SWPIndex
+integer   hMfdSwpIndex
+ 
+swpIndex = swp$pointer$index
+for (mfd$pointer$first; mfd$pointer$ok; mfd$pointer$next)
+{
+    mfd$NSweepAreas$i = Xmfd$NSweepAreas$i
+    for (mfd$swp$index=1; mfd$swp$index<=mfd$NSweepAreas$i;
+         mfd$swp$index=mfd$swp$index+1)
+    {
+        if (Xmfd$Swp$SWPIndx$i == SWPIndex) break
+    }
+    if (Xmfd$Swp$SWPIndx$i == SWPIndex)
+    {
+        # Remove sweep area by replacing with last sweep area
+        hMfdSwpIndex = mfd$swp$index
+        mfd$swp$index = mfd$NSweepAreas$i
+        mfd$Swp$SWPIndx$i = Xmfd$Swp$SWPIndx$i
+        PUTmfd$Swp$SWPIndx$i (0)            # clear last sweep index
+        if (mfd$swp$index != hMfdSwpIndex)
+        {
+            mfd$swp$index = hMfdSwpIndex
+            PUTmfd$Swp$SWPIndx$i
+        }
+        mfd$NSweepAreas$i = mfd$NSweepAreas$i - 1
+        PUTmfd$NSweepAreas$i
+    }
+}
+ 
+# Mark sweep area for deletion
+PUTswp$Status$i ($beingDeleted$code)
+ 
+return
+end

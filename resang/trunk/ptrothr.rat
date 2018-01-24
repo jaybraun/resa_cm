@@ -1,0 +1,564 @@
+##### FILE: PTROTHR.rat
+ 
+### Record of modifications
+###
+###   date    prog  module               comments
+### ========= ==== ============= ===============================================
+###   3/90    CML    various     Changed referencesf to POS, DUP, and DYN tables
+###                              so that they reference the UNT table.
+###
+################################################################################
+ 
+ 
+include "ascii.inc"
+include "bbctl.inc"
+include "bbcode.inc"
+include "bbsta.inc"
+include "bbrth.inc"
+include "bbunt.inc"
+include "ptmain.inc"
+include "ptcolor.inc"
+include "ptgraph.inc"
+include "wgmdrot.inc"
+ 
+define (BBImplicit, Implicit NONE)                  # MJC 5/31/2K (E2145)
+ 
+Subroutine Plot_Rothr(STA$Pointer)      # plot rothr controller
+ 
+ ##########################################################
+ #$%
+ #$% Purpose:   PLOT_Rothr controls rothr plot routines
+ #$%            Note : all parameters passed to subsequent
+ #$%                   subroutines are contained in PLOTCOMMON
+ #$%                   as:  irotindx,irotas,irotdn,etc.. see ptmain.inc
+ #$%
+ #$% Called By: PLOT_UP
+ #$%
+ #$% Calls:     Rothr_Display     Rothr_Eval
+ #$%            Rothr_SelCSA      Rothr_DelCSA
+ #$%
+ #$% Tables:    STA
+ #$%
+ #$% Date:      June 1987
+ #$%
+ #$% Author:    Richard Schauer
+ #$%
+ ##########################################################
+ 
+ 
+BBcommon
+PLOTcommon
+ 
+integer I_SWITCH_1                          # MJC 5/31/2K (E2145)
+BBDeclare (STA$Pointer,
+           STA$Rothrorder$I,
+           STA$Rothrairsurfpca$I,
+           STA$Rothrdaynightpca$I,
+           STA$Rothrindx$I)                         # MJC 5/31/2K (E2145)
+integer inew
+ 
+data inew/$YES/  # first time thru
+ 
+  if ((inew == $YES) | (Xsta$RothrNewOrder$I == $YES))  # new order or first time
+    {
+     PUTsta$RothrNewOrder$I ($NO)
+     STA$RothrOrder$I       = Xsta$RothrOrder$I            # get order
+     STA$RothrAirSurfPCA$I  = Xsta$RothrAirSurfPCA$I
+     STA$RothrDayNightPCA$I = Xsta$RothrDayNightPCA$I
+     STA$RothrIndx$I        = Xsta$RothrIndx$I
+ 
+     switch (STA$RothrOrder$I)
+       {
+        case $Erase$Rothr:                # erase rothr all
+          {
+           irotindx = 0                   # clear rothr index and evaluate flag
+           PUTsta$RothrEval$I ($NO)
+           RETURN
+          }
+        case $Evaluate$Rothr:                # evaluate rothr site
+          {
+           if (irotindx != sta$RothrIndx$I)  # not same site
+             {
+              irotindx = sta$RothrIndx$I     # set index to new rothr
+              call rotdispup                 # get new lat/lon points
+             }
+           irotas = sta$RothrAirSurfPCA$I    # set air/surf day/night
+           irotdn = sta$RothrDayNightPCA$I
+           PUTsta$RothrEval$I ($YES)         # evaluate is yes
+           call rotevalup                    # calculate dir regions' quality
+          }
+        case $Plot$Rothr:                 # display rothr site
+          {
+           PUTsta$RothrEval$I ($NO)          # new display, not evaluated yet
+           irotas   = sta$RothrAirSurfPCA$I  # get air/surface
+           irotdn   = sta$RothrDayNightPCA$i # get day/night
+           if (irotindx != sta$RothrIndx$I)  # if different site
+             {
+              irotindx = sta$RothrIndx$I     # calculate new lat/lon points
+              call rotdispup
+             }
+          }
+        default: {}
+       }
+     if (inew == $YES) inew = $NO          # clear first time through
+    }
+ 
+  if ((irotindx > 0) & ( irotindx < 9))
+    {
+     call rothr_display              # if we get to here, display the rothr base
+     if (Xsta$RothrEval$I == $YES)   # evaluate the rothr base
+       call rothr_eval
+     if (Xsta$RothrEval$i != $YES)
+       {
+        call rothr_csa
+       }
+    }
+ 
+return
+end
+ 
+ 
+
+ 
+Subroutine Rothr_Display
+ 
+ ##########################################################
+ #$%
+ #$% Purpose:   Rothr_Display plots a rothr base
+ #$%
+ #$% Called By: PLOT_ROTHR
+ #$%
+ #$% Calls:
+ #$%
+ #$% Tables:    None
+ #$%
+ #$% Date:      June 1987
+ #$%
+ #$% Author:    Richard Schauer
+ #$%
+ ##########################################################
+ 
+ 
+BBcommon
+PLOTcommon
+ 
+integer   COLOR,id,ii,imax,jj,jjx, poly_type
+ 
+real*4    templat[9],templon[9]
+ 
+  COLOR = $Color$Rothr    # tan color
+ 
+  imax = (Rothr$Last$Surface$DIR - 500) / surf$dir$length
+  for (jj = 1; jj <= 9; jj = jj + 1)            # draw radials...
+    for (ii = 1; ii <= imax; ii = ii + 1)
+      {
+       call draw_line_c(rotlat[ii,jj],rotlon[ii,jj],
+                      rotlat[ii+1,jj],rotlon[ii+1,jj],
+                      COLOR)
+      }
+  if (irotas == air$pca) # draw every other ring arc
+    {
+     jjx = 2
+     imax = ((Rothr$Last$Air$DIR - 500) / air$dir$length) * 2
+    }
+  else
+    jjx = 1 # draw every ring arc for surface
+ 
+  id = 0
+  for (jj = 1; jj <= imax; jj=jj + jjx)      # draw rings...
+    {
+     for (ii = 1; ii <= 9; ii = ii + 1)
+       {
+        templat[ii] = rotlat[jj,ii]
+        templon[ii] = rotlon[jj,ii]
+       }
+ 
+     # draw arc as a series of lines in a pseudo polygon
+     poly_type = $poly$ROTHR
+     call draw_polygon_c(id,templat,templon,-9,COLOR,poly_type)
+    }
+ 
+  # draw last ring arc.  this is done in case of variable lenght rothr
+  # max distances.
+ 
+  imax = (Rothr$Last$Surface$DIR - 500) / surf$dir$length + 1
+  for (ii = 1; ii <= 9; ii = ii + 1)
+    {
+     templat[ii] = rotlat[imax,ii]
+     templon[ii] = rotlon[imax,ii]
+    }
+  poly_type = $poly$ROTHR
+  call draw_polygon_c(id,templat,templon,-9,COLOR,poly_type)
+ 
+return
+end
+ 
+
+ 
+Subroutine Rothr_Eval
+ 
+ ##########################################################
+ #$%
+ #$% Purpose:   Rothr_Eval evaluates the current rothr base
+ #$%            against an air radar xsection or surface xsection
+ #$%
+ #$% Called By: PLOT_ROTHR
+ #$%
+ #$% Calls:
+ #$%
+ #$% Tables:
+ #$%
+ #$% Date:      June 1987
+ #$%
+ #$% Author:    Richard Schauer
+ #$%
+ ##########################################################
+ 
+ 
+BBcommon
+PLOTcommon
+ 
+integer addrange,COLOR,ii,imax,iqual,jj
+ 
+BBDeclare  (RTH$Pointer,
+            RTH$Unitindx$I,
+            RTH$PCA$Index,
+            UNT$Pointer)             # MJC 5/31/2K (E2145)
+ 
+real*4 range,baselat,baselon
+ 
+  RTH$pointer$to irotindx
+  RTH$UnitIndx$I = XRTH$UnitIndx$I   # get unit lat/lon
+  UNT$Pointer$to RTH$UnitIndx$I
+  baselat = Xunt$TrueLatitude$F
+  baselon = Xunt$TrueLongitude$F
+ 
+  range = 500.0
+  if (irotas == air$pca)             # its an air coverage
+    {
+     imax = (Rothr$Last$Air$DIR - 500) / air$dir$length
+     RTH$PCA$index = air$pca$base
+     addrange = air$dir$length
+    }
+  else                               # its a surface coverage
+    {
+     imax = (Rothr$Last$Surface$DIR - 500) / surf$dir$length
+     RTH$PCA$index = surf$pca$base
+     addrange = surf$dir$length
+    }
+  for (ii = 1; ii <= imax; ii = ii + 1)      # each pca ring
+    {
+     for (jj = 1; jj <= 8; jj = jj + 1)      # each dir in pca ring
+       {
+        RTH$PCA$index = RTH$PCA$index + 1
+        iqual = evaldir[RTH$PCA$index]
+        if (iqual == dir$good)
+          COLOR = dir$good$color               # red
+        else if (iqual == dir$fair)
+          COLOR = dir$fair$color               # yellow
+        else COLOR = dir$poor$color            # tan
+        call draw_dirbox(COLOR,range,jj,5.0,0.13,baselat,baselon,$NO)
+       }
+     range = range + addrange
+    }
+ 
+return
+end
+ 
+
+Subroutine rotevalup
+ 
+ ##########################################################
+ #$%
+ #$% Purpose:   rotevalup updates the current rothr CSA evaluation
+ #$%            against an air radar xsection or surface xsection
+ #$%
+ #$% Called By: PLOT_ROTHR
+ #$%
+ #$% Calls:
+ #$%
+ #$% Tables:
+ #$%
+ #$% Date:      June 1987
+ #$%
+ #$% Author:    Richard Schauer
+ #$%
+ ##########################################################
+ 
+ 
+BBcommon
+PLOTcommon
+ 
+integer icitf,ii,imax,iqual,itranloss,jj
+ 
+BBDeclare  (RTH$Pointer,
+            RTH$Performancefactor$F,
+            RTH$PCA$Index)                          # MJC 5/31/2K (E2145)
+ 
+real*4 addrng,nf,range,rothr_snr,snr,xsect
+ 
+  for (ii = 1; ii <= 144; ii = ii + 1) evaldir[ii] = 0
+  RTH$pointer$to irotindx
+  RTH$PerformanceFactor$F = XRTH$PerformanceFactor$F   # get Performance factor for rothr
+  nf = XRTH$Noise$I
+  icitf = 1
+  if (irotas == air$pca)
+    {
+     imax = (Rothr$Last$Air$DIR - 500) / air$dir$length
+     xsect = 20.0                # radar xsection for air target
+     range = 625.0               # start in middle of dir
+     addrng = air$dir$length     # width of air dir
+     RTH$PCA$index = air$pca$base
+    }
+  else
+    {
+     imax = (Rothr$Last$Surface$DIR - 500) / surf$dir$length
+     xsect = 40.0                # xsection for surface target
+     range = 562.5               # start in middle of dir
+     addrng = surf$dir$length    # width of surface dir
+     RTH$PCA$index = surf$pca$base
+    }
+  for (ii = 1; ii <= imax; ii = ii + 1)    # for each ring
+    {
+     for (jj = 1; jj <= 8; jj = jj + 1)    # for each dir in ring
+       {
+        RTH$PCA$index = RTH$PCA$index + 1
+        if (irotdn == day$rth)
+          itranloss = XRTH$PCA$DayLoss$I
+        else
+          itranloss = XRTH$PCA$NiteLoss$I
+        snr = rothr_snr(RTH$PerformanceFactor$F,     # calculate snr excess
+                        xsect,
+                        range,
+                        icitf,
+                        itranloss,
+                        nf)
+        if (snr > 17)                      # set quality of dir in table
+          iqual = dir$good
+        else if ((snr <= 17) & (snr >= 3))
+          iqual = dir$fair
+        else
+          iqual = dir$poor
+        evaldir[RTH$PCA$index] = iqual
+        }
+     range = range + addrng
+    }
+ 
+return
+end
+ 
+
+Subroutine rotdispup
+ 
+ ##########################################################
+ #$%
+ #$% Purpose:   rotdispup updates the current rothr CSA display
+ #$%            against air or surface
+ #$%
+ #$% Called By: PLOT_ROTHR
+ #$%
+ #$% Calls:
+ #$%
+ #$% Tables:
+ #$%
+ #$% Date:      June 1987
+ #$%
+ #$% Author:    Richard Schauer
+ #$%
+ ##########################################################
+ 
+ 
+BBcommon
+PLOTcommon
+ 
+integer ii,imax,jj
+ 
+BBDeclare  (RTH$Pointer,
+            RTH$Unitindx$I,
+            RTH$Othbr$F,
+            UNT$Pointer,
+            UNT$Truelatitude$F,
+            UNT$Truelongitude$F)                            # MJC 5/31/2K (E2145)
+ 
+real*4  radial,range,tcos
+ 
+ 
+ 
+  RTH$Pointer$to irotindx
+  RTH$UnitIndx$I = XRTH$UnitIndx$I
+  UNT$Pointer$to RTH$UnitIndx$I
+ 
+  RTH$othbr$F = XRTH$othbr$F
+  UNT$TrueLatitude$F = Xunt$TrueLatitude$F       # get lat/lon of base
+  UNT$Truelongitude$F = Xunt$TrueLongitude$F
+ 
+  range = 500.0
+  imax = (Rothr$Last$Surface$DIR - 500) / surf$dir$length + 1
+  for (ii = 1; ii <= imax; ii = ii + 1)            # calculate points for PCA
+    {
+     for (jj = 1; jj <= 9; jj = jj + 1)
+       {
+        rotlat[ii,jj] = UNT$TrueLatitude$F       # start with base lat/lon
+        rotlon[ii,jj] = UNT$TrueLongitude$F
+        tcos = cos(rotlat[ii,jj])
+        radial = RTH$Othbr$F + radialadd[jj]     # find pts with rad. and range added
+        call Rrb2ll(rotlat[ii,jj],rotlon[ii,jj],range,radial,0.0,tcos)
+        rotlat[ii,jj] = rotlat[ii,jj] * 180 / $PI
+        rotlon[ii,jj] = rotlon[ii,jj] * 180 / $PI
+       }
+     range = range + surf$dir$length
+     if (range == Rothr$Last$Surface$DIR) range = Rothr$Max$Range
+    }
+ 
+return
+end
+ 
+
+ 
+Subroutine Draw_Dirbox(COLOR,range,irad,rangeadd,radadd,baselat,baselon,iblf)
+ 
+ ##########################################################
+ #$%
+ #$% Purpose:   Draw_Dirbox draws the box for the dir that
+ #$%            is range distance and radial direction from the
+ #$%            rothr base.  It draws it inside the rothr display
+ #$%            lines.
+ #$%
+ #$% Called By: PLOT_ROTHR
+ #$%
+ #$% Calls:
+ #$%
+ #$% Tables:
+ #$%
+ #$% Date:      June 1987
+ #$%
+ #$% Author:    Richard Schauer
+ #$%
+ ##########################################################
+ 
+ 
+BBcommon
+PLOTcommon
+ 
+integer COLOR,iblf,irad,kk
+ 
+BBDeclare  (RTH$Pointer,
+            RTH$Othbr$F)                            # MJC 5/31/2K (E2145)
+ 
+real*4  baselat,baselon,lat[4],lon[4],lrange,radadd,radial,range,
+        rangeadd,trange,tcos
+ 
+  RTH$pointer$to irotindx
+  RTH$Othbr$F = XRTH$Othbr$F
+ 
+  trange = range + rangeadd
+  if (irotas == air$pca)
+    if (range + air$dir$length == Rothr$Last$Air$DIR)
+      lrange = Rothr$Max$Range
+    else
+      lrange = range + air$dir$length
+  else
+    if (range + surf$dir$length == Rothr$Last$Surface$DIR)
+      lrange = Rothr$Max$Range
+    else
+      lrange = range + surf$dir$length
+  lrange = lrange - 2 * rangeadd
+  for (kk = 1; kk <= 4; kk = kk + 1)    # find four points in dir box within
+    {                                   # rothr display lines
+     lat[kk] = baselat
+     lon[kk] = baselon
+     tcos = cos(lat[kk])
+     if (mod(kk,2) != 0)
+       radial = RTH$Othbr$F + radialadd[irad] + radadd
+     else
+       radial = RTH$Othbr$F + radialadd[irad+1] - radadd
+     call Rrb2ll(lat[kk],lon[kk],trange,radial,0.0,tcos)
+     lat[kk] = lat[kk] * 57.29578    # conversion to degrees from radians
+     lon[kk] = lon[kk] * 57.29578
+     if (kk == 2)
+       trange = lrange
+    }
+  #iblinkit no longer exists
+  #if (iblf == $YES) call iblinkit ($YES,$YES)  # blinking dashed line
+  call draw_line_c(lat[1],lon[1],lat[2],lon[2],COLOR)# draw four lines
+  call draw_line_c(lat[2],lon[2],lat[4],lon[4],COLOR)
+  call draw_line_c(lat[4],lon[4],lat[3],lon[3],COLOR)
+  call draw_line_c(lat[3],lon[3],lat[1],lon[1],COLOR)
+  #if (iblf == $YES) call iblinkit ($NO,$NO)    # reset to normal line
+ 
+return
+end
+ 
+
+ 
+Subroutine Rothr_csa
+ 
+ ##########################################################
+ #$%
+ #$% Purpose:   Rothr_csa plots the csa for the current rothr base
+ #$%
+ #$% Called By: PLOT_ROTHR
+ #$%
+ #$% Calls:
+ #$%
+ #$% Tables:
+ #$%
+ #$% Date:      June 1987
+ #$%
+ #$% Author:    Richard Schauer
+ #$%
+ ##########################################################
+ 
+BBcommon
+PLOTcommon
+ 
+integer    COLOR,ii,imax,jj
+ 
+BBDeclare  (RTH$Pointer,
+            RTH$Unitindx$I,
+            RTH$PCA$Index,
+            UNT$Pointer)                            # MJC 5/31/2K (E2145)
+ 
+real*4     range,addrange,baselat,baselon
+ 
+  RTH$pointer$to irotindx
+  RTH$UnitIndx$I = XRTH$UnitIndx$I
+  UNT$Pointer$to RTH$UnitIndx$I
+  baselat = Xunt$TrueLatitude$F        # get base lat/lon
+  baselon = Xunt$TrueLongitude$F
+ 
+  range = 500.0
+  if (irotas == air$pca)
+    {
+     imax = (Rothr$Last$Air$DIR - 500) / air$dir$length
+     RTH$PCA$index = air$pca$base
+     addrange = air$dir$length
+    }
+  else
+    {
+     imax = (Rothr$Last$Surface$DIR - 500) / surf$dir$length
+     RTH$PCA$index = surf$pca$base
+     addrange = surf$dir$length
+    }
+  COLOR = $Color$Rothr$Blink                 # white blinking color
+  for (ii = 1; ii <= imax; ii = ii + 1)      # each pca ring
+    {
+     for (jj = 1; jj <= 8; jj = jj + 1)      # each dir in pca ring
+       {
+        RTH$PCA$index = RTH$PCA$index + 1
+        if (irotdn == day$rth)
+          {
+           if (XRTH$pca$dayon$I == $NO) NEXT
+          }
+        else
+          {
+           if (XRTH$pca$niteon$I == $NO) NEXT
+          }
+        call draw_dirbox(COLOR,range,jj,10.0,0.12,baselat,baselon,$YES)
+       }
+     range = range + addrange
+    }
+ 
+return
+end
+ 

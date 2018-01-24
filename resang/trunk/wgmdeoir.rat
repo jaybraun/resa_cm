@@ -1,0 +1,680 @@
+ 
+            #        File wgmdEOIR.rat    (EO/IR Sensor Model)
+ 
+#define($deg2rad,0.0174533)    # (This appears in BBCODE.def)
+#define(EOIR$Swath$Angle,IBB[304]) # 180 degrees is side to side
+##FLIR$Horiz$FOView; default 10  # jb Horizontal Field-of-View (degrees) 5/92
+##FLIR$Vert$FOView;  default  7  # jb Vertical   Field-of-View (degrees) 5/92
+ 
+define($half,MIN(89.0,(EOIR$Swath$Angle/2.0))) # (Anti-Overflow)
+define($swath,$half*$PI/180.) # Half-angle, radians
+define($TANswath,tan($swath))
+define($HORIZMAX,EOIR$Range$Max*SIN($swath))
+define($BoatSQRT,SQRT(10.))    # SQRT of SmallBoat 'height'
+define($ShipSQRT,SQRT(50.))    # SQRT of SHIP      'height'
+define($MinCLOUD,0)    # IGNORE cloud-cover LESS thick than this
+ 
+define($IDENT,3)  # Used for iKNOW subscripts, e.g., iKNOW[$RECOG]
+define($RECOG,2)
+define($DETCT,1)
+ 
+include "bbcode.inc"
+include "bbctl.inc"
+include "bbacc.inc"
+include "bbdeq.inc"
+include "bbird.inc"
+include "bbshc.inc"
+include "bbunt.inc"
+include "bbuvp.inc"          # EOIR Ident/Recog/Detect prob's.
+include "bbvue.inc"
+include "bbwet.inc"
+include "macros.inc"
+ 
+define(BBimplicit,IMPLICIT NONE)    # jb E2145  7/11/00
+ 
+
+Subroutine EOIR_MOD
+########################################################
+#$%
+#$%  Purpose:  The Electro-Optical/InfraRed sensor model
+#$%  is called to determine whether any aircraft with
+#$%  activated EO/IR sensors detect targets.
+#$%
+#$%  Called By: WARCYC
+#$%
+#$%  Calls:     FNDWET    RCPA    REPIR    RLL2RB    RRB2LL
+#$%
+#$%  Tables:    ACC    UNT    UVP    WET
+#$%
+#$%  Date:      February 1990
+#$%
+#$%  Author:    Joe Bryant
+#$%
+#$%  Modified:  Susan Miller 5/6/92 for UVP ranges increased to 60
+#$%             Slant range has to be less than or equal to
+#$%             value stored in table, or use greatest (last)
+#$%             range entered for that target
+#$%
+#$%  Note: UNT refers to the detecting a/c; unt2 to targets
+#$%
+########################################################
+BBcommon
+ 
+LITERAL     CSTRIP8                              # jb E2145 7/11/00
+Real*4      Intra_Degradation
+REAL   fSQRT1,fSQRT2,tstnum,rndnum,untcos,brg,speedratio
+REAL  DELALT,DELTARNG,FNADIR,DISTFAR,DISTNEAR,   # jb E2145 7/11/00
+    DLATMAX,DLONMAX,DLATMAX2,DLONMAX2,           # jb E2145 7/11/00
+    HEADNG,HGTNMI,RDIST,X,RANDOM,                # jb E2145 7/11/00
+    RELBRG,REVERSEBRG,                           # jb E2145 7/11/00
+    RMAXHORIZ,RMAXTRAVEL,RNG,                    # jb E2145 7/11/00
+    RTIM,SLRANGE,SQVERT,TRAVEL,                  # jb E2145 7/11/00
+    SHIPMAXSPEED,UNITSPEED                       # jb E2145 7/11/00
+ 
+REAL  UNT$Truespeed$F,UNT$Truecourse$F,          # jb E2145 7/11/00
+    UNT$Truelatitude$F,UNT$Truelongitude$F,      # jb E2145 7/11/00
+    UNT$Assumedlatitude$F,UNT$Assumedlongitude$F # jb E2145 7/11/00
+REAL    UNT2$Truelongitude$F,                    # jb E2145 7/11/00
+    UNT2$Truelatitude$F,UNT2$Truespeed$F,        # jb E2145 7/11/00
+    IRD$Latitude$F,IRD$Longitude$F               # jb E2145 7/11/00
+Integer  I,IREFAL,ICHARPNTR,                     # jb E2145 7/11/00
+    INTRA_CODE,ION,                              # jb E2145 7/11/00
+    MINDET,MINPLUS                               # jb E2145 7/11/00
+Integer UNT$Pointer,                             # jb E2145 7/11/00
+    UNT$Status$I,UNT$View$I                      # jb E2145 7/11/00
+Integer   UNT2$Pointer,UNT2$Type$I,              # jb E2145 7/11/00
+    UNT2$Status$I,UNT2$Truealtdepth$I            # jb E2145 7/11/00
+Integer ACC$Pointer, ACC$Uvpindx$I               # jb E2145 7/11/00
+Integer   WET$Pointer,WET$Ceiling$I,             # jb E2145 7/11/00
+    WET$Cloudcover$I,WET$Clouddepth$I            # jb E2145 7/11/00
+Integer UVP$Pointer,UVP$PB$Index,                # jb E2145 7/11/00
+        UVP$PB$range$I,                          # jb E2145 7/11/00
+        SHC$Pointer,SHC$Uvpindx$I                # jb E2145 7/11/00
+Integer IRD$Motion$I,                            # jb E2145 7/11/00
+    IRD$Course$I,IRD$Speed$I                     # jb E2145 7/11/00
+Integer DEQ$Pointer, DEQ2$Pointer                # jb E2145 7/11/00
+integer iCloudTOP
+BYTE    iKNOW[3]                    # Flags for IDENT, RECOG, DETECT
+BYTE    IntraKNOW[3]                # Flags for intra-emi comparison
+Logical NOcloud, iABOVE1, iBELOW2, Intra_EMI_Impact
+ 
+#$%-----------------------------------------------------------------
+#$% First, we find out whether this unit is really a flying air-
+#$% craft equipped for EOIR detections, with the sensor ON.  If
+#$% so, is the a/c flying in clouds that will prevent detections?
+#$% If these tests are passed, data is saved (course,speed,View,
+#$% Assumed position) and computed ( Square of alt. in n.miles, max.
+#$% horizontal range, max. travel, max. latitude difference, max.
+#$% longitude difference); for use when considering each target.
+ 
+For (UNT$Pointer$FIRST; UNT$Pointer$OK; UNT$Pointer$NEXT)
+   {
+    unt$status$i = Xunt$status$i
+    if (unt$status$i == $AwaitingLaunch$code |  #$% if awaiting launch,
+        unt$status$i == $beingdeleted$code)	#$% or being deleted,
+                                       NEXT
+ 
+    if(xUNT$Type$i != $AIR$Code)       NEXT
+ 
+    #$% if unit is a Hide Site, then get next because Hide Site cannot detected others
+    if (xUNT$Type$I == $Site$Code & xUNT$SubType$I == $HideSite$SubCode)
+       NEXT                                                    #khc 7/92
+ 
+    if (xUNT$GhostedUnit$I == $YES)    NEXT # if it's a ghosted unit, skip it
+                                            # SMM 5/18/92
+ 
+    ACC$Pointer = Xunt$AccPntr$i
+    if(xACC$EOIRflag$i == $NO)         NEXT    # (Block 1)
+ 
+    UNT$TrueLatitude$F  = xUNT$TrueLatitude$F
+    UNT$TrueLongitude$F = xUNT$TrueLongitude$F
+    call fndwet(unt$truelatitude$f,    #$% Find WET pointer
+	    unt$truelongitude$f,
+	    wet$pointer)
+ 
+##    if(Xwet$Category$i == $FOG$Code)    NEXT    # REMOVED 3/6/90
+        ## Joe:  How about $Rain$Code?  $Haze$Code?  ONLY $Clear$Code???!!!
+ 
+    IREFAL = xUNT$TrueAltDepth$i    # Altitude of 'reference' unit
+ 
+    wet$cloudcover$i = xwet$cloudcover$i
+    if(wet$cloudcover$i == 0)
+       {
+        NOcloud = .TRUE.
+        iABOVE1 = .FALSE.
+        iCloudTOP     = 999999
+        WET$Ceiling$i = 999999
+        WET$CloudDepth$i = 0
+       }
+    else
+       {
+        WET$CloudDepth$i = xWET$CloudDepth$i
+        WET$Ceiling$i = xWET$Ceiling$i
+        iCloudTOP = WET$Ceiling$i + WET$CloudDepth$i
+        NOcloud = (WET$CloudDepth$i <= $MinCloud) # Logical; ignore clouds?
+        iABOVE1 = ( IREFAL > iCloudTOP )
+       }
+ 
+ 
+    if(!NOcloud & IREFAL > WET$Ceiling$i & # If flying in prohibitive cloud
+             IREFAL < iCloudTOP)    { NEXT }
+ 
+    UNTCOS = COS(UNT$TrueLatitude$F)        # jb        3/6/90
+ 
+    iON = $NO
+    FOR_DEQ_CHAIN
+       {
+        if(Xdeq$IDENT$i != $EOIR$code) NEXT
+        if(Xdeq$ON$i == $YES) iON = $YES
+        BREAK
+       }
+    if(iON == $NO)                     NEXT    # (Block 2)
+ 
+    HGTnmi = iREFAL / (3.0 * $Yds$Per$Mile) # ft/(ft.per nMile) =nMiles 5/92
+#    RmaxHORIZ = SQRT(EOIR$Range$Max * EOIR$Range$Max - SQVERT)
+    RmaxHORIZ = HGTnmi * $TANswath                      #            5/22/92
+    RmaxHORIZ = MIN($HORIZMAX,RmaxHORIZ)
+ 
+    SQVERT = HGTnmi * HGTnmi   # Square of: alititude in Nmi         5/22/92
+ 
+    UNT$TrueSpeed$F = xUNT$TrueSpeed$F
+ 
+     RmaxTRAVEL = UNT$TrueSpeed$F * model$interval * $Hours$Per$Minute   # distance traveled
+ 
+     RmaxTRAVEL = MAX(RmaxTRAVEL,RmaxHORIZ) # Speed could be ~ zero!
+ 
+#$%    Save square-root of detector's altitude for later LOS use:
+    fSQRT1 = float(IREFAL)    # Preliminary step to get fSQRT1
+    fSQRT1 = SQRT(fSQRT1)
+ 
+    UNT$TrueCourse$F = xUNT$TrueCourse$F # Save for call to RCPA
+    unt$View$i = Xunt$View$i    # Save for comparison with targets'
+ 
+    UNT$AssumedLatitude$F  = xUNT$AssumedLatitude$F  # For computing
+    UNT$AssumedLongitude$F = xUNT$AssumedLongitude$F # reported position
+ 
+    dlatMAX = RMAXTRAVEL * $deg2rad / 60.    # maximum delta latitude
+    dlonMAX = dlatMAX / UNTCOS               # maximum delta longitude
+                                                        # of target
+#$%-------------------------------------------------------------
+#$% The detector A/C is NOT in clouds; his STATUS is ok; he
+#$% has an EO/IR sensor, which is ON.  Now we're ready to see
+#$% if there are any qualified targets.  Targets are screened
+#$% as to Status; View; altitude below detector; altitude
+#$% with respect to clouds; difference in altitude, eligible unit
+#$% type; eligible EOIR target; latitude difference, and longitude
+#$% difference. Only if screening is passed are calls made to
+#$% RRL2RB and RCPA as preliminary to detection/recognition/ident-
+#$% ification determinations.
+#$%-------------------------------------------------------------
+ 
+    For(unt2$Pointer$FIRST;unt2$Pointer$OK;unt2$Pointer$NEXT)
+       {
+        if (Xunt2$View$i == UNT$View$i)            NEXT
+        unt2$status$i = Xunt2$status$i
+        if (unt2$status$i == $AwaitingLaunch$code |  #$% if awaiting launch,
+    	    unt2$status$i == $beingdeleted$code)     #$% or being deleted,
+                                                   NEXT
+        if (Xunt2$NeverDetect$i == YES) next        # joa 3/05 per_never
+ 
+        #$% if the unit is hiding, then get next one
+        if (unt2$Status$i == $Hiding$Code | xUNT2$HideStatus$i == $CurrentlyHiding)
+           NEXT                            #khc 7/92
+ 
+        #$% if the unit is a Hide Site, then get next one
+        if (xUNT2$type$i == $Site$Code & xUNT$SubType$I == $HideSite$SubCode)
+           NEXT                                                #khc 7/92
+ 
+#$%        Sensor looks DOWN ONLY..
+        UNT2$TrueAltDepth$i = xUNT2$TrueAltDepth$i
+        if(UNT2$TrueAltDepth$i >= IREFAL)          NEXT
+ 
+#$%    Is target flying in a detection-preventing cloud?
+        if(!NOcloud & UNT2$TrueAltDepth$i > WET$Ceiling$i &
+                  UNT2$TrueAltDepth$i < iCloudTOP)
+                                                {  NEXT  }
+ 
+#$%    Is Altitude difference too much for detection?
+         delalt = ABS((unt2$truealtdepth$i - irefal) / $Feet$Per$Nmi) #    3/8/90
+         if (delalt >= EOIR$Range$MAX) NEXT               #           (Block 8)
+ 
+ 
+#$%        (a) Neither SUBS nor SHOREBASES are valid EO/IR targets..
+#$%        (b) All valid Ship classes/Aircraft types have UVP pointers..
+#$%        (c) Valid EO/IR targets are either MOBILE or STATIONARY..
+ 
+        unt2$TYPE$i = Xunt2$TYPE$i    # No sub or shorebase targets..
+#       if(unt2$TYPE$i==$SURFACE$Code | unt2$TYPE$i==$SurfaceWithAC$Code)
+        if(unt2$TYPE$i==$SURFACE$Code )
+           {
+#$%            Set UVP Pointer for Surface Craft:
+            SHC$Pointer = Xunt2$SHCpntr$i
+            SHC$UVPindx$i = xSHC$UVPindx$i
+            if(SHC$UVPindx$i == $NULL$Code)            NEXT  # (Block 4)
+            UVP$Pointer$TO (xSHC$UVPindx$i)                  # (Block 5)
+            if(xUVP$Type$i ==$UAV$Mobile) ird$Motion$i = $UAV$Mobile
+            ELSE                          ird$Motion$i = $UAV$Fixed
+ 
+            UnitSpeed = FLOAT(Xunt2$Speed$i)         # jb    4/9/90
+            ShipMAXspeed = FLOAT(xSHC$MAXspeed$i)    # jb    4/9/90
+            SpeedRatio = unitSpeed / SHipMAXspeed    # jb    4/9/90
+ 
+           }
+        else if(unt2$TYPE$i == $AIR$Code)
+           {
+#$%            Set UVP Pointer for Aircraft:
+            ACC$Pointer = Xunt2$AccPntr$i
+            ACC$UVPindx$i = xACC$UVPindx$i
+            if(ACC$UVPindx$i == $NULL$Code)            NEXT  # (Block 4)
+            UVP$Pointer$TO (xACC$UVPindx$i)                  # (Block 5)
+            if(xUVP$Type$i ==$UAV$Mobile) ird$Motion$i = $UAV$Mobile
+            ELSE                          ird$Motion$i = $UAV$Fixed
+ 
+            if (Xunt2$Hits$i > 0)    SpeedRatio = 0.0   # jb    3/8/90
+            else                    SpeedRatio = 1.0    # jb    3/6/90
+           }
+        else                                           NEXT #Not Ship\a/c
+ 
+#-----------------------------                3/18/90
+        UNT2$TrueSpeed$F = xUNT2$TrueSpeed$F  # speed of target  4/11/90
+         dlatMAX2 = UNT2$TrueSpeed$F * $Hours$Per$Minute *
+                     model$interval * ($deg2rad / 60.) # Tgt delta latitude
+ 
+         dlonMAX2 = dlatMAX2 / UNTCOS          # Target delta longitude
+ 
+#$%    Is target's latitude obviously out of range?
+        unt2$TrueLatitude$F = Xunt2$TrueLatitude$F    # Block 3,a
+        if(ABS(unt2$TrueLatitude$F -unt$TrueLatitude$F) > DLATMAX +dlatMAX2 +
+           (RmaxHORIZ * $deg2rad /60.) )      { NEXT } # jb RmaxHORIZ 5/21/92
+ 
+#$%    Same for Longitude.. ?
+        unt2$TrueLongitude$F = Xunt2$TrueLongitude$F    # Block 3,b
+        if(ABS(unt2$TrueLongitude$F -unt$TrueLongitude$F) > dlonMAX +dlonMAX2 +
+           RmaxHORIZ * $deg2rad / 60.)        { NEXT } # jb RmaxHORIZ 5/21/92
+ 
+        if(unt2$Type$i == $AIR$Code)
+           {
+            fSQRT2 = float(UNT2$TrueAltDepth$i)
+            fSQRT2 = SQRT(fSQRT2)
+           }
+        else if(xUNT2$SuperType$i == $SmallBoat$SuperCode)      # DEW 5/1/90
+            {
+            fSQRT2 = $BoatSQRT
+            }
+        else
+            {
+            fSQRT2 = $ShipSQRT
+            }
+#        else if (Xunt2$SmallBoat$i == $NO) fSQRT2 = $ShipSQRT
+#        else                               fSQRT2 = $BoatSQRT
+ 
+ 
+#------------------------------------3/19/90----------------------------
+        Call RLL2RB(_                #Rhumb line Lat/Lon to Range/Bearing
+            UNT$TrueLatitude$F,       #latitude of 1st pt (input)
+            UNT$TrueLongitude$F,      #longitude of 1st pt (input)
+            UNTCOS,                   #cos of lat of 1st pt (input)
+            unt2$TrueLatitude$F,          #latitude of 2nd pt (input
+            unt2$TrueLongitude$F,         #longitude of 2nd pt (input)
+            COS(unt2$TrueLatitude$F),      #cos of lat of 2nd pt (input)
+                   RNG,              #range (output)
+                   BRG )             #bearing (output)
+ 
+##----------------------------------------------------------------------------
+## -- The following is inactivated pending decision on 'final' design: 5/22/92
+#        CALL Rcpa(_
+#            RDIST,             # Returned: CPA distance (naut. miles)
+#            UNT$TrueCourse$F,  # (radians):course of object-1
+#            UNT$TrueSpeed$F,   # (knots  ):speed  of object-1
+#            xUNT2$TrueCourse$F, # (radians) course of object-2
+#            UNT2$TrueSpeed$F,  # (knots  ) speed  of object-2
+#            RNG,                   # Initial range between objects
+#            BRG,                   #(radians) init. brg from OBJ1 to 2
+#            RTIM )              # Returned: (min.) -elapsed time
+#
+#        If (RTIM      > 1.0 )        { NEXT } # Not WITHIN 1 MINUTE
+#        Else if (RTIM < 0.0 ) # -7 -> not closing; -12.-> hours away
+#           {
+#            If (RNG > RmaxHORIZ)     { NEXT }  # Not close enough NOW
+#            if( 1.23 * (fSQRT1 + fSQRT2) < RNG )  NEXT  # (Block 6)
+#            SLRANGE = SQRT(SQVERT + RNG*RNG)   # Slant Range NOW
+#           }
+#        Else    # 0.0 <= RTIM <= 1.0
+#           {
+#            If (RDIST > RmaxHORIZ)   { NEXT } # Won't be close enough..
+#            if( 1.23 * (fSQRT1 + fSQRT2) < RDIST )  NEXT  # (Block 6)
+#            SLRANGE = SQRT(SQVERT + RDIST*RDIST) # Slant Range @ CPA
+#           }
+##--- End of removal of SLRANGE computations in favor of FLIR logic 5/22/92
+##--------------------------------------------------------------------
+######################   Logic for FLIR  -------------------    5/21/92
+## CAUTION:  In this case the sensor looks AHEAD rather than straight DOWN.
+##   The user could easily set up a combination of sensor altitude, swath
+##   angle, EOIR$Range$Max and/or sensor probabilities versus ranges that
+##   would never allow detections...
+ 
+##        Is this target within the FLIR horizontal field-of-view/ahead?
+        RELbrg = BRG - UNT$TrueCourse$F
+        $angPI (RELbrg)
+        if(RELbrg < 0.0)    RELbrg = -1.0 * RELbrg
+        if(RELbrg > 0.5 * FLIR$Horiz$FOView * $pi / 180.0)  NEXT   # Not in horiz. FOV
+ 
+##        Is this target TOO CLOSE to be in the vertical field-of-view?
+        fNadir =$swath -FLIR$Vert$FOView *$PI/180. # Radians, nadir to stare
+        DISTnear = HGTnmi * TAN(fNadir)
+        if(RNG < DISTnear)                 NEXT  # Too close for vert. FOV
+ 
+##        Will range to tgt be within the end of Vert. FOview, THIS game min.?
+        DISTfar = HGTnmi * TAN($swath) # Dist. frm FLIR to end of Vert. FOV
+        If(RNG <= DISTfar)   # Within maximum rang for Field of View NOW!
+            {                # Since already within outer range, RMIN_TO_
+            ##RTIM = -3.0    #  TARGET will NOT return RTIM as -3.0
+             DeltaRNG = UNT$TrueSpeed$F * model$interval *
+                        $Hours$Per$Minute   # Max additional closure
+            }                                 #    might take place..
+ 
+        Else    # If not already in FOV, compute whether it'll be this minute;
+            {        # and if so, adjust RNG to approx. range
+            ReverseBRG = BRG + $PI # Bearing from target to the FLIR
+            $ANG2pi (ReverseBRG)
+            RDIST = DISTfar    # For consistency with logic for CPA case
+            Call RMIN_TO_TARGET(_
+              RDIST,              # Dist. to end of vert. FOView (nMi)
+              xUNT2$TrueCourse$F, # (radians) course of TARGET        real
+              UNT2$TrueSpeed$F,   # (knots)   speed  of TARGET        real
+              UNT$TrueSpeed$F,    # (knots)   speed  of INTERCEPTOR   real
+              RNG,                # (n.mi.) Initial rng between units real
+              ReverseBRG,         # (radians) init. brg FROM tgt TO INTERCEPTOR
+              RTIM )    # RETURNED value (min.) elapsed time to reach RADIUS
+ 
+            if (RTIM == -3.0) RTIM = 0   # JOA 12/02 E2317
+            If (RTIM      < 0.0 )   { NEXT } # No solution; OR, FAR in future
+            If (RTIM      > model$interval)   { NEXT } # Not WITHIN THE NEXT TIME STEP
+ 
+##            Note: Now, when RTIM elapses, the range is DISTfar..
+            If(RTIM < 0.01)    # Avoid division by RTIM if near zero..
+              DeltaRNG = UNT$TrueSpeed$F * model$interval *
+                         $Hours$Per$Minute # Max additional closure
+            Else
+               {    # Compute Proportional additional  closure
+               DeltaRNG = RNG - DISTfar
+               DeltaRNG = DeltaRNG * (model$interval - RTIM)/RTIM    # in range
+               }
+            }
+#        RNG = DISTfar - DeltaRNG    # Decrement RNG for computations--but,..
+        RNG = RNG - DeltaRNG  # testing, 11/16/92 SMM
+        RNG = MAX(RNG,DISTnear) # ..never less than DISTnear, at this point
+ 
+        If (RNG > RmaxHORIZ)                  NEXT   # Not close enough
+        if( 1.23 * (fSQRT1 + fSQRT2) < RNG )  NEXT  # (Block 6) (Outside LOS)
+        SLRANGE = SQRT(SQVERT + RNG*RNG)   # Slant Range NOW
+###   ---- End of culling (and computing SLRANGE) for FLIR -------- jb 5/22/92
+##---------------------------------------------------------------------------
+ 
+        tstnum = 1.0       # Initl'z test-number ("V", in    Block 10)
+        rndnum = RANDOM(x) # Initl'z random nmbr ("u", in    Block 11)
+        if (!noCloud )        # Cloud cover MAY intervene...
+           {
+            iBELOW2 = ( UNT2$TrueAltDepth$i < WET$Ceiling$i )
+            if (iABOVE1 & iBELOW2) # | (!iABOVE1 & !iBELOW2) ) 2/22/90
+               {    # Cloud cover DOES intervene..         (Block  9)
+                tstnum = 1.0 - (WET$CloudCover$i / 100.) #(Block 10)
+               }
+           }
+ 
+        # loop through UVP subtable PB index until we find the slant
+        # range that is less than or equal to the range for that index
+        # if slant range is greater than any of the stored ranges,
+        # use the largest (last) stored range     SMM 5/6/92
+        For(UVP$PB$index = 1;UVP$PB$index$ok;UVP$PB$index = UVP$PB$index + 1)
+            {
+             UVP$PB$Range$I = xUVP$PB$Range$I
+             if (SLRANGE <= UVP$PB$Range$I)
+                 break
+            }
+ 
+#   UVP$PB$index = MIN( 6,INT(SLRANGE + 0.9) )  # (Block 7b) #GONE 5/8/92
+ 
+ 
+ 
+        for(i=1; i <= 3; i =i +1)
+           {
+            iKNOW[i] = $NO # Init'lz
+           }
+ 
+        if (rndnum <= tstnum * xUVP$PB$Identification$i / 100.0)
+           {             #  3
+            for(i=1; i <= $IDENT; i =i +1)
+               {
+                iKNOW[i] = $YES  # (Block 12)
+               }
+           }
+        else if (rndnum <= tstnum * xUVP$PB$Recognition$i / 100.0)
+           {             #   2
+            for(i=1; i <= $RECOG; i =i +1)
+               {
+                iKNOW[i] = $YES  # (Block 13)
+               }
+           }
+        else if (rndnum <= tstnum * xUVP$PB$Detection$i / 100.0)
+           {        # 1
+            iKNOW[$DETCT] = $YES                               # (Block 14a)
+           }
+ 
+ 
+        if( iKNOW[$DETCT] == $YES )    # Detection (at least) is made
+           {
+            iCHARpntr = Xunt2$SHCpntr$i # (EITHER ACC or SHC)
+            ird$COURSE$i = 0.5 + Xunt2$TRUEcourse$F * 180/$PI
+            if(ird$COURSE$i >= 360) ird$course$i = 0    # overcautious?
+            ird$Speed$i   = 0.5 + Xunt2$TRUEspeed$F
+ 
+##  Answer to posit. accuracy question:  use TRUE data  2/27/90
+##  Answer to posit. accuracy question:  use RELATIVE data  3/6/90
+##-----------------------------------------------------------------
+            TRAVEL = RNG * RNG - RDIST * RDIST   # Intermediate value
+            if (TRAVEL < 0.001) TRAVEL = 0       # Prevent SQRT(0)
+            else                TRAVEL = SQRT(TRAVEL)
+ 
+            if (TRAVEL > RmaxHORIZ) MINPLUS = 1
+            else                    MINPLUS = 0
+            MINDET = GAME$TIME + MINPLUS
+ 
+            ird$Latitude$F  = UNT$AssumedLatitude$F
+            ird$Longitude$F = UNT$AssumedLongitude$F
+            HEADNG = 0.0
+            Call RRB2LL( _    #Rhumb line Range/Bearing to Lat/Lon
+               ird$Latitude$F,    #latitude (input & output)
+               ird$Longitude$F,   #longitude (input & output)
+                   RNG,       #range (input)
+                   BRG,       #relative bearing (input)
+                   HEADNG,    #course (input) WARN: MAY BE a CONSTANT!
+                   UNTCOS)       #cosine of latitude (input & output)
+ 
+#----------------------------------------------------------------------
+#$%            Send unit pointers and iKNOW to repIR
+            Call repIR (xUNT$Name$C,    # Detector
+                        unt$VIEW$I,     # Detector's View
+                        xUNT2$Name$C,   # Detectee
+                        unt2$Type$i,    # Detectee UNT type
+                        ird$Latitude$F, # Detectee latitude
+                        ird$Longitude$F,# Detectee longitude
+                        ird$COURSE$i,  # Detectee Course, 0-359
+                        ird$Speed$i,    # Detectee Speed
+                        iCharPntr,      # Detectee Charac. Pointer
+                        ird$Motion$i,   # $UAV$Fixed or $UAV$Mobile
+                        SpeedRatio,      # for Damage Assessment
+                        iKNOW,            # 3 Flags (DET/RECOG/IDENT)
+                        Unt$Pointer,     # jb for LDX entry      5/7/92
+                        Unt2$Pointer,    # jb for LDX entry      5/7/92
+                        SLRANGE,        # jb for LDX entry      5/8/92
+                        BRG      )      # jb for LDX entry      5/8/92
+           }
+       }    # End FOR (unt2$Pointer$FIRST.. (thru 'targets'
+ 
+   }    # End FOR (unt$Pointer$FIRST.. (thru 'detectors'
+ 
+return
+END
+
+ 
+Subroutine repIR (CTestDETCTR,    # Detector NAME
+                  iVUEdetctr,     # VIEW of Detector
+                  CTestTARG,      # Detectee NAME
+                  iTYPE,          # Detectee's UNT type
+                  ird$Latitude$F, # Detectee latitude
+                  ird$Longitude$F,# Detectee longitude
+                  ird$COURSE$i,  # Detectee Course, 0-359
+                  ird$Speed$i,     # Detectee Speed
+                  iCharPntr,      # Detectee Charac. Pointer
+                  ird$Motion$i,   # $UAV$Fixed or $UAV$Mobile
+                  SpeedRatio,     # for Damage Assessment
+                  iKNOW,          # 3 Flags (DET/RECOG/IDENT)
+                  Unt$Pointer,        # jb Detector, for LDX 5/7/92
+                  Unt2$Pointer,       # jb Detectee, for LDX 5/7/92
+                  SLRANGE,            # jb for LDX entry      5/8/92
+                  BRG      )          # jb for LDX entry      5/8/92
+                                  #    iKNOW [1]  [2]   [3]
+########################################################
+#$%
+#$% Purpose:   repIR places EO/IR detection/recognition/
+#$%   identification data in table bbIRD, for eventual
+#$%   display to a View controlling UAV('s)
+#$%
+#$% Called By: EOIR
+#$%
+#$% Calls:     Obtain_View_Track_Nbr  <wgxcorlt.rat>
+#$%            Zero_IRD_Entry          <wgmdrem.rat>
+#$%
+#$% Tables:    IRD    UVP
+#$%
+#$% Date:      February 1990
+#$%
+#$% Author:    Joe Bryant
+#$%
+#$% Modified:  Carol Kropp - Sept. 1994 (E1082)
+#$%            Added calls to Obtain_View_Track_Nbr and
+#$%            Zero_IRD_Entry.  The track number is
+#$%            flagged as available or assigned.
+#$%
+########################################################
+BBcommon
+ 
+Literal    CTestTARG, CTestDETCTR
+LITERAL     CSTRIP8,                    # jb E2145 7/11/00
+    IRD$Detectorname$C,IRD$Targetname$C # jb E2145 7/11/00
+ 
+REAL BASIC_PB_DETECT,EMI_PB_DETECT,    # jb E2145  7/11/00
+     BRG,SLRANGE,SPEEDRATIO,           # jb E2145  7/11/00
+    IRD$Latitude$F,IRD$Longitude$F     # jb E2145  7/11/00
+ 
+Integer IPNTR,ICHARPNTR,               # jb E2145  7/11/00
+    IBASIC_RESULT,IEMI_RESULT,         # jb E2145  7/11/00
+    IDTE_PHASE,IDETECTION_TYPE,        # jb E2145  7/11/00
+    ITYPE,IVUEDETCTR,KCLASS            # jb E2145  7/11/00
+ 
+Integer IRD$Pointer,IRD$Course$I,      # jb E2145  7/11/00
+    IRD$Speed$I,IRD$Trackseq$I,        # jb E2145  7/11/00
+    IRD$Motion$I,IRD$Damagelevel$I     # jb E2145  7/11/00
+Integer IRD2$Pointer,UNT$Pointer,      # jb E2145  7/11/00
+        UNT2$Pointer, VUE$Pointer      # jb E2145  7/11/00
+Integer    NEWptr, iUseOLD
+Integer LCOMP           # jb AAI01/LCOMP    2/14/01
+BYTE iKNOW[3]    # repIR argument; $DTECT/$RECOG/$IDENT flags
+ 
+NEWptr  = $NO
+iUseOLD = $NO
+    ## JOE .. consider supporting and using OK
+For(ird$Pointer$First; ird$Pointer$OK; ird$Pointer$Next)
+   {
+    if (LCOMP(Xird$DETECTORname$C,CTestDETCTR) == 0  & # jb AAI01/LCOMP 2/14/01
+        LCOMP(Xird$TARGETname$C,CTestTARG) == 0 )      # jb AAI01/LCOMP 2/14/01
+       {
+        iUseOLD = $YES
+        BREAK
+       }
+    else if (NEWptr == $NO & Xird$TrackSEQ$i < 1)
+       {
+        NEWptr = ird$Pointer
+       }
+   }
+ 
+If (NEWptr == $NO & iUseOLD == $NO) # Need to exceed high-water-
+   {                                #    mark in table    5/10/90
+    ird2$Pointer = ird$Pointer + ird$ENTRY
+    if(ird2$Pointer$VALID)    # Avoid wandering out of table..
+       {
+        IRD$used = IRD2$pointer$index * IRD$entry # Update $USED..
+        NEWptr = ird2$pointer
+       }
+   }
+ 
+If (NEWptr != $NO)    # IF A NEW SLOT will be used.
+   {
+    ird$Pointer = NEWptr
+    call Zero_IRD_Entry (IRD$Pointer)
+ 
+    PUTird$View$i  (iVUEdetctr)
+    VUE$pointer$TO (iVUEdetctr)
+                                       #(none)
+    call Obtain_View_Track_Nbr (vue$pointer,$EOIR$Code,kclass,ird$TrackSEQ$i)
+        PUTird$TrackSEQ$i
+ 
+    ird$DETECTORname$C = CTestDETCTR
+    ird$tARGETname$C   = CTestTARG
+    PUTird$DETECTORname$C
+    putIRD$DetectorIndx$I (UNT$Pointer$Index) # added for use in postgame 10/92
+    PUTird$TARGETname$C
+    putIRD$TargetIndx$I (UNT2$Pointer$Index)  # added for use in postgame 10/92
+ 
+    PUTird$TargetType$I (iTYPE)   #             3/8/90
+ 
+    PUTird$Motion$i                    # (repIR argument)
+    PUTird$SHCpntr$i    (iCHARpntr)    # (Either SCH or ACC)
+ 
+#    if (IRD$last < IRD$pointer)                #    4/10/90
+#       {
+#        IRD$used = IRD$pointer$index * IRD$entry
+#       }
+ 
+   }    # End 'if a NEW slot ...'
+ 
+ 
+if (iUseOLD == $YES | NEWptr != $NO) # IRD tbl NOT overflowed
+   {
+    PUTird$Time$f (Game$Time)
+ 
+    if(SpeedRatio < EOIR$Damage$DESTROYED/100.)
+        ird$DAMAGElevel$i = $Destroyed$Code
+    else if(SpeedRatio < EOIR$Damage$SEVERE/100.)
+        ird$DAMAGElevel$i = $Severe$Code
+    else if(SpeedRatio < EOIR$Damage$MODERATE/100.)
+        ird$DAMAGElevel$i = $Moderate$Code
+    else if(SpeedRatio < EOIR$Damage$MINOR/100.)
+        ird$DAMAGElevel$i = $Minor$Code
+    else ird$DAMAGElevel$i = $NOdamage$Code
+    PUTird$DAMAGElevel$i
+ 
+    PUTird$Latitude$F    # (Lat. and Long. are REPIR inputs)
+    PUTird$Longitude$F
+ 
+    if (iKNOW[$IDENT] == $YES) PUTird$Identified$i ($YES)
+    if (iKNOW[$RECOG] == $YES) PUTird$Recognized$i ($YES)
+ 
+##  Answer to vector accuracy question:  use TRUE data  2/27/90
+    if(ird$Motion$i == $UAV$Mobile)
+       {
+        PUTird$COURSE$i
+        PUTird$Speed$i
+       }
+   }    # End if IRD table NOT overflowed
+ 
+ 
+ELSE                        # Table overflow
+   {
+    call echor
+    call echov ("EOIR Detection Table overflow")
+   }
+ 
+Return
+END

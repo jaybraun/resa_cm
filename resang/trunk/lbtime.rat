@@ -1,0 +1,780 @@
+include "bbcode.inc"
+include "bbctl.inc"
+include "time.inc"
+include "hstim.inc"
+ 
+#define(min$in$leapyear,(31622400./60.))
+#define(min$in$nonleapyear,(31536000./60.))
+ 
+define ($MinPerDay,(24.0 * 60. ))
+define (min$in$leapyear,(366 * $MinPerDay ))
+define (min$in$nonleapyear,(365 * $MinPerDay ))
+ 
+undefine err
+undefine read
+ 
+define (BBimplicit, Implicit None)
+
+integer Function Game_DTG(gmin)
+bbcommon
+integer dtg
+real gmin
+integer min_to_dtg, irc
+                   #  1   2    3   4    5
+real result_dtg[5] # yr, mo, day, hr, min
+ 
+# cal for DAY and TIME
+ 
+irc = min_to_dtg (Start$Time, gmin, result_dtg)
+ 
+dtg = int(result_dtg[3])*10000 + int(result_dtg[4])*100 + int(result_dtg[5])
+ 
+return(dtg)
+end
+
+integer Function Game_DTGs(gmin)  # Return DTG with seconds
+bbcommon
+integer dtg
+real gmin
+integer minute, second
+integer min_to_dtg, irc
+                   #  1   2    3   4    5
+real result_dtg[5] # yr, mo, day, hr, min
+ 
+# cal for DAY and TIME
+ 
+irc = min_to_dtg (Start$Time, gmin, result_dtg)
+minute = int(result_dtg[5])
+second = (result_dtg[5] - minute) * $Seconds$Per$Minute
+dtg = int(result_dtg[3])*1000000 + int(result_dtg[4])*10000 + minute*100 + second
+ 
+return(dtg)
+end
+
+###########################################################################
+ 
+integer Function Game_Time(gmin)
+BBcommon
+ 
+integer hrs, log, min
+real    gmin
+ 
+#partial cal for time
+ 
+log = mod(ZULU$StartTime + int(gmin), int($Minutes$Per$Day)) # JFR 1/13/94 - starttime in floating point
+ 
+min = mod(log,60)
+ 
+hrs = log/60
+ 
+return(hrs*100+min)
+end
+ 
+
+ 
+subroutine monday(_             # Given julian date, calculate month and day
+                  iyear,        # year (in) like 1999
+                  jday,         # Julian day (in)
+                  month,        # Month(out)
+                  iday)         # Day(out)
+ 
+IMPLICIT NONE
+ 
+integer iyear, jday, month, iday, leap_year
+ 
+#                     Jan,Feb,Mar,Apr,May,Jun,Jul,Aug,Sep,Oct,Nov,Dec,Error
+integer days_in [13] / 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31,99999/
+ 
+days_in[2] = 28 + leap_year(iyear)  # Adjust for leap_year
+ 
+iday = jday
+for (month = 1; iday > days_in[month]; month=month + 1)
+    {
+    iday = iday - days_in[month]
+    }
+ 
+if (month > 12)         # safety relief
+    {
+    month = 12          # Force it to last day of year
+    iday = days_in[12]
+    }
+ 
+return
+end
+ 
+
+ 
+Subroutine Load_Start_Time(_            # Read h.tim file
+                           scenario_name)
+ 
+BBImplicit
+TimCommon
+ 
+literal scenario_name
+integer k, i
+integer first_call/YES/
+real time_stamp                 # Time for next start time adjustment
+real current_time, current_time_in
+real tim_record_hold[tim$length]
+real tim_record_pend[tim$length]
+ 
+character cfile[64]
+vaxcharacter*64 v_cfile
+equivalence (cfile, v_cfile)
+ 
+repeat
+    {
+    if (first_call != YES) break
+ 
+    first_call = NO
+    k = 0
+    call smovhn (scenario_name, ARB, cfile, k)
+    call smovv  ("h.tim", cfile, k)
+    call smov   (EOS, cfile, k)
+ 
+    open(UNIT   =  $lfc$time,
+        FILE    =  v_cfile,
+        ACCESS  =  'SEQUENTIAL',
+        FORM    =  'UNFORMATTED',
+        STATUS  =  "OLD")
+ 
+    # Initialize dtg, setup header
+ 
+    read($lfc$time,END=800,ERR=850)tim$record
+    time_stamp = Xtim$EndRecordTime$f       # Time that start time adjusted
+    current_time = time_stamp
+    # copy active buffer to pending buffer
+    for (i=1;i<=tim$length;i=i+1) tim_record_pend[i] = fhs_tim[i]
+    } until (1 == 1)
+ 
+repeat
+    {
+    break
+    entry check_for_next_start_time (current_time_in)
+ 
+    current_time = current_time_in
+    }
+ 
+return
+ 
+800
+    return
+ 
+850
+    print *, ' Read error in tim history file '
+    stop
+ 
+end
+
+ 
+ 
+Subroutine Convert_to_gm (time,         # input - the DTG
+                          game_minute)  # output - the corresponding game minute
+ 
+################################################################
+#$%
+#$% Purpose:   Convert_to_gm converts the Date-Time-Game (DTG)
+#$%            into the corresponding game minute.
+#$%
+#$% Called By: Delete_SPA   Define_SPA
+#$%
+#$% Calls:     INT          MOD         dtg_to_min
+#$%
+#$% Tables:    None
+#$%
+#$% Date:      October 1991
+#$%
+#$% Author:    Carol L. Kropp
+#$%
+#$% Modified:  Carol Kropp - 4/96 (E1561)
+#$%            The modifications for variable time caused bad
+#$%            game time information to be returned.  No longer
+#$%            need to subtract one from the entered zulu day
+#$%            since zuu does not start out as day 1 (was assuming
+#$%            day was in the next month).  Also the call to
+#$%            dtg_to_min had the arguments in the wrong order.
+#$%
+################################################################
+BBCommon
+ 
+integer  time
+real     game_minute
+integer  min, hr, day
+integer irc, min_to_dtg, dtg_to_min, igm
+real input_dtg[5]
+real result_dtg[5]
+ 
+min = MOD (time, 100)
+hr  = INT ((MOD (time, 10000) - min) * 0.01)
+day = INT (time * 0.0001)
+ 
+ 
+# DTG of current simulation time
+irc = MIN_TO_DTG (Start$Time,   # dtg of time step 0; 5 element array
+                                #  1-year,2-mon,3-day,4-hr,5-min
+                  Game$Time,    # minutes to be added to start$time
+                  Result_dtg)   # Resultant dtg yr,mo,da,hr,min
+ 
+input_dtg[1] = result_dtg[1]            # Assume current year and month
+input_dtg[2] = result_dtg[2]
+ 
+if (day < result_dtg[3])                # Possibly next month
+{
+    if ((result_dtg[3] - day) > 10)     # Next month if over 10 days
+    {
+        input_dtg[2] = input_dtg[2] + 1 # Bump month
+        if (input_dtg[2] > 12)          # Bump year
+        {
+            input_dtg[1] = input_dtg[1] + 1
+            input_dtg[2] = 1
+        }
+    }
+}
+ 
+input_dtg[3] = day
+input_dtg[4] = hr
+input_dtg[5] = min
+ 
+irc = dtg_to_min (start$time, input_dtg, game_minute)
+igm = game_minute + 0.5
+game_minute = igm
+ 
+return
+end
+ 
+
+ 
+Integer function MIN_TO_DTG(_           # Convert time-step to DTG
+                      InitDtg,          # dtg of sim time 0; 5 element array
+                                        #  1-year,2-mon,3-day,4-hr,5-min
+                      deltatime,        # minutes to be added to InitDtg:in:float:min
+                      Resultdtg)        # Resultant dtg ddhhmmss:real array: out
+ 
+########################################################################
+#$%                                                                  %$#
+#$%  Purpose:  Convert a time-step to a DTG for output display.      %$#
+#$%                                                                  %$#
+#$%#####################################################################
+ 
+IMPLICIT NONE
+ 
+real InitDtg[5], deltatime, ResultDtg[5]
+integer dtg_to_offset, offset_to_dtg
+integer return_code
+real*8 basemin, sum_min
+ 
+return_code = dtg_to_offset (InitDtg, basemin)
+ 
+if (return_code == 0)
+    return[ return_code ]
+ 
+sum_min = basemin + deltatime + .0001   # Fudge factor to nearest second
+ 
+return_code = offset_to_dtg (sum_min, ResultDtg)
+ 
+return[ return_code ]
+end
+ 
+ 
+
+ 
+Integer function DTG_TO_MIN(_           # Difference in minutes between two dtgs
+                      InitDtg,          # dtg of time 0; 5 element array
+                                        #  1-year,2-mon,3-day,4-hr,5-min
+                      Inputdtg,         # Input dtg:in:int dtg array
+                      Interval)         # resultant Inputdtg - InitDtg
+ 
+########################################################################
+#$%                                                                  %$#
+#$%  Purpose:  Calculate interval in minutes between two dtgs.       %$#
+#$%                                                                  %$#
+#$%#####################################################################
+ 
+IMPLICIT NONE
+ 
+real initDtg[5], Inputdtg[5], interval
+integer irc
+real*8 init_interval, input_interval
+integer dtg_to_offset
+ 
+irc = dtg_to_offset (InitDtg, init_interval)
+if (irc == 0)
+    return ( irc )
+ 
+irc = dtg_to_offset (InputDtg, input_interval)
+ 
+interval = input_interval - init_interval
+ 
+return ( irc )
+end
+ 
+
+ 
+Integer function offset_to_dtg(_        # Minutes from Jan 1, 1980 to dtg
+                            offset,     # Minutes from ref date:in:float:min
+                            dtg)        # date time:out:float array:y,m,d,h,m
+ 
+IMPLICIT NONE
+ 
+real*8 offset
+real dtg[5]
+real sdtg[5]
+real*8 woffset, min_in_year
+real minute
+integer year, month, day, hour, julian_day, irc
+integer leap_year
+ 
+data sdtg/1980.,1.,1.,0.,0./
+ 
+woffset = offset
+ 
+if (woffset < 0.)
+    return[ 0 ]
+ 
+year = sdtg[1]
+irc = 1
+ 
+repeat
+    {
+    if (leap_year(year) == YES) min_in_year = min$in$leapyear
+    else                 min_in_year = min$in$nonleapyear
+ 
+    if (woffset < min_in_year) break
+ 
+    year = year + 1
+    woffset = woffset - min_in_year
+    }
+ 
+julian_day = (int(woffset) / int($Minutes$Per$Day)) + 1
+ 
+call monday(_                   # Given julian date, calculate mon and day
+             year,              # year like 1982
+             julian_day,        # Julian day
+             month,             # Month(out)
+             day)               # Day(out)
+ 
+ 
+woffset = woffset - (julian_day - 1) * int($Minutes$Per$Day)
+ 
+hour = int(woffset * $Hours$Per$Minute)
+woffset = woffset - hour * int($Minutes$Per$Hour)
+ 
+minute = woffset
+ 
+dtg[1] = year
+dtg[2] = month
+dtg[3] = day
+dtg[4] = hour
+dtg[5] = minute
+ 
+return[ irc ]
+end
+ 
+ 
+
+ 
+Integer function dtg_to_offset(_        # Minutes from Jan 1, 1980 to dtg
+                            dtg,        # date time:in:float array:y,m,d,h,m
+                            offset)     # Minutes from ref date:out:float:min
+IMPLICIT NONE
+ 
+real*8 offset
+real dtg[5]
+real sdtg[5]
+real*8 woffset
+integer julian_day, month, day, irc
+integer year, year_end
+integer leap_year, month_to_julian
+ 
+data sdtg/1980,1,1,0,0/
+ 
+year = sdtg[1]
+year_end = dtg[1]
+if (year_end < 100) year_end = year_end + 1900
+ 
+if (year_end < year)
+{
+    return[ 0 ]
+}
+ 
+irc = 1
+woffset = 0
+for (year = sdtg[1]; year < year_end; year = year + 1)
+    {
+    if (leap_year(year) == YES) woffset = woffset + min$in$leapyear
+    else                 woffset = woffset + min$in$nonleapyear
+    }
+ 
+month = dtg[2]
+day = dtg[3]
+ 
+julian_day =  month_to_julian(_         # Gregorian to julian day
+                                year_end,
+                                month,
+                                day)
+ 
+woffset = woffset + (julian_day - 1) * $Minutes$Per$Day
+ 
+offset = woffset + dtg[4] * $Minutes$Per$Hour + dtg[5]
+ 
+return[ irc ]
+end
+ 
+
+ 
+Integer function leap_year(             # Is given year a leap year
+                           year)        # year:in:integer
+ 
+IMPLICIT NONE
+integer year
+ 
+if ((mod(year,4) == 0 & mod(year,100) != 0) |
+    mod(year,400) == 0                       ) leap_year = YES
+else                                           leap_year = NO
+ 
+return
+end
+
+ 
+integer function month_to_julian(_              # Gregorian to julian day
+                                year,
+                                month,
+                                day)
+ 
+IMPLICIT NONE
+ 
+integer year, month, day, julian
+ 
+integer cum_days[12], leap_year
+ 
+data cum_days/0,31,59,90,120,151,181,212,243,273,304,334/
+ 
+julian = day
+ 
+if (month > 2)                  # Handle Leap Year
+    {
+    julian = julian + leap_year(year)
+    }
+ 
+julian = julian + cum_days[month]
+return [julian]
+ 
+end
+ 
+
+ 
+subroutine smovdatetime(_               # DTG array to string
+                   dtg,                 # DTG:in:array[5]:real
+                   str,                 # DTG(mm-dd-yyyy hh:mm):out:array:character
+                   len)                 # Current position in str:inout:integer
+ 
+IMPLICIT NONE
+ 
+real dtg[5]
+character str[ARB]
+integer len
+string month_text "xxJANFEBMARAPRMAYJUNJULAUGSEPOCTNOVDEC"
+ 
+call smoviz(int(dtg[3]),2,str,len)      # Day
+call smovh(month_text[int(dtg[2])*3],3,str,len)         # Month
+call smovi(int(dtg[1]),str,len)         # Year
+call smov  (COLON, str, len)
+call smoviz(int(dtg[4]),2,str,len)      # Hour
+call smoviz(int(dtg[5]),2,str,len)      # Minute
+call smov  (COLON, str, len)
+call smoviz(int((dtg[5]-int(dtg[5]))*$Seconds$Per$Minute),2,str,len)            # Second
+ 
+return
+end
+ 
+
+ 
+subroutine SmovNoyrMoDatetime(_         # DTG array to string
+                   dtg,                 # DTG:in:array[5]:real
+                   str,                 # DTG(dd-hhmm:ss):out:array:character
+                   len)                 # Current position in str:inout:integer
+ 
+IMPLICIT NONE
+ 
+real dtg[5]
+character str[ARB]
+integer len
+ 
+call smoviz(int(dtg[3]),2,str,len)              # Day
+call smov  (MINUS, str, len)
+call smoviz(int(dtg[4]),2,str,len)              # Hour
+call smoviz(int(dtg[5]),2,str,len)              # Minute
+call smov  (COLON, str, len)
+call smoviz(int((dtg[5]-int(dtg[5]))*$Seconds$Per$Minute),2,str,len)            # Second
+ 
+return
+end
+ 
+
+ 
+subroutine parse_dtg (_         # Convert input dtg string to real array
+                      line,     # dtg string: in:char:yyyymmddhhmmss
+                      dtg)      # Internal dtg format:out:real array:yy,mm,dd,hh,mm
+IMPLICIT NONE
+character line[ARB]
+real dtg[5]
+integer ctoi, len
+character wline[ARB]
+ 
+#1   5 7 9 B D
+#yyyymmddhhmmss
+ 
+len = 1
+call stcopy (line, 1, wline, len)
+ 
+len = 13
+dtg[5] = ctoi(wline, len) * $Minutes$Per$Second
+ 
+wline[13] = EOS
+len = 11
+dtg[5] = dtg[5] + ctoi(wline, len)
+ 
+wline[11] = EOS
+len = 9
+dtg[4] = ctoi(wline, len)
+ 
+wline[9] = EOS
+len = 7
+dtg[3] = ctoi(wline, len)
+ 
+wline[7] = EOS
+len = 5
+dtg[2] = ctoi(wline, len)
+ 
+wline[5] = EOS
+len = 1
+dtg[1] = ctoi(wline, len)
+ 
+ 
+return
+end
+
+Subroutine dtg_to_delta_min (dtg,            # input - the DTG
+                             look_back,      # input - window in minutes
+                             delta_minutes)  # output - the corresponding game minute
+ 
+################################################################
+#$%
+#$% Purpose:    Converts a 6 digit Date-Time-Group (DTG)
+#$%             into the delta minutes until that time arrives.
+#$%             If Delta_Minutes is negative, the DTG has come and gone,
+#$%             but only if it is fewer than Look_Back.
+#$%
+#$% Tables:     Start$Time
+#$%
+#$% Date:       August 2000
+#$%
+#$% Author:     Dane Wills
+#$%             Adapted from Convert_to_gm by Carol L. Kropp
+#$%
+################################################################
+BBCommon
+ 
+integer     dtg,
+            delta_minutes, look_back,
+            day, hr, min,
+            irc, dtg_to_min, min_to_dtg
+ 
+real        current_dtg[5], future_dtg[5],
+            future_minute
+ 
+# Use integer math on DDHHMM
+day = max(1, dtg / 10000 )
+hr  = MOD (dtg / 100, 100)
+min = MOD (dtg, 100)
+ 
+# DTG of current simulation time
+irc = MIN_TO_DTG (Start$Time,   # dtg of time step 0; 5 element array
+                                #  1-year,2-mon,3-day,4-hr,5-min
+                  Game$Time,    # minutes to be added to start$time
+                  current_dtg)  # computed current: yr,mo,da,hr,min
+ 
+future_dtg[1] = current_dtg[1]  # setup the year
+future_dtg[2] = current_dtg[2]  # Same month
+future_dtg[3] = day
+future_dtg[4] = hr
+future_dtg[5] = min
+ 
+# Compute Minute for Future DTG
+irc = dtg_to_min (start$time, future_dtg, future_minute)
+ 
+delta_minutes = future_minute - game$time
+
+if (delta_minutes > (15 * 24 * 60))     # If more than 15 days in future.. assume last month
+{
+    future_dtg[2] = current_dtg[2] -1   #  Assume prior Month
+	if (future_dtg[2] <= 0)				#
+	{
+		future_dtg[2] = future_dtg[2] + 12
+		future_dtg[1] = future_dtg[1] - 1
+	}
+ 
+    irc = dtg_to_min (start$time, future_dtg, future_minute)
+ 
+    delta_minutes = future_minute - game$time
+}
+ 
+if (delta_minutes < 0 &                 # If already past...
+    abs(delta_minutes) > look_back)     # by more than LOOK_BACK
+{
+    future_dtg[2] = current_dtg[2] + 1  #  Assume next Month
+	if (future_dtg[2] >= 12)
+	{
+		future_dtg[2] = future_dtg[2] - 12
+		future_dtg[1] = future_dtg[1] + 1
+	}
+ 
+    irc = dtg_to_min (start$time, future_dtg, future_minute)
+ 
+    delta_minutes = future_minute - game$time
+}
+ 
+return
+end
+
+
+# Get current date and wall clock time from system and format into dd-mmm-yyyy hh:mm:ss.hh
+Subroutine lib$date_time(date_time_v)
+vmschar*23 date_time_v
+vmschar*8 date_v
+vmschar*10 time_v
+vmschar*5 zone_v
+character str[24]
+integer len
+integer sys_time[8] #1-yr, 2-mo, 3-day, 4-UTC min offset, 5-hr, 6-min, 7-sec, 8-millisec
+string month_text "xxJANFEBMARAPRMAYJUNJULAUGSEPOCTNOVDEC"
+ 
+call date_and_time (date_v,time_v,zone_v,sys_time)      # get the system date/time (Yr/Mo/Day/Hr/Min/Sec/hsec)
+ 
+len = 0
+call smoviz(sys_time[3],2,str,len)      # Day
+call smov  (MINUS, str, len)
+call smovh(month_text[sys_time[2]*3],3,str,len)# Month
+call smov  (MINUS, str, len)
+call smovi(sys_time[1],str,len)         # Year
+call smov  (BLANK, str, len)
+call smoviz(sys_time[5],2,str,len)      # Hour
+call smov  (COLON, str, len)
+call smoviz(sys_time[6],2,str,len)      # Minute
+call smov  (COLON, str, len)
+call smoviz(sys_time[7],2,str,len)      # Second
+call smov  (PERIOD, str, len)
+call smoviz(sys_time[8]/10,2,str,len)   # hundredth second
+call smov  (EOS, str, len)
+ 
+call rs2fs(str, date_time_v)
+ 
+return
+end
+ 
+
+ 
+Integer function month2int (month)
+ 
+integer i, kk, equal
+character monstr[4]
+string month_text "JANFEBMARAPRMAYJUNJULAUGSEPOCTNOVDEC"
+ 
+for (i=1; i <= 12; i = i + 1)
+{
+    kk = 0
+    call smovh(month_text[(i-1)*3+1], 3, monstr, kk)
+    call smov (EOS, monstr, kk)
+    if (equal (month, monstr)== YES) break
+}
+ 
+if (i > 12) i = 0
+ 
+return (i)
+end
+ 
+ 
+
+ 
+Subroutine dtg_arith (indtg, value, outdtg)
+# Add value to string input DTG and output string output DTG
+implicit none
+character indtg[7]
+character outdtg[7]
+real      value
+real      realdtg[5]
+real*8    offset
+integer   dtg_to_offset
+integer   offset_to_dtg
+integer   irc
+ 
+call strdtg_to_realdtg (indtg, realdtg)
+ 
+irc = dtg_to_offset (realdtg, offset)
+ 
+offset = offset + value
+ 
+irc = offset_to_dtg (offset, realdtg)
+ 
+call realdtg_to_strdtg (realdtg, outdtg)
+ 
+return
+end
+ 
+
+ 
+subroutine strdtg_to_realdtg (indtg, realdtg)
+BBcommon
+real      realdtg[5] # 1 - yyyy; 2 - mm; 3 - dd; 4 - hh; 5 - mm
+real      current_dtg[5]
+integer   kk
+integer   ctoi
+character indtg[7]
+character day[3]
+character hr[3]
+character min[3]
+ 
+integer  min_to_dtg, irc
+ 
+kk = 0; call smovh (indtg,    2, day, kk); call smov (EOS, day, kk)
+kk = 0; call smovh (indtg[3], 2, hr,  kk); call smov (EOS, hr,  kk)
+kk = 0; call smovh (indtg[5], 2, min, kk); call smov (EOS, min, kk)
+ 
+# DTG of current simulation time
+irc = MIN_TO_DTG (Start$Time,   # dtg of time step 0; 5 element array
+                                #  1-year,2-mon,3-day,4-hr,5-min
+                  Game$Time,    # minutes to be added to start$time
+                  current_dtg)  # computed current: yr,mo,da,hr,min
+ 
+realdtg[1] = current_dtg[1]
+realdtg[2] = current_dtg[2]
+kk = 1
+realdtg[3] = ctoi(day, kk)
+kk = 1
+realdtg[4] = ctoi(hr, kk)
+kk = 1
+realdtg[5] = ctoi(min, kk)
+ 
+return
+end
+ 
+ 
+
+ 
+subroutine realdtg_to_strdtg (realdtg, outdtg)
+implicit none
+real      realdtg[5] # 1 - yyyy; 2 - mm; 3 - dd; 4 - hh; 5 - mm
+integer   kk
+integer   ctoi
+character outdtg[7]
+ 
+kk = 0
+call smoviz (int(realdtg[3]), 2, outdtg, kk)
+call smoviz (int(realdtg[4]), 2, outdtg, kk)
+call smoviz (int(realdtg[5]), 2, outdtg, kk)
+call smov   (EOS, outdtg, kk)
+ 
+return
+end
+ 
+ 

@@ -1,0 +1,1014 @@
+ 
+ 
+              #        File wgmdLIDAR.rat    (LIDAR Sensor Model)
+ 
+define (feet$to$meter$mult, 3.28)           # 3.28 ft ~= 1 meter
+define (MAX$Detectable$Sub$Depth, 500)      # Max sub depth (ft) for detection
+define (LIDAR$Search$Range, 10)             # Ten nautical mile search range
+ 
+define (BBImplicit,Implicit None)
+define ($debug,)
+ 
+include "bbcode.inc"
+include "bbctl.inc"
+include "bbacc.inc"
+include "bbdeq.inc"
+include "bbrmt.inc"
+include "bbshc.inc"
+include "bbunt.inc"
+include "bbvue.inc"
+include "bbler.inc"
+include "bbldk.inc"
+include "macros.inc"
+define (BBImplicit, Implicit None)                  # MJC 7/13/2K (E2145)
+
+Subroutine LIDARMOD
+##################################################################
+#
+#    Purpose:  The LIDAR non-acoustic sensor model is called to
+#    determine whether any aircraft with activated LIDAR sensors
+#    detect submarine targets.
+#
+#    Called By: WARCYC  (wgmain.rat)
+#
+#    Calls:     compute_LIDAR_swath
+#               compute_pd
+#               report_LIDAR_detection
+#
+#    Tables:    UNT
+#
+#    Date:      February 1991
+#
+#    Author:    Susan Miller and Carol Kropp
+#
+##################################################################
+BBcommon
+BBDeclare  (DEQ$Pointer,
+            UNT$View$I,
+            UNT2$Status$I)                      # MJC 7/11/2K (E2145)
+real RANDOM , x                                    # MJC 7/11/2K (E2145)
+literal CSTRIP8                                 # MJC 7/13/2K (E2145)
+integer    unt$Pointer, unt2$Pointer, unt_status
+integer    ac_altitude_ft, sub_depth_ft, LIDAR_on, sub_in_swath
+integer*4  ACC$Pointer
+real*4     range_nmi, bearing
+real*4     ac_latitude, ac_longitude
+real*4     sub_latitude, sub_longitude
+real*4     detection_probability
+data x/0.0/		# Get next random number in sequence
+#---------------------------------------------------------------------
+#   First, determine whether the unit is a flying aircraft equipped
+#   with LIDAR and LIDAR has been turned ON.  If so, is the aircraft
+#   flying at an altitude at or below the maximum detection altitude
+#   (6000 meters)?  If the above conditions are met, determine if any
+#   submarines not in the plane's view are within the LIDAR swath and
+#   are at a depth above 500 feet.  If there are any submarines
+#   which meet these conditions, determine the detection probability.
+#   If the detection probability is less than a uniform random
+#   number, then a detection will occur.
+#
+#   If any submarine is within the LIDAR swath at a depth above
+#   500 ft., then the submarine's view is notified that the submarine
+#   is detecting an airborne light beam.
+#---------------------------------------------------------------------
+ 
+if (LDK$Used == 0)      # No LIDAR environment file were loaded...
+  return
+ 
+For (UNT$Pointer$FIRST; UNT$Pointer$OK; UNT$Pointer$NEXT)
+   {
+    if (Xunt$Type$i != $AIR$Code)    # if not an aircraft
+       NEXT
+ 
+    if (xUNT$GhostedUnit$I == $YES)  next # skip ghosted aircraft SMM 5/18/92
+ 
+    unt_status = Xunt$status$i
+    if (unt_status == $AwaitingLaunch$code |  # if awaiting launch,
+        unt_status == $beingdeleted$code)     # or being deleted
+       NEXT
+ 
+    ACC$Pointer = Xunt$AccPntr$i
+    if (xACC$LIDARcapable$i == $NO)    # if not equipped with LIDAR
+       NEXT
+ 
+    LIDAR_on = $NO
+    FOR_DEQ_CHAIN
+       {
+        if (Xdeq$IDENT$i != $LIDAR$code)
+           NEXT
+        if ((Xdeq$ON$i == $YES) & (Xdeq$TimeWhenUse$f <= game$time))
+           LIDAR_on = $YES
+        BREAK
+       }
+    if (LIDAR_on == $NO)
+       NEXT
+ 
+    ac_latitude  = xUNT$TrueLatitude$F
+    ac_longitude = xUNT$TrueLongitude$F
+ 
+    if (trace$LIDAR != $No)
+       {
+        call echor
+        call echov ("   Game-Minute=")
+        call echoi (Game$Minute)
+        call echor
+        call echov (" Aircraft : ")
+        call echohn (xUNT$name$c,$$MaxLit)
+        call echov ("    altitude (ft) = ")
+        call echoi (ac_altitude_ft)
+        call echov ("    true latitude = ")
+        call echof (ac_latitude,3)
+        call echov ("    true longitude = ")
+        call echof (ac_longitude,3)
+        call echov ("    heading error = ")
+        call echof (xUNT$HeadingError$f,3)
+       }
+ 
+#*************************************************************************
+ 
+#------------------------------------------------------------------
+#   Determine if there are any target submarines within a ten
+#   mile range at a depth above 500 feet.  If so, determine
+#   if it is within the LIDAR swath and determine the detection
+#   probability.  Targets are screened as to unit type, view,
+#   status, depth, and latitude and longitude difference.
+#------------------------------------------------------------------
+ 
+    unt$View$i = Xunt$View$i    # Save for comparison with targets
+ 
+    For(unt2$Pointer$FIRST;unt2$Pointer$OK;unt2$Pointer$NEXT)
+       {
+        if (Xunt2$SuperType$i != $Submarine$SuperCode)    # if not a submarine
+           NEXT
+ 
+        if (Xunt2$View$i == unt$View$i)               # if in the same view
+           NEXT
+ 
+        unt2$status$i = Xunt2$status$i
+        if (unt2$status$i == $beingdeleted$code)      #$% if being deleted
+           NEXT
+ 
+        if (Xunt2$NeverDetect$i == YES) next        # joa 3/05 per_never
+ 
+        sub_depth_ft = Xunt2$TrueAltDepth$i
+        if (sub_depth_ft > Max$Detectable$Sub$Depth)  # sub is above 500 ft deep
+           NEXT
+ 
+        ac_altitude_ft = Xunt$TrueAltDepth$i
+ 
+        sub_latitude = (Xunt2$TrueLatitude$F)
+        sub_longitude = (Xunt2$TrueLongitude$F)
+ 
+        Call RLL2RB(_           #Rhumb line Lat/Lon to Range/Bearing
+            ac_latitude,        #latitude of 1st pt (input)
+            ac_longitude,       #longitude of 1st pt (input)
+            COS(ac_latitude),   #cos of lat of 1st pt (input)
+            sub_latitude,       #latitude of 2nd pt (input
+            sub_longitude,      #longitude of 2nd pt (input)
+            COS(sub_latitude),  #cos of lat of 2nd pt (input)
+            range_nmi,          #range in nmi (output)
+            bearing)            #bearing in radians (output)
+ 
+        if (range_nmi > LIDAR$Search$Range)   # if out of range
+           NEXT
+ 
+        if (trace$LIDAR != $No)
+          {
+           call echor
+           call echov (" Possible sub target : ")
+           call echohn (xUNT2$name$c,$$MaxLit)
+           call echor
+           call echov ("    depth (ft) = ")
+           call echoi (sub_depth_ft)
+           call echov ("    course (radians) = ")
+           call echof (Xunt2$TrueCourse$F, 3)
+           call echor
+           call echov ("    true latitude = ")
+           call echof (sub_latitude, 3)
+           call echov ("    true longitude = ")
+           call echof (sub_longitude, 3)
+           call echor
+           call echov ("    range (nmi) = ")
+           call echof (range_nmi, 3)
+           call echov ("    true bearing (radians) = ")
+           call echof (bearing, 3)
+          }
+ 
+        Call compute_LIDAR_swath (_   # Compute the swath
+             ac_altitude_ft,
+             Xunt$TrueSpeed$F,        # the true speed of the aircraft
+             Xunt$TrueCourse$F,       # the true course of the aircraft (radians)
+             range_nmi,               # range from aircraft to sub
+             bearing,                 # bearing from aircraft to sub (radians)
+             sub_in_swath)            # (output) is the sub within the swath
+ 
+        if (sub_in_swath == $No)      # then the submarine is not within the
+          NEXT                        # LIDAR swath
+ 
+        if (Xunt2$View$i >= $FirstOrange$View)
+          Call notify_sub (_            # Notify the sub of the LIDAR beam
+                           unt2$Pointer)
+ 
+        Call compute_pd (_            # Compute the detection probability
+             ac_altitude_ft,
+             sub_depth_ft,
+             sub_latitude,
+             sub_longitude,
+             xUNT$InDayLight$I,       # day or night
+             detection_probability)   # probability  (output)
+ 
+        if (detection_probability >= RANDOM(x))
+          NEXT
+ 
+        if (trace$LIDAR != $No)
+          {
+           call echor
+           call echov (" Detected sub target : ")
+           call echohn (xUNT2$name$c,$$MaxLit)
+           call echor
+          }
+ 
+        Call report_LIDAR_detection (_  # Report the LIDAR detection
+             unt$Pointer,
+             unt2$Pointer,
+             range_nmi,
+             bearing)
+ 
+       } # end of for loop - search for targets
+   } # end of for loop - aircraft detectors
+Return
+END
+
+ 
+ 
+Subroutine compute_LIDAR_swath (ac_altitude_ft,
+                                ac_speed_knots, # the speed of the aircraft
+                                ac_course,      # the course of the aircraft
+                                range_nmi,      # from aircraft to sub
+                                bearing,        # from aircraft to sub (radians)
+                                sub_in_swath)   # (output) is sub w/in swath
+ 
+#--------------------------------------------------------------------
+#   Purpose:  compute_LIDAR_swath will compute the box shaped LIDAR
+#   swath based on the course, speed and altitude of the aircraft.
+#   The location of the swath is determined by the aircraft position.
+#   Then it will be determined if the submarine is within the swath
+#   area, this information is return through the sub_in_swath
+#   argument.
+#
+#   Called By: LIDARMOD
+#
+#   Calls:     ASB          SQRT          TAN          ATAN
+#
+#   Tables:    None
+#--------------------------------------------------------------------
+BBcommon
+ 
+integer*4  ac_altitude_ft, sub_in_swath
+real*4     ac_course, ac_speed_knots
+real*4     bearing, range_nmi
+real*4     swath_length, swath_radius, swath_width, half_swath_width
+real*4     angle_to_sub            # the difference between aircraft heading
+                                   # and the bearing of the sub
+real*4     phi, tan_phi
+real*4     X, Y, max_range_in_swath
+ 
+  sub_in_swath = $No
+ 
+  angle_to_sub = ABS (bearing - ac_course)
+ 
+  if (trace$LIDAR != $No)
+    {
+     call echor
+     call echov ("Aircraft course = ")
+     call echof (ac_course, 3)
+     call echov ("          Bearing to sub =")
+     call echof (bearing, 3)
+     call echor
+     call echov ("Angle to the sub (bearing - course) = ")
+     call echof (angle_to_sub, 3)
+     call echor
+    }
+ 
+  #$%  If the angle_to_sub <= pi/2 then the sub is in front of the aircraft
+  if (angle_to_sub <= $PI/2.0)
+    {
+ 
+    if (trace$LIDAR != $No)
+      {
+       call echov("We're in compute lidar swath")
+       call echor
+       call echov ("The aircraft altitude = ")
+       call echoi (ac_altitude_ft)
+       call echov (" and the speed = ")
+       call echof (ac_speed_knots, 3)
+       call echor
+      }
+ 
+     swath_radius = (ac_altitude_ft * 0.5) / 6000.0
+     swath_length = ac_speed_knots * model$interval * $Hours$Per$Minute +
+                    swath_radius
+     swath_width  = 2.0 * swath_radius
+     half_swath_width = 0.5 * swath_width
+ 
+     tan_phi = half_swath_width / swath_length
+     phi = ATAN (tan_phi)       # angle (in radians) wich divides the envelop
+                                # into regions
+ 
+     if (trace$LIDAR != $No)
+       {
+        call echov ("swath radius = ")
+        call echof (swath_radius, 3)
+        call echov ("     swath length = ")
+        call echof (swath_length, 3)
+        call echov ("     swath width = ")
+        call echof (swath_width, 3)
+        call echor
+        call echov ("phi (radians) = ")
+        call echof (phi, 3)
+        call echor
+       }
+ 
+     #$% if the submarine is within the angle bounded by the line of sight (LOS)
+     #$% and the farthest corner of the swath
+     if (angle_to_sub <= phi)   # looking toward the swath ahead
+       {
+        # X = the distance perpendicular to the LOS on the far side of the swath
+        X = swath_length * TAN (angle_to_sub)
+        max_range_in_swath = SQRT ((X*X) + (swath_length*swath_length))
+       }
+     else
+       {
+        # Y = the distance along the LOS to form a right triangle
+        Y = half_swath_width * TAN (($PI/2) - angle_to_sub)
+        max_range_in_swath = SQRT ((Y*Y) + (half_swath_width*half_swath_width))
+       }
+ 
+     if (range_nmi <= max_range_in_swath)
+       sub_in_swath = $Yes
+    } # end if the sub is in front of the aircraft
+ 
+  if (trace$LIDAR != $No)
+    {
+     call echov("The max range within the swath is ")
+     call echof(max_range_in_swath,3)
+     call echor
+     call echov("Now leaving compute...")
+     call echor
+    }
+ 
+Return
+END
+
+ 
+Subroutine notify_sub (unt2$Pointer)
+ 
+#--------------------------------------------------------------------
+#   Purpose:  notify_sub will notify the view to which the submarine
+#   belongs that it is detecting an airborne light beam from the
+#   LIDAR system.  The notice will be printed on the i/o terminal
+#   screen.
+#
+#   Called By: LIDARMOD
+#
+#   Calls:
+#
+#   Tables:
+#--------------------------------------------------------------------
+BBcommon
+literal CSTRIP8                                         # MJC 7/13/2K (E2145)
+integer*4   unt2$Pointer
+integer*4   msg_len
+character   msg[80]
+ 
+  #$% move unit name to msg array
+  msg_len = 0
+  Call SMOVHN (xUNT2$Name$C, $$MaxLit, msg, msg_len)    # submarine unit name
+  Call SMOVV (" Airborne Light Beam Detected.", msg, msg_len)
+  #$% display message
+  call send_ (xUNT2$View$I, 0, msg_len, msg)
+ 
+Return
+END
+
+ 
+ 
+Subroutine compute_pd (ac_altitude_ft,     # aircraft altitude
+                       sub_depth_ft,       # submarine depth
+                       sub_lat,            # sub's latitude (radians)
+                       sub_long,           # sub's longitude (radians)
+                       in_day_light,       # is target in day or night
+                       final_prob)         # the detection probability
+ 
+#---------------------------------------------------------------------------
+#   Purpose:  Finds the probability of detection by extracting the K
+#             value from the appropriate LER region, matching that K
+#             value with the same K value in the LDK table and extracting
+#             the probability after matching the time of day (day or night),
+#             altitude of the aircraft in meters, and depth of the submarine
+#             in feet.
+#
+#   Called By: LIDARMOD
+#
+#   Calls:     lidar_region
+#              which_altitude
+#              which_depth
+#              get_kvalue_index
+#              interpolate_prob
+#
+#   Tables:    LDK
+#
+#   Date:      March 1991
+#
+#   Author:    Susan Miller and Carol Kropp
+#
+#-------------------------------------------------------------------------
+BBcommon
+BBDeclare  (LER$Pointer,
+            LDK$KV$Index)                           # MJC 7/11/2K (E2145)
+integer*4  ac_altitude_ft, sub_depth_ft, table_depth
+integer*4  ac_altitude_meters, min_altitude, max_altitude
+integer*4  region_nbr, in_day_light
+integer    interpolate_flag, save_pointer
+integer    save_index
+integer    LDK$Pointer
+real*4     sub_lat, sub_long
+real*4     detect_prob, second_prob, final_prob
+real       k_value
+ 
+  final_prob = 0.0
+  ler$pointer$first      # go to beginning of LER table
+ 
+  call lidar_region (sub_lat, sub_long, region_nbr, k_value)  # find region
+ 
+  if (trace$LIDAR != $No)
+    {
+     call echov ("The lidar region is ")
+     call echoi (region_nbr)
+     call echov (" and the K value is ")
+     call echof (k_value,4)
+     call echor
+    }
+ 
+  if (region_nbr < 1 | region_nbr > LER$Slots)
+    return
+ 
+  max_altitude = 0
+  interpolate_flag = $NO
+ 
+  call which_altitude (ac_altitude_ft,       # input
+                       min_altitude,         # output
+                       max_altitude,         # output
+                       interpolate_flag)     # output
+ 
+  call which_depth (sub_depth_ft,    # input
+                    table_depth)     # output
+ 
+  call get_kvalue_index(k_value,         # input
+                        save_index)      # output
+ 
+  For (LDK$Pointer$First; LDK$Pointer$Valid; LDK$Pointer$Next)
+     {
+      if (xLDK$Time$I != in_day_light)
+         next
+      if (xLDK$AircraftAlt$I != min_altitude)  # check time and a/c alt
+            {
+             if (trace$LIDAR != $No)
+                {
+                 call echov ("No match for first alt, alt = ")
+                 call echoi (xLDK$AircraftAlt$I)
+                 call echov (", time of day = ")
+                 call echoi (xLDK$Time$I)
+                 call echor
+                }
+             next
+            }
+      save_pointer = LDK$Pointer        # save the pointer for the match
+      if (trace$LIDAR != $No)
+         {
+          call echov ("Inside loop through LDK pointers ")
+          call echov ("the save_pointer is ")
+          call echoi (save_pointer)
+          call echor
+          call echov ("The first alt check is ")
+          call echoi (xLDK$AircraftAlt$I)
+          call echor
+         }
+      for (LDK$Pointer = save_pointer; LDK$Pointer$Valid; LDK$Pointer$Next)
+          {
+           if (xLDK$SubDepth$i != table_depth)      # find a sub depth match
+              next
+           LDK$KV$index = save_index                # save the index
+           detect_prob = xLDK$KV$DetectionProb$F
+           if (trace$LIDAR != $No)
+              {
+               call echov ("It's a match, The table depth is ")
+               call echoi (table_depth)
+               call echor
+               call echov ("The detection probability is ")
+               call echof (detect_prob,4)
+               call echor
+              }  # if trace$LIDAR != $no
+           break
+          }  # for loop
+          break
+     }   # loop through LDK table
+ 
+  if (interpolate_flag == $YES)
+     {                           # check for aircft alt match
+      For (LDK$Pointer$First; LDK$Pointer$Valid; LDK$Pointer$Next)
+         {
+          if (xLDK$Time$i != in_day_light)
+             next
+          if (xLDK$AircraftAlt$I != max_altitude)
+            {
+             if (trace$LIDAR != $No)
+                {
+                 call echov ("No match for second alt, alt = ")
+                 call echoi (xLDK$AircraftAlt$I)
+                 call echov (", pointer = ")
+                 call echoi (LDK$Pointer)
+                 call echor
+                }
+             next
+            }
+          save_pointer = LDK$Pointer
+          if (trace$LIDAR != $No)
+             {
+              call echov ("Interpolate flag is yes, The save pointer is ")
+              call echoi (save_pointer)
+              call echor
+              call echov ("Second altitude is ")
+              call echoi (xLDK$AircraftAlt$I)
+              call echor
+             }
+ 
+          for (LDK$Pointer = save_pointer; LDK$Pointer$Valid; LDK$Pointer$Next)
+              {
+               if (xLDK$SubDepth$i != table_depth)
+                  {
+                   if (trace$LIDAR != $No)
+                      {
+                       call echov ("Table_depth: ")
+                       call echoi (table_depth)
+                       call echov (", xdepth: ")
+                       call echoi (xLDK$SubDepth$I)
+                       call echov (" and pointer: ")
+                       call echoi (LDK$Pointer)
+                       call echor
+                      }
+                   next
+                  }
+               LDK$KV$index = save_index
+               second_prob = xLDK$KV$DetectionProb$F
+               if (trace$LIDAR != $No)
+                  {
+                   call echov ("It's a match, The table depth is ")
+                   call echoi (table_depth)
+                   call echor
+                   call echov ("The second detection probability is ")
+                   call echof (second_prob,4)
+                   call echor
+                  }  # if trace$LIDAR != $no
+               break
+              }  # for loop through LDK pointer
+          break
+         }  # for loop through LDK pointer
+ 
+         ac_altitude_meters = INT(ac_altitude_ft/feet$to$meter$mult)
+         if (trace$LIDAR != $No)
+            {
+             call echov ("The a/c alt in meters is ")
+             call echoi (ac_altitude_meters)
+             call echor
+            }
+ 
+         call interpolate_prob(ac_altitude_meters,  # input
+                               min_altitude,        # input
+                               max_altitude,        # input
+                               second_prob,         # input
+                               detect_prob,         # input
+                               final_prob)          # output
+ 
+         if (trace$LIDAR != $No)
+            {
+             call echov ("The interpolated probability is ")
+             call echof (final_prob,4)
+             call echor
+            }
+        }  # end if interpolate_flag == $yes
+ 
+Return
+END
+
+ 
+Subroutine lidar_region (sub_lat,       # radians
+                         sub_long,      # radians
+                         region_number, # (output)
+                         k_value)       # (output)
+#--------------------------------------------------------------------
+#   Purpose:   lidar_region determines which of the lidar
+#              environements the submarine is in.
+#
+#   Called By: compute_dp
+#
+#   Calls:     inout
+#
+#   Tables:    LER
+#--------------------------------------------------------------------
+BBcommon
+BBDeclare  (LER$Pointer,
+            LER$VER$Index)                              # MJC 7/11/2K (E2145)
+real*4  sub_lat, sub_long
+integer region_number
+real    x[6], y[6], k_value
+integer number_vertices, inflag
+ 
+  region_number = 99            # initialize outside range of 1 to 10
+  for (LER$pointer$first; LER$pointer$OK; LER$pointer$next)
+    {
+     number_vertices = xLER$NbrVertices$i
+     if(number_vertices < 1 | number_vertices > 6)
+       NEXT
+ 
+     for (LER$ver$index = 1; LER$ver$index <= number_vertices;
+                                   LER$ver$index = LER$ver$index + 1)
+       {
+        x[LER$ver$index] = xLER$ver$longitude$f  # get vertices' longitudes
+        y[LER$ver$index] = xLER$ver$latitude$f   # get vertices' latitudes
+       }
+ 
+     call inout(sub_long, sub_lat, number_vertices, x, y, inflag)   # note LON before LAT!..
+     if(inflag == $YES)
+       {
+        region_number = xLER$Region$i
+        k_value = xLER$Kvalue$f
+        BREAK
+       }
+    }
+ 
+return
+end
+ 
+
+ 
+Subroutine which_altitude (ac_altitude_ft,      # acft altitude from table
+                           min_altitude,        # output
+                           max_altitude,        # output
+                           interpolate_flag)    # output
+ 
+#--------------------------------------------------------------------
+#   Purpose:   Selects the altitude that is the closest to the four
+#              altitudes found in the LIDAR table.  If the altitude is
+#              between 500 and 6000, and not equal to 500, 1000, 3000,
+#              or 6000, then the k value will have to be interpolated,
+#              so, set the interpolate_flag to yes and store the lesser
+#              altitude and the greater altitude.
+#
+#   Called By: compute_pd
+#
+#   Calls:     NONE
+#
+#   Tables:    NONE
+#--------------------------------------------------------------------
+BBcommon
+ 
+integer*4  ac_altitude_ft, min_altitude, max_altitude
+integer    interpolate_flag
+ 
+  if ((ac_altitude_ft/feet$to$meter$mult) <= 500)
+     min_altitude = 500
+  else if ((ac_altitude_ft/feet$to$meter$mult) >= 6000)
+     min_altitude = 6000
+  else                       # altitude is between 500 and 6000 meters
+     if ((ac_altitude_ft/feet$to$meter$mult) > 500 &
+         (ac_altitude_ft/feet$to$meter$mult) <= 1000)
+        {
+         if ((ac_altitude_ft/feet$to$meter$mult) == 1000)
+             min_altitude = 1000
+         else
+             {               # extract two k values
+              min_altitude = 500
+              max_altitude = 1000
+              interpolate_flag = $YES
+             }
+        }
+  else
+      if ((ac_altitude_ft/feet$to$meter$mult) > 1000 &
+          (ac_altitude_ft/feet$to$meter$mult) <= 3000)
+        {
+         if ((ac_altitude_ft/feet$to$meter$mult) == 3000)
+             min_altitude = 3000
+         else
+             {               # extract two k values
+              min_altitude = 1000
+              max_altitude = 3000
+              interpolate_flag = $YES
+             }
+        }
+  else if ((ac_altitude_ft/feet$to$meter$mult) > 3000 &
+           (ac_altitude_ft/feet$to$meter$mult) < 6000)
+     {                       # extract two k values
+     min_altitude = 3000
+     max_altitude = 6000
+     interpolate_flag = $YES
+     }
+ 
+  if (trace$LIDAR != $No)
+    {
+     call echov ("Inside which_altitude ")
+     call echor
+     call echov ("The aircraft altitude in feet from the table is ")
+     call echoi (ac_altitude_ft)
+     call echor
+     call echov ("The aircraft altitude in meters is ")
+     call echoi (min_altitude)
+     call echor
+     call echov ("The second aircraft altitude in meters is ")
+     call echoi (max_altitude)
+     call echor
+     call echov ("The interpolate flag is set to ")
+     call echoi (interpolate_flag)
+     call echor
+    }
+ 
+Return
+END
+ 
+
+ 
+Subroutine which_depth (sub_depth_ft,    # input
+                        table_depth)     # output
+ 
+#--------------------------------------------------------------------
+#   Purpose:   Selects the depth that is the closest to one of the
+#              20 depths found in the LIDAR table.
+#
+#   Called By: compute_pd
+#
+#   Calls:     NONE
+#
+#   Tables:    LDK
+#--------------------------------------------------------------------
+BBcommon
+ 
+integer*4  sub_depth_ft, table_depth, last_depth
+integer    LDK$Pointer
+ 
+ last_depth = 0
+ 
+ for (LDK$Pointer$First; LDK$Pointer$Valid; LDK$Pointer$Next)
+    {
+     if (xLDK$ValueKey$I != 0)
+        next
+ 
+     if (sub_depth_ft >= xLDK$SubDepth$I)
+        {
+         table_depth = xLDK$SubDepth$I
+         if (table_depth < last_depth)
+            {
+             table_depth = last_depth
+             break
+            }
+         last_depth = xLDK$SubDepth$I
+         NEXT
+        }
+     else   # sub_depth_ft is < the table depth so save last depth
+         if (trace$LIDAR != $No)
+            {
+             call echov ("Inside else in which_depth ")
+             call echov ("the table depth in feet is ")
+             call echoi (table_depth)
+             call echor
+            }
+        BREAK
+    }
+Return
+END
+
+ 
+Subroutine get_kvalue_index (k_value,       # input
+                             save_index)    # output
+ 
+#--------------------------------------------------------------------
+#   Purpose:   Gets the index of the matching k value
+#
+#   Called By: compute_pd
+#
+#   Calls:     NONE
+#
+#   Tables:    LDK
+#--------------------------------------------------------------------
+BBcommon
+BBDeclare  (LDK$Pointer,
+            LDK$KV$Index)                               # MJC 7/11/2K (E2145)
+real       k_value
+integer    save_index
+ 
+  LDK$Pointer$First
+  if (trace$LIDAR != $No)
+     {
+      call echov ("Checking for value key  ")
+      call echor
+      call echov ("The pointer value is ")
+      call echoi (LDK$Pointer)
+      call echov (" and the K value is ")
+      call echof (k_value,8)
+      call echor
+  }
+  if (xLDK$ValueKey$I == 1)
+     {
+      For (LDK$KV$index = 1;
+           LDK$KV$index <= LDK$KV$Slots;
+           LDK$KV$index = LDK$KV$index + 1)
+         {
+          if (ABS(k_value - xLDK$KV$Value$F) <= 0.00001)
+             {
+              if (trace$LIDAR != $No)
+                 {
+                  call echov ("LDK$KV$Index is ")
+                  call echoi (LDK$KV$Index)
+                  call echov (" LDK$KV$Address is ")
+                  call echoi (LDK$KV$Address)
+                  call echor
+                  call echov (" LDK$KV$Position is ")
+                  call echoi (LDK$KV$Position)
+                  call echov (" LDK$KV$Value is ")
+                  call echof (xLDK$KV$Value$F,8)
+                  call echor
+                 }    # if trace$lidar is yes
+              save_index = LDK$KV$index
+              break
+             }
+          else
+             {
+              if (trace$LIDAR != $No)
+                 {
+                  call echov ("It's NOT a match! LDK$KV$Index is ")
+                  call echoi (LDK$KV$Index)
+                  call echov (" LDK$KV$Value is ")
+                  call echof (xLDK$KV$Value$F,8)
+                  call echor
+                 }    # if trace$lidar is yes
+              next
+             }
+         }   # for loop through index
+     }    #end loop if LDK$ValueKey$I = 1
+ 
+Return
+END
+
+ 
+Subroutine interpolate_prob(ac_altitude_meters, # input
+                            min_altitude,       # input
+                            max_altitude,       # input
+                            second_prob,        # input
+                            first_prob,         # input
+                            final_prob)         # output
+ 
+#--------------------------------------------------------------------
+#   Purpose:   Interpolates the probability of detection if the
+#              aircraft altitude doesn't correspond exactly to one
+#              of the four altitudes found in the LIDAR table.
+#
+#   Called By: compute_pd
+#
+#   Calls:     NONE
+#
+#   Tables:    LDK
+#--------------------------------------------------------------------
+BBcommon
+ 
+integer  ac_altitude_meters, min_altitude, max_altitude
+integer  altitude_diff
+real     product1, product2
+real*4   first_prob, second_prob, prob_diff
+real*4   final_prob
+ 
+  if (trace$LIDAR != $No)
+    {
+     call echov ("Inside Interpolate_prob: The first prob is ")
+     call echof (first_prob,4)
+     call echov (" and the second prob is ")
+     call echof (second_prob,4)
+     call echor
+     call echov ("The min altitude in meters is ")
+     call echoi (min_altitude)
+     call echov (".  The max altitude is ")
+     call echoi (max_altitude)
+     call echor
+    }
+ 
+  #$% get the value for the differences in the two altitudes
+  altitude_diff = max_altitude - min_altitude
+ 
+  #$% get the value of the differences in the two probabilities
+  prob_diff = second_prob - first_prob
+ 
+  #$% ratio of the differences
+  product1 = prob_diff / REAL(altitude_diff)
+ 
+  if (trace$LIDAR != $No)
+    {
+     call echov ("The altitude difference is ")
+     call echof (REAL(altitude_diff),4)
+     call echov (" and the probability difference is ")
+     call echof (prob_diff,4)
+     call echor
+     call echov ("The product of the differences is ")
+     call echof (product1,4)
+     call echor
+     call echov ("(ac_alt_meters - min_altitude) = ")
+     call echoi (ac_altitude_meters - min_altitude)
+     call echor
+    }
+ 
+  product2 = product1 * (ac_altitude_meters - min_altitude)
+ 
+  if (trace$LIDAR != $No)
+    {
+     call echov ("product1 * (a/c altitude - ")
+     call echov ("min of the two altitudes) = ")
+     call echof (product2,4)
+     call echor
+    }
+ 
+  #$% final probability
+  final_prob = product2 + first_prob
+ 
+  if (trace$LIDAR != $No)
+    {
+     call echov ("final probability is ")
+     call echof (final_prob,4)
+     call echor
+    }
+ 
+Return
+END
+
+ 
+Subroutine report_LIDAR_detection (unt$pointer,
+                                   unt2$pointer,
+                                   range,
+                                   bearing)
+ 
+#--------------------------------------------------------------------
+#   Purpose:   report_LIDAR_detection loads the detection data into
+#              the detection table.
+#
+#   Called By: LIDARMOD
+#
+#   Calls:     LCLRAS  APPLL
+#
+#   Tables:    UNT
+#--------------------------------------------------------------------
+ 
+BBcommon
+ 
+Integer*4       unt$Pointer, unt2$Pointer
+Real*4          app_sub_lat, app_sub_long
+Real*4          range, bearing, app_bearing
+Integer*4       rounded_bearing, rounded_range
+ 
+    app_bearing = bearing + xunt$headingerror$f  # compute target app bearing
+                                                 # in radians
+    $ang2pi (app_bearing)                        # insure between 0 and 2*pi
+ 
+ 
+    call appll(_                          # get apparent lat/long of target
+               xUNT$assumedlatitude$f,    # assumed lat of a/c
+               xUNT$assumedlongitude$f,   # assumed long of a/c
+               range,                     # range to target (nmi)
+               app_bearing,               # apparent bearing to target (radians)
+               app_sub_lat,               # returned apparent target lat
+               app_sub_long)              # returned apparent target long
+ 
+    rounded_range = range + .5                   # round & store range
+    rounded_bearing = app_bearing * (180./$pi) + .5 # convert bearing to degs
+    if (rounded_bearing >= 360)                  # adjust bearing to be between
+       rounded_bearing = rounded_bearing - 360   # 0 - 359 degrees
+ 
+    if (trace$LIDAR != $No)
+        {
+         call echor
+         call echov (" rounded range = ")
+         call echoi (rounded_range)
+         call echov ("     apparent bearing = ")
+         call echof (app_bearing, 3)
+         call echor
+         call echov (" apparent sub lat =  ")
+         call echof (app_sub_lat, 3)
+         call echor
+         call echov (" apparent sub long =  ")
+         call echof (app_sub_long, 3)
+       }
+ 
+    # enter active radar detection data into local detection table
+    Call LCLRAS (unt$pointer, unt2$pointer,
+                 rounded_bearing,
+                 app_sub_lat, app_sub_long,
+                 rounded_range,
+                 $Sub$Code, $LIDAR$code)
+ 
+Return
+END

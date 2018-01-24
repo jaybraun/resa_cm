@@ -1,0 +1,738 @@
+ 
+include "ascii.inc"
+include "bbctl.inc"
+include "bbcode.inc"
+ 
+include "bbacc.inc"
+include "bbaml.inc"
+include "bbbml.inc"
+include "bbdeq.inc"
+include "bbinv.inc"
+include "bbown.inc"
+include "bbtor.inc"
+include "bbunt.inc"
+ 
+define (err, -3)   # alsp.inc undefines it - who_am_i uses it
+ 
+define (number_args, 5)
+define (input_unit, 9)
+define (output_unit, 10)
+ 
+ 
+define (InventoryCommon,
+        literal sam_names(10)           # SMM 4/98 (E1506)
+        integer number_of_sams          # SMM 4/98 (E1506)
+ 
+        Integer nbreq, iquant[100]             # clk 7/27/94 (E1315)
+        Literal nameq[100],namac[100]     # The size of nbrrdy cased iquant and
+        Integer nbrrdy[40,8]              # nbreq to be stomped on, so the order
+        Equivalence (namac,nameq)         # was rearanged.  Nbrrdy can start at
+        Equivalence (nbrrdy,nameq[41])    # nameq[41] since only 40 AC types are
+                                          # permitted.
+        Common/InvC/sam_names, number_of_sams, nbreq, iquant, nameq
+       )
+ 
+define (BBImplicit, Implicit None)
+ 
+ 
+undefine write   # use the standard fortran write statement
+undefine read
+ 
+program atostats
+#########################################################################
+#$%
+#$% Purpose:    This program is intended to tap into the RESA blackboard
+#$%             to veriry Launch orders for ATO missions.
+#$% Calls:      initr4         <rlib.olb>
+#$%             read_arguments
+#$%             ctoi
+#$%             who_am_i
+#$%             bbmap
+#$%             check_version
+#$%             remark
+#$%             exit
+#$%             Init_Collection_File
+#$%             delay
+#$%             Game_DTG
+#$%             smov..
+#$%             echo..
+#$%             write
+#$%             close
+#$%
+#$% Tables:     global variables
+#$%
+#$% Date:       Aug 2008
+#$%
+#$% Author:     James O. Allen
+#$%
+#########################################################################
+BBcommon
+ 
+integer   ctoi        # integer function
+integer   Game_DTG    # integer function
+ 
+integer          arg_len[number_args], k
+vaxcharacter*80  args[number_args], params
+ 
+integer   game_number
+character  msg[ARB]
+VMSCHAR*ARB bbname
+integer   error
+integer   next_cycle, delay_time, next_record_interval
+integer nl
+ 
+integer   msg1_len
+character msg1[80]
+vaxcharacter*80  v_msg1
+Equivalence  (msg1, v_msg1)
+ 
+integer kk
+ 
+vaxcharacter*80  ato_root
+vaxcharacter*80  atoid
+vaxcharacter*80  atoid_update
+vaxcharacter*80  infile
+vaxcharacter*80  outfile
+ 
+vaxcharacter*80  atoid_dir
+ 
+call initR4
+ 
+game_number = 0
+call who_am_i (game_number, bbname)
+BBmap (bbname)
+call check_version (error, msg)
+ 
+if (msg[1] != EOS)
+    call remark (msg)
+if (error == YES)
+    call exit
+ 
+call Read_Arguments (number_args, args, arg_len, params)
+ 
+ato_root     = args[1][1:arg_len[1]]
+atoid        = args[2][1:arg_len[2]]
+atoid_update = args[3][1:arg_len[3]]
+infile       = args[4][1:arg_len[4]]
+outfile      = args[5][1:arg_len[5]]
+
+# Get ato directory
+atoid_dir = ""
+kk = 0
+call smovvn(ato_root, atoid_dir, kk)
+call smovv("/", atoid_dir, kk)
+call smovvn(atoid, atoid_dir, kk)
+call smovv("/",atoid_dir, kk)
+call smovvn(atoid_update, atoid_dir, kk)
+call smovv("/", atoid_dir, kk)
+ 
+call Init_ATOSummary_File(atoid_dir, infile)
+ 
+call Init_Collection_File(atoid_dir, outfile)
+ 
+call write_ATO_Errors
+ 
+close (INPUT_UNIT)
+close (OUTPUT_UNIT)
+ 
+end
+
+ 
+subroutine who_am_i (igame, bbname)
+###########################################################
+#$%
+#$% Purpose:   WHO_AM_I allows user to start a game using
+#$%            a command line input
+#$%
+###########################################################
+implicit none
+ 
+character  buf[30]
+integer    k,ic, igame
+VMSCHAR*(*) BBname             # jb E2144  (Re: BBSmap & MAKE_..) 8/3/00
+ 
+ 
+call make_CSF_bb_name (igame,$$BBNAME,bbname)
+ 
+end
+
+ 
+Subroutine Init_Collection_File(atoid_dir, outfile)
+#########################################################################
+#$%
+#$% Purpose:    Init_Collection_File will open the data collection file
+#$%             and write the scenario information.
+#$%
+#$% Called By:  collect_load_stats
+#$%
+#$% Calls:      smov..
+#$%             open
+#$%             echo..
+#$%             exit
+#$%             write
+#$%
+#$% Tables:     global variables
+#$%
+#$% Date:       Aug 2008
+#$%
+#$% Author:     James O. Allen
+#$%
+#########################################################################
+BBcommon
+ 
+vmschar*(*) atoid_dir
+vmschar*(*) outfile
+ 
+integer  interval    # interval at which data is to be collected
+integer  Game_DTG    # integer function
+integer  record_interval # Interval at which data is to be recorded
+integer  name_len
+integer  kk
+ 
+vmschar*ARB sumfile
+ 
+integer    return_val, msg_len
+ 
+character  msg[80]
+vaxcharacter*80 v_msg
+Equivalence  (msg, v_msg)
+ 
+sumfile = ""
+kk = 0
+call smovvn(atoid_dir, sumfile, kk)
+call smovvn(outfile, sumfile, kk)
+ 
+open (unit   = OUTPUT_UNIT,  file   = sumfile,
+      iostat = return_val, recl = 120,   status = 'unknown')
+if (return_val != 0)
+{
+ print *, "Output file not opened"
+ call exit
+}
+ 
+print *, "Output file is ", sumfile
+ 
+return
+end
+
+ 
+Subroutine Init_ATOSummary_File(atoid_dir, infile)
+#########################################################################
+#$%
+#$% Purpose:    Init_ATOSummary_File will open the ATO summary file
+#$%             generated by ATOSTATS DCL
+#$%
+#$% Called By:  collect_load_stats
+#$%
+#$% Calls:      smov..
+#$%             open
+#$%             echo..
+#$%             exit
+#$%             write
+#$%
+#$% Tables:     global variables
+#$%
+#$% Date:       Aug 2008
+#$%
+#$% Author:     James O. Allen
+#$%
+#########################################################################
+BBcommon
+ 
+vmschar*(*) atoid_dir
+vmschar*(*) infile
+ 
+integer  interval    # interval at which data is to be collected
+integer  Game_DTG    # integer function
+integer  record_interval # Interval at which data is to be recorded
+integer  name_len
+integer  kk
+ 
+VMSchar*ARB file_name
+ 
+integer    return_val, msg_len
+character  msg[80]
+vaxcharacter*80 v_msg
+Equivalence  (msg, v_msg)
+ 
+file_name = ""
+kk = 0
+call smovvn(atoid_dir, file_name, kk)
+call smovvn(infile, file_name, kk)
+ 
+open (unit   = INPUT_UNIT,  file   = file_name,
+      iostat = return_val, recl = 120,   status = 'old')
+ 
+if (return_val != 0)
+{
+ print *, "Input file not opened"
+ call exit
+}
+ 
+print *, "Input file is ", file_name
+ 
+ 
+return
+end
+
+undefine err
+ 
+Subroutine write_ATO_Errors
+BBcommon
+InventoryCommon
+ 
+vmschar vstrip*ARB
+character msg[120]
+vaxcharacter*120  v_msg
+Equivalence  (msg, v_msg)
+vaxcharacter    a_line*100
+vaxcharacter    t_line*100
+vaxcharacter    curr_platform*100
+vaxcharacter    platform*100
+vaxcharacter    linetype*100
+vaxcharacter    item*100
+vaxcharacter    qty*6
+literal         iname, jname
+integer         untindx,deqindx
+integer         ctoi, jj, kk, i
+integer         msg_len
+BBDeclare       (unt$pointer, deq$pointer, deq$remaining$i, own$pointer)
+integer         iqty, none
+integer         in0, in4, in8, in12, inMNT, in16, infly, idestroyed
+ 
+curr_platform = ""
+repeat
+{
+    #read ATO summary line
+    read (input_unit,9001,end=8002,err=8001) a_line
+    9001 format (A)
+    call Trim_Compress (a_line, t_line, kk)
+    call str_element (platform, 0, " ", t_line )
+    call str_element (linetype, 1, " ", t_line )
+    call str_element (item    , 2, " ", t_line )
+    call str_element (qty     , 3, " ", t_line )
+ 
+    jj = 1
+    iqty = ctoi(%%ref(qty),jj)
+ 
+    #if launch
+    if (linetype == "LAUNCH")
+    {
+        if (curr_platform != platform)
+        {
+            #    verify platform
+            call untfnd ($neutral$view, %%ref(platform),unt$pointer)
+            #       not found
+            if (unt$pointer == 0)
+            {
+                msg_len = 0
+                call smovv (t_line[1:kk], msg, msg_len)
+                call smovv (" *** Platform not found", msg, msg_len)
+                write (output_unit, fmt=*)  v_msg[1:msg_len]
+            }
+            curr_platform = platform
+        }
+        if (unt$pointer == 0) next
+ 
+        #$% get list of aircraft
+        OWN$Pointer$to  (xUNT$OwnIndx$i)
+        call LISTAC(own$pointer,none)
+ 
+        #$% if none, return
+        if (none == $yes)
+        {
+            msg_len = 0
+            call smovv (t_line[1:kk], msg, msg_len)
+            call smovv (" *** no a/c", msg, msg_len)
+            write (output_unit, fmt=*)  v_msg[1:msg_len]
+        }
+        else
+        {
+            jj = 0
+            jname = $BLANKLIT
+            call smovhn(%%ref(item),$$maxlit, jname, jj)
+ 			none = $yes
+            for (i=1 ; i<=nbreq ; i=i+1)
+            {
+                #$% get aircraft names
+                iname = namac[i]
+                if (iname == jname)         # Found ac type
+                {
+                    #$% get number
+                    in0   = nbrrdy[i,1]
+                    in4   = nbrrdy[i,2]
+                    in8   = nbrrdy[i,3]
+                    in12  = nbrrdy[i,4]
+                    inMNT  = nbrrdy[i,5]
+                    in16 = nbrrdy[i,6]
+                    infly = nbrrdy[i,7]
+                    idestroyed = nbrrdy[i,8]
+                    if ((in16*1.5 + infly) < iqty)          # Assume ac flown 1.5 times
+                    {
+                        msg_len = 0
+                        call smovv (t_line[1:kk], msg, msg_len)
+                        call smovv (" *** estimate insufficient a/c ", msg, msg_len)
+                        call smovi (in16+infly, msg, msg_len)
+                        write (output_unit, fmt=*)  v_msg[1:msg_len]
+                    }
+					none = $no
+                    break
+                }
+			}
+	        #       not found
+	        if (none == $yes)
+	        {
+	            msg_len = 0
+	            call smovv (t_line[1:kk], msg, msg_len)
+	            call smovv (" *** AC not found", msg, msg_len)
+	            write (output_unit, fmt=*)  v_msg[1:msg_len]
+	        }
+        }
+    }
+    if (unt$pointer == 0) next
+    #if load
+    if (linetype == "LOAD")
+    {
+        #    verify item
+        call fndeq (unt$pointer, %%ref(item), deqindx)
+        #       not found
+        if (deqindx == 0)
+        {
+            msg_len = 0
+            call smovv (t_line[1:kk], msg, msg_len)
+            call smovv (" *** expendable not found", msg, msg_len)
+            write (output_unit, fmt=*)  v_msg[1:msg_len]
+        }
+        if (deqindx == 0) next
+        #    verify qty
+        deq$pointer$to deqindx
+        deq$remaining$i = Xdeq$remaining$i
+        if (deq$remaining$i < iqty)
+        {
+            msg_len = 0
+            call smovv (t_line[1:kk], msg, msg_len)
+            call smovv (" *** insufficient quantity", msg, msg_len)
+            write (output_unit, fmt=*)  v_msg[1:msg_len]
+        }
+    }
+}
+#------------------------------
+# end of file
+ 
+ 
+repeat
+    {
+    break
+ 
+    8001 continue       # Comes here for ERROR on open or READ
+    }
+repeat
+    {
+    break
+ 
+    8002 continue       # Comes here for END
+    }
+ 
+return
+end
+ 
+
+subroutine fndac (unt$pointer, itype, deqindx)
+BBcommon
+ 
+literal itype, cstrip8
+BBDeclare (unt$pointer)
+BBDeclare (deq$pointer)
+integer deqindx
+ 
+deqindx = 0
+#$% for each equipment entry of the launch platform
+FOR_DEQ_CHAIN
+   {
+    #$% if equipment ID is not aircraft, get next entry
+    if (Xdeq$Ident$i != $Aircraft$code) next
+    #$% if not same equipment type, get next entry
+    if (Xdeq$Type$c != itype) next
+    deqindx = deq$pointer$index
+    break
+   }
+ 
+return
+end
+ 
+
+subroutine fndeq (unt2$pointer, item, deqindx)
+########################################################
+#$%
+#$% Purpose:   XVLOAD verifies the equipment needed
+#$%            to load a flight is available.
+#$%
+#$%            UNT2 points to the Ship/Base
+#$%            UNT points to the already loaded Aircraft (if > 0) for reload
+#$%
+#$% Called By: XLOAD      XVLAUN
+#$%
+#$% Calls:     None
+#$%
+#$% Tables:    DEQ
+#$%
+#$% Date:      APRIL 81
+#$%
+#$% Author:    DANA WILLS
+#$%
+########################################################
+BBcommon
+ 
+literal nameeq
+literal CSTRIP8
+literal item
+Integer ISAVE,IOK,IPNT,IQTYEQ,
+    IEQPTR,IPQTY,IAQTY,
+    DEQ2$Pointer,DEQ2$Ident$I,
+    TOR$Pointer,TOR$Maxalt$I,
+    DEQ$Pointer,DEQ$Ident$I,
+    ACC$Pointer,UNT2$Pointer,UNT$Pointer
+Integer  LCOMP
+integer deqindx
+integer ifound
+ 
+ifound = 0
+#$% for each equipment entry
+FOR_DEQ2_CHAIN
+{
+    #$% if not same equipment name, get next entry
+    if (LCOMP(Xdeq2$Type$C, item) != 0)  NEXT
+ 
+    deq2$ident$i = Xdeq2$ident$i
+    if (deq2$ident$i != $CruiseMissile$code &
+        deq2$ident$i != $Torpedo$code       &
+        deq2$ident$i != $AAM$code           &
+        deq2$ident$i != $ASM$code           &
+        deq2$ident$i != $Bomb$code          &
+        deq2$ident$i != $SmartTorpedo$Code  &
+        deq2$ident$i != $Mine$code          &
+        deq2$ident$i != $Gun$code           &
+        deq2$ident$i != $CHAFF$code         &
+        deq2$ident$i != $SonoBuoy$code      &
+        deq2$ident$i != $GND$Code           &
+        deq2$ident$i != $CommBuoy$code       ) next
+ 
+ 
+    ## if equipment is TORP and maxalt/depth is 0   ## tpa 8/12/83
+    if (deq2$Ident$I == $Torpedo$Code)
+    {
+        ieqptr = Xdeq2$Pntr$i
+        TOR$Pointer  = ieqptr
+        TOR$MaxAlt$I = xTOR$MaxAlt$I
+        if (Xtor$maxalt$i <= 0) next
+    }
+    ifound = $yes
+    break
+}
+ 
+if (ifound == $yes)
+    deqindx = deq2$pointer$index
+else
+    deqindx = 0
+ 
+return
+end
+
+ 
+Subroutine LISTAC(own$pointer,none)
+##################################################################
+#$%
+#$% Purpose:   LISTAC generates list of available aircraft.
+#$%
+#$% Called By: AVAENT
+#$%
+#$% Calls:     INVENT
+#$%
+#$% Tables:    OWN     INV
+#$%
+#$% Date:      25 JAN 82
+#$%
+#$% Author:    F. Jones
+#$%
+##################################################################
+ 
+BBcommon
+InventoryCommon
+ 
+integer inext, n, itype, number, none       # MJC 4/20/2000
+BBDeclare  (own$firstinvindx$I,
+            own$pointer,
+            inv$exp$index,
+            inv$pointer)                    # MJC 4/20/2000
+Literal name
+ 
+repeat
+   {
+    #$% get aircraft inventory
+    own$FirstInvIndx$i = xown$FirstInvIndx$i
+ 
+    inext = own$FirstInvIndx$i
+    inv$exp$index = 0
+ 
+    #$% initialize counters
+    n = 0
+    nbreq = 0
+ 
+    #$% loop through aircraft inventory
+    repeat
+       {
+        #$% get name and number of expendable equipment remaining
+        call INVENT (inv$pointer,inv$exp$index,inext,itype,name,number)
+ 
+        #$% if null is reached, break from loop
+        if (itype == $null$code) break
+ 
+        if (itype != $AcNow$code) next
+ 
+        n = n + 1
+ 
+        #$% if counter greater than 40, break loop
+        if (n > 40) break
+ 
+        #$% save aircraft name
+        namac[n] = name
+ 
+        #$% load number ready
+        nbrrdy[n,1] = number
+ 
+        #$% get name and number of expendable equipment remaining
+        call INVENT (inv$pointer,inv$exp$index,inext,itype,name,number)
+        if (itype != $AcIn4$code) break
+ 
+        #$% load number ready
+        nbrrdy[n,2] = number
+ 
+        #$% call to get name and number of expendable equipment remaining
+        call INVENT (inv$pointer,inv$exp$index,inext,itype,name,number)
+        if (itype != $AcIn8$code) break
+ 
+        #$% load number ready
+        nbrrdy[n,3] = number
+ 
+        #$% call to get name and number of expendable equipment remaining
+        call INVENT (inv$pointer,inv$exp$index,inext,itype,name,number)
+        if (itype != $AcIn12$code) break
+ 
+        #$% load number ready
+        nbrrdy[n,4] = number
+ 
+        ####  Added for A/C in MAINT (for AVAIL board only) jb  4/29/87
+        #$% call to get name and number of expendable equipment remaining
+        call INVENT (inv$pointer,inv$exp$index,inext,itype,name,number)
+        if (itype != $MAINT$code) break
+ 
+        #$% load number in MAINTENANCE
+       # if(nbrrdy[n,4] > 0) nbrrdy[n,5] = number        # jb    7/29/87
+       # else    nbrrdy[n,5] = number + 1                # jb    7/28/87
+ 
+        nbrrdy[n,5] = number        # av  5/25/93
+ 
+        #$% call to get name and number of expendable equipment remaining
+        call INVENT (inv$pointer,inv$exp$index,inext,itype,name,number)
+        if (itype != $AcIn16$code) break
+ 
+        #$% load number ready
+        nbrrdy[n,6] = number                        # av 5/19/93
+ 
+        #$% call to get name and number of flying aircraft
+        call INVENT (inv$pointer,inv$exp$index,inext,itype,name,number)
+        if (itype != $AcFlying$code) break
+ 
+        #$% load number ready
+        nbrrdy[n,7] = number                        # av 5/19/93
+ 
+      #$% call to get name and number of flying aircraft
+        call INVENT (inv$pointer,inv$exp$index,inext,itype,name,number)
+        if (itype != $AcDestroyed$code) break
+ 
+        #$% load number ready
+        nbrrdy[n,8] = number                        # av 5/19/93
+ 
+        nbreq = n
+       }
+ 
+     #$% repeat until inventory is matched
+   } until (xown$FirstInvIndx$i == own$FirstInvIndx$i)
+ 
+if (nbreq > 0) none = $no
+else           none = $yes
+ 
+return
+end
+
+ 
+Subroutine INVENT (inv$pointer,inv$exp$index,inext,itype,name,number)
+#######################################################################
+#$%
+#$% Purpose:   INVENT gets name of expendable equipment and number
+#$%            remaining for display.
+#$%
+#$% Called By: LSTEXP     LISTAC     CAPENT
+#$%
+#$% Calls:     None
+#$%
+#$% Tables:    INV
+#$%
+#$% Date:      28 JAN 82
+#$%
+#$% Author:    F. Jones
+#$%
+#######################################################################
+ 
+BBcommon
+ 
+BBDeclare  (inv$exp$index,
+            inv$pointer)                 # MJC 4/20/2000
+integer inext, itype, number             # MJC 4/20/2000
+literal cstrip8                          # MJC 4/20/2000
+Literal name
+ 
+#$% increment expendables index
+inv$exp$index = inv$exp$index + 1
+ 
+#$% if greater than number of slots
+if (inv$exp$index > inv$exp$slots)
+   {
+    #$% set index to one
+    inv$exp$index = 1
+   }
+ 
+#$% if index equals one
+if (inv$exp$index == 1)
+   {
+    #$% if next index equals zero
+    if (inext == 0)
+       {
+        #$% set type to null and return
+        itype = $null$code
+        return
+       }
+ 
+    #$% set inventory pointer
+    inv$pointer$to inext
+ 
+    #$% save next index
+    inext = xinv$nextindx$i
+   }
+ 
+#$% get expendable type
+itype = xinv$exp$type$i
+ 
+#$% if null, return
+if (itype == $null$code)  return
+ 
+#$% get number remaining
+number = xinv$exp$remaining$i
+ 
+#$% get name of expendable
+name = xinv$exp$name$c
+ 
+return
+end
+ 
+ 

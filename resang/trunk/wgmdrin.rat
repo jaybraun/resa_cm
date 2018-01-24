@@ -1,0 +1,1423 @@
+##                      File  WGMDRIN.rat
+ 
+###    Modified 21-Mar-89 for new UNT/DEQ structure (no POS/DYN)
+###             30-Mar-89 for POS & DYN (DEW)
+###
+###
+###    Modified 31-MAY-89 for Boat Operations                AM.
+###
+###
+ 
+ 
+#####   version 3.1  dated-  7apr81
+ 
+ 
+###
+### mod to version 3.0          dated 29 dec 1980
+###
+### smn prog    module    comments
+### === ====    ======    =================================================
+### 002 rjw     repin
+###             rpown1
+###             rppos1
+###             untsta
+###             uddet
+###             rpinv1
+###             wrtinv
+###             bldava
+###             rptrk1
+###             rplcl1
+###             addpnd
+###             addinv
+###             needrp
+###             getrep
+###             bldrep
+###             rpckem
+###             cmeas
+###             rpagan
+###             rpcler
+###             rpbar1
+###             fndown
+###             boatava        routine to process boat availability info. AM
+###             wrtinv1        write boat inventory.                      AM
+###
+ 
+ 
+#####   new file after version 3.0
+ 
+# 
+ 
+#$%     MODULE                          UTILITY                    DATA
+#$%   SUBROUTINES                     SUBROUTINES                 TABLES
+#$%   ===========                     ===========                 ======
+#$%
+#$%     REPIN                           ECHOR                      UNT
+#$%     RPOWN1                          ECHOH                      REP
+#$%     RPPOS1                          BLDCOM                     COM
+#$%     UNTSTA                          SUBROU                     DEQ
+#$%     UDDET                           BLDAVA                     PND
+#$%     RPINV1                          WRTINV                     OWN
+#$%     WRTINV                                                     POS
+#$%     BLDAVA                                                     PAT
+#$%     RPTRK1                                                     INV
+#$%     RPLCL1                                                     AML
+#$%     ADDPND                                                     LCL
+#$%     ADDINV                                                     VUE
+#$%     NEEDRP                                                     DAM
+#$%     GETREP                                                     RCN
+#$%     BLDREP                                                     REP
+#$%     RPCKEM                                                     PAI
+#$%     CMEAS                                                      COM
+#$%     RPAGAN                                                     BOY
+#$%     RPCLER                                                     BAR
+#$%     RPBAR1                                                     COR
+#$%     FNDOWN
+#$%     RPKILL <REPOUT>
+#$%     RPTRKOTH
+#$%     RPRCL1
+#$%
+#$%
+#$%   NOTES
+#$%   =====
+#$%
+#$%   1. <FILENAME> INDICATES WHERE SUBROUTINE IS LOCATED.
+#$%
+#$%   2. UTILITY SUBROUTINES NOT SHOWN ON FLOWCHART.
+#$%
+#$%   3. * INDICATES NO OTHER SUBROUTINES CALLED.
+#$%
+#$%
+#$%   FLOWCHART FOR REPIN
+#$%   ===================
+#$%
+#$%   REPIN - NEEDRP - RPCKEM*
+#$%         - BLDCOM*
+#$%         - BLDREP*
+#$%         - REOWN1 - RPPOS1 - SUBROU*
+#$%                           - UNTSTA*
+#$%                           - UDDET *
+#$%                           - CMEAS *
+#$%                  - RPINV1 - EXPTST*
+#$%                           - WRTINV - SUBROU*
+#$%                           - BLDAVA*
+#$%                  - RPBAR1 - SUBROU*
+#$%         - GETREP*
+#$%         - RPTRK1 - RPLCL1 - ADDPND*
+#$%         - RPTRKORH - RPRCL1*
+#$%         - RPAGAN - RPKILL*
+#$%         - RPCLER*
+ 
+
+ 
+ 
+#define ($debug,$$Debug$Control)
+ 
+include "macros.inc"
+include "bbctl.inc"
+include "bbcode.inc"
+include "bbacc.inc"
+include "bbaml.inc"
+include "bbbar.inc"
+include "bbboy.inc"
+include "bbcom.inc"
+include "bbdam.inc"
+include "bbdeq.inc"
+include "bblcl.inc"
+include "bbown.inc"
+include "bbinv.inc"
+include "bbcor.inc"
+include "bbpai.inc"
+include "bbpat.inc"
+include "bbpnd.inc"
+include "bbrcn.inc"
+include "bbrep.inc"
+include "bbshc.inc"                     # joa 2/96 (E1467)
+include "bbsui.inc"
+include "bbunt.inc"
+include "bbvue.inc"
+include "bbbml.inc"                     # Added 5/31/89        AM.
+include "bbrth.inc"                     # Added 4/9/90         CL.
+include "wgmdrot.inc"                   # Added 4/9/90         CL.
+ 
+define(BBimplicit,IMPLICIT NONE)        # jb E2145  7/10/00
+define ($Max_AC_Types_Per_Unit, 40)     # clk 7/27/94 (E1315)
+define ($Nbr_AC_Inventory_Codes, 8)     # clk 7/27/94 (E1315)
+
+ 
+Subroutine REPIN                        #places pending reports in the queue
+ 
+#######################################################
+#$%
+#$% Purpose:   REPIN provides executive control
+#$%            over generating reports.
+#$%
+#$% Called By: WARIN
+#$%
+#$% Calls:     NEEDRP     GETREP     BLDCOM
+#$%            BLDREP     RPOWN1     RPTRKOTH
+#$%            RPTRK1     RPAGAN     ECHOR
+#$%            RPCLER     ECHOH
+#$%
+#$% Tables:    UNT        REP        COM
+#$%
+#$%
+#$% Date:      DEC 80
+#$%
+#$% Author:    Ron Williams
+#$%
+#$% Modified:  James O. Allen E2316 10Dec02
+#$%            Send pnd and rep table full messages once per cycle instead
+#$%            of everytime at attempt is made to store an entry
+#$%
+#######################################################
+BBcommon
+common/scratch$pad/irpntr[unt$slots]
+ 
+LITERAL     CSTRIP8                                 # jb E2145  7/10/00
+REAL        SAVE_TIME                               # jb E2145  7/10/00
+Real        pndOverflowTime, repOverflowTime
+Integer  I,IBYPAS,IDAMAG,IFIRST,IRECON,IRPNTR,      # jb E2145  7/10/00
+    ISAVE_FULL,IUNIT,LAUNCH,NEEDAT,NEEDET,          # jb E2145  7/10/00
+    NEEDNA,NEEDNE,NEEDNS,NEEDST,NEEDOW,NOROOM,      # jb E2145  7/10/00
+    UNT$Pointer,UNT$Status$I,UNT$Reportwaiting$I,   # jb E2145  7/10/00
+    REP$Pointer,REP$Comindx$I,REP$Firstpndindx$I,   # jb E2145  7/10/00
+    COM$Pointer,PND$Pointer,UNT2$Pointer            # jb E2145  7/10/00
+integer ipath[2]
+ 
+#$% for each entry
+for (i=1;i<=unt$slots;i=i+1)             #initialize
+   {
+    #$% clear receiving pointer
+    irpntr[i] = 0
+   }
+ 
+#$% for each unit entry
+for (unt$pointer$first;unt$pointer$ok;unt$pointer$next)
+   {
+    #$% get unit status
+    unt$status$i = xunt$status$i
+ 
+    #$% if status being deleted, get next entry
+    if (unt$status$i == $BeingDeleted$code)  next
+ 
+    #$% if aircraft or boat awaiting launch, get next entry
+    if (unt$status$i == $AwaitingLaunch$code)  next
+ 
+    #$% if report waiting, get next entry
+#    if (xunt$ReportWaiting$i != $no)  next
+    if (xunt$ReportWaiting$i == $YES)  next             ## TPA 3/9/83
+ 
+    #$% call need report
+    call NEEDRP(unt$pointer,unt2$pointer,ipath,ibypas,idamag,irecon,
+                needow,needst,needat,needet,needns,needna,needne)
+ 
+    #$% if no report data needed
+    if (needst == $no & needat == $no & needet == $no &
+        needns == $no & needna == $no & needne == $no &
+        needow == $no & idamag == 0   & irecon == 0   )  next
+ 
+    if (trace$reporting != $no)
+        {
+        call echor
+        call echohn(xunt$name$c,$$MaxLit)
+        call echov(" reporting...")
+        }
+ 
+    iunit = unt$pointer$index
+ 
+    #$% call get report
+    call GETREP(rep$pointer)
+ 
+    #$% if REP pointer is zero
+    if (rep$pointer == 0)
+       {
+        #$% send message that REP table is full
+        if (repOverflowTime != game$time)
+            {
+            repOverflowTime = game$time
+            call echor
+            call echov("REP table full")
+            }
+        next
+       }
+ 
+    if (trace$reporting != $no)
+        {
+        call echov("[REP #")
+        call echoi(rep$pointer$index)
+        call echov(", ")
+        }
+ 
+    #$% if no bypass
+ 
+    if (ibypas == $no)
+        #$% call build communication report
+       {
+        COM$Pointer = 0                  # set flag indicating this commun.
+                                         # has no relationship to previous msg
+                                         # 4/91, reh
+ 
+        call BLDCOM($report$code,
+                    ipath[1],
+                    ipath[2],
+                    unt$pointer$index,
+                    unt2$pointer$index,
+                    1,
+                    com$pointer)         # in/out
+ 
+        if (trace$reporting != $no)
+            {
+            call echov("COM #")
+            call echoi(com$pointer$index)
+            call echov("]...")
+            }
+ 
+        #$% if COM pointer is zero
+        if (com$pointer == 0)
+           {
+            rep$zero
+ 
+            # replaced game minutes with game seconds - JFR 10/26/93
+            if (save_time != game$time)              # only put message once
+                {                                       # per cycle.  tell how
+                save_time = game$time                # many times full last
+                                                        # cycle.
+                call echor
+                call echov ("COM table full (")
+                call echoi (isave_full)
+                call echov (" times)")
+ 
+                isave_full = 0
+                }
+ 
+            isave_full = isave_full + 1
+ 
+            next
+           }
+ 
+        #$% set COM pointer
+        rep$ComIndx$i = com$pointer$index
+       }
+    else
+       {
+        if (trace$reporting != $no)
+            {
+            call echov("no COM]...")
+            }
+ 
+        #$% clear COM index
+        rep$ComIndx$i = 0
+       }
+ 
+    #$% set report waiting and store it
+    unt$ReportWaiting$i = $yes
+    PUTunt$ReportWaiting$i
+ 
+    #$% call build report to find which reports are needed
+    call BLDREP(rep$pointer,iunit,rep$ComIndx$i,
+                needst,needat,needet,
+                needns,needna,needne,
+                needow,idamag,irecon)
+ 
+    ifirst = 0                             #initialize
+    noroom = $NO                           #jhm 4/02
+ 
+    #$% if need OWN
+    if (needow != $no)
+       {
+        if (trace$reporting != $no)
+            {
+            call echov("own...")
+            }
+ 
+        irpntr[iunit] = rep$pointer             #save for a/c awaiting launch
+ 
+        #$% call report OWN
+        call RPOWN1(unt$pointer,pnd$pointer,ifirst,noroom)
+       }
+    #$% if any track reports needed
+    if (needst != $no | needat != $no | needet != $no |
+        needns != $no | needna != $no | needne != $no )
+       {
+        if (trace$reporting != $no)
+            {
+            call echov("tracks")
+            }
+        #$% call report track
+        call RPTRK1(unt$pointer,pnd$pointer,ifirst,noroom,
+                    needst,needat,needet,needns,needna,needne)
+        call RPTRKOTH(unt$pointer,pnd$pointer,ifirst,noroom,needst,needat)
+       }
+ 
+    #$% set first pending index
+    rep$FirstPndIndx$i = ifirst
+    PUTrep$FirstPndIndx$i
+ 
+    #$% if there is room, call to clear report and set for later try
+    if (noroom == $no)  call RPCLER(unt$pointer)
+    else
+       {
+        irpntr[iunit] = 0
+        call RPAGAN(unt$pointer,rep$pointer)
+        #$% send message that PND table is full
+        if (pndOverflowTime != game$time)
+            {
+            pndOverflowTime = game$time
+            call echor
+            call echov("PND table full")
+            }
+        noroom = $NO                        #jhm 4/02 make sure initialized
+       }
+   }
+ 
+#$% for each unit entry
+for (unt$pointer$first;unt$pointer$ok;unt$pointer$next)
+   {
+    #$% get unit status
+    unt$status$i = xunt$status$i
+ 
+    #$% if aircraft or boat not awaiting launch, get next entry
+    if (unt$status$i != $AwaitingLaunch$code)  next
+ 
+    #$% get launch index
+    launch = xunt$LaunchIndx$i              # 3/30/89
+    if (launch == 0)  next      # ALSP leaves LaunchIndx blank # dew 12/2000
+ 
+    #$% if no aircraft awaiting launch, get next
+    if (irpntr[launch] == 0)  next
+ 
+    if (trace$reporting != $no)
+        {
+        call echor
+        call echohn(xunt$name$c,$$MaxLit)
+        call echov(" reporting...")
+        }
+ 
+    rep$pointer = irpntr[launch]
+ 
+    rep$ComIndx$i = xrep$ComIndx$i
+ 
+    #$% call get report
+    call GETREP(rep$pointer)
+ 
+    #$% if REP pointer is zero
+    if (rep$pointer == 0)
+       {
+        unt$pointer$to launch
+        #$% send message that REP table is full
+        if (repOverflowTime != game$time)
+            {
+            repOverflowTime = game$time
+            call echor
+            call echov("REP table full")
+            }
+        next
+       }
+ 
+    if (trace$reporting != $no)
+        {
+        call echov("[REP #")
+        call echoi(rep$pointer$index)
+        call echov(", ")
+        call echov("COM #")
+        call echoi(rep$ComIndx$i)
+        call echov("]...")
+        }
+ 
+    #$% call build report
+    call BLDREP(rep$pointer,unt$pointer$index,rep$ComIndx$i,
+                $no,$no,$no,$no,$no,$no,$yes,0,0)
+ 
+    ifirst = 0
+ 
+    #$% call report OWN
+    call RPOWN1(unt$pointer,pnd$pointer,ifirst,noroom)
+ 
+    #$% set first pending index to first
+    rep$FirstPndIndx$i = ifirst
+    PUTrep$FirstPndIndx$i
+ 
+    #$% if room, call to clear report
+    if (noroom == $no)  call RPCLER(unt$pointer)
+    else
+       {
+        call RPAGAN(unt$pointer,rep$pointer)
+        call echor
+        if (pndOverflowTime != game$time)
+            {
+            pndOverflowTime = game$time
+            call echov("PND table full")
+            }
+       }
+   }
+ 
+return
+end
+ 
+
+ 
+Subroutine RPOWN1(unt$pointer,pnd$pointer,ifirst,noroom)
+ 
+#######################################################
+#$%
+#$% Purpose:   RPOWN1 generates a report for
+#$%            own force position, inventory
+#$%            and sonobuoy barrier status.
+#$%
+#$% Called By: REPIN
+#$%
+#$% Calls:     RPPOS1     RPINV1     RPBAR1
+#$%
+#$% Tables:    UNT        PND
+#$%
+#$% Date:      DEC 80
+#$%
+#$% Author:    Ron Williams
+#$%
+#######################################################
+BBcommon
+Integer  IFIRST, NOROOM,       # jb E2145  7/10/00
+    UNT$Pointer, PND$Pointer   # jb E2145  7/10/00
+external addpnd
+ 
+#$% call report position
+call RPPOS1(unt$pointer,ADDPND,pnd$pointer,ifirst,noroom)
+ 
+#$% call report inventory
+call RPINV1(unt$pointer,ADDPND,pnd$pointer,ifirst,noroom)
+ 
+#$% if unit has barrier
+if (xunt$HasBarrier$i != $no)
+    #$% call report barrier
+    call RPBAR1(unt$pointer,ADDPND,pnd$pointer,ifirst,noroom)
+ 
+return
+end
+ 
+ 
+ 
+ 
+ 
+Subroutine RPTRK1(unt$pointer,pnd$pointer,ifirst,noroom,
+                  needst,needat,needet,needns,needna,needne)
+ 
+ 
+#######################################################
+#$%
+#$% Purpose:   RPTRK1 generates PND entries for LCL
+#$%            entries.  Packs multiple LCL entries
+#$%            per PND.
+#$%
+#$% Called By: REPIN
+#$%
+#$% Calls:     RPLCL1
+#$%
+#$% Tables:    UNT        LCL        PND
+#$%
+#$% Date:      DEC 80
+#$%
+#$% Author:    Ron Williams
+#$%
+#######################################################
+BBcommon
+ 
+Integer  IFIRST,NEEDAT,NEEDET,NEEDNA, # jb E2145  7/10/00
+    NEEDNE,NEEDNS,NEEDST,NOROOM,      # jb E2145  7/10/00
+    LCL$Pointer,LCL$Reportstatus$I,   # jb E2145  7/10/00
+    LCL$Class$I,LCL$Nextindx$I,       # jb E2145  7/10/00
+    PND$Pointer,PND$LCL$Index,        # jb E2145  7/10/00
+    UNT$Pointer                       # jb E2145  7/10/00
+ 
+#$% get first LCL index
+lcl$NextIndx$i = xunt$FirstLclIndx$i
+ 
+pnd$lcl$index = 0
+ 
+#$% for each entry on the LCL chain
+while (lcl$NextIndx$i != 0)
+   {
+    #$% set LCL pointer and set up for next LCL entry on the chain
+    lcl$pointer$to lcl$NextIndx$i
+    lcl$NextIndx$i = xlcl$NextIndx$i
+ 
+    lcl$class$i = xlcl$class$i
+ 
+    #$% if class is aircraft
+    if      (lcl$class$i == $air$code)
+       {
+        #$% if need new aircraft data and needs report
+        if (needna != $no &
+            xlcl$ReportStatus$i == $NeedsReport$code)
+           {
+            #$% call to copy an LCL entry into the PND slot
+            call RPLCL1(pnd$pointer,pnd$lcl$index,lcl$pointer,ifirst,noroom)
+            if (noroom != $no)  break
+ 
+            #$% set report status to begun
+            lcl$ReportStatus$i = $ReportBegun$code
+            putlcl$ReportStatus$i
+           }
+        #$% else if needs aircraft tracks data
+        else if (needat != $no)
+           {
+            #$% call to copy an LCL entry into the PND slot
+            call RPLCL1(pnd$pointer,pnd$lcl$index,lcl$pointer,ifirst,noroom)
+            if (noroom != $no)  break
+           }
+       }
+ 
+    #$% else if class is ship or submarine
+    else if (lcl$class$i == $surface$code |
+             lcl$class$i == $sub$code )
+       {
+        #$% if need new ship data and needs report
+        if (needns != $no &
+            xlcl$ReportStatus$i == $NeedsReport$code)
+           {
+            #$% call to copy an LCL entry into a PND slot
+            call RPLCL1(pnd$pointer,pnd$lcl$index,lcl$pointer,ifirst,noroom)
+            if (noroom != $no)  break
+ 
+            #$% set report status begun
+            lcl$ReportStatus$i = $ReportBegun$code
+            putlcl$ReportStatus$i
+           }
+        #$% else if need ship tracks data
+        else if (needst != $no)
+           {
+            #$% call to copy an LCL entry int a PND slot
+            call RPLCL1(pnd$pointer,pnd$lcl$index,lcl$pointer,ifirst,noroom)
+            if (noroom != $no)  break
+           }
+       }
+ 
+    else
+       {
+        #$% if need new ESM data and needs report
+        if (needne != $no &
+            xlcl$ReportStatus$i == $NeedsReport$code)
+           {
+            #$% call to copy an LCL entry into a PND slot
+            call RPLCL1(pnd$pointer,pnd$lcl$index,lcl$pointer,ifirst,noroom)
+            if (noroom != $no)  break
+ 
+            #$% set report status begun
+            lcl$ReportStatus$i = $ReportBegun$code
+            putlcl$ReportStatus$i
+           }
+        #$% else if need track interval data
+        else if (needet != $no)
+           {
+            #$% call to copy an LCL entry into a PND slot
+            call RPLCL1(pnd$pointer,pnd$lcl$index,lcl$pointer,ifirst,noroom)
+            if (noroom != $no)  break
+           }
+       }
+   }
+ 
+return
+end
+ 
+
+ 
+Subroutine RPLCL1(pnd$pointer,pnd$lcl$index,lcl$pointer,ifirst,noroom)
+ 
+#######################################################
+#$%
+#$% Purpose:   RPLCL1 copies a LCL entry in to a
+#$%            PND slot.  Allocates additional
+#$%            PND entries as needed.
+#$%
+#$% Called By: RPTRK1
+#$%
+#$% Calls:     ADDPND
+#$%
+#$% Tables:    PND        LCL
+#$%
+#$% Date:      DEC 80
+#$%
+#$% Author:    Ron Williams
+#$%
+#######################################################
+BBcommon
+ 
+Integer IFIRST,NOROOM,LCL$Pointer, # jb E2145  7/10/00
+        PND$Pointer,PND$LCL$Index  # jb E2145  7/10/00
+ 
+#$% increment counter
+pnd$lcl$index = pnd$lcl$index + 1
+#$% if pending LCL index greater than slots, set index to one
+if (pnd$lcl$index > pnd$lcl$slots) pnd$lcl$index = 1
+ 
+#$% if pending LCL index is first
+if (pnd$lcl$index == 1)
+   {
+    #$% call add pending report
+    call ADDPND(pnd$pointer,ifirst,$Detection$code,noroom)
+    if (noroom != $no)  return
+   }
+ 
+#$% use Macro to copy LCL data to PND entry
+pnd$lcl$duplicate$lcl
+ 
+return
+end
+ 
+
+ 
+Subroutine ADDPND(pnd$pointer,ifirst,pnd$RecordType$i,noroom)
+ 
+#######################################################
+#$%
+#$% Purpose:   ADDPND allocates one additional slot
+#$%            and connects it to the end of the
+#$%            PND chain.
+#$%
+#$% Called By: RPLCL1     RPPND1
+#$%
+#$% Calls:     None
+#$%
+#$% Tables:    PND
+#$%
+#$% Date:      DEC 80
+#$%
+#$% Author:    Ron Williams
+#$%
+#######################################################
+BBcommon
+ 
+Integer IFIRST,INDEXX,NOROOM,    # jb E2145  7/10/00
+    PND$Pointer,PND$Nextindx$I,  # jb E2145  7/10/00
+    PND$Recordtype$I             # jb E2145  7/10/00
+ 
+index = Pending$First$Free                      #get first free slot
+ 
+if (index == 0)                                 #if none free
+   {
+    noroom = $yes
+    return
+   }
+ 
+if (ifirst == 0)                                #if chain currently empty
+   {
+    ifirst = index                              #begin at first free slot
+   }
+else                                            #otherwise
+   {
+    pnd$NextIndx$i = index                      #connect free slot to previous
+    putpnd$NextIndx$i
+   }
+ 
+pnd$pointer$to index
+ 
+Pending$First$Free = xpnd$NextIndx$i            #update first free slot
+ 
+pnd$NextIndx$i = 0                              #new slot is end of chain
+putpnd$NextIndx$i
+ 
+putpnd$RecordType$i
+ 
+return
+end
+ 
+
+ 
+Subroutine NEEDRP(unt$pointer,unt2$pointer,ipath,ibypas,idamag,
+                  irecon,needow,needst,needat,needet,needns,needna,needne)
+ 
+#######################################################
+#$%
+#$% Purpose:   NEEDRP determines if a unit needs
+#$%            to report, and what it is that is
+#$%            needed.
+#$%
+#$% Called By: REPIN
+#$%
+#$% Calls:     RPCKEM
+#$%
+#$% Tables:    UNT        VUE        DAM
+#$%            RCN
+#$%
+#$% Date:      DEC 80
+#$%
+#$% Author:    Ron Williams
+#$%
+#######################################################
+BBcommon
+ 
+Integer IBYPAS,IDAMAG,IRECON,IUNIT,            # jb E2145  7/10/00
+    NEEDAT,NEEDET,NEEDNA,NEEDNE,               # jb E2145  7/10/00
+    NEEDNS,NEEDOW,NEEDST,                      # jb E2145  7/10/00
+    UNT$Pointer,UNT$Airtrackinterval$I,        # jb E2145  7/10/00
+    UNT$View$I,UNT$Shiptrackinterval$I,        # jb E2145  7/10/00
+    UNT$Esmtrackinterval$I,UNT$Owninterval$I,  # jb E2145  7/10/00
+    VUE$Pointer, VUE$Embarkindx$I,             # jb E2145  7/10/00
+    UNT2$Pointer, UNT2$Status$I,               # jb E2145  7/10/00
+    DAM$Pointer, DAM$Nextindx$I,               # jb E2145  7/10/00
+    RCN$Pointer, RCN$Nextindx$I                # jb E2145  7/10/00
+integer ipath[2]
+ 
+#$% initialize flags
+idamag = 0
+irecon = 0
+needow = $no
+needst = $no
+needat = $no
+needet = $no
+needns = $no
+needna = $no
+needne = $no
+ 
+#$% get unit pointer
+iunit = unt$pointer$index
+ 
+#$% get unit view
+unt$view$i = xunt$view$i
+# if(unt$view$i < 1 | unt$view$i > 10)  RETURN  #       5/8/85
+ 
+#$% set VUE pointer to view
+vue$pointer$to unt$view$i
+ 
+#$% get embark index
+vue$EmbarkIndx$i = xvue$EmbarkIndx$i
+ 
+#$% if embark index is greater than slots available, return
+if (vue$EmbarkIndx$i > unt$slots) return
+ 
+#$% if no embark index and view is CONTROL view, set UNT pointer
+if (vue$EmbarkIndx$i == 0     |
+    unt$view$i == $neutral$view )  unt2$pointer = unt$pointer
+#$% else, set UNT pointer to embark index
+else                             unt2$pointer$to vue$EmbarkIndx$i
+ 
+#$% get unit status
+unt2$status$i = xunt2$status$i
+ 
+#$% if being deleted, return
+if (unt2$status$i == $BeingDeleted$code)  return
+ 
+if (unt$pointer == unt2$pointer)
+   {
+    #$% initialize flag to YES
+    ibypas = $yes
+ 
+    needow = $yes
+    needst = $yes
+    needat = $yes
+    needet = $yes
+    needns = $yes
+    needna = $yes
+    needne = $yes
+   }
+else
+   {
+    #$% if status is sinking, return
+    if (xunt$status$i == $Sinking$code |
+        unt2$status$i == $Sinking$code )  return
+ 
+    #$% if no report to make, return
+    if (xunt$MakeReports$i == $no)  return
+ 
+    #$% save path pointers
+    ipath[1] = xunt$Path1Pntr$i
+    ipath[2] = xunt$Path2Pntr$i
+ 
+    #$% if COMM bypass is YES
+    if (xunt$CommBypass$i != $no)
+        {
+        #$% set bypass to YES
+        ibypas = $yes
+        }
+    else
+        {
+        #$% set bypass to NO
+        ibypas = $no
+ 
+        #$% call check EMCON status
+        call RPCKEM(unt$pointer,ipath)
+ 
+        if (ipath[1] == 0)
+            {
+        #   if (trace$reporting != $no)
+        #       {
+        #       call echor
+        #       call echohn(xunt$name$c,$$MaxLit)
+        #       call echov(" reporting...")
+        #       call echov("Emcon Tight")
+        #       }
+            return
+            }
+        }
+ 
+    #$% get interval data
+    unt$OwnInterval$i       = xunt$OwnInterval$i
+    unt$ShipTrackInterval$i = xunt$ShipTrackInterval$i
+    unt$AirTrackInterval$i  = xunt$AirTrackInterval$i
+    unt$EsmTrackInterval$i  = xunt$EsmTrackInterval$i
+ 
+    #$% if OWN interval valid
+    if (unt$OwnInterval$i != 0)
+       {
+        #$% if report OWN
+        if (xunt$ReportOwn$i != $no |
+            (game$time - Xunt$LastOwnReportTime$F) >= float(unt$OwnInterval$i))
+           {
+            needow = $yes # JFR 1/13/94 for VTS
+            putunt$LastOwnReportTime$f(game$time)
+           }
+       }
+    #$% if ship track interval valid
+    if (unt$ShipTrackInterval$i != 0)
+       {
+        #$% if report ship tracks
+        if (xunt$ReportShipTracks$i != $no |
+            (game$time - Xunt$LastShipTrackReportTime$F) >= float(unt$ShipTrackInterval$i))
+           {
+            needst = $yes # JFR 1/13/94 for VTS
+            putunt$LastShipTrackReportTime$f(game$time)
+           }
+ 
+        #$% if report new ship
+        if (xunt$ReportNewShip$i != $no) needns = $yes # adjust to floating minutes - JFR 1/10/94
+       }
+    #$% if air track interval valid
+    if (xunt$AirTrackInterval$i != 0)
+       {
+        #$% if report air tracks
+        if (xunt$ReportAirTracks$i != $no |
+            (game$time - Xunt$LastAirTrackReportTime$f) >= float(unt$AirTrackInterval$i))
+           {
+            needat = $yes # JFR 1/13/94 for VTS
+            putunt$LastAirTrackReportTime$f(game$time)
+           }
+ 
+        #$% if report new aircraft
+        if (xunt$ReportNewAir$i != $no) needna = $yes # adjust to floating minutes - JFR 1/10/94
+       }
+ 
+    #$% if ESM track interval valid
+    if (xunt$EsmTrackInterval$i != 0)
+       {
+        #$% if report ESM tracks
+        if (xunt$ReportEsmTracks$i != $no |
+            (game$time - Xunt$LastEsmReportTime$f) >= float(unt$EsmTrackInterval$i))
+           {
+            needet = $yes # JFR 1/13/94 for VTS
+            putunt$LastEsmReportTime$f(game$time)
+           }
+ 
+        #$% if report new ESM
+        if (xunt$ReportNewEsm$i != $no) needne = $yes # adjust to floating minutes - JFR 1/10/94
+       }
+   }
+ 
+#$% if report damage
+if (xunt$ReportDamage$i != $no)
+   {
+    #$% for each damage entry
+    for (dam$pointer$first;dam$pointer$ok;dam$pointer$next)
+       {
+        #$% if DAM unit index is not unit, get next
+        if (xdam$UnitIndx$i != iunit)  next
+ 
+        #$% if report is not needed, get next
+        if (xdam$ReportStatus$i != $NeedsReport$code)  next
+ 
+        #$% add damage entry to head of linked list for unit
+        dam$NextIndx$i = idamag
+        PUTdam$NextIndx$i
+ 
+        #$% remember index to new head of list
+        idamag = dam$pointer$index
+       }
+   }
+ 
+if (xunt$ReportReconn$i != $no)                 #$% if report RECONN
+   {
+    #$% for each RECONN entry,
+    for (rcn$pointer$first;rcn$pointer$ok;rcn$pointer$next)
+       {
+        if (xrcn$ReconnUnit$i != iunit | # If not this unit, or
+                                          # if report not needed,
+            xrcn$ReportStatus$i != $NeedsReport$code) NEXT # SKIP
+ 
+        rcn$NextIndx$i = irecon
+        PUTrcn$NextIndx$i
+        irecon = rcn$pointer$index # RETURN index to new head of list
+       }
+   }
+ 
+return
+end
+ 
+
+ 
+Subroutine GETREP(rep$pointer)
+ 
+#######################################################
+#$%
+#$% Purpose:   GETREP find an available REP entry or
+#$%            else return zero.
+#$%
+#$% Called By: REPIN
+#$%
+#$% Calls:     None
+#$%
+#$% Tables:    REP
+#$%
+#$% Date:      DEC 80
+#$%
+#$% Author:    Ron Williams
+#$%
+#######################################################
+BBcommon
+ 
+Integer  REP$Pointer   # jb E2145  7/10/00
+ 
+for (rep$pointer$first;rep$pointer$valid;rep$pointer$next)
+    {
+    if (xrep$SenderIndx$i == $no)               # found empty slot !!
+        {
+        rep$used = max(rep$used, rep$pointer - rep$base + rep$entry - 1)
+ 
+        return
+        }
+    }
+ 
+rep$pointer = 0                                 # empty slot not found !
+ 
+return
+end
+ 
+
+ 
+Subroutine BLDREP(rep$pointer,
+                  rep$SenderIndx$i,
+                  rep$ComIndx$i,
+                  rep$ShipTracks$i,
+                  rep$AirTracks$i,
+                  rep$EsmTracks$i,
+                  rep$NewShip$i,
+                  rep$NewAir$i,
+                  rep$NewEsm$i,
+                  rep$Own$i,
+                  rep$FirstDamIndx$i,
+                  rep$FirstRcnIndx$i)
+ 
+#######################################################
+#$%
+#$% Purpose:   BLDREP builds the REP entry.
+#$%
+#$% Called By: REPIN
+#$%
+#$% Calls:     None
+#$%
+#$% Tables:    REP
+#$%
+#$% Date:      DEC 80
+#$%
+#$% Author:    Ron Williams
+#$%
+#######################################################
+BBcommon
+ 
+REAL    REP$Reporttime$F                      # jb E2145  7/10/00
+Integer  REP$Pointer,REP$Own$I,REP$Newair$I,  # jb E2145  7/10/00
+    REP$Senderindx$I,REP$Comindx$I,           # jb E2145  7/10/00
+    REP$Shiptracks$I,REP$Airtracks$I,         # jb E2145  7/10/00
+    REP$Esmtracks$I, REP$Newship$I,           # jb E2145  7/10/00
+    REP$Newesm$I,REP$Firstdamindx$I,          # jb E2145  7/10/00
+    REP$Firstrcnindx$I,REP$Inpreparation$I    # jb E2145  7/10/00
+ 
+#$% store report data
+PUTrep$SenderIndx$i
+PUTrep$ComIndx$i
+PUTrep$ShipTracks$i
+PUTrep$AirTracks$i
+PUTrep$EsmTracks$i
+PUTrep$NewShip$i
+PUTrep$NewAir$i
+PUTrep$NewEsm$i
+PUTrep$Own$i
+PUTrep$FirstDamIndx$i
+PUTrep$FirstRcnIndx$i
+ 
+#$% set report time and store it
+rep$ReportTime$f = game$time
+PUTrep$ReportTime$f
+ 
+#$% set report in preparation and store it
+rep$InPreparation$i = $yes
+PUTrep$InPreparation$i
+ 
+return
+end
+ 
+
+ 
+Subroutine RPCKEM(unt$pointer,ipath)
+ 
+#######################################################
+#$%
+#$% Purpose:   RPCKEM determines which compath to
+#$%            report on based on EMCON conditions.
+#$%
+#$% Called By: NEEDRP
+#$%
+#$% Calls:     None
+#$%
+#$% Tables:    UNT        PAT        DEQ
+#$%
+#$% Date:      DEC 80
+#$%
+#$% Author:    Ron Williams
+#$%
+#######################################################
+BBcommon
+ 
+LITERAL  CSNDEQ,CSTRIP8             # jb E2145  7/10/00
+Integer  I, IUNIT,                  # jb E2145  7/10/00
+    UNT$Pointer,UNT$Violateemcon$I, # jb E2145  7/10/00
+    DEQ$Pointer, DEQ$Ident$I,       # jb E2145  7/10/00
+    PAT$Pointer, PAI$Pointer        # jb E2145  7/10/00
+integer ipath[2],jpath[2]
+ 
+#$% get violate EMCON status
+unt$ViolateEmcon$i = xunt$ViolateEmcon$i
+ 
+iunit = Unt$Pointer$index                        # 3/30/89
+ 
+#$% for each of two circuits (commpaths)
+for (i=1;i<=2;i=i+1)
+   {
+    jpath[i] = ipath[i]
+    ipath[i] = 0
+ 
+    #$% set path pointer
+    pat$pointer = jpath[i]
+ 
+    #$% set pair pointer
+    pai$pointer$to xpat$PairIndx$i
+ 
+    #$% get sending equipment
+    csndeq = xpai$SendingEquipment$c
+ 
+    #$% for each equipment entry
+    for_DEQ_Chain (iunit)
+        {
+        DEQ$Ident$I = xDEQ$Ident$I
+ 
+        #$% if equipment is not commsuite and acoustic, get next entry
+        if (DEQ$ident$i != $commsuite$code    &
+            DEQ$ident$i != $acousticcomm$code )  next
+ 
+        #$% if equipment is not sending equipment, get next
+        if (xDEQ$type$c != csndeq)  next
+ 
+        #$% if violate EMCON or equipment OK to send
+        if (unt$ViolateEmcon$i != $no |
+            xDEQ$OkToSend$i != $no ) ipath[i] = jpath[i]
+ 
+        break
+        }
+   }
+ 
+#$% if first path is zero
+if (ipath[1] == 0)
+    {
+    #$% set path
+    ipath[1] = ipath[2]
+    #$% clear second path
+    ipath[2] = 0
+    }
+ 
+return
+end
+ 
+ 
+
+ 
+Subroutine RPAGAN(unt$pointer,rep$pointer)
+ 
+#######################################################
+#$%
+#$% Purpose:   RPAGAN removes a report package
+#$%            (COM & REP & PND) for the cases
+#$%            where a complete report was not
+#$%            able to be built.
+#$%
+#$% Called By: REPIN
+#$%
+#$% Calls:     RPKILL
+#$%
+#$% Tables:    UNT        REP        COM
+#$%
+#$% Date:      DEC 80
+#$%
+#$% Author:    Ron Williams
+#$%
+#######################################################
+BBcommon
+ 
+LITERAL  CSTRIP8                               # jb E2145  7/10/00
+Integer  UNT$Pointer,REP$Pointer,COM$Pointer   # jb E2145  7/10/00
+ 
+if (trace$reporting != $no)
+    {
+    call echor
+    call echohn(xunt$name$c,$$MaxLit)
+    call echov(" can't complete report this minute")
+    }
+ 
+#$% if no aircraft or boat awaiting launch and COMM entry exists
+if (xunt$Status$i != $AwaitingLaunch$code &
+    xrep$ComIndx$i != 0)
+   {
+    #$% set COMM pointer
+    com$pointer$to xrep$ComIndx$i
+    com$zero
+   }
+ 
+#$% call to delete report
+call RPKILL(rep$pointer)
+ 
+return
+end
+ 
+
+ 
+Subroutine RPCLER(unt$pointer)
+ 
+#######################################################
+#$%
+#$% Purpose:   RPCLER clears report status flags in UNT.
+#$%
+#$% Called By: REPIN
+#$%
+#$% Calls:     None
+#$%
+#$% Tables:    UNT
+#$%
+#$% Date:      DEC 80
+#$%
+#$% Author:    Ron Williams
+#$%
+#######################################################
+BBcommon
+ 
+Integer UNT$Pointer,UNT$Reportshiptracks$I,      # jb E2145  7/10/00
+    UNT$Reportown$I, UNT$Reportairtracks$I,      # jb E2145  7/10/00
+    UNT$Reportesmtracks$I,UNT$Reportnewship$I,   # jb E2145  7/10/00
+    UNT$Reportnewair$I,UNT$Reportnewesm$I,       # jb E2145  7/10/00
+    UNT$Reportdamage$I,UNT$Reportreconn$I        # jb E2145  7/10/00
+ 
+#$% clear report OWN and store it
+unt$ReportOwn$i = $no
+PUTunt$ReportOwn$i
+ 
+#$% clear report ship track and store it
+unt$ReportShipTracks$i = $no
+PUTunt$ReportShipTracks$i
+ 
+#$% clear report aircraft track and store it
+unt$ReportAirTracks$i = $no
+PUTunt$ReportAirTracks$i
+ 
+#$% clear report ESM track and store it
+unt$ReportEsmTracks$i = $no
+PUTunt$ReportEsmTracks$i
+ 
+#$% clear report new ship and store it
+unt$ReportNewShip$i = $no
+PUTunt$ReportNewShip$i
+ 
+#$% clear report new aircraft and store it
+unt$ReportNewAir$i = $no
+PUTunt$ReportNewAir$i
+ 
+#$% clear report new ESM and store it
+unt$ReportNewEsm$i = $no
+PUTunt$ReportNewEsm$i
+ 
+#$% clear report damage and store it
+unt$ReportDamage$i = $no
+PUTunt$ReportDamage$i
+ 
+#$% clear report RECONN and store it
+unt$ReportReconn$i = $no
+PUTunt$ReportReconn$i
+ 
+return
+end
+ 
+
+ 
+Subroutine RPBAR1(unt$pointer,SUBROU,cor$pointer,ifirst,noroom)
+ 
+#######################################################
+#$%
+#$% Purpose:   RPBAR1 generates a report for
+#$%            sonobuoy barrier status.
+#$%
+#$% Called By: RPOWN1
+#$%
+#$% Calls:     SUBROU
+#$%
+#$% Tables:    UNT        BOY        BAR
+#$%            COR
+#$%
+#$% Date:      DEC 80
+#$%
+#$%Author:     Ron Williams
+#$%
+#######################################################
+BBcommon
+ 
+Integer IFIRST,INDX,KBARXX,NOROOM,  # jb E2145  7/10/00
+    UNT$Pointer, UNT$Hasbarrier$I,  # jb E2145  7/10/00
+    BOY$Pointer, BOY$Type$I,        # jb E2145  7/10/00
+    BAR$Pointer, COR$Pointer        # jb E2145  7/10/00
+ 
+indx = unt$pointer$index
+unt$HasBarrier$i = $no
+ 
+#$% for each entry
+for (boy$pointer$first;boy$pointer$ok;boy$pointer$next)
+   {
+    #$% if owner index is not the same, get next
+    if (Xboy$OwnerIndx$i != indx)  next
+ 
+    #$% get barrier type
+    boy$Type$i = xboy$Type$i
+ 
+    #$% if type is not active barrier and not passive
+    #$% barrier and not RBOC, get next
+    if (boy$Type$i != $ActiveBarrier$code  &
+        boy$Type$i != $PassiveBarrier$code &
+        boy$Type$i != $CHAFF$code           )  next # jb 1/18/91
+ 
+    unt$HasBarrier$i = $yes
+ 
+    #$% set BAR pointer
+    bar$pointer$to boy$pointer$index
+ 
+    call SUBROU(cor$pointer,ifirst,$Barrier$code,noroom)
+    if (noroom != $no) return
+ 
+    #$% duplicate sonobuoy barrier information into the COR entry
+    cor$Duplicate$bar
+   }
+ 
+#$% store has barrier
+PUTunt$HasBarrier$i
+ 
+return
+end
+ 
+ 
+ 
+
+subroutine RPTRKOTH (unt$pointer,pnd$pointer,ifirst,noroom,needst,needat)
+ 
+###################################################################
+#$%
+#$% Purpose:   RPTRKOTH generates PND entries for RCL entries
+#$%            (ROTHR track table).  Packs multiple RCL entries
+#$%            per PND.
+#$%
+#$% Called By: REPIN
+#$%
+#$% Calls:     RPRCL1
+#$%
+#$% Tables:    UNT     ROT$RCL     PND
+#$%
+#$% Date:      JULY 87
+#$%
+#$% Author:    Richard Schauer
+#$%
+###################################################################
+BBcommon
+ 
+Integer IFIRST,IFOUND,ISLOT,     # jb E2145  7/10/00
+    IUNIT,NEEDAT,NEEDST,NOROOM,  # jb E2145  7/10/00
+    RTH$Pointer,PND$RCL$Index,   # jb E2145  7/10/00
+    RTH$RCL$Index,               # jb E2145  7/10/00
+    PND$Pointer, UNT$Pointer     # jb E2145  7/10/00
+ 
+  if ((needst ==$NO) & (needat ==$NO)) RETURN
+ 
+  if (Xunt$Type$i != $Shorebase$code) RETURN
+ 
+  iunit = UNT$Pointer$Index
+  ifound = $NO
+ 
+  for (RTH$Pointer$First; RTH$Pointer$OK; RTH$Pointer$Next)  # check to see if
+    {                                                        # rothr attached
+     if (Xrth$InUse$i == $NO) NEXT                           # and active
+     if (Xrth$UnitIndx$i == iunit)
+       {
+        ifound = Xrth$Active$i
+        BREAK
+       }
+    }
+  if (ifound == $NO) RETURN
+ 
+  PND$RCL$Index = 0
+ 
+  for (islot = Xrth$FirstRCL$i; islot != 0; islot = Xrth$RCL$Next$i)
+    {
+     RTH$RCL$Index = islot
+     if (Xrth$RCL$DetFlag$i == $NO) NEXT
+     if (Xrth$RCL$Class$i == $Air$Code)
+       {
+        if (needat == $NO) NEXT
+       }
+     else
+       {
+        if (needst == $NO) NEXT
+       }
+     call RPRCL1(PND$Pointer,PND$RCL$Index,RTH$Pointer,islot,ifirst,noroom)
+     if (noroom != $NO) BREAK
+    }
+ 
+return
+end
+
+ 
+subroutine RPRCL1 (PND$Pointer,PND$RCL$Index,RTH$Pointer,RTH$RCL$Index,
+                   ifirst,noroom)
+#########################################################################
+#$%
+#$% Purpose:   RPRCL1 copies a RTH$RCL entry in to a PND slot.  Allocates
+#$%
+#$% Called By: RPTRKOTH
+#$%
+#$% Calls:     ADDPND
+#$%
+#$% Tables:    PND     RTH$RCL
+#$%
+#$% Date:      July 87
+#$%
+#$% Author:    Richard Schauer
+#$%
+#########################################################################
+BBcommon
+ 
+Integer IFIRST,NOROOM,           # jb E2145  7/10/00
+    PND$Pointer,PND$RCL$Index,   # jb E2145  7/10/00
+    RTH$Pointer,RTH$RCL$Index    # jb E2145  7/10/00
+ 
+PND$RCL$Index = PND$RCL$Index + 1
+if (PND$RCL$Index > PND$RCL$Slots) PND$RCL$Index = 1
+ 
+if (PND$RCL$Index == 1)
+  {
+   #$% call add pending report
+   call ADDPND(PND$Pointer,ifirst,$OTH$Code,noroom)
+   if (noroom != $NO) RETURN
+  }
+ 
+PND$RCL$Duplicate$RCL
+ 
+return
+end

@@ -1,0 +1,824 @@
+include "ascii.inc"         
+include "bbcode.inc"
+include "elevation.inc"         
+undefine read
+undefine write
+undefine err
+undefine pause
+define($debug,)
+
+#$%   The DMED. (Digital Mean Elevation Data) file is  a series of 394 byte
+#$%   records in the ROOT directory.  The first 14 bytes of the first
+#$%   record give the minimum bounding rectangle (MBR) in degrees 
+#$%   encompassing the cells on the CD. For example N30N36E020E032 
+#$%   indicates that the MSR is 6 degrees high and 12 degrees wide.
+
+#$%   A data file of DTED Level 1 is a 1 degree by 1 degree cell defined by
+#$%   the integer 1 degree latitudes and 1 degree longitudes of a geographic
+#$%   reference system.  The terrain elevation information is expressed 
+#$%   in meters.  The elevation posts are defined by the intersections of  
+#$%   the rows and columns within a matrix. The required matrix intervals
+#$%   defined in terms of geographic arc seconds vary according to latitude
+#$%   as indicated below.
+#$%
+#$%	Zone    Latitude     100m post spacing
+#$%                          lat  long
+#$%      I      0-50 NS       3 x  3
+#$%     II      50-70 NS      3 x  6   
+#$%    III      70-75 NS      3 X  9
+#$%     IV      75-80 NS      3 x 12
+#$%     V       80-90 NS      3 x 18 
+
+#define(secsPer100meters,3./100.)  # as shown this varies with latitude    
+
+# If a specific point in deg,min,sec is desired, the following equation
+# will retrieve it.
+# lon_index = ((lon_W +(i*100 *secsPer100meters)) - (lonD * 3600)) / lon_interval
+# convert user_increment back to meters and then to arc second offset
+
+
+define (request_limit,1201)		# 1201 is the maximum number records
+                                        # in a cell
+define(user_increment,1)
+define($carriage_return,0)
+define(DEG$PER$RAD ,57.295779)                    # =  180 / Pi
+define(RAD$PER$DEG ,0.01745329)                   ## =  Pi / 180
+define (DTEDcommon,
+integer*2 current_elev
+integer*2 final_lat,final_lon
+Integer*4 out_lat_index,out_lon_index,out_grid_height,out_grid_width
+#integer*4  user_increment
+integer*2 grid_width,grid_height
+
+# The following area is used to build output records.
+real felev(120)
+integer*2 ielev(240),jelev(240)
+character celev(480)
+equivalence (ielev,felev)
+equivalence (ielev,celev)
+integer*2 lat_interval, lon_interval, lon_rcds, lat_points
+
+integer*2 request_list[0:1200]   # the number of elevation records in a cell
+vmschar*ARB devnam
+vmschar*ARB devnam1
+vmschar*ARB devnam2
+vmschar*ARB devnam3
+
+
+common /DTED/out_grid_height,out_grid_width,ielev,
+    grid_width,grid_height,
+    request_list,jelev,final_lat,final_lon,
+    lat_interval,lon_interval,lon_rcds,lat_points,
+    current_elev, devnam, devnam1, devnam2, devnam3
+
+)
+
+Program Build_elev_Library
+IMPLICIT NONE
+
+call initr4
+
+call initDted
+
+call Request_mount       # request user to mount a disk 
+                         # determine number of degrees covered
+call process_elevation_data
+
+end
+
+
+Subroutine initDted
+implicit none
+DTEDcommon
+
+integer   getarg3
+character buf(FILENAMESIZE)
+integer*4 i, kk
+vmschar*3 dtedcdnum
+
+ call help_pgm(0,
+              "dtedlib: Interactively view and change bb symbolically ",
+              "dtedlib Tags: environment, dted",
+              "Usage: dtedlib <cd number>",
+              "",
+              "",
+              "",
+              "",
+              "Example: dtedlib 210")
+
+for (i=1; getarg3(i, buf, FILENAMESIZE) != EOF; i=i+1)
+{
+    if (buf[1] == MINUS)
+    {
+    	next
+    }
+    else if (buf[1] == EOS)
+    {
+    	next
+    }
+    else
+    {
+		call rs2fs (buf, dtedcdnum)
+		devnam = "/run/media/resa/TCD_DTED" // dtedcdnum
+		devnam1 = "/run/media/resa/TCD__DTED" // dtedcdnum
+		devnam2 = "/run/media/resa/TCD_DTED_" // dtedcdnum
+		devnam3 = "/run/media/resa/TCD__DTED_" // dtedcdnum
+    }
+}
+if (i < 3)
+{
+	call remark("usage:  dtedlib [cd number]")
+	call exit()
+}
+
+return
+end
+
+
+
+define(RAD$PER$DEG ,0.01745329)                  # =  Pi / 180
+
+Subroutine request_mount
+
+#$%  Request_mount mounts the new CDROM; dismounts the previous CDROM;
+#$%  Calls READ_DMED to determine the minimum bounding rectangle; and
+#$%  adjusts this information to reflect "to" rather than "through"
+#$%
+IMPLICIT NONE
+DTEDcommon
+
+vaxcharacter*1 answer
+
+integer*4 i,start, kk
+integer*4 stat, getlin
+integer*2 istat,dmed_record_no
+integer*2 DTED_elev
+integer*2 dmed_open, dmed_read
+integer*2 DTED_mount
+integer*2 DTED_open
+integer*2 DTED_close
+integer ctoi,itoc
+integer*4 temp_lat,temp_lon
+character DMED_record[394]	# One logical DMED record
+character chars[40]
+character cdfile[ARB]
+
+  repeat
+{
+    print *,'Insert CDROM and type "R" when ready.'
+    read 100,answer
+    100 format (40a)
+    if (answer ==  "r" | answer == "R") break
+}
+
+kk = 0
+call smovvn(devnam, cdfile, kk)
+call smovvn("/dmed",cdfile, kk)
+call smov(EOS, cdfile, kk)
+istat= dmed_open(cdfile) # Minimum Bounding Rectangle Record:Char:out
+if (istat != 0)
+{
+	kk = 0
+	call smovvn(devnam, cdfile, kk)
+	call smovvn("/dmed.",cdfile, kk)
+	call smov(EOS, cdfile, kk)
+	istat= dmed_open(cdfile)
+}
+if (istat != 0)
+{
+	devnam = devnam1
+
+	kk = 0
+	call smovvn(devnam, cdfile, kk)
+	call smovvn("/dmed",cdfile, kk)
+	call smov(EOS, cdfile, kk)
+	istat= dmed_open(cdfile)
+}
+
+if (istat != 0)
+{
+	devnam = devnam1
+
+	kk = 0
+	call smovvn(devnam, cdfile, kk)
+	call smovvn("/dmed.",cdfile, kk)
+	call smov(EOS, cdfile, kk)
+	istat= dmed_open(cdfile)
+}
+
+if (istat != 0)
+{
+	devnam = devnam2
+
+	kk = 0
+	call smovvn(devnam, cdfile, kk)
+	call smovvn("/dmed",cdfile, kk)
+	call smov(EOS, cdfile, kk)
+	istat= dmed_open(cdfile)
+}
+
+if (istat != 0)
+{
+	devnam = devnam2
+
+	kk = 0
+	call smovvn(devnam, cdfile, kk)
+	call smovvn("/dmed.",cdfile, kk)
+	call smov(EOS, cdfile, kk)
+	istat= dmed_open(cdfile)
+}
+
+if (istat != 0)
+{
+	devnam = devnam3
+
+	kk = 0
+	call smovvn(devnam, cdfile, kk)
+	call smovvn("/dmed",cdfile, kk)
+	call smov(EOS, cdfile, kk)
+	istat= dmed_open(cdfile)
+}
+
+if (istat != 0)
+{
+	devnam = devnam3
+
+	kk = 0
+	call smovvn(devnam, cdfile, kk)
+	call smovvn("/dmed.",cdfile, kk)
+	call smov(EOS, cdfile, kk)
+	istat= dmed_open(cdfile)
+}
+
+
+
+
+
+
+if (istat != 0)
+{
+	print *, "DMED file not found on CD"
+	call exit()
+}
+istat= dmed_read(DMED_record) # Minimum Bounding Rectangle Record:Char:out
+
+start=5
+temp_lat = ctoi[DMED_record,start]
+
+if(DMED_record[4] == $LETN)
+{
+    if(temp_lat > 0)			
+    	temp_lat = temp_lat -1
+     else  # latitude == 0
+     	temp_lat = 1    
+}
+else  # dmed_record[4] == S
+{
+    temp_lat = -temp_lat    	
+    temp_lat = temp_lat + 1
+
+}
+final_lat = temp_lat #convert to integer*2
+        
+start=12
+temp_lon = ctoi[DMED_record,start]
+
+if(DMED_record[11] == $LETE)
+    temp_lon = temp_lon -1
+else   # west longitude 
+{
+    temp_lon = -temp_lon 
+    temp_lon = temp_lon + 1
+
+}
+
+final_lon = temp_lon # convert to integer*2
+return
+end
+    	
+
+define(secsPer100meters,3./100.)  
+define(max_cell_rcds,1201)   # The number of records is a function of latitude.
+                             # For latitudes from S50 to N49 the count is 1201.
+#membytes = (max_cell_rcds+1) * (max_cell_rcds+1) * 2
+define(max_cell_file_bytes,(arith(arith(arith(max_cell_rcds,+,1),*,arith(max_cell_rcds,+,1)),*2)))
+
+Subroutine process_elevation_data
+#
+#   Called by: Bld_elev_Library
+#
+
+IMPLICIT NONE
+DTEDcommon
+
+integer*2 DTED_request_setup 
+integer*2 DTED_read
+integer*2 DTED_open
+integer*2 DTED_elev
+integer*2 DTED_close
+integer*2 dmed_read
+                
+
+integer ctoi,itoc
+
+integer*4 dev_end
+integer*4 length
+integer*4 lat_scale, lon_scale
+integer*2 current_lon,current_lat,k_lon,k_lat,kk_lon,reqno,istat
+integer*4 i,k,irc,j,out_array_count,Dmed_area
+integer*4 current_lat4,current_lon4,offset,char_count,int_start,area_count
+integer*4 byte_count,max_elev,i_area,j_area,k_area
+integer*2 old_file,last_file
+integer*2 request_no,lat_index, lon_index,max_elev2
+integer*2 next_read,first_record
+integer*2 cell_inventory[0:89,0:179]
+integer*2 lat_sign,lon_sign,iv
+integer*2 lon_rcd[0:max_cell_rcds]
+integer*2 maximum_elevation
+logical first_through
+integer*2 cell_area[16]
+real r_area
+character cell_id[8]
+vaxcharacter*8 vax_cell_id
+integer*2     cell_file_buf[0:max_cell_rcds, 0:max_cell_rcds]
+
+character outfile[23]
+vaxcharacter*23 v_outfile
+equivalence (outfile, v_outfile)
+
+character max_char_elev[7]
+character DMED_record[394]	# One logical DMED record
+
+EQUIVALENCE(cell_id,Vax_cell_id)
+
+character file_name[128]	# Name of file to be opened.
+vaxcharacter*128 sfile_name
+    equivalence (file_name,sfile_name)
+
+
+integer*4 stid/2/			# Recording standard.
+				#	1 = High Sierra
+				#	2 = ISO9660
+first_record= 0
+
+outfile[1]=$LETD;outfile[2]=$LETT;outfile[3]=$LETE;outfile[4]=$LETD
+outfile[5] = $UNDERSCORE                 # outfile[6]:outfile[12] = HDDHDDD
+outfile[13] = $UNDERSCORE ;outfile[14] = $DIG1
+outfile[15] = $PERIOD; outfile[16]=$LETE; outfile[17]=$LETL; outfile[18]=$LETV
+
+data max_char_elev[7]/$SPACE/
+
+
+out_grid_height=1200
+out_grid_width=1200
+
+current_elev = 0
+first_through = .true.
+
+REPEAT
+{
+    istat= dmed_read(DMED_record) 
+    
+	# Copy cell lat and lon
+    vax_cell_id = " "
+    for(iv=1;iv<=7;iv=iv+1)
+    {
+    	cell_id[iv] = dmed_record[iv]
+                	
+    }
+
+    if(DMED_record(8) == $SPACE) # a cell with no data
+    {
+    	write(*, '(1H,A,2X,A)')_
+        'NO DATA IN CELL', vax_cell_id  
+    	
+    	call end_test(DMED_Record, # IN
+                      current_lat, # OUT
+                      current_lon, # OUT
+                      last_file)   # OUT
+                      
+        if(last_file == $no)
+    	    NEXT
+    	else
+            BREAK
+    }
+	else
+	{
+    	write(*, '(1H,A,2X,A)')_
+        'PROCESSING CELL', vax_cell_id  
+	}
+
+    # construct ouput file name and test to see if it already exists
+
+    length=5
+    call smovh(DMED_record,7,outfile,length)
+
+    call build_outfile(DMED_record, 
+                       v_outfile,
+                       old_file)
+
+    if(old_file == $yes) NEXT  # This file has already been created
+
+    #$%  For each of the 16 areas in the DTED Cell store the maximum
+    #$%  elevation as recorded in the corresponding DMED record
+	maximum_elevation = 0
+    for(byte_count = 1;byte_count <=16;byte_count = byte_count +1)
+    {
+	cell_area[byte_count] = 0       
+    }
+
+    byte_count = 1
+    offset=16
+    for(DMED_area=1;DMED_area <=16;Dmed_area = DMED_area +1)
+    {
+		for(char_count=1;char_count<=6;char_count=char_count+1)    
+		{
+		    max_char_elev[char_count]= DMED_record[offset+char_count]
+		}
+		int_start = 1
+		max_elev = ctoi(max_char_elev,int_start)
+
+		# Use area max elevation to keep max elevation for cell
+		if (maximum_elevation < max_elev) maximum_elevation = max_elev
+
+		if(max_elev == 0)
+		    cell_area[byte_count] = 0
+		else
+		{
+		    max_elev2 = max_elev
+		    cell_area[byte_count] = max_elev2
+
+		}
+		byte_count = byte_count + 1
+		offset = offset+ 24
+    }
+    
+    # convert character data in current DMED_record to Integer lat and
+    # lon needed for DTED open and return flag indicating last cell on
+    # currently mounted CDROM
+
+    call end_test(DMED_Record, # IN
+    	              current_lat,    # Integer: lat needed for dted_open: out
+                      current_lon,    # Integer: lon needed for DTED_open:out
+        	      last_file)      # OUT
+
+    if(first_through == .false.)  # first time through, the file is already open
+    	istat =  DTED_close()
+    else
+       first_through = .false.
+
+	dev_end = len_trim(devnam)
+
+	sfile_name = devnam(1:dev_end)
+	call build_cdname(current_lat,current_lon,file_name[dev_end+1],stid)
+
+    istat = DTED_open(file_name, # Cell file name on CD:in
+		      lon_interval,		 # interval between adjacent longitude
+					  			 # records in the currently open file:
+					 			 # Integer:Arc Seconds:out
+		      lon_rcds,     	 # Number of Lon records in file:int:out
+		      lat_interval, 	 # Interval between adjacent lat points
+					    	     # in longitude record in currently open
+					 		     # file:Integer:ARC seconds:Out
+		      lat_points)   	 # Number of Lat points in longitude
+					  			 # record in currently open file
+
+
+    lat_scale = Max_cell_rcds / (lat_points-1)
+    lon_scale = max_cell_rcds / (lon_rcds-1)
+
+    k = FLOAT(lon_rcds)/user_increment + .99 # Ceiling function
+    out_array_count = k
+
+    # for each of the requested longitude records, get the altitude
+    # at each latitude increment.  
+
+    for(kk_lon=0;kk_lon < out_array_count-1;kk_lon = kk_lon + 1)
+    {
+		istat = Dted_read(kk_lon, lon_rcd)  # increment the longitude record
+
+        out_lon_index = kk_lon * lon_scale
+
+        for (i = 0; i < lat_points-1; i = i + user_increment)
+        {
+			# set up index into the cell_area array 
+	    
+	    	out_lat_index = i * lat_scale
+	   		R_area = (FLOAT(out_lat_index)/300.0) +1
+	   		I_area = r_area
+	   		R_area = (FLOAT(out_lon_index)/300.0) 
+	    	j_area = R_area
+	   		K_area = 4*(j_area) + I_area
+	    	#if(cell_area[k_area] == 0) NEXT
+
+	    	current_elev = lon_rcd[i]
+
+#			Current elevation in dted should not exceed max elevation in dmed
+#			if (current_elev > maximum_elevation)
+#				print *, kk_lon, i, current_elev, maximum_elevation
+			if (current_elev < 0)
+			{
+				current_elev = 0
+#				print *, kk_lon, i, current_elev, maximum_elevation
+			}
+
+	    	call fill_elev(current_elev,
+			       out_lat_index,  # offset from S corner of the array
+			       out_lon_index,  # offset from W corner of the array
+			       cell_file_buf,  # start location of table
+			       out_grid_height,
+			       out_grid_width,
+    			       lat_scale,
+    			       lon_scale)
+		} # end for i <= lat_points
+    } # end kk_lon
+
+    call write_elev_record(maximum_elevation, # maximum for the grid:integer:in
+		   current_lat,            # South Lat for cell:integer*2:innext
+		   current_lon,            # West Lon for cell:integer*2:in
+		   cell_file_buf,          # start location of table
+		   out_grid_height,        # maximum latitude points:integer:in
+		   out_grid_width,         # maximum longitude points:integer:in
+		   cell_area[1])
+
+    if(last_file == $yes) BREAK
+} # end REPEAT
+return
+end
+
+
+Subroutine end_test(DMED_Record, # IN
+                    DMED_lat,    # latitude of current cell; integer*2 :out
+                    DMED_lon,    # longitude of current cell; integer*2 :out
+                    last_file)   # OUT
+
+
+IMPLICIT NONE
+DTEDCOMMON
+character DMED_record[394]	# One logical DMED record
+integer*4 DMED_lat4,DMED_lon4,start_pos,end_pos,istat
+integer*2 DMED_lat,DMED_lon,last_file
+
+start_pos=2
+end_pos = 3
+call get_num(DMED_record,start_pos,end_pos,DMED_lat4,istat)
+
+start_pos=5
+end_pos = 7
+
+call get_num(DMED_record,start_pos,end_pos,DMED_lon4,istat)
+
+DMED_lat = DMED_lat4  #Convert to integer*2
+DMED_lon = DMED_lon4
+
+if(DMED_lat4 == final_lat & DMED_lon4 == final_lon)
+    last_file = $yes
+else
+    last_file = $no
+
+return
+end
+
+
+subroutine get_num (chars,i, limit,intgr,istat)
+
+# Subroutine Get_Num gets the next integer from a string of characters.
+# Variable i identifies the first character position in which to look.
+# Variable limit identifies the end of the string.  Leading zeroes are
+# ignored.  Integers are delimited by any non numeric character
+# including + and -. At the return, variable i points to the location
+# of the delimiting character; variable intgr contains the integer,
+# and istat contains zero if at least one numeric character was found. 
+# If no numeric character was found, istat contains 1.
+
+character chars[arb]
+integer*2 istat, change_sign
+
+istat = 1
+intgr = 0
+change_sign = 0
+
+if ((chars[i-1] == $LETS |
+     chars[i-1] == $LETW))
+    change_sign = 1
+
+for (;i<=limit; i=i+1)
+{
+    if (chars[i] != $SPACE) BREAK
+}
+if (i > limit)
+	# The rest of the string was all blank.
+    return
+
+for (;i<= limit; i=i+1)
+{
+	# Convert character to a number
+    j = chars[i] - $Dig0
+	# Stop on any non numeric character
+    if (j < 0 | j > 9) break
+    intgr = intgr * 10 + j
+    istat = 0
+}
+
+if (change_sign == 1)
+    intgr = -intgr
+
+return
+end    
+
+
+
+Subroutine build_outfile(DMED_record, 
+                         v_outfile,
+                         old_file)
+
+IMPLICIT NONE
+integer*4 length,ios
+integer*2 old_file
+character DMED_record[394]	# One logical DMED record
+
+vaxcharacter*23 v_outfile
+
+# outfile name is DTED_HDDHDDD_1.ELV  
+# all characters except the Hemispheres, Lat and Lon are filled in by
+# process elevation data
+
+old_file = $no
+
+open (unit=15, file=v_Outfile,form='unformatted',recl=$DTEDCellDim*2/4,status='unknown',_
+    access = 'sequential',IOSTAT=ios)
+
+return
+end
+
+Subroutine fill_elev(current_elev,   # elevation value to be stored:int*2:in
+                     out_lat_index,  # offset from S corner of the array
+                     out_lon_index,  # offset from W corner of the array
+		   			 elev_fill,	     # start location of table
+                     out_grid_height,# number of lat points defined by degree
+                                     # span and user requested interval
+                     out_grid_width, # number of lon points defined by degree
+                                     # span and user requested interval
+                     lat_scale,	     # Max_cell_rcds/lat_points:integer:in
+                     lon_scale)	     # Max_cell_rcds/lon_rcds:integer:in
+
+IMPLICIT NONE
+
+integer*2 current_elev
+integer*4 out_lat_index,out_lon_index,out_grid_height,out_grid_width
+integer*2 elev_fill[0:max_cell_rcds, 0:max_cell_rcds]
+integer*4 lat_scale, lon_scale, i, j
+
+for (i=0; i<lat_scale; i=i+1)		# Handle 6" and 12" resolution
+{					# by duplicating points giving
+    for (j=0; j<lon_scale; j=j+1)	# 3" resolution
+    {
+	elev_fill[out_lat_index+i,out_lon_index+j] = current_elev
+    }
+}
+
+return
+end
+
+
+
+define($METERS2FT,3.2808)
+define(DESCRIPTOR_WIDTH,4)
+define(bit_record_length,4096)    
+define(best_bit_width,7)
+define ($cbsize,arith(1200,*,1200))	# size of circular buffer
+
+
+
+
+Subroutine write_elev_record(_
+                    maximum_elevation, # maximum for the grid:integer:in
+		            deg_lat,           # South Lat for grid:int:in
+		            deg_lon,           # West Lon for grid:int:in
+		            elev_fill,         # start location of table
+		            out_grid_height,   # maximum latitude points:integer:in
+		            out_grid_width,    # maximum longitude points:integer:in
+                    cell_area)
+
+IMPLICIT NONE
+real*4    r_area
+integer*4 first_through
+integer*4 out_grid_height,out_grid_width,i_lat,i_lon,record_len,in_lat,in_lon
+integer*4 byte_count,max_elev,i_area,j_area,k_area
+integer*4 i,kkk
+integer*4 itoc,ios
+integer*4 outbuf_index
+integer*2 maximum_elevation
+integer*2 terminator
+Integer*2 deg_lon,deg_lat,terminator_width,threshold, bw2
+integer*2 cell_area[16]
+Integer*2 lat_sign,lon_sign,previous_elevation,elevation_diff
+integer*2 elev_fill[0:max_cell_rcds, 0:max_cell_rcds]
+integer*2 offset
+Integer*2 current_elevation,first_elevation
+integer*2 outbuf[$DTEDCellDim]
+data outbuf/$DTEDCellDim*0/
+
+first_elevation = elev_fill[0,0]
+previous_elevation = first_elevation
+
+# Header record containing max elevation for cell and areas
+outbuf[1] = deg_lat
+outbuf[2] = deg_lon
+outbuf[3] = first_elevation
+outbuf[4] = maximum_elevation
+for (i=1; i<=16; i=i+1) 
+{
+	outbuf[4+i] = cell_area[i]
+}
+write (15) outbuf
+
+# grid height reflects the latitude span,grid width the longitude span
+
+for (i_lon=0; i_lon < out_grid_width; i_lon = i_lon + 1)
+{
+	outbuf_index = 0
+    for (i_lat=0; i_lat < out_grid_height; i_lat = i_lat + 1)
+    {
+		outbuf_index = outbuf_index + 1
+	    current_elevation = elev_fill[i_lat,i_lon]
+		outbuf[outbuf_index] = current_elevation
+    }
+
+    write (15) outbuf
+}
+
+close(UNIT=15)
+
+return
+end
+
+
+subroutine build_CDname(sw_lat,sw_lon,fname,stid)
+
+integer*4 stid
+integer*2 sw_lat
+integer*2 sw_lon
+character fname[*]
+character CDname[19]
+data CDname[1]/$SLASH/
+data CDname[2]/$LITD/
+data CDname[3]/$LITT/
+data CDname[4]/$LITE/
+data CDname[5]/$LITD/
+data CDname[6]/$SLASH/
+
+data CDname[11]/$SLASH/
+
+
+data CDname[15]/$PERIOD/
+data CDname[16]/$LITD/
+data CDname[17]/$LITT/
+data CDname[18]/$DIG1/
+data CDname[19]/EOS/
+
+integer*4 lon1, lon2, lon3, lat1, lat2
+
+lon1 = ABS(sw_lon) / 100
+lon2 = (ABS(sw_lon) - lon1 * 100) / 10
+lon3 = (ABS(sw_lon) - lon1 * 100 - lon2 * 10)
+lat1 = ABS(sw_lat) / 10
+lat2 = ABS(sw_lat) - lat1 * 10
+
+if (sw_lon < 0) CDname[7] = $LITW
+else            CDname[7] = $LITE
+
+CDname[8] = lon1 + $DIG0
+CDname[9] = lon2 + $DIG0
+CDname[10] = lon3 + $DIG0
+
+if (sw_lat < 0) CDname[12] = $LITS
+else            CDname[12] = $LITN
+CDname[13] = lat1 + $DIG0
+CDname[14] = lat2 + $DIG0
+
+if (stid == 2)
+{
+    for (i=1;i<=18;i=i+1)                     # change from 19 to 18 3/7/91 DES
+        fname[i] = cdname[i]
+    fname[19] = EOS                        # change from 20 to 19 3/7/91 DES
+#	CDOPEN expects the file name to be delimited by a space.
+}
+else
+{
+    for (i=1;i<=10;i=i+1)
+	fname[i] = cdname[I]
+    for (;i<=14;i=i+1)
+	fname[i] = $DIG0
+    for (;i<=18;i=i+1)
+	fname[i] = cdname[i-4]
+    for (;i<=22;i=i+1)
+	fname(i) = $DIG0
+    for (;i<=26;i=i+1)
+	fname[i] = cdname[i-8]
+    fname[27] = EOS
+#    fname[28] = $SPACE
+}
+return
+end
+

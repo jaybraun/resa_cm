@@ -1,0 +1,669 @@
+##---------------------------------------------------------------------------
+###  VAX Conversion:    (subroutines SEND, SNDMSG, GETCOM)
+#  2/2/82  -Undefine READ, in GETCOM
+#          -Decreased number of bytes from 5 to 4 (a longword)
+#           for itype and for imsg[i]
+#          -In subroutine SNDMSG, references to vue$msg$EXT$I are deleted
+#           because it's now completely omitted from the VUE table.  (The
+#           extraction in the PLMAIN file is also deleted;  noting that
+#           nothing is done with it after the extraction anyhow.)
+#  2/3/82  -In subroutine SEND, array TEXT is designated as LITERAL, and
+#           its contents are positioned in the integer IMSG array by a
+#           call on SMOVH rather than by assignment of array elements.
+#           Note that TEXT's "ILEN" for LEX-type messages is now in
+#           QUADwords (the lements of a LITERAL array).
+#          -In subroutine GETCOM, changed READ statements to read
+#           the CMT$record rather than using local array REC
+##---------------------------------------------------------------------
+ 
+#####   version 3.1  dated-  7apr81
+ 
+ 
+#####   version 3.0  dated- 22dec80
+ 
+ 
+# 
+ 
+#$%      MODULE                       UTILITY                     DATA
+#$%    SUBROUTINES                  SUBROUTINES                  TABLES
+#$%    ===========                  ===========                  ======
+#$%
+#$%      SEND                         ECHO                         VUE
+#$%      SNDMSG                       ECHOH
+#$%      GETCOM                       ECHOI
+#$%                                   ECHOR
+#$%                                   SMOV
+#$%                                   TRACE
+#$%                                   IGBYTE
+#$%
+#$%
+#$%
+#$%    NOTES
+#$%    =====
+#$%
+#$%    1.  UTILITY SUBROUTINES NOT SHOWN ON FLOWCHART.
+#$%
+#$%    2.  * INDICATES NO OTHER SUBROUTINES CALLED.
+#$%
+#$%
+#$%
+#$%    FLOWCHART FOR FILE SEND
+#$%    =======================
+#$%
+#$%    SEND - GETCOM*
+#$%         - SNDMSG*
+ 
+
+ 
+include "bbctl.inc"
+include "bbcode.inc"
+include "bbvue.inc"
+include "bbsta.inc"
+include "ascii.inc"
+include "hscmt.inc"
+include "stationmsg.inc"             # joa 12/97 (E1852)
+ 
+define(BBImplicit, Implicit NONE)                          # MJC 5/4/2000 (E2145)
+ 
+subroutine send_(jview,itype,ilen,text)
+ 
+ ##########################################################
+ #$%
+ #$% Purpose:   SEND uses subroutine SNDMSG to transmit
+ #$%            any of three different message types
+ #$%            (COMMTEXT, LEXICAL, or STATUS).
+ #$%            With copy to Control (when requested).
+ #$%
+ #$% Tables:    VUE
+ #$%
+ #$% Date:      DEC 80
+ #$%
+ #$% Author:    Dana Wills
+ #$%
+ #$% Modified:  Jim Allen - 12/97 (E1852)
+ #$%            Added control copy flag values to
+ #$%            sndmsg calls.
+ #$%
+ ##########################################################
+ 
+#########################################################################
+#                                                                       #
+#       SEND:  To send 3 types of messages to PLAYER                    #
+#                                                                       #
+#       Message Types:  COMM, delivery of a COMMTEXT message (all lines)#
+#                       LEX,  player commands in lexical codes          #
+#                       TEXT, ascii text of a message                   #
+#                                                                       #
+#       Arguments:                                                      #
+#                                                                       #
+#       Msg type   Arg Name   Meaning/Usage                             #
+#       --------   --------   -----------------------------------       #
+#       All        jview      The index into the VUE table.             #
+#                             (if the index is invalid, the message     #
+#                              goes to CONTROL)                         #
+#                             If the value is negative, then a copy     #
+#                             will not be sent to control....           #
+#                                                                       #
+#       COMM       itype      Must be 'COMM'.                   2/2/82  #
+#       COMM       ilen       The Disk-Address of the COMMTEXT message. #
+#       COMM       text       N/A                                       #
+#                                                                       #
+#       LEX        itype      Must be 'LEX '.                   2/2/82  #
+#       LEX        ilen       Length (QUADwords) of array TEXT. 2/3/82  #
+#       LEX        text       An array of the length specified          #
+#                                        (QUADwords as of       2/3/82):#
+#                         quadWord 1 - Addressee Name, Force code, or   #
+#                                      0 (zero).                        #
+#                         quadWord 2 - Time to execute (or 0, zero).    #
+#                         quadWord 3 - Order Number (nord).             #
+#                                      (enter as negative to show       #
+#                                       as a relative time-SEARCH PLAN).#
+#                         quadWord 4 thru ILEN - Lex codes.             #
+#                                                                       #
+#       TEXT       itype      Must not be 'COMM' or 'LEX '.      2/2/82 #
+#       TEXT       ilen       The length (BYTES) of the message. 2/3/82 #
+#       TEXT       text       An array of the length specified          #
+#                             containing ascii text.                    #
+#                                                                       #
+#                                                                       #
+#########################################################################
+ 
+#########################################################################
+#                                                                       #
+#       SEND generates an array which is passed to SNDMSG along with a  #
+#       VUE$pointer.                                                    #
+#                                                                       #
+#       For COMM messages, all lines of the message are read from disk, #
+#       and formated as TEXT for SNDMSG.                                #
+#                                                                       #
+#       If CONTROL is copying the messages for a view, then SNDMSG      #
+#       will be called twice.  Once with each respective VUE$pointer.   #
+#                                                                       #
+#       The format of the array is:                                     #
+#                                                                       #
+#       Word    Description                                             #
+#       ----    -------------------------------------                   #
+#        1      Length of the array                                     #
+#        2      The VUE index of the original addressee                 #
+#        3      The message Type code (0=TEXT, 1=LEX)                   #
+#                                                                       #
+#       if TEXT                                                         #
+#       -------                                                         #
+#        4-n    Ascii text                                              #
+#                                                                       #
+#       if LEX                                                          #
+#       ------                                                          #
+#        4-5    Order Addressee (name, force code, or zero)             #
+#        6-7    Order Execution time                                    #
+#        7-8    Order Number (Negative if relative)                     #
+#        9-n    Lex codes                                               #
+#                                                                       #
+#                                                                       #
+#########################################################################
+ BBcommon
+ 
+ literal lmsg[100]                               # defined in QUADwords  2/3/82
+ integer JVIEW,IVIEW,IEXSUP,JLEN,
+         ITYPE,ILINE,I,NCHAR,
+         LCHAR,ICHAR,IGBYTE,
+         VUE$Pointer, VUE$Copy$I                # MJC 5/4/2000 (E2145)
+ integer ILEN
+ LITERAL text[ilen]                             # defined in QUADwords  2/3/82
+ integer msg0,imsg[200]                         # 100 vice 50           2/9/82
+ equivalence (lmsg,imsg[4])                     # 2/24/82
+ common /x_msg_send/ msg0,imsg                  # force LMSG to correct boundary (dew 19-Jul-00)
+ 
+ if (execution$mode == review$mode &            # send no messages when
+     review$fast    >  game$minute &            # REVIEWing FAST, except
+     game$pause     != $yes         ) return    # during a PAUSE.
+ 
+ if (abs(jview) < $first$view |
+     abs(jview) > $last$view   ) iview = 1      # Default VUE
+ else                            iview = abs(jview)
+ 
+ iexsup = vue$base                      # save pointer to CONTROL view
+ 
+ vue$pointer$to iview                   # set pointer to receipent
+ 
+ vue$copy$i = Xvue$copy$i               # Copy requested ?
+ if (jview <  0) vue$copy$i = $no       #   But not this message...
+ if (jview == 1) vue$copy$i = $no       #   And not two to himself
+ 
+ imsg[2] = iview
+ imsg[3] = 0                            # set TEXT code
+ 
+ if (itype == $comm$code | itype == 'COMM')     # process commtext messages     2/2/82
+   {
+    for (iline=1; iline <= 9; iline=iline+1)
+       {
+        #$% call to get COMMTEXT entry
+        call getcom (ilen,iline,jlen,imsg[4])
+ 
+        #$% if length is zero, break loop
+        if (jlen == 0) break
+        imsg[1] = jlen+3
+ 
+        #$% if CONTROL is to get msg., send line to his terminal,
+        if (vue$copy$i == $YES)
+           call sndmsg (iexsup, imsg, $yes)
+        call sndmsg (vue$pointer, imsg, $no)
+       }
+   }
+else if (itype == $LEX$code | itype == 'LEX') # process lex messages           2/2/82
+  {
+   imsg[1] = 3+ilen*2                   # Convert double word len to word len
+   imsg[3] = 1                          # set LEX code
+ 
+   for (i=1; i <= ilen; i=i+1)
+        lmsg[i] = text[i]                 # move literals
+ 
+   #$% if CONTROL is to get msg., send line to his terminal
+   if (vue$copy$i == $YES)
+     call sndmsg (iexsup, imsg, $yes)
+   #$% send line to addressee's terminal
+   call sndmsg (vue$pointer, imsg, $no)
+  }
+else                                    # process status messages (text)
+   {
+    nchar = $space
+    jlen = 12                           #                               2/4/82
+ 
+    for (i=1; i<=ilen; i=i+1)           # 4 bytes per word, vice 5      2/9/82
+       {
+        lchar = nchar
+        ichar = igbyte (text,i)
+        nchar = ichar
+ 
+        #$% interpret nulls as spaces
+        if (ichar == $null)
+           {
+            nchar = $space
+            next
+           }
+ 
+        #$% interpret carriage returns as spaces
+        if (ichar == $return)
+           {
+            nchar = $space
+           }
+ 
+        #$% interpret tabs as spaces
+        if (lchar == $tab)
+           {
+            nchar = $space
+           }
+        #$% skip if two spaces in a row
+        else if (ichar == $space & lchar == $space) next
+ 
+        #$% move characters into the array
+        call smov (ichar,imsg,jlen)
+       }
+ 
+    #$% file remainder of words with nulls
+    while (mod(jlen,4) != 0) call smov ($null,imsg,jlen)    #/4 vice /5  2/9/82
+ 
+    #$% reset word counter in array
+    imsg[1] = jlen/4                            # jlen/4 vice jlen/5 ??  2/9/82
+ 
+    #$% (for other than time tags) if CONTROL is to get message, send it to him
+    if (vue$copy$i == $YES & (imsg[4] != '----' | ilen != 4))         # 2/9/82
+        call sndmsg (iexsup, imsg, $yes)
+ 
+    #$% send message to addressee
+    call sndmsg (vue$pointer, imsg, $no)
+   }
+ 
+return
+end
+
+subroutine send_view(jview,itype,ilen,text)
+ 
+ ##########################################################
+ #$%
+ #$% Purpose:   SEND_VIEW uses subroutine SNDMSG to transmit
+ #$%            any of three different message types
+ #$%            (COMMTEXT, LEXICAL, or STATUS) to stations in given view(jview).
+ #$%            With copy to Control (when requested).
+ #$%
+ #$% Tables:    VUE
+ #$%
+ #$% Date:      APR 2016
+ #$%
+ #$% Author:    Jim Allen
+ #$%
+ ##########################################################
+ 
+ BBcommon
+ StationMsgCommon
+ integer hold
+
+ integer JVIEW,
+         ITYPE,
+         ILEN
+ LITERAL text[ilen]                             # defined in QUADwords  2/3/82
+
+ hold = StationMsgWithinOrderProcessing
+ StationMsgWithinOrderProcessing = $no	# This will cause message to be sent to all active stations in view
+ call send_ (jview,itype,ilen,text)
+ StationMsgWithinOrderProcessing = hold
+ 
+return
+end 
+
+ 
+ subroutine sndmsg (vue$pointer, imsg, iscopy)
+ #####################################################
+ #$%
+ #$% Purpose:   SNDMSG transmits message to reciever
+ #$%            stations.
+ #$%
+ #$% Called By: SEND
+ #$%
+ #$% Calls:     ECHOR      ECHO       ECHOI
+ #$%
+ #$% Tables:    VUE
+ #$%
+ #$% Date:      DEC 80
+ #$%
+ #$% Author:    Dana Wills
+ #$%
+ #%% Modified:  James Allen - 12/97 (E1852)
+ #$%            Added iscopy to the argument list for call
+ #$%            to sndmsg_station.  Removed inserting the
+ #$%            message into the VUE table - never used.
+ #$%
+ #####################################################
+ 
+ bbcommon
+ 
+ integer imsg[100]
+ 
+ integer VUE$Pointer,
+         ISCOPY                                 # MJC 5/4/2000 (E2145)
+ 
+ if (! vue$pointer$ok)                          # check for good pointer
+   {
+    #$% send invlaid message to user, return
+    call echov ("Invalid VUE point. INDX=")
+    call echoi (vue$pointer$index)
+    call echor
+    return
+   }
+ 
+ call sndmsg_station (vue$pointer,imsg, iscopy)
+ 
+ return
+ end
+ 
+
+ 
+ subroutine sndmsg_station (vue$pointer, imsg, iscopy)
+ #####################################################
+ #$%
+ #$% Purpose:   SNDMSG_STATION transmits message for a
+ #$%            view to each station on that view.
+ #$%
+ #$% Called By: SNDMSG
+ #$%
+ #$% Calls:     ECHOR      ECHO       ECHOI
+ #$%
+ #$% Tables:    STA
+ #$%
+ #$% Date:      FEB 83
+ #$%
+ #$% Author:    Dana Wills
+ #$%
+ #%% Modified:  James Allen - 12/97 (E1852)
+ #$%            Added iscopy to the argument list
+ #$%            to determine if control gets a copy.
+ #$%            If within order processing, then only
+ #$%            the station not the entire view gets
+ #$%            the message.
+ #$%
+ #####################################################
+ 
+bbcommon
+StationMsgCommon
+ 
+integer imsg[100]
+integer iscopy
+ 
+integer STA$Pointer, IVIEW, VUE$Pointer                 # MJC 5/4/2000 (E2145)
+ 
+  if (StationMsgWithinOrderProcessing == $yes & iscopy == $no)
+    {
+     STA$Pointer$TO (StationMsgIndx)
+    }
+  if (StationMsgWithinOrderProcessing == $yes & iscopy == $no & STA$Pointer$Valid)
+    {
+     imsg[2] = xSTA$View$I                   # Make sure not copy
+     call sndmsg_single_station (STA$Pointer, imsg)
+    }
+  else
+    {
+     iview = VUE$Pointer$Index
+ 
+     # Control does not get a copy of own errors even if unit is blue or orange
+     if (StationMsgWithinOrderProcessing == $yes & iscopy == $yes)
+       {
+        STA$Pointer$To (StationMsgIndx)
+        if (STA$Pointer$Valid)
+          {
+           if (xSTA$View$I == $Neutral$View)
+              return
+          }
+       }
+ 
+     for (STA$Pointer$First; STA$Pointer$Valid; STA$Pointer$Next)
+       {
+        if (xSTA$PlayerOn$I != $yes ) next          # not logged on... no send !
+        if (xSTA$View$I     != iview) next          # not same view... no send !
+ 
+        if (xSTA$Copy$I == $NO & iscopy == $yes)    # Copy is station oriented
+              next
+ 
+        call sndmsg_single_station (STA$Pointer, imsg)
+       }
+    }
+ 
+return
+end
+
+ 
+subroutine getcom (id,iline,ilen,imsg)
+ 
+######################################################
+#$%
+#$% Purpose:   GETCOM gets COMMTEXT lines from disk.
+#$%
+#$% Called By: SEND
+#$%
+#$% Calls:     None
+#$%
+#$% Tables:    None
+#$%
+#$% Date:      DEC 80
+#$%
+#$% Author:    Dana Wills
+#$%
+######################################################
+ 
+UNDEFINE read                                   #                      2/2/82
+ 
+bbcommon
+CMT$Record$Definition                           #                       2/4/82
+ 
+integer imsg[100],lastid,lines,msgid,rec[20]    #                       2/9/82
+data lastid/-1/
+integer*4   istat
+ 
+integer     KNLEN,ILEN,I,ID,
+            ILINE,MLEN,IDSK,KLEN                        # MJC 5/4/2000 (E2145)
+ 
+#$% initialize length
+knlen = 0                                       #                       3/15/82
+ilen = 0
+ 
+for(i=1;i<21;i=i + 1)  rec[i] =0                # Clear the array       3/15/80
+ 
+#$% if id not last id
+if (id != lastid)                               #
+   {
+    # iostat added 1/9/91
+    #$% find number of lines and MSG ID; and set last ID to ID,
+    read ($lfc$comm,rec=id,iostat=istat,%err%=8001) cmt$record # find number of lines  2/3/82
+ 
+    lines = xcmt$nlines$i                       #               2/4/82
+    msgid = xcmt$msgid$i                        #               2/4/82
+    lastid = id
+   }
+ 
+##if ( .false. )      # handle error condition for READ above
+REPEAT          # jb E2143 (BRNCHINTOBLK) 7/13/00
+    {
+    BREAK       # jb E2143 (BRNCHINTOBLK) 7/13/00
+    8001
+ 
+    if (iline > 1) return
+ 
+    call echor
+    call echov ("Error on READ of Comm Text File, id=")
+    call echoi (id)
+    call echov (" iostatus = ")
+    call echoi (istat)
+    call echov (". Notify Software Support")
+ 
+    mlen = 0
+    call smovv ("<Message garbled, contact Control>     ",imsg,mlen)
+    ilen = mlen/4
+    imsg[ilen+1] = 0
+    return
+    }
+ 
+#$% if all lines processed, set flag and terminate processing this message
+if (iline > lines)                              # return null text
+   {
+    lastid = -1
+    return
+   }
+ 
+idsk = id+iline                                 # fix disk address
+ 
+#$% iostat added 1/9/91
+read ($lfc$comm,rec=idsk,iostat=istat,%err%=8002) cmt$record   # get one line of text  2/3/82
+call smovh ( cmt$record, 80, rec, knlen)        # 80 bytes to REC array 3/15/82
+ 
+##if ( .false. )      # handle error condition for READ above
+REPEAT          # jb E2143 (BRNCHINTOBLK) 7/13/00
+    {
+    BREAK       # jb E2143 (BRNCHINTOBLK) 7/13/00
+    8002
+ 
+    if (iline > 1) return
+ 
+    call echor
+    call echov ("Error on READ of Comm Text File (text), id=")
+    call echoi (id)
+    call echov (" iostatus = ")
+    call echoi (istat)
+    call echov (". Notify Software Support")
+ 
+    mlen = 0
+    call smovv ("<Rest of Message garbled, contact Control>     ",imsg,mlen)
+    ilen = mlen/4
+    imsg[ilen+1] = 0
+    return
+    }
+ 
+#$% initialize length
+ilen = 0
+#$% for each entry up to 20 words
+for (klen = 1; klen <= 20; klen = klen + 1)     #                       2/4/82
+   {
+    if (rec[klen] == 0) break                   # get out when null
+ 
+    ilen = ilen + 1
+    imsg[ilen] = rec[klen]                      # move text
+   }
+ 
+return
+end
+
+ 
+subroutine sndmsg_single_station (sta$pointer,imsg)
+#####################################################
+#$%
+#$% Purpose:   SNDMSG_SINGLE_STATION transmits message
+#$%            for a station.
+#$%
+#$% Called By: SNDMSG_STATIOM
+#$%
+#$% Calls:     ECHOR      ECHO       ECHOI
+#$%
+#$% Tables:    STA
+#$%
+#$% Date:      December 1997 (E1852)
+#$%
+#$% Author:    Jim Alen
+#$%
+#####################################################
+BBCommon
+StationMsgCommon
+ 
+integer imsg[100]
+ 
+integer IVIEW,IAVAIL,ILEN,INEED,I,
+        STA$Pointer, STA$Msgread$I,
+        STA$Msgwrite$I, STA$MSG$Index,
+        STA$MSG$word$I, STA$MSG$len$I,
+        STA$MSG$for$I, STA$MSG$gm$I,
+        STA$MSG$type$I                          # MJC 5/4/2000 (E2145)
+ 
+  iview = xSTA$View$I
+ 
+  if (xSTA$PlayerOn$I != $yes )
+    return        # not logged on... no send !
+ 
+   STA$MsgRead$I = XSTA$MsgRead$I              # get read and write pointers
+   STA$MsgWrite$I = XSTA$MsgWrite$I
+ 
+   iavail = STA$MsgRead$I - STA$MsgWrite$I     # determine available slots
+ 
+   if(iavail <= 0)
+     iavail = STA$MSG$Slots + iavail
+ 
+   ilen = imsg[1]                              # get length from first word
+   ineed = ilen - 2                            # actual space needed
+ 
+   if (ineed >= iavail)                        # if not enough space, ...
+     {                                         # notify wargame log
+ 
+#      call echov ("Losing message to view #")  # JHM 2/4/03 E2339
+#      call echoi (iview)                       # these not needed for tech
+#      call echov (", Station #")
+#      call echoi (STA$Pointer$Index)
+ 
+      return
+     }
+ 
+   STA$MSG$Index = STA$MsgWrite$I              # set message write index
+   STA$MSG$WOrd$I = 0                          # clear the control word
+   putSTA$MSG$Word$I
+ 
+   STA$MSG$Len$I = ineed                       # fill
+   putSTA$MSG$Len$I
+ 
+   STA$MSG$For$I = imsg[2]                     #   in
+   putSTA$MSG$For$I
+ 
+   STA$MSG$GM$I = Game$Minute                  #       the
+   putSTA$MSG$GM$I
+ 
+   STA$MSG$Type$I = imsg[3]                    #           info
+   putSTA$MSG$Type$I
+ 
+   STA$MSG$Index = STA$MSG$Index + 1           # increment index
+   if (STA$MSG$Index > STA$MSG$Slots)
+      STA$MSG$Index = 1
+ 
+   for (i=4; i<=ilen; i=i+1)                   # for each word message
+     {
+      # store the word in the MSG subtable in the sta table
+      STA$MSG$Word$I = imsg[i]
+      putSTA$MSG$Word$I
+ 
+      # increment index, if message entries are greater than slots,
+      # set index to one
+      STA$MSG$Index = STA$MSG$Index + 1
+      if (STA$MSG$Index > STA$MSG$Slots)
+        STA$MSG$Index = 1
+     }
+ 
+    STA$MSGWrite$I = STA$MSG$Index              # store write pointer in STA
+    putSTA$MsgWrite$I
+ 
+return
+end
+
+
+subroutine send_v (jview, vstr)             # DEW 7/26/2000
+implicit none
+integer     jview, kk
+VMSchar*(*) vstr
+ 
+kk = len(vstr)
+call send_ (jview, $text$code, kk, %%ref(vstr) )
+ 
+return
+end
+
+subroutine send_lex (jview, narg, args)         # DEW 7/26/2000
+implicit none
+integer     jview, narg
+literal     args[ARB]
+ 
+call send_ (jview, $lex$code, narg, args)
+ 
+return
+end
+ 

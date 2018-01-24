@@ -1,0 +1,2572 @@
+#           WGMDENG_AIR.rin  (included by WGMDENG.rat)
+
+define(OK_deltaALT,3000) # jb Acceptable altitude difference for AAMs  1/18/01
+ 
+Subroutine PROC_CAP (UNT$pointer,       # Receive a/c UNT pointer.
+                     past_cap,          # Return past CAP flag.
+                     range_from_cap)    # Return distance a/c is from cap posit.
+################################################################################
+#$%
+#$% Purpose:    PROC_CAP computes range and bearing to a destination Lat/Lon
+#$%             from the present a/c position and returns flag if a/c is past
+#$%             his CAP range.
+#$%
+#$% Called By:  ASSGNT    ATOAIR
+#$%
+#$% Calls:  RLL2RB
+#$%
+#$% Tables: UNT
+#$%
+#$% Date:   AUG 83
+#$%
+#$% Author: Capt Schiltz
+#$%         
+#$%           Susan Miller - 7/97 (E1385)
+#$%           Added setting of UNT$TestIntercept$I to $no when
+#$%           the assigned target is being deleted.
+#$% Modified: 3/29/92 by Susan Miller for Air-to-air enhancements
+#$% jb  Modified 1/01 with the intent to:
+#$%      - Reduce push-pull fights with INTCPT and GET_CAP_TARGET
+#$%      - Reliably set speed for going back to CAPstation center, so as to
+#$%         prevent the interceptor's 'stalling' while 'in the boondocks'..
+#$%     - Reduce fuel expenditure while returning to station's center
+################################################################################
+BBCommon
+
+real*4  Range, Brg
+LITERAL     CSTRIP8                         # jb  E2145  6/27/00
+real    unit_latitude, unit_longitude, unit_coslat
+REAL    UNT$Orderedspeed$F,                 # jb  E2145  6/27/00
+    UNT$Caplatitude$F,UNT$Orderedlatitude$F,   # jb  E2145  6/27/00
+    UNT$Caplongitude$F,UNT$Orderedlongitude$F  # jb  E2145  6/27/00
+REAL factor / 1.2 / # Multiplier for Range_From_Cap  # jb vs 1.34 1/24/01
+integer past_cap, range_from_cap, unt$AttackIndx$I   # jb   1/3/01
+integer entry_point_called
+Integer JJ, UNT$CapRange$i,                 # jb  E2145  1/2/01
+    UNT$Pointer,UNT$Orderedaltdepth$I,      # jb  E2145  6/27/00
+    ACC$Pointer, ACC$LoiterSpeed$I, ACC$CruiseSpeed$I,   # 1/9/01
+    LCL$Pointer, UNT2$Pointer, UNT3$pointer
+character   msg[ARB]
+
+entry_point_called = $no
+
+repeat                                              # E2143 dew 10/99
+    {
+     break                                          # E2143 dew 10/99
+     entry Proc_CAP_track (UNT$Pointer,past_cap,range_from_cap,
+                           LCL$Pointer)
+     entry_point_called = $yes
+     }
+
+if (entry_point_called == $yes)
+    {
+     unit_latitude  = xLCL$ApparentLat$f
+     unit_longitude = xLCL$ApparentLon$f
+     unit_coslat = COS(xLCL$ApparentLat$f)
+    }
+else # entry point was not called
+    {
+     unit_latitude  = xUNT$TrueLatitude$f
+     unit_longitude = xUNT$TrueLongitude$f
+     unit_coslat = xUNT$CosTrueLat$f
+    }
+
+# Get range to target.  Pass attacker latitude and longitude,
+# pass attacker cos true lat, pass cap latitude and longitude, 
+# pass cap cos of lat, return range and bearing to cap station.
+
+UNT$CAPLatitude$F = xUNT$CapLatitude$f
+UNT$CAPLongitude$F = xUNT$CapLongitude$f
+call RLL2RB (unit_latitude,
+             unit_longitude,
+             unit_coslat,
+             UNT$CapLatitude$f,
+             UNT$CapLongitude$f,
+             COS(UNT$CapLatitude$f),
+             Range,
+             Brg)
+
+range_from_CAP = INT(Range)
+unt$AttackIndx$I = Xunt$AttackIndx$I                   # jb  1/3/01
+UNT$CapRange$i = xUNT$CapRange$i                        # jb  1/2/01
+past_cap = $no
+
+acc$pointer = xUNT$AccPntr$i    # jb moved up   1/3/01
+acc$LoiterSpeed$i = Xacc$LoiterSpeed$i  # jb    1/3/01
+acc$CruiseSpeed$i = Xacc$CruiseSpeed$i  # jb    1/9/01
+
+    # Inserted to insure speed is set if enterceptor is 'going home'  Done
+    #         below too, but not for certain
+IF (xUNT$Status$i == $Proceeding$code) 
+    {   ##   We need to give him a speed unless he's close enough # jb  1/9/01
+    if(range_from_cap > 5)  # jb Closer than that is 'close enough')   1/17/01
+        {
+        if ( range_from_cap <= 1.2 * unt$caprange$i)  # jb  1/9/01
+         # jb  yes,  near enough to save some fuel... # jb  1/9/01
+            UNT$OrderedSpeed$f  = acc$LoiterSpeed$i       # jb  1/9/01
+        else UNT$OrderedSpeed$f = acc$CruiseSpeed$i       # jb  1/9/01
+        putUNT$OrderedSpeed$f                             # jb  1/9/01
+        }
+    }   # jb  End if interceptor may be going 'home'...
+
+# The interceptor may be too far away from his CAPstation:
+if (range_from_cap >= UNT$CapRange$i * factor) # jb *factor  1/9/01
+    {       # Note: *factor reduces fights with GET_CAP_TARGET, INTCPT
+    # yes, attacker is past his cap
+    past_cap = $yes     
+
+    # entry point called from ASSGNT
+    if (entry_point_called == $yes) return
+
+    # If interceptor isn't on his way 'home', send him there: 
+    if (!(xUNT$OrderedLatitude$f == UNT$CapLatitude$f &
+          xUNT$OrderedLongitude$f == UNT$CapLongitude$f))
+       {
+        #"Target past CAP range. XXXXX returning to CAP position."
+        jj = 0
+        call smovv("Target past CAP range.  ",msg,jj)
+        call smovhn(xUNT$Name$c,$$MaxLit,msg,jj)
+        call smovv(" returning to CAP position.",msg,jj)
+            # removed for PER #H1067 10/26/92 SMM
+            #        call send_(xUNT$View$i,0,jj,msg)
+
+        # Send the attacker back to CAP.
+        UNT$OrderedLatitude$f  = UNT$CapLatitude$f 
+        putUNT$OrderedLatitude$f  
+    
+        UNT$OrderedLongitude$f = UNT$CapLongitude$f 
+        putUNT$OrderedLongitude$f    
+
+        UNT$OrderedAltDepth$i = xUNT$CapAltitude$i 
+        putUNT$OrderedAltDepth$i
+       }
+        # Speed setting moved out of preceding IF  # jb  1/17/01
+        # Set speed to cruise speed ( or loiter, if near enough..)
+    if (range_from_cap > 1.2 * UNT$CapRange$i)     # jb   1/2/01
+         UNT$OrderedSpeed$f = acc$CruiseSpeed$i
+    else UNT$OrderedSpeed$f = acc$LoiterSpeed$i  # jb  1/2/01
+    putUNT$OrderedSpeed$f
+
+    putUNT$EngageStatus$i ($EngagementOver$code)
+    putUNT$Status$i ($Proceeding$code)
+    putUNT$TailChaseOverride$i ($No)
+
+    UNT3$Pointer$To XUNT$AttackIndx$I # jb (no X)    1/3/00 
+    if (unt3$pointer$ok)
+        putUNT3$UnderAttack$i ($NO)  # send the target on his way
+
+
+    putUNT$AttackIndx$i ($no)
+    putUNT$AssignedTarget$i ($no)
+    putUNT$TestIntercept$I ($no)     # SMM 7/97 (E1385)
+
+    putUNT$ReactFlag$I ($No)   # reset for future engagements
+    
+    if (trace$engage$exe != $no)         
+       call echov(" Returning after Past_Cap ")
+##    return            # jb  Removed           1/3/01
+   }  # End if interceptor strayed too far ('past his CAP')
+
+return
+end # end of PROC_CAP
+
+
+Subroutine PROC_REACT (unt$pointer,     # Receive attacker pointer.
+                       unt2$pointer,    # Receive target pointer.
+                       lcl$pointer,     # Receive LCL pointer to target.
+                       reacted)         # Return reacted flag (yes/no).
+################################################################################
+#$%
+#$% Purpose:    PROC_REACT determines if a flight will react to attack, resets
+#$%             LCL values and returns a flag.
+#$%
+#$% Called By:  ATOAIR
+#$%
+#$% Calls:  AIR_REACT
+#$%         Find_Active_RMT
+#$%         DEQGET             <lbcommn.rat>
+#$%
+#$% Tables: LCL UNT
+#$%
+#$% Date:   SEP 89
+#$%
+#$% Author: MSgt Kim Harris.
+#$%         
+#$% Modified: 3/29/92 by Susan Miller for Air-to-air enhancements
+#$%
+#$%           Carol Kropp - 10/23/94
+#$%           If the target has no AAMs onboard...don't react.
+#$%
+################################################################################
+BBCommon
+
+literal dummy           # dummy literal currently not used
+LITERAL UNT2$Name$C, CSTRIP8    # jb E2145  6/27/00
+REAL    X,RANDOM                # jb E2145  6/27/00
+real    aware_of_attack # flag if target knows it's being attacked
+integer reacted,        # flag whether target flight reacted
+        iHoldTgtPntr,   # hold orig target pointer
+        ifound,         # hold number of weapons
+        attacker_view,  # attacker's view
+        RMT$Pointer     # remote detection table pointer
+integer naam            # # aam items located on unit - returned from DEQGET
+integer eqlist[5,30]    # equipment list - returned from DEQGET
+Integer LCL$Pointer, LCL$Headsup$I, # jb E2145  6/27/00
+    UNT$Pointer,UNT$Attackindx$I,   # jb E2145  6/27/00
+    UNT$Assignedtarget$I,           # jb E2145  6/27/00
+    UNT2$Pointer,UNT2$Nbractot$I,   # jb E2145  6/27/00
+    ACC$Pointer                     # jb E2145  6/27/00
+
+reacted = $no           # initialize to no reaction
+
+acc$pointer = xunt2$AccPntr$i       # get the target's acc pointer
+
+if (xacc$React$i == $no) return     # If the ROE is to not react, return.
+
+if (xunt2$Mission$i == $Reconn$Code) # If the target's mission is recce, return.
+    return
+
+call DEQGET (UNT2$Pointer, $AAM$Code, naam, eqlist)
+if (naam < 1)    # if DEQGET found no AAMs, don't reack to
+  {              # the attack - Unit is a Sitting Duck if it does!
+    if (trace$engage$exe != $no)
+      {
+        call echor
+        call echohn (xUNT2$Name$C, $$MaxLit)
+        call echov  (" has no AAMs onboard - not reacting to attack.")
+        call echor
+      }
+    return
+  }
+
+# If the target is not paired on the attacker and is not reacting
+# to another attack, see if he's aware of the attack.
+if (xunt2$AssignedTarget$i != unt$pointer$index & xunt2$ReactFlag$i == $no)
+    {
+    # Debugging, display message to Wargame terminal.
+    if (trace$engage$exe != $no)
+        {
+         call echor
+         call echov ("  Processing Reaction to Attack. ")
+        }
+
+    # If a random number is higher than the probability of reacting
+    # to attack, the target is unaware of the pair.
+    aware_of_attack = 100.0 * random(x)
+    if  (aware_of_attack > ReactToAttack$Prob) 
+        {
+        # Debugging, display message to Wargame terminal.
+        if (trace$engage$exe != $no)
+            {
+            call echov ("Exiting PROC_REACT.  Value of aware_of_attack is ")
+            call echof (aware_of_attack,5)
+            }
+
+        # Set reaction flag and time reacted and return without reacting.
+        putUNT2$ReactFlag$i ($no)
+        putunt2$ReactTime$f (0)
+        return  # because the target doesn't know about the attacker
+        }
+
+    # else target knows he's under attack
+    iHoldTgtPntr = UNT2$Pointer$Index
+    
+    # see if target flight splits off a flight to react to attack by UNT
+    # or if entire target flight reacts to the attack,
+    # if new flight created for reaction, new flight added to attacker's
+    # detection list and attacker set as new flight's assigned target
+    call AIR_REACT (unt$pointer,        # attacker's UNT pointer
+                    unt2$pointer,       # target's UNT pointer
+                    lcl$pointer)        # LCL detection pointer to target
+
+    # Let's see who he's paired on now.
+    if (trace$engage$exe != $no)
+        {
+         call echor
+         call echov  ("  After AIR_REACT.....")
+         call echohn (xunt$Name$c,5)
+         call echov  (" Attacking ")
+         unt2$Name$c = xunt2$Name$c
+         if (unt2$Name$c != 0) call echohn (unt2$Name$c,5)
+         else                  call echoi  (unt2$pointer$index)
+        }
+
+    if (xUNT2$GhostedUnit$I != $YES)    # if the attacker's not a ghosted unit
+        {                               # do the following stuff
+        # If target is different now...
+        if (unt2$pointer$index != iholdtgtpntr)
+            {
+             reacted = $yes  # target reacted by splitting
+    
+             # Reset the attacker's assigned target and attack index
+             # to the new reacted target flight
+             unt$AssignedTarget$i = unt2$pointer$index
+             putunt$AssignedTarget$i 
+             unt$AttackIndx$i = unt2$pointer$index
+             putunt$AttackIndx$i
+    
+             # Let new target unit know he's under attack.
+             putunt2$UnderAttack$i ($yes)
+    
+             # Track could be a RMT track and LCL would not be set
+             # so check now before putting values
+             if (LCL$Pointer != 0)
+                {
+                 # reset LCL values
+                 unt2$NbrAcTot$i = xunt2$NbrAcTot$i
+                 lcl$HeadsUp$i = xlcl$Tallyho$i - unt2$NbrAcTot$i
+                 putlcl$HeadsUp$i 
+                }
+        
+             attacker_view = xUNT$View$I
+             # Find RMT entry for old target
+             call FIND_active_RMT (iHoldTgtPntr,  # send old target's pointer
+                                   RMT$pointer,   # receive target's RMT pointer
+                                   attacker_view, # send attacker's view
+                                   iFound,        # flag if old target still 
+                                   dummy)         # assigned to current attacker
+
+             # If the old target was found, update it's AcAssignedTo.
+             if (iFound == $yes)
+                {
+                 putrmt$AcAssignedTo$i (0)
+    
+                 putrmt$HeadsUp$i (unt2$NbrAcTot$i)
+                }
+
+             # Now, set AcAssignedTo for the new target.
+             call Find_active_RMT (unt2$pointer$index, # send new split target
+                                   rmt$pointer,        # receive new RMT pointer
+                                   attacker_view,      # send attacker's view
+                                   iFound,             # flag if new target held
+                                   dummy)              # by attacker
+
+             if (iFound == $yes)    # yes, attacker's view holds active 
+                {                   # detection on new split flight target
+                 putrmt$AcAssignedTo$i (unt$pointer$index) # assign that unt
+                }
+    
+             return
+            } # end if original target split and a new target exists
+        } # end if not a ghosted attacking unit
+    } # end if target not paired on attacker and not reacting to another attack
+
+return
+end     # end of PROC_REACT
+
+Subroutine AIR_REACT (unt2$pointer,     # Receive attacking a/c pointer.
+                      unt$pointer,      # Receive/pass defending a/c pointer.
+                      lcl$pointer)      # Receive attacker's LCL pointer.
+################################################################################
+#$%
+#$% Purpose:    AIR_REACT handles reaction to attack for flights of a/c 
+#$%             currently under attack by another flight of a/c.
+#$%
+#$% Called By:  PROC_REACT
+#$%
+#$% Calls:  BINGO       DEQGET      ECHO      ECHOV
+#$%         ECHOHN      ECHOIB      ECHOR     GETRB
+#$%         GTTRK       OSPLIT      REPRAD    SEND
+#$%         SMOVH
+#$%
+#$% Tables: DEQ LCL MC ORD RMT UNT
+#$%
+#$% Date:   JUN 88
+#$%
+#$% Author: TSgt Kim Harris
+#$%         
+#$% Modified: 3/29/92 by Susan Miller for Air-to-air enhancements
+#$%
+#$%           Susan Miller - 7/97 (E1385)
+#$%           Added setting of UNT$TestIntercept$I to $no when
+#$%           the assigned target is being deleted.
+#$%
+################################################################################
+BBCommon
+
+LITERAL  UNT$Name$C, ORD$W01$C, CSTRIP8     # jb E2145  6/27/00
+REAL    TGTRNG, TGTBRG                      # jb E2145  6/27/00
+Integer split_number,   # number of a/c splitting from collective flight
+        nFound,         # nbr of AAMs or AAGs found on a/c
+        EqList[5,30],   # list of weapons on target flight
+        iunit,          # holds UNT pointer to new flights
+        jj              # msg length counter
+Integer N,                                        # jb E2145  6/27/00
+    UNT$Pointer,UNT$Nbractot$I,UNT$Mission$I,     # jb E2145  6/27/00
+    UNT$Rtlindx$I,UNT$Rteindx$I,
+    UNT$Assignedtarget$I,UNT$Attackindx$I,        # jb E2145  6/27/00
+    UNT$Routeinreverseflag$I,                     # jb E2145  6/27/00
+    UNT2$Pointer, UNT2$Nbractot$I,                # jb E2145  6/27/00
+    ORD$Pointer,  ORD$Code$I,                     # jb E2145  6/27/00
+    ACC$Pointer, DEQ$Pointer, LCL$Pointer         # jb E2145  6/27/00
+Integer LCOMP                             # jb  AAI01, E2145   2/22/01
+
+character msg[ARB] 
+
+# Find out how many a/c are in each flight.
+unt2$NbrAcTot$i = xunt2$NbrAcTot$i      # nbr in attacking flight
+unt$NbrAcTot$i = xunt$NbrAcTot$i        # nbr in defending flight
+
+if (trace$engage$exe != $no)
+    {
+    call echohn (xunt2$Name$c,5)
+    call echov  (" with ")
+    call echoib (unt2$NbrAcTot$i,2)
+    call echov  (" AC Attacking ")
+    call echohn (xunt$Name$c,5)
+    call echov  (" with ")
+    call echoib (unt$NbrAcTot$i,2)
+    }
+
+# Zero iunit.
+iunit = 0
+
+# Determine if the defending flight can split off a new flight to meet the
+# attacker or if the whole flight must respond to him.  If the defending
+# flight is larger than the attacking flight, a split can be made.  If they
+# are equal in size or the attacking flight is larger, the whole flight will
+# respond to the attacker.  In addition, if the target flight has a mission of
+# AD, Cap or StrikeCap, splitoffs must leave at least two in the original 
+# flight.
+if (unt$NbrAcTot$i > unt2$NbrAcTot$i)
+    {
+    # Split_number is how many will split off to meet the attacker.
+    split_number = unt2$NbrAcTot$i
+
+    # If the mission is not air defense, go ahead and perform the split.
+    unt$Mission$i = xunt$Mission$i
+
+    if (unt$Mission$i != $AirDefense$Code & # air-to-air enhancements 3/29/92 SMM
+        unt$Mission$i != $Cap$Code        &
+        unt$Mission$i != $StrikeCap$Code)
+        {
+         call OSPLIT (0,            # send 0 for NORD
+                     unt$pointer,   # send defending a/c pointer
+                     0,             # send 0 for IWORD
+                     0,             # send 0 for ILEX
+                     1,             # send nbr of new flights
+                     split_number,  # send nbr in new flight
+                     iunit)         # receive UNT pntr to new flight
+        }
+
+    # If we get here, the defending flight is air defense, so see if
+    # doing a split will still leave at least two in the flight.
+    else 
+        if ((unt$NbrAcTot$i - split_number) >= 2)
+            {
+             call OSPLIT (0,             # send 0 for NORD
+                          unt$pointer,   # send defending a/c pointer
+                          0,             # send 0 for IWORD
+                          0,             # send 0 for ILEX
+                          1,             # send nbr of new flights
+                          split_number,  # send nbr in new flight
+                          iunit)         # receive UNT pntr to new flight
+            }
+    }   #end if(unt$NbrAcTot$i > unt2$NbrAcTot$i)
+
+# At this point, we've either performed a split or the whole flight is going
+# to respond to the attacker.  To determine which is going to happen, check
+# iunit to see if it contains a value.  If it does, reset unt$pointer to the
+# new flight, after resetting the old flight's under attack flag.
+If (iunit != 0)
+    {
+     putunt$UnderAttack$i ($no)
+     unt$pointer = iunit
+    }
+
+# Get target's name (used twice below).
+unt$Name$c = xunt$Name$c
+
+# Set reaction flag and time reacted.
+putunt$ReactFlag$i ($yes)
+putunt$ReactTime$f (game$time)
+
+# Display message that flight is reacting to attack.
+# "xxxxx reacting to attack."
+jj =  0
+call smovhn (unt$Name$c,$$MaxLit,msg,jj)
+call smovv (" reacting to attack.",msg,jj)
+call send_ (xunt$View$i,0,jj,msg)
+
+# Regardless of whether or not a/c has air to air weapons to fight with,
+# the defending flight should jettison all other ASMs and bombs.
+# Find all ASMs and bombs.  Get deq$pointer again to make sure we
+# are looking at the right flight.
+
+nFound = 0  # init item count
+
+# Call routine to locate ASMs.
+call DEQGET (unt$pointer,           # pass A/C pointer
+             $ASM$code,             # pass equipment type code
+             nFound,                # Pass/receive item count
+             EqList)                # Receive results of search
+
+# Call routine to locate bombs.
+call DEQGET (unt$pointer,           # pass A/C pointer
+             $BOMB$code,            # pass equipment type code
+             nFound,                # Pass/receive item count
+             EqList)                # Receive results of search
+
+# Get rid of all ASMs and bombs found.
+# Don't want to expend if expend flag == $no.
+ACC$pointer = xUNT$ACCPntr$I
+If (nFound != 0 & xACC$Expnd$I == $yes)
+    {
+     for (N = 1; N <= nFound; N = N + 1)
+        {
+         DEQ$Pointer$To EqList[1,N]
+         putDEQ$Remaining$I (0)
+        }
+    }
+
+# Find out if the target has any AAMs.  If not, he shouldn't be paired
+# on his attacker.  Additionally, if he's not on a route and not doing
+# auto ARM, he should bingo right here.
+unt$RtlIndx$i = xunt$RtlIndx$i
+nFound = 0   # init item count
+
+# Call routine to locate AAMs.
+call DEQGET (unt$pointer,       # pass A/C pointer
+             $AAM$CODE,         # pass equipment type code
+             nFound,            # Pass/receive item count
+             EqList)            # Receive results of search
+
+unt$RteIndx$i = xunt$RteIndx$i
+
+if (nFound == 0)        # no AAMs found, set flags
+    {
+     putunt$AttackIndx$i (0)
+     putunt$AssignedTarget$i (0)
+     putUNT$TestIntercept$I ($no)     # SMM 7/97 (E1385)
+
+     if (unt$RteIndx$i == 0 & unt$RtlIndx$i == 0)
+        {
+         call BINGO (unt$pointer) 
+        }
+    }
+else
+    {
+    unt$AssignedTarget$i = unt2$pointer$index
+    putunt$AssignedTarget$i
+
+    unt$AttackIndx$i = unt2$pointer$index
+    putunt$AttackIndx$i
+    }
+
+# Need to ensure that the new flight gets added to the attacker's detections 
+# list or else he'll lose the detection next cycle.  Call REPRAD (WGMDDET)
+# to set up a radar detection for all reacted flights.
+if ((xUNT2$GhostedUnit$I == $NO)  # if the attacker is not a ghosted unit
+   & (LCL$Pointer != 0))          # if the track is in the LCL table
+    Call REPRAD (unt2$pointer,
+                 unt$pointer,
+                 xunt$Type$i,
+                 xlcl$Range$f,
+                 REAL(xlcl$Bearing$i * $deg2rad) ) # AAI01: jb for dew  2/12/01
+
+# The following needs to be done if the target has AAMs.
+# So, if he doesn't, exit right here.
+if (nFound == 0) return
+
+# Need to ensure that the attacker gets added to the reacting flight's
+# detections list so he won't lose the pair.  Get range and bearing to
+# the attacker, then call REPRAD to process the detection.
+call GETRB_M (UNT$pointer,      # send target pointer
+              UNT2$pointer,     # send attacker pointer
+              tgtrng,           # receive range
+              tgtbrg)           # receive bearing
+
+Call REPRAD (unt$pointer,       # send target pointer
+             unt2$pointer,      # send attacker pointer
+             xunt2$Type$i,      # send attacker type
+             tgtrng,            # send range
+             tgtbrg)            # send bearing
+
+return
+end     #   end of AIR_REACT
+
+
+Subroutine NONE_FOUND (unt$pointer,     # Receive attacker pointer.
+                       lcl$pointer,     #   Receive detection pointer.
+                       ntargt)          #   Receive number in target flight.
+################################################################################
+#$%  
+#$% Purpose:    NONE_FOUND does all necessary processing for flights having
+#$%             no AAMs.
+#$%
+#$% Called By:  ATOAIR
+#$%
+#$% Calls:  BINGO     ECHOV     Find_active_RMT
+#$%         SEND      SMOVV
+#$%
+#$% Tables: LCL RMT UNT
+#$%
+#$% Date:   March 26, 1992
+#$%
+#$% Author: Code taken out of ATOAIR module and modified to 
+#$%         incorporate Air-to-air enhancements 
+#$%
+#$% Modified: Susan Miller - 7/97 (E1385)
+#$%           Added setting of UNT$TestIntercept$I to $no when
+#$%           the assigned target is being deleted.
+#$%
+################################################################################
+BBCommon
+
+LITERAL     CSTRIP8         
+Integer  JJ, IHOLD,
+    UNT$Pointer,UNT$Mission$I,      # jb E2145  6/28/00
+    UNT$Rulesofengage$I,UNT$View$I,
+    LCL$Pointer, UNT2$pointer
+integer ntargt
+character msg[ARB]
+
+# if trace display requested by user (usually for debug)
+if (trace$engage$exe != $no)  call echov (" Heads UP")
+
+if (LCL$Pointer != 0)
+    PUTlcl$headsup$i (ntargt)                   # enter heads up count
+
+# Check rules of engagement.  If assigned a specified target and
+# defensive mission, return them to base.
+unt$RulesOfEngage$i = xunt$RulesOfEngage$i
+
+if (unt$RulesOfEngage$i == $SpecTarget$code)
+    {
+     unt$View$i = xunt$View$i
+     unt$Mission$i = xunt$Mission$i
+     if (unt$mission$i == $CAP$CODE      |          
+         unt$mission$i == $STRIKECAP$CODE|
+         unt$mission$i == $AirDefense$code) # air-to-air upgrade 3/23/92 SMM
+        {
+        call BINGO (unt$pointer)
+        jj = 0
+        call smovv (" From: ", msg, jj)
+        call smovhn (xunt$name$c, $$MaxLit, msg, jj)
+        call smovv (", all AAMs expended, returning to base. ", msg, jj)
+        call send_ (xunt$view$i, 0, jj, msg) # jb 7/11/89
+       }
+     else
+        {
+         jj = 0
+         call smovv (" From: ", msg, jj)
+         call smovhn (xunt$name$c, $$MaxLit, msg, jj)
+         call smovv (", no AAMs onboard, cannot engage. ", msg, jj)
+         call send_ (xunt$view$i, 0, jj, msg) # jb 7/11/89
+        }                   
+    } # end if ROE = $SpecTarget$Code
+    # Else, set ROE to if attacked, set status to proceeding, zero
+    # assigned target and attack index.
+else if (unt$RulesOfEngage$i == $AirEnemy$code  |
+         unt$RulesOfEngage$i == $AirNonFriendly$code)
+    {
+     PUTunt$RulesOfEngage$i ($IFATTACKED$CODE)       # weapons tight
+     PUTunt$status$i ($proceeding$code)
+     Ihold = xunt$AssignedTarget$i
+     UNT2$Pointer$To XUNT$AttackIndx$I # jb (no X)    1/3/00 
+     if (unt2$pointer$ok)
+         putUNT2$UnderAttack$i ($NO)  # send the target on his way
+
+     PUTunt$AssignedTarget$i ($no)
+     PUTunt$attackindx$i ($no)               # delete attack guide
+     putUNT$TestIntercept$I ($no)     # SMM 7/97 (E1385)
+
+     putUNT$ReactFlag$I ($no)   # reset so it can react next time
+    } # end if ROE == $AirEnemy$Code,$AirNonFriendly$Code
+ 
+return
+end # end of NONE_FOUND
+
+
+Subroutine ALL_GONE (unt$pointer,   # Receive attacker's unit pointer.
+                     unt2$pointer)  # Receive target's unit pointer.
+################################################################################
+#$%
+#$% Purpose:    ALL_GONE handles processing for air to air engagements when
+#$%             all targets were killed.
+#$%
+#$% Called by:  ATOAIR
+#$%
+#$% Calls:  ASSGNT     ECHO      ECHOV     OACTIV
+#$%
+#$% Tables: DEQ UNT
+#$%
+#$% Date:   OCT 89
+#$%
+#$% Author: MSgt Kim Harris
+#$%
+#$% Modified: 3/29/92 by Susan Miller for Air-to-air enhancements
+#$%
+################################################################################
+BBCommon
+CAPCommon
+
+LITERAL  CSTRIP8                                     # jb E2145  6/28/00
+literal     sil_radar[5], cname
+data        sil_radar/$lex$SILENCE$, $lex$RADAR$  , 0, 0, 0/
+REAL    UNT$Orderedlatitude$F,UNT$Orderedlongitude$F, # jb E2145  6/28/00
+        UNT$Orderedspeed$F                            # jb E2145  6/28/00
+integer     iHoldUNTpntr,
+            target_view
+Integer ORIGINAL_FLIGHT_INDEX,                       # jb E2145  6/28/00
+    UNT$Pointer,UNT$Mission$I,                       # jb E2145  6/28/00
+    UNT$Type$I,UNT$Orderedaltdepth$I,                # jb E2145  6/28/00
+    ACC$Pointer,    UNT2$Pointer                     # jb E2145  6/28/00
+Integer LCOMP                               # jb  AAI01, E2145   2/12/01
+
+# See if the flight was result of reaction to attack.
+# If yes, find remainder of flight, if it still exists.
+if ((xunt2$ReactFlag$i == $yes) & (xUNT2$SplitFlag$I == $yes))
+    {
+    target_view = xunt2$View$i
+    iHoldUNTpntr = unt2$pointer
+    cname = xunt2$Event$c
+    original_flight_index = xUNT2$OrigFltIndx$i
+
+    # loop through unt table 
+    for (unt2$pointer$first; unt2$pointer$ok; unt2$pointer$next)
+        {
+         if (xunt2$InUse$i == 0) next
+         if (xunt2$Status$i == $BeingDeleted$code) next
+         if (xunt2$View$i != target_view) next
+         if (iHoldUNTpntr == unt2$pointer) next
+
+         # if event name is the same and the unt pointer index is the 
+         # same as the dead flight's original flight index then we've
+         # found the remainder of the flight
+###         if (xunt2$Event$c == cname &     # jb AAI01, for axp  2/12/01     
+         if (LCOMP(xunt2$Event$c,cname)== 0 & # jb AAI01, for axp  2/12/01      
+             UNT2$Pointer$Index == original_flight_index)
+            {
+             putunt$AttackIndx$i (unt2$pointer$index)
+             putunt$AssignedTarget$i (unt2$pointer$index)
+        
+             # Send debug message to wargame terminal.
+             if (trace$engage$exe != $no)
+                {
+                 call echor 
+                 call echov ("    ")
+                 call echohn (xunt$Name$c, $$MaxLit)
+                 call echov (" now going after ")
+                 call echohn (xunt2$Name$c, $$MaxLit)
+                }
+             break
+            }
+        }
+    }
+# else, not a split flight, everyone killed
+else
+    {
+     if (xunt$RulesOfEngage$i == $SpecTarget$code)
+        {
+         putunt$RulesOfEngage$i ($IfAttacked$code)
+        }
+    unt$Type$i = xunt$Type$i
+    # get another target
+    call ASSGNT (unt$pointer,unt$Type$i)
+    }
+
+# If no target found;
+if (xunt$AssignedTarget$i == $NO)
+    {
+     # If weapons tight, silence the radar.
+     if (xunt$RulesOfEngage$i == $IfAttacked$Code)
+        {
+         # If not defensive mission, silence radars.
+         unt$Mission$i = xunt$Mission$i
+         if (unt$Mission$i != $AirDefense$code  & 
+             unt$Mission$i != $CAP$code &
+             unt$Mission$i != $Escort$code & 
+             unt$mission$i != $strikecap$code &
+             unt$Mission$i != $Sweep$code)
+            {
+             call OACTIV (Silence$Order,unt$pointer,2,sil_radar)
+            }
+        }
+
+    # If assigned a CAP position, go back to it.
+    if (xunt$AssignedCap$i == $yes)
+        {
+         unt$pointer$to unt$pointer$index
+
+         unt$OrderedLatitude$f = unt$CapLatitude$f 
+         putunt$OrderedLatitude$f  
+
+         unt$OrderedLongitude$f = unt$CapLongitude$f 
+         putunt$OrderedLongitude$f     
+
+         unt$OrderedAltDepth$i = unt$CapAltitude$i 
+         putunt$OrderedAltDepth$i
+
+         # Set speed to cruise speed.
+         acc$pointer = xunt$AccPntr$i
+         unt$OrderedSpeed$f = xacc$CruiseSpeed$i
+         putunt$OrderedSpeed$f
+        }
+    }
+
+return
+end # end of ALL_GONE
+
+
+Subroutine DISENGAGE_AIR (unt$pointer,  # Receive attacker's unit pointer.
+                          unt2$pointer, # Receive target's unit pointer.
+                          iDisengage)   # Return disengage flag (yes/no).
+################################################################################
+#$%
+#$% Purpose:    DISENGAGE_AIR determines whether a flight will continue its 
+#$%             current engagement.  Ties between target and attacker are
+#$%             broken when disengagement is positive.
+#$%
+#$% Called By:  ATOAIR
+#$%
+#$% Calls:  ECHOV     ECHOF     ECHOR  
+#$%         RRB2LL    SEND      SMOVV
+#$%
+#$% Tables: ACC UNT
+#$%
+#$% Date:   OCT 89
+#$%
+#$% Author: MSgt Kim Harris
+#$%         
+#$% Modified: 3/29/92 by Susan Miller for Air-to-air enhancements
+#$%
+#$%           Susan Miller - 7/97 (E1385)
+#$%           Added setting of UNT$TestIntercept$I to $no when
+#$%           the assigned target is being deleted.
+#$%
+#$%           Susan Miller - 7/97 (E1410)
+#$%           Moved call to Find_active_RMT outside of check for if
+#$%           if target is not ghosted, since we still want the target
+#$%           name whether it is ghosted or not, also changed the 
+#$%           disengaging message so the unit's true name is not provided.
+#$%
+################################################################################
+BBCommon
+CAPCommon
+
+literal     track_name, CSTRIP8                     # jb E2145  6/28/00
+real        RanNum, ContEngage, Range, Bearing, FCos
+REAL X, RANDOM,
+    UNT$Orderedlatitude$F,UNT$Orderedlongitude$F,   # jb E2145  6/28/00
+    UNT$Orderedspeed$F,UNT2$Orderedspeed$F,         # jb E2145  6/28/00
+    UNT2$Orderedlatitude$F,UNT2$Orderedlongitude$F  # jb E2145  6/28/00
+integer  iDisengage,    
+         iFound,        # flag set to yes if target found in rmt table
+         jj,            # message length 
+         RMT$Pointer    # remote detection table pointer
+Integer    ISIDE,                                   # jb E2145  6/28/00
+    UNT$Pointer,UNT$Indaylight$I,
+    UNT$View$I,UNT$Orderedaltdepth$I,               # jb E2145  6/28/00
+    UNT2$Pointer,UNT2$Assignedtarget$I,             # jb E2145  6/28/00
+    UNT2$Orderedaltdepth$I,                         # jb E2145  6/28/00
+    UNT3$Pointer,
+    ACC$Pointer                                     # jb E2145  6/28/00
+
+character   MSG[ARB]    #string MSG "xxxxx is disengaging from xxxxx."
+
+iDisengage = $no
+UNT$View$I = xunt$View$i
+# two sided scaling factors.
+call WHSIDE (UNT$View$I,iside)    
+
+unt$InDayLight$i = xunt$InDayLight$i
+
+if (iside == $blue$code)
+    {
+     # Determine which probability to use, day or night.
+     if (unt$InDayLight$i == $yes)   ContEngage = DayContEngage$prob$blue
+
+     else   ContEngage = NightContEngage$prob$blue
+    }
+
+else if (iside == $orange$code)
+        {
+         # Determine which probability to use, day or night.
+         if (unt$InDayLight$i == $yes)  ContEngage = DayContEngage$prob$orange
+
+         else  ContEngage = NightContEngage$prob$orange
+        }
+
+else   # I am neutral
+    {
+     # Determine which probability to use, day or night.
+     if (unt$InDayLight$i == $yes)  ContEngage = DayContEngage$prob$blue
+
+     else  ContEngage = NightContEngage$prob$blue
+    }
+
+# only do the following code if the target is not a ghosted unit
+if (xUNT2$GhostedUnit$I != $yes)
+    {
+     # If the target is also targeted on us, modify the probability.
+     unt2$AssignedTarget$i = xunt2$AssignedTarget$i
+
+     # two sided scaling factors.
+     if (unt2$AssignedTarget$i == unt$pointer$index)
+        {
+         if (unt$InDayLight$i == $yes)
+            {
+             ContEngage = sqrt ((DayContEngage$prob$blue + DayContEngage$prob$orange)/2.)
+            }
+        else
+            {
+             ContEngage = sqrt ((NightContEngage$prob$blue + NightContEngage$prob$orange)/2.)
+            }
+        }
+    } # end if target is not a ghost
+
+if (trace$engage$exe != $no)
+    {
+     call echor
+     call echov ("    Prob of continuing engagement is ")
+     call echof (ContEngage,403)
+    }
+
+# If a random number is less than or equal to the prob, continue
+# the engagement.
+rannum = random(x)
+
+if (rannum <= ContEngage)
+    {
+    if (trace$engage$exe != $no)
+        {
+         call echov (".  RanNum is ")
+         call echof (RanNum,403)
+         call echov (".  Continuing engagement.")
+        }
+    return
+    }
+
+iDisengage = $yes
+
+if (trace$engage$exe != $no)
+    {
+    call echov (".  RanNum is ")
+    call echof (Rannum,403)
+    call echov (".  Disengaging.")
+    }
+
+#$% Break the engagement.
+putunt$EngageStatus$i ($EngagementOver$code)
+putunt$Status$i ($Proceeding$code)
+putunt$TailChaseOverride$i ($No)
+UNT3$Pointer$To XUNT$AttackIndx$I # jb (no X)    1/3/00 
+if (unt3$pointer$ok)
+    putUNT3$UnderAttack$i ($NO)  # send the target on his way
+putunt$AttackIndx$i ($no)
+putunt$AssignedTarget$i ($no)
+putunt$DisengageTime$f (game$time)
+putUNT$ReactFlag$I ($no)   # reset so it can react next time
+putUNT$TestIntercept$I ($NO)     # SMM 7/97 (E1385)
+
+putunt2$UnderAttack$i (no)
+
+# If the flight doesn't have an assigned CAP position, send him
+# to a position 30 miles away in the opposite direction.
+
+if (xunt$AssignedCap$i == $yes)
+    {
+     unt$OrderedLatitude$f = unt$CapLatitude$f 
+     putunt$OrderedLatitude$f  
+
+     unt$OrderedLongitude$f = unt$CapLongitude$f 
+     putunt$OrderedLongitude$f    
+
+     unt$OrderedAltDepth$i = unt$CapAltitude$i 
+     putunt$OrderedAltDepth$i
+    }
+else
+    {
+     unt$OrderedLatitude$f = xunt$TrueLatitude$f
+     unt$OrderedLongitude$f = xunt$TrueLongitude$f
+     FCos = Cos(unt$OrderedLatitude$f)
+     Range = 30.
+     # turn him 180 degrees from ordered course
+     Bearing = (xUNT$OrderedCourse$F + 180.0) * ($PI/180.)
+
+     # Compute lat/lon to travel to and save it.
+     call RRB2LL (unt$OrderedLatitude$f, 
+                  unt$OrderedLongitude$f, 
+                  Range, 
+                  Bearing,
+                  0.0,
+                  FCos)
+
+     putunt$OrderedLatitude$f
+     putunt$OrderedLongitude$f
+    }
+
+# Set speed to cruise speed.
+acc$pointer = xunt$AccPntr$i
+unt$OrderedSpeed$f = xacc$CruiseSpeed$i
+putunt$OrderedSpeed$f
+
+# only do the following code if the target is not a ghosted unit
+if (xUNT2$GhostedUnit$I != $yes)
+    {
+     # Determine if the target is paired back on us.  If he is, break his
+     # engagement and change his course also.
+     if (unt2$AssignedTarget$i == unt$pointer$index)
+        {
+        putunt2$EngageStatus$i ($EngagementOver$code)
+        putunt2$Status$i ($Proceeding$code)
+        UNT3$Pointer$To XUNT$AttackIndx$I # jb (no X)    1/3/00 
+        if (unt3$pointer$ok)
+             putUNT3$UnderAttack$i ($NO)  # send the target on his way
+
+        putunt2$AttackIndx$i ($no)
+        putunt2$AssignedTarget$i (no)
+        putunt2$DisengageTime$f (game$time)
+        putUNT2$ReactFlag$I ($no)   # reset 
+        putUNT$TestIntercept$I ($no)     # SMM 7/97 (E1385)
+
+        putunt$UnderAttack$i (no)
+
+        # If the flight doesn't have an assigned CAP position, send him
+        # to a position 30 miles away in the opposite direction.
+        unt2$pointer$to unt2$pointer$index
+
+        if (xunt2$AssignedCap$i == $yes)
+            {
+             unt2$OrderedLatitude$f = xunt2$CapLatitude$f 
+             putunt2$OrderedLatitude$f  
+
+             unt2$OrderedLongitude$f = xunt2$CapLongitude$f 
+             putunt2$OrderedLongitude$f     
+
+             unt2$OrderedAltDepth$i = xunt2$CapAltitude$i 
+             putunt2$OrderedAltDepth$i
+            }
+        else
+            {
+             unt2$OrderedLatitude$f = xunt2$TrueLatitude$f
+             unt2$OrderedLongitude$f = xunt2$TrueLongitude$f
+             FCos = Cos(unt2$OrderedLatitude$f)
+             Range = 30.
+             Bearing = (xUNT2$OrderedCourse$F + 180.0) * ($PI/180.)
+
+             # Compute lat/lon to travel to and save it.
+             call RRB2LL (unt2$OrderedLatitude$f, 
+                          unt2$OrderedLongitude$f, 
+                          Range,
+                          Bearing, 
+                          0.0,
+                          FCos)
+
+             putunt2$OrderedLatitude$f
+             putunt2$OrderedLongitude$f
+            }
+
+         # Set speed to cruise speed.
+         acc$pointer = xunt2$AccPntr$i
+         unt2$OrderedSpeed$f = xacc$CruiseSpeed$i
+         putunt2$OrderedSpeed$f
+        }
+    } # end if target is not a ghosted unit
+
+  ifound = $no
+  # get the target's track name for following message
+  call Find_active_RMT (xUNT$AssignedTarget$I, # send target's pointer index
+                        rmt$pointer,           # receive target's rmt pointer
+                        UNT$View$I,            # send attacker's view
+                        ifound,                # receive flag
+                        track_name)            # receive track name
+
+# Send message to player.
+#string MSG "xxxxx is disengaging from xxxxx."
+jj =  0
+call smovhn (xunt$Name$c,$$MaxLit,msg,jj)
+if (iFound == $yes)
+  {
+   call smovv (" is disengaging from ",msg,jj)
+   call smovhn (track_name,$$MaxLit,msg,jj)
+   }
+else
+   call smovv (" is disengaging.  ",msg,jj)    
+call send_ (xunt$View$i,0,jj,MSG)
+
+return
+end # end of DISENGAGE_AIR
+
+
+
+Subroutine AVG_CAP (unt$pointer,    # Receive flight's unit pointer.
+                    nfound,         # number of AAMs found
+                    eqlist)         # list of equipment
+################################################################################
+#$%
+#$% Purpose:    AVG_CAP checks AC to see how many missiles are left, excluding
+#$%             guns.  If there is more than 1 AAM per bird they will return to
+#$%             /proceed to the CAP, otherwise, they will BINGO, leaving one 
+#$%             AAM for defense on the flight home.
+#$%
+#$% Called By:  ATOAIR
+#$%
+#$% Calls:  BINGO     DYNGET     ECHOF     ECHOV     ECHOHN
+#$%         ECHOR     SEND       SMOVV
+#$%
+#$% Tables: MC  UNT
+#$%
+#$% Date:   SEP 89
+#$%
+#$% Author: MSgt Kim Harris
+#$%
+#$% Modified: 3/29/92 by Susan Miller for Air-to-air enhancements
+#$%
+################################################################################
+BBCommon
+CAPCommon
+
+LITERAL  UNT$Name$C, MC$Name$C,  CSTRIP8            # jb E2145  6/28/00
+REAL UNT$Orderedlatitude$F,UNT$Orderedlongitude$F,  # jb E2145  6/28/00
+    UNT$Orderedspeed$F, AVG_TO_CAP                  # jb E2145  6/28/00
+Integer N,JJ,
+    UNT$Pointer, UNT$View$I, UNT$Mission$I,         # jb E2145  6/28/00
+    UNT$Engagestatus$I,UNT$Orderedaltdepth$I,       # jb E2145  6/28/00
+    MC$Pointer, ACC$Pointer                         # jb E2145  6/28/00
+integer     Qty_to_CAP, EqList[5,30], nfound
+character   msg[ARB]
+
+unt$Name$c = xunt$Name$c
+unt$View$i = xunt$View$i
+
+nfound = 0                                      # init item count
+
+call DEQGET(unt$pointer,        # receive UNT pointer
+            $AAM$CODE,          # receive equipment ident code
+            nfound,             # receive/return nbr items fnd
+            eqlist)             # receive/return list of EQ
+
+unt$mission$i = Xunt$mission$i        
+
+if ((nfound == 0) & (unt$mission$i == $cap$code      |
+                     unt$mission$i == $strikecap$code|
+                     unt$Mission$i == $Sweep$code    |
+                     unt$mission$i == $AirDefense$code))
+    {
+     call bingo (UNT$Pointer)  #return CAP to base
+     jj = 0
+     call smovv (" From: ", msg, jj)
+     call smovhn (xunt$name$c, $$MaxLit, msg, jj)
+     call smovv (", all AAMs expended, returning to base. ", msg, jj)
+     call send_  (xunt$view$i, 0, jj, msg)
+    }
+
+Qty_to_CAP = 0                                       
+
+for (n = 1; n <= nFound; n = n + 1)                     
+    {
+    if (EqList[3,n] <= 0) next
+    mc$pointer = EqList[2,n]
+    mc$Name$c  = xmc$Name$c
+
+    if (trace$engage$exe != $no)
+        {
+        call echor
+        call echov  (" mc$Name:")
+        call echohn (mc$Name$c,8)
+        }
+
+    Qty_to_CAP = Qty_to_CAP + EqList[3,n]
+    }
+
+Avg_to_CAP = float(Qty_to_CAP)/xunt$NbrAc$i
+
+if (trace$engage$exe != $no)
+    {
+    call echor
+    call echov ("    AVG_TO_CAP: ")
+    call echof (Avg_to_CAP,802)
+    }
+
+# If less than two missiles per AC, BINGO; if there is a valid CAP
+# Lat/Long move it to Ordered Lat/Long or if there is a valid 
+# Ordered Lat/Long let AC proceed, else BINGO
+
+unt$EngageStatus$i = xunt$EngageStatus$i
+if (Avg_to_CAP < 0.5 & unt$EngageStatus$i != $Engaging$Code)
+    {
+    call BINGO (unt$pointer)    # jb E2208 delete 'flag' arg  12/11/00          
+    #" From: xxxxx, all AAMs expended, returning to base. "
+    jj = 0
+    call smovv (" From: ", msg, jj)
+    call smovhn (unt$Name$c, $$MaxLit, msg, jj)
+    call smovv (", all AAMs expended, returning to base. ", msg,jj)
+    call send_  (unt$View$i, 0, jj, msg)
+    }
+else if (xunt$DisengageTime$f < game$time)
+    {
+    if (xunt$AssignedCap$i == $yes & unt$EngageStatus$i != $Engaging$Code)
+        {
+        unt$OrderedLatitude$f = unt$CapLatitude$f
+        putunt$OrderedLatitude$f
+
+        unt$OrderedLongitude$f = unt$CapLongitude$f
+        putunt$OrderedLongitude$f
+
+        unt$OrderedAltDepth$i = unt$CapAltitude$i 
+        putunt$OrderedAltDepth$i
+
+        # Reset speed.
+        acc$pointer = xunt$AccPntr$i
+        unt$OrderedSpeed$f = xacc$CruiseSpeed$i
+        putunt$OrderedSpeed$f
+        }
+    }
+
+return
+end # end of AVG_CAP
+
+
+
+Subroutine Test_for_Intercept(unt$pointer, # Receive attacker's unit pointer.
+                            unt2$pointer,# Receive target's unit pointer.
+                            acc$pointer, # Receive attacker's ACC pointer.
+                            lcl$pointer, # Receive attacker's LCL pointer.
+                            EqList,      # Receive attacker's equipment list.
+                            nFound,      # Receive number of equipment items.
+                            iRng,        # Receive range to target.
+                            ntargt,      # Receive number in target flight.
+                            cont_intercept, # Send flag 
+                            mrange)      # Send max missile range
+################################################################################
+#$%
+#$% Purpose:    Test_for_INTERCEPT determines if a flight will successfully 
+#$%             intercept the flight he's currently paired on.  
+#$%             TESTS:
+#$%                 If the max distance to travel before firing AAMS 
+#$%                 for the attacking a/c is greater than 20 nmi, or
+#$%                 If calculated probability of engagement is less than
+#$%                 a random number, or
+#$%                 If the target is outside the cap range of the attacker,
+#$%                 then break engagement.
+#$%
+#$% Called By:  ATOAIR
+#$%
+#$% Calls:      ECHOV     ECHOF     ECHOR
+#$%             SEND      SMOVH     Find_active_RMT
+#$%             RLL2RB
+#$%
+#$% Tables:     ACC     LCL     UNT
+#$%
+#$% Date:       OCT 89
+#$%
+#$% Author:     MSgt Kim Harris
+#$%             
+#$% Modified:   3/29/92 by Susan Miller for Air-to-air model
+#$%
+#$%             Susan Miller - 7/97 (E1385)
+#$%             Reimplemented use of variable UNT$TestIntercept$I.
+#$%
+################################################################################
+BBCommon
+CAPCommon
+
+literal track_name, CSTRIP8                      # jb E2145  6/28/00
+REAL   X,RANDOM,RANGE,BRG,UNT$Orderedspeed$F,   # jb E2145  6/28/00
+    UNT$Orderedlatitude$F,UNT$Orderedlongitude$F # jb E2145  6/28/00
+real    LowAltFactor, NightFactor, ProbIntcpt, AEM, RanNum
+integer cont_intercept,     # flag for continuation of intercept
+        check_range,        # range from CAP posit + missile range
+        mRange,             # max missile range
+        EqList[5,30],       # equipment list
+        iRng,               # integer range to target
+        nFound,             # number of missiles found
+        distance_to_travel, # distance attacker must travel before firing AAMs
+        ntargt,             # number of a/c in target flight                 
+        assigned_target_index, 
+        if_found,           # flag returned from find_active_rmt
+        jj,                 # message length
+        target_past_cap     # flag if target past cap range
+Integer N,                               # jb E2145  6/28/00
+    UNT$Pointer,UNT$Orderedaltdepth$I,   # jb E2145  6/28/00
+    LCL$Pointer,RMT$Pointer,             # jb E2145  6/28/00
+    ACC$Pointer,UNT2$Pointer             # jb E2145  6/28/00
+Integer UNT3$Pointer, UNT$AssignedCap$I, # jb AAI01  5/2/01
+    HIStgtSIDE,HIStgtINDX,MYside         # jb AAI01  5/2/01
+character msg[ARB]
+
+cont_intercept = $no
+assigned_target_index = xUNT$AssignedTarget$i # reset if disengaging
+
+# Find the missile with the farthest range.
+mRange = 0
+for (N = 1; N <= nFound; N = N + 1)
+    {
+    # If out of stock, skip it.
+    if (EqList[3,N] <= 0) next
+
+    # If range less than or equal to saved range, skip it.
+    if (EqList[4,n] <= mRange) next
+
+    mRange = EqList[4,n]
+    }
+
+# The test for successful intercept will only be done when we're less 
+# than 20 miles outside max missile range and the A/C is not assigned to
+# a CAP station.  The test is done only once, so if they're TestIntercept 
+# flag is set, return.
+distance_to_travel = iRng - mRange
+if ((distance_to_travel > 20) & (xunt$AssignedCap$i == $no)) return
+
+# if testintercept is yes and unit status is not proceeding, set cont_intercept
+# to yes so intercept is not recalculated every game cycle   # SMM 7/97 (E1385)
+if ((xUNT$TestIntercept$I == $yes) & (xUNT$Status$I != $Proceeding$Code))
+    {
+     cont_intercept = $yes
+     return
+    }
+
+# Get the attacker's AEM.
+AEM = xacc$AirEffectMult$f
+
+# Determine what the low altitude factor will be.
+if      (xunt2$TrueAltDepth$i >= 1000)  LowAltFactor = 0.0
+else if (AEM <= 1.0)                    LowAltFactor = PSI$Low
+else                                    LowAltFactor = PSI$LowPD
+
+# Determine what the night factor will be.
+if      (xunt$InDaylight$i == $yes)     NightFactor = 0.0
+else if (AEM <= 1.0)                    NightFactor = PSI$Nite
+else                                    NightFactor = PSI$NitePD
+
+# Compute the probability of intercept.
+ProbIntcpt = ((AEM * PSI$Ratio) + PSI$Min - LowAltFactor - NightFactor)
+
+# If the probability is greater than 100, limit it to 100.
+if (ProbIntcpt >= 1.0)  ProbIntcpt = 1.0
+
+# Send message to wargame terminal for debugging.
+if (trace$engage$exe != $no)
+    {
+    call echor
+    call echov ("    AEM: ")
+    call echof (AEM,403)
+    call echov ("; PSI$Ratio: ")
+    call echof (PSI$Ratio,403)
+    call echov ("; PSI$Min: ")
+    call echof (PSI$Min,403)
+    call echov ("; LF: ")
+    call echof (LowAltFactor,403)
+    call echov ("; NF: ")
+    call echof (NightFactor,403)
+    }
+
+# Check against a random number.  If a random number is less than
+# the probability, the flight will continue on its path.
+RanNum = Random(x)
+
+# Send message to wargame terminal.
+if (trace$engage$exe != $no)
+    {
+    call echor
+    call echov ("    Prob of Intercept = ")
+    call echof (ProbIntcpt,403)
+    call echov (".  RanNum = ")
+    call echof (RanNum,403)
+    call echov (". ")
+    }
+    
+if (RanNum <= ProbIntcpt)   # attacker will continue intercept
+    {
+     cont_intercept = $yes
+
+     # Set intercept test flag to yes to insure they don't try it more than
+     # once for this engagement.   # smm 7/97 (E1385)
+     putunt$TestIntercept$i ($yes)
+##################################
+        # jb 5/2/01 If target is in turn targeting one of our friendlies,
+        #    we want to exempt the CAP a/c from the CAP RADIUS test  5/2/01
+     call whside(Xunt$View$i,MYside)     # jb What's my view?  5/2/01
+     HIStgtSIDE = $RED$code # jb initlz to 7 (NOT 0,1, or 2)   5/2/01
+     
+     unt$AssignedCap$i = xunt$AssignedCap$i # jb Use local vrbl  5/2/01
+     if (unt$AssignedCap$i != $no) # jb 
+        {
+        HIStgtINDX = Xunt2$AssignedTarget$i # jb Find out whether he/s
+        unt3$Pointer$TO (HIStgtINDX)     #    targetinc someone   5/2/01
+        if(unt3$Pointer$Valid)          # jb If so. maybe he's after 5/2/01
+            call whside (Xunt3$View$i,HIStgtSIDE)  # jb  one of OURS? 5/2/01
+        }
+##################################
+     if (HIStgtSIDE != MYside  &  # jb If NOT EXEMPT from range test. 5/2/01 
+        unt$AssignedCap$i != $no)     # test if target is within cap range
+        {
+         target_past_cap = $no  # initialize flag
+    
+         call RLL2RB (UNT$CAPLatitude$f,   # send attacker latitude
+                      UNT$CAPLongitude$f,  # send attacker longitude
+                      cos_cap_lat,          # send attacker cos 
+                      xUNT2$TrueLatitude$f, # send target latitude
+                      xUNT2$TrueLongitude$f,# send target longitude
+                      xUNT2$CosTrueLat$f,   # send target cos 
+                      Range,                # receive range to target
+                      Brg)                  # receive bearing
+
+         # If the target is more than specified range from attacker's CAP
+##         check_range = mrange + UNT$CapRange$I
+         check_range = UNT$CapRange$I +  # jb More constraint, per doctrine?  
+                        MIN(0.5 * mrange , 0.17 * UNT$CapRange$I) # jb 1/24/01
+         if (INT(Range) >= check_range)
+            {
+             #"Target past CAP range. XXXXX returning to CAP position."
+             jj = 0
+             call smovv("Target past CAP range.  ",msg,jj)
+             call smovhn(xunt$Name$c,$$MaxLit,msg,jj)
+             call smovv(" returning to CAP position.",msg,jj)
+# removed for PER #H1067 10/26/92 SMM
+#             call send_(xunt$View$i,0,jj,msg)
+        
+             target_past_cap = $yes
+             cont_intercept = $no
+            }
+        } # if (xunt$AssignedCap$i != $no)
+    } # end if continuing intercept
+
+if (cont_intercept == $yes)
+    {
+     # Send message to wargame terminal.
+     if (trace$engage$exe != $no)  call echov (" Continuing.")
+     return
+    }
+
+# Send message to wargame terminal.
+if (trace$engage$exe != $no)  call echov (" Breaking Intercept.")
+
+putunt$BrokeInterceptTime$f (game$time)
+
+# If the flight is not on CAP, anchor him where he is by setting speed
+# to zero.
+if (xunt$AssignedCap$i == $no) putunt$OrderedSpeed$f (0.)
+
+# Else, send him back to his CAP position.
+else
+    {
+    unt$OrderedLatitude$f = unt$CapLatitude$f 
+    putunt$OrderedLatitude$f  
+
+    unt$OrderedLongitude$f = unt$CapLongitude$f 
+    putunt$OrderedLongitude$f                   
+
+    unt$OrderedAltDepth$i = unt$CapAltitude$i 
+    putunt$OrderedAltDepth$i
+
+    # Set speed to cruise speed.
+    unt$OrderedSpeed$f = xacc$CruiseSpeed$i
+    putunt$OrderedSpeed$f
+    }
+
+# Set flag back to no if they break the intercept so they'll be able
+# to try it again on the next engagement.   # SMM 7/97 (E1385)
+putunt$TestIntercept$i ($no)
+
+if (LCL$Pointer != 0)
+    putlcl$HeadsUp$i (ntargt)  # Enter heads up count.
+
+# Break the engagement.
+putunt$EngageStatus$i ($EngagementOver$code)
+putunt$Status$i ($Proceeding$code)
+putunt$TailChaseOverride$i ($No) 
+UNT3$Pointer$To XUNT$AttackIndx$I # jb (no X)    1/3/00 
+if (unt3$pointer$ok)
+    putUNT3$UnderAttack$i ($NO)  # send the target on his way
+
+putunt$AttackIndx$i ($no)
+putunt$AssignedTarget$i (no)
+putunt$UnderAttack$i (no)
+
+putUNT$ReactFlag$I ($no)   # reset so it can react next time
+
+if (target_past_cap != $yes)
+    {
+     # get track_name for following message
+     call Find_active_RMT(assigned_target_index,
+                          rmt$pointer,
+                          xUNT$View$I,
+                          if_found,
+                          track_name)
+
+     # Send message to player.
+     # MSG "Heads up, xxxxx missed intercept on xxxxx."
+     jj = 0
+     call smovv(" Heads up, ", msg, jj)
+     call smovhn (xunt$Name$c, $$MaxLit, msg, jj)
+     if (if_found == $yes)
+        {
+         call smovv(" missed intercept on ", msg, jj)
+         call smovhn (track_name, $$MaxLit, msg, jj)
+        }
+     else
+        {
+         call smovv(" missed intercept. ", msg, jj)
+        }
+     call send_ (xunt$View$i,0,jj,msg)
+    } # end if target not past cap range 
+
+return
+end     # end of Test_for_intercept
+
+
+Subroutine Launch_and_Kill (unt$pointer,      # Receive attacker's unit pointer.
+                            unt2$pointer,     # Receive target's unit pointer.
+                            mc$pointer,       # Receive attacker's MC pointer.
+                            eqlist,           # Receive attacker's equipment list.
+                            naam,             # Receive attacker's weapon index
+                            rannum,           # Receive random number
+                            mc$probkill$f,    # Send missile probility hit
+                            nhit,             # Send the number of hits
+                            totals,           # Receive/send
+                            unsuccessful)     # Send $yes if unsuccessful launch
+################################################################################
+#$%
+#$% Purpose:    Launch_and_Kill determines if a flight will successfully 
+#$%             launch a missile and kill a target
+#$%
+#$% Called By:  ATOAIR
+#$%
+#$% Calls:      ECHOV     ECHOF     ECHOR  
+#$%             SEND      SMOVH     RANDOM    WHSIDE
+#$%
+#$% Tables:     MC     UNT
+#$%
+#$% Date:       MAR 92
+#$%
+#$% Author:     Susan Miller  Code removed from ATOAIR and placed here
+#$%
+#$% Modified:   Carol Kropp - 2/23/93
+#$%             Removed nkill and ntargt - values changed in Process_AAM_Hit.
+#$%
+#$%             Susan Miller - 7/97 (E1410)
+#$%             Added parameter unsuccessful to the routine interface,
+#$%             since with level >= 1 the attacker may not fire any AAMs.
+#$%             Added ENCommon for collection of postgame data for the
+#$%             times when a launch occurs.  Changed trace information for
+#$%             providing prob launch info (removed setting and use of
+#$%             iranlaunch to use ranlaunch).  Replaced trace message
+#$%             "Fire: X  If TDM of XXX% is < XXX, then NEXT" with
+#$%             "Set PK to smaller of TDM or Missile PK. 
+#$%              If PK (XXX.X%) < XXX.X% - Then no kill."                
+#$%
+################################################################################
+BBCommon
+ENcommon
+
+LITERAL    CSTRIP8                      # jb E2145  6/28/00
+REAL       X,RANDOM                     # jb E2145  6/28/00
+real*4 rannum, mc$probkill$f, Prob_of_launch
+real*4 ranlaunch, TDMS, SPDS, ALTS, NTMS, TDMprobKILL
+integer eqlist[5,30], nhit, unsuccessful
+integer totals[2]    # totals[1] hits per game cycle, 
+                     # totals[2] missiles fired per game cycle
+integer iside, iph
+integer   scale_pk_entry_called
+
+Integer    NAAM,              # jb E2145  6/28/00
+    UNT$Pointer,MC$Pointer,   # jb E2145  6/28/00
+    UNT2$Pointer              # jb E2145  6/28/00
+
+scale_pk_entry_called = $no
+unsuccessful = $no             # SMM 7/97 (E1410)
+
+ranlaunch = random(x)  # get random number for prob. of weapon launch
+
+# get which side to set the two sided scaling factors
+call WHSIDE (xunt$View$i,   # send the attacker's view
+             iside)         # receive the attacker's side
+
+if (iside == $Blue$Code) 
+    Prob_of_launch = AirToAir$Prob$Launch$blue
+else if (iside == $Orange$Code) 
+    Prob_of_launch = AirToAir$Prob$Launch$Orange
+else                # neutral
+    Prob_of_launch = AirToAir$Prob$Launch$blue
+
+# If the probability of launch is less than a random number,
+# then the missile doesn't launch.
+if (Prob_of_launch <= ranlaunch)
+    {
+     if (trace$engage$exe != $no)
+        {
+         call echor
+         call echov  ("Probability of launch (")
+         call echof  ((Prob_of_launch * 100.0),3)
+         call echov  ("%) not met for ")
+         call echohn (xmc$Name$c,$$MaxLit)
+         call echov  (", draw was ")
+         call echof  ((ranlaunch * 100.0),3)
+         call echov  ("%.")
+        }
+
+     if (log$engage != $no)                # log the unsuccessful launch
+        {                                  # if engagement log is desired
+         call engdata (UNT$Pointer, UNT2$Pointer)     # SMM 7/97 (E1410)
+         putENG$Weapon$C    (xMC$Name$C)
+         putENG$ResultPh$F  (Prob_of_launch * 100.0)
+         putENG$Result$I    (eng$unsuccessful$code)
+         call write_eng_rec
+        }
+
+     unsuccessful = $yes
+     return
+    } # end if airtoair launch doesn't happen
+
+repeat                                              # E2143 dew 10/99
+    {
+     break                                          # E2143 dew 10/99
+     entry Scale_PK_Value (UNT$Pointer,   UNT2$Pointer,  MC$Pointer,
+                           eqlist,        naam,          rannum,
+                           MC$ProbKill$F, nhit,          totals)
+     scale_pk_entry_called = $yes
+     }
+
+# Decrement the missile count.
+EqList[3,NAAM] = EqList[3,NAAM] - 1
+# Increment the number of missiles fired
+totals[2] = totals[2] + 1   
+
+# two sided scaling factors.
+call WHSIDE (xunt$View$i,   # send the attacker's view
+             iside)         # receive the attacker's side
+
+if (iside == $blue$code)  
+    target$scale = target$scale$blue
+else if (iside == $orange$code) 
+    target$scale = target$scale$orange
+else # neutral
+    target$scale = target$scale$blue
+
+# Target Difficulty Multiplier.
+TDMS = target$scale
+SPDS = Amax1(0.0,(speed$scale/(xunt2$TrueSpeed$f +.001)) ** 2)
+if (SPDS > 1.0) SPDS = 1.0
+ALTS = Amax1(0.0,(xunt2$TrueAltDepth$i + 150.0) /altitude$scale)
+if (ALTS > 1.0) ALTS = 1.0
+NTMS = Amax1(0.0 + xunt2$InDayLight$i,night$scale)
+if (NTMS > 1.0) NTMS = 1.0
+TDMprobKILL = TDMS * SPDS * ALTS * NTMS * mc$PROBKILL$F 
+
+if (trace$engage$exe != $no)
+    {
+     call echor
+     call echov("TDMS = ")
+     call echof(TDMS,803)
+     call echov(" SPDS =  ")
+     call echof(SPDS,803)
+     call echov(" ALTS = ")
+     call echof(alts,803)
+     call echov(" NTMS = ")
+     call echof(NTMS,803)
+     call echor 
+    }
+# use the smaller of the two probabilities
+if (TDMprobKILL < mc$ProbKill$f) mc$ProbKill$f = TDMprobKILL
+
+if (trace$engage$exe != $no)
+    {
+     call echor
+     call echov  ("Set PK to smaller of TDM or")
+     call echov  (" Missile PK.  If PK (")
+     call echof ((100.0 * mc$probKILL$F),3)
+     call echov  ("%) < ")
+     call echof ((100.0 * rannum),3)
+     call echov  ("% - Then no kill.")
+    }
+
+#If less than a random number, then no kill, get next.
+if (mc$probKILL$F < rannum) 
+    {
+     iph = INT(mc$probkill$f)
+     NHIT = 0   # no hit occurred
+    }
+ELSE   # hit occurred   
+    {
+     NHIT = 1
+     totals[1] = totals[1] + 1  # increment total number of hits
+    }
+
+return
+end # end of launch_and_kill
+
+
+Subroutine In_Firing_range (unt$pointer,   # receive attacking a/c pointer
+                            unt2$pointer,  # receive target a/c pointer
+                            nFound,        # receive nbr of AAMs
+                            naam,          # return index to AAM
+                            EqList,        # receive/return equipment list
+                            int_range,     # return equipment range
+                            altdiff,       # return altitude differential
+                            absalt,        # return absolute value of altitude
+                            ac_tgt)        # receive flag, yes for a/c, 
+                                           # no for cruise missile
+################################################################################
+#$%
+#$% Purpose:    In_Firing_Range determines whether or not a target is within 
+#$%             max weapon range.
+#$%
+#$% Called By:  ATOAIR
+#$%
+#$% Calls:      GETRB_M RANGE_NEXT_MIN
+#$%
+#$% Tables:     MC UNT
+#$%
+#$% Date:       JUN 88
+#$%
+#$% Author:     TSgt Kim Harris
+#$%
+#$% Modified:   4/22/92 by Susan Miller for Air-to-air ehancements
+#$%
+################################################################################
+BBCommon
+
+Real    range,          # range of missile
+        brg,            # bearing of flight
+        future_range    # range btwn attacker and target in next minute
+Integer naam,           # flag for missile in range
+        nFound,         # number of missiles found
+        mrange,         # max range of missile
+        int_range,      # integer range of missile
+        int_future_range, # integer range next game minute for ghosted a/c
+        EqList[5,30],   # equipment list
+        altdiff,        # Altitude difference between flights
+        absalt,         # Absolute value of the altitude difference
+        ac_tgt          # set to yes if target is air$code, no, cruise missile
+Integer N, TARGET_MAXALT,               # jb E2145  6/28/00
+    UNT$Pointer,UNT$Truealtdepth$I,     # jb E2145  6/28/00
+    UNT2$Pointer,UNT2$Truealtdepth$I,   # jb E2145  6/28/00
+    MC$Pointer,MC$Maxrange$I            # jb E2145  6/28/00
+
+# Init flag no missile in range and max missile range.
+naam = $no
+
+# Air-to-air enhancements     SMM 3/25/92
+# Get a/c and target altitudes.  If the value of ALTDIFF is 
+# positive or 0, then the target is above or equal to the 
+# attacker so use the altitude of the attacker.  Otherwise,
+# the target is below so use altitude below attacker.
+if(Level$Air$Engagement >= 1)   # cruise missile or a/c as target
+    {
+     UNT$TrueAltDepth$I = xUNT$TrueAltDepth$I
+     UNT2$TrueAltDepth$I = xUNT2$TrueAltDepth$I # cruise missile in UNT table
+     altdiff = UNT2$TrueAltDepth$I - UNT$TrueAltDepth$I
+     absalt = IABS(altdiff)      # absolute value of the altitude difference
+
+     # if target is a cruise missile and it's speed is greater than the
+     # max cruise missile speed for engagement, return out of routine
+     if ((ac_tgt == $no) & (xUNT2$TrueSpeed$F > MaxCruiseMissile$Speed))
+        return
+    }
+
+call GETRB_M(_                  #get range and bearing
+           UNT$POINTER,         #pass A/C pointer
+           UNT2$POINTER,        # tgt pointer 
+           RANGE,               #receive range
+           BRG)                 #receive bearing, but never use it
+
+future_range = 0.0    # initialize before call
+int_future_range = 0
+# clk 7/96 - AWSIM is still checking range when the engagement
+# is received and sending miss.  Only option at this point is
+# to remove the "dr"ing and use real range.
+# if enhanced air to air model and the target is a ghosted unit,
+# calculate whether the target will be within weapons range
+# in the next game minute
+#if ((Level$Air$engagement >= 1) & (xUNT2$GhostedUnit$I == $yes))
+#    call Range_next_min(_
+#                        UNT$Pointer,    # send attacker's UNT pointer
+#                        UNT2$Pointer,   # send target's UNT pointer
+#                        future_range)   # receive next minute range
+
+int_range = int(range + 0.5)         # Get integer range.
+#if (future_range > 0)
+#    int_future_range = int(future_range + 0.5)
+
+mrange = 1000   # initialize max range
+
+for (N=1; N <= nfound; N=N+1)                   # do for all missiles found
+    {
+    if (eqlist[3,N] <= 0) next                  # out of stock ??
+
+    MC$POINTER = eqlist[2,N]                    # get missile pointer
+
+    MC$MaxRange$I = xMC$MaxRange$I              # get missile max range
+    MC$MaxRange$I = max(1,MC$MaxRange$I)        #               8/7/85
+    eqlist[4,N]   = MC$MaxRange$I               # save the range
+
+    if ((INT_RANGE <= MC$MaxRange$I) | # if target within range now 9/22/83
+        (future_range > 0.0) &         # or range next minute  SMM 5/11/92
+        (int_future_range <= MC$MaxRange$I))# & future range w/in missile range
+       {   
+        if(MC$MAXRANGE$I < MRANGE)              # if a closer range missile
+            {
+            MRANGE = MC$MaxRange$I              # save new missile range
+
+            NAAM = N                            # save missile index
+            }   # end if closer range
+
+        # Air-to-air enhancement  SMM 3/25/92
+        # The target must also be w/in the alt limitations of the missile.
+        if(Level$Air$Engagement >= 1)   # cruise missile or a/c as target 
+            {
+             # the target is below the attacker, use maximum 
+             # altitude differential for targets below.         
+             if (altdiff < 0)  target_maxalt = xMC$AltitudeBelowAttacker$I
+             # otherwise, use altitude differential for above
+             else  target_maxalt = xMC$AltitudeAboveAttacker$I
+    
+             # if absolute value of altitude difference is greater than
+             # the max altitude differential then there are no missiles in range
+             if (absalt > target_maxalt)
+                NAAM = $NO
+            } # end enhanced air to air
+
+       }   # end if target within range
+    
+    }   # end do all missiles
+
+return
+end # end of In_Firing_Range
+
+
+
+Subroutine Who_to_kill(UNT$Pointer,      # receive attacker UNT pointer
+                       UNT2$Pointer,     # receive target UNT pointer
+                       MC$Pointer,       # receive MC pointer for AAM
+                       leader_index,     # receive target leader's index
+                       BDA_NBR_FIRED)    # NBR fired for Battle damage assessment
+                     
+################################################################################
+#$%
+#$% Purpose:    Who_to_kill loops through a target flight saving the 
+#$%             flight leader for the last to kill
+#$%
+#$% Called By:  ATOAIR
+#$%
+#$% Calls:      ECHOR   ECHOHN  ECHOV   ECHOIZ
+#$%             Update_Destroyed_Aircraft
+#$%             Generate_Eng_Rec
+#$%
+#$% Tables:     AML UNT MC
+#$%
+#$% Date:       April 1992
+#$%
+#$% Author:     Susan Miller
+#$%             
+#$% Modified:   Code removed from Atoair 
+#$% Modified:   11/17/92 - Carol Kropp and Susan Miller
+#$%             Completely rewrote routine, in an attempt to determine why
+#$%             bad data was being sent to Update_Destroyed_Aircraft.  The
+#$%             actual problem was traced to DAMAIR <wgmddam.rat> (NbrAC
+#$%             was not set to zero if a grand slam was scored), so atoair
+#$%             was trying to kill already dead a/c.
+#$%
+#$%             JFR 12/95 (E1104)
+#$%             Added a parameter to handle BDA.
+################################################################################
+BBCommon
+
+LITERAL    CSTRIP8                         # jb E2145  6/28/00
+integer  leader_index   # leaders index 
+integer BDA_NBR_FIRED     # JFR 9/27/93
+
+Integer AML2$Pointer,AML2$Nextindx$I,      # jb E2145  6/28/00
+    AML3$Pointer,AML3$Status$I,            # jb E2145  6/28/00
+    UNT$Pointer,UNT2$Pointer,MC$Pointer    # jb E2145  6/28/00
+
+  AML2$Pointer$To  (leader_index)
+  AML2$NextIndx$I = xAML2$NextIndx$I
+
+  if (AML2$NextIndx$I == 0)
+    AML3$Status$I = $Destroyed$Code
+  else  # the index is valid
+    {
+     AML3$Pointer$To  (AML2$NextIndx$I)
+     AML3$Status$I = xAML3$Status$I
+    }
+
+  if (trace$engage$exe != $no)
+    {
+     call echor
+     call echov  ("In who_to_kill:  The leader's name is ")
+     call echohn (xAML2$SideNumber$C, $$MaxLit)
+     call echov  (" - ")
+    }
+
+  #$% Loop through the flight chain to the last a/c which isn't destroyed
+  while (AML2$NextIndx$I != 0  &
+         AML3$Status$I != $Destroyed$code)
+    {
+     AML2$Pointer$To  (AML2$NextIndx$I)
+     AML2$NextIndx$I = xAML2$NextIndx$I
+
+     if (AML2$NextIndx$I != 0)
+       {
+        AML3$Pointer$To  (AML2$NextIndx$I)
+        AML3$Status$I = xAML3$Status$I
+       }
+    }
+
+  #$% if last guy & he's already dead, then there isn't anyone left to kill,
+  #$% as this will happen only when the leader is dead
+  if (xAML2$Status$I == $Destroyed$code)
+    {
+     if (trace$engage$exe != $no)
+        {
+         call echor
+         call echov (" The Leader is dead and there is noone to kill.")
+         call echor
+        }
+     return
+    }   # end if last guy destroyed
+  
+  if (trace$engage$exe != $no)
+    {
+     if (leader_index == AML2$Pointer$Index)  # if the a/c is the leader
+       {
+        call echov (" I have no friends and I'm dead!!")
+       }
+     else
+       {
+        call echov (" I have friends, switching to ")
+        call echohn (xAML2$SideNumber$C, $$MaxLit)
+       }
+     call echor
+    } 
+
+  #$% Add new kills to other kills.
+  putUNT2$Hits$I (xUNT2$Hits$I + 1)
+  putUNT2$MissHits$I (xUNT2$MissHits$I + 1)
+
+  putAML2$Status$I ($Destroyed$Code)
+
+  #$% Enter data into the DAC table.       clk 3/92
+  call Update_Destroyed_Aircraft (UNT2$Pointer, 
+                                  UNT$Pointer,
+                                  $AirToAirMissile$Code,
+                                  xMC$Name$C, AML2$Pointer,
+                                  BDA_NBR_FIRED)  # JFR E1104
+
+  if (log$engage != $no) # if engagement log desired
+    {
+
+     call engdata(UNT$Pointer, UNT2$Pointer) # jhm 12/01
+     call Generate_eng_rec ("SPLASH  ","ENGAGE  ",xaml2$SideNumber$c)
+    }                                             
+
+  # if trace display requested by user (usually for debug)
+  if (trace$engage$exe != $no)
+    {
+     call echo ($aster)
+     call echov ("  [")
+     call echohn (xaml2$SideNumber$c,$$MaxLit)
+     call echov (" down]")
+    }
+
+return 
+end # of who_to_kill
+
+
+Subroutine Range_next_min (UNT$Pointer,     # Receive attacker's UNT pointer
+                           UNT2$Pointer,    # Receive target's UNT pointer
+                           future_range)    # Send next minute range
+                            
+################################################################################
+#$%
+#$% Purpose:    RANGE_NEXT_MIN checks to see if the target will be within
+#$%             missile range in the next game cycle by dead reckoning both
+#$%             the attacker and the target for one minute and comparing the
+#$%             new range to the missile range
+#$%
+#$% Called By:  In_firing_range
+#$% 
+#$% Calls:  RLL2RB  RRB2LL
+#$%
+#$% Tables: UNT
+#$%
+#$% Date:   MAY 92
+#$%
+#$% Author: Susan Miller
+#$%         
+################################################################################
+BBCommon
+
+real    UNT_dist_traveled, UNT2_dist_traveled,
+        current_range, current_bearing,
+        next_min_range, next_min_bearing,
+        future_range
+REAL  UNT$Truespeed$F,UNT$Truecourse$F,         # jb E2145  6/28/00
+    UNT$Truelatitude$F,UNT$Truelongitude$F,     # jb E2145  6/28/00
+    UNT$Costruelat$F,                           # jb E2145  6/28/00
+    UNT2$Truespeed$F,UNT2$Truecourse$F,         # jb E2145  6/28/00
+    UNT2$Truelatitude$F,UNT2$Truelongitude$F,   # jb E2145  6/28/00
+    UNT2$Costruelat$F                           # jb E2145  6/28/00
+Integer    UNT$Pointer, UNT2$Pointer
+
+# get information on the attacker
+UNT$TrueSpeed$F = xUNT$TrueSpeed$F
+UNT$TrueCourse$F = xUNT$TrueCourse$F
+UNT$TrueLatitude$F = xUNT$TrueLatitude$F 
+UNT$TrueLongitude$F = xUNT$TrueLongitude$F
+UNT$CosTrueLat$F = xUNT$CosTrueLat$F
+
+# calculate the attacker distance traveled
+# by dividing speed in knots by 60 minutes
+UNT_dist_traveled = UNT$TrueSpeed$F / 60.0
+
+# get information for the target
+UNT2$TrueSpeed$F = xUNT2$TrueSpeed$F
+UNT2$TrueCourse$F = xUNT2$TrueCourse$F
+UNT2$TrueLatitude$F = xUNT2$TrueLatitude$F 
+UNT2$TrueLongitude$F = xUNT2$TrueLongitude$F
+UNT2$CosTrueLat$F = xUNT2$CosTrueLat$F
+
+# if neither target nor attacker are moving,
+# future range won't change, so set future range and return
+if ((UNT$TrueSpeed$F == 0) & (UNT2$TrueSpeed$F == 0))
+    {
+     future_range = -1
+     return
+    }
+
+# calculate the target distance traveled 
+# by dividing speed in knots by 60 minutes
+UNT2_dist_traveled = UNT2$TrueSpeed$F / 60.0
+
+call RLL2RB(_
+            UNT$TrueLatitude$F,      # sent
+            UNT$TrueLongitude$F,     # sent
+            UNT$CosTrueLat$F,        # sent
+            UNT2$TrueLatitude$F,     # sent
+            UNT2$TrueLongitude$F,    # sent
+            UNT2$CosTrueLat$F,       # sent
+            current_range,           # returned
+            current_bearing)         # returned
+
+# if attacker has speed, get attacker's new latitude and longitude
+if (UNT_dist_traveled > 0)
+    call RRB2LL(_
+                UNT$TrueLatitude$F,     # sent and received
+                UNT$TrueLongitude$F,    # sent and received
+                UNT_dist_traveled,      # sent
+                0.0,                    # sent
+                UNT$TrueCourse$F,       # sent 
+                UNT$CosTrueLat$F)       # sent and received
+
+# if target has a speed, get target's new latitude and longitude
+if (UNT2_dist_traveled > 0)
+    call RRB2LL(_
+                UNT2$TrueLatitude$F,    # sent and received
+                UNT2$TrueLongitude$F,   # sent and received
+                UNT2_dist_traveled,     # sent 
+                0.0,                    # sent 
+                UNT2$TrueCourse$F,       # sent 
+                UNT2$CosTrueLat$F)      # sent and received
+
+# now get the future range in the next game minute
+call RLL2RB(_
+            UNT$TrueLatitude$F,      # sent
+            UNT$TrueLongitude$F,     # sent
+            COS(UNT$TrueLatitude$F), # sent
+            UNT2$TrueLatitude$F,     # sent
+            UNT2$TrueLongitude$F,    # sent
+            COS(UNT2$TrueLatitude$F),# sent
+            next_min_range,          # returned
+            next_min_bearing)        # returned
+
+# test to see whether range is increasing
+# if so, attacker and target are not closing
+if (next_min_range >= current_range) 
+    future_range = -1
+
+# else they are closing 
+# so send the next minute range
+else    
+    future_range = next_min_range
+
+return
+end
+
+
+Subroutine Get_CAP_target (UNT$Pointer)    # receive CAP UNT pointer
+#$%     Note: This 3-D version considers time to climb or dive. 1/18/01
+                           
+################################################################################
+#$%
+#$% Purpose:    Get_CAP_target searches the RMT table for an 
+#$%             assignable target by checking:
+#$%   a) that the track meets ROE and if it is a
+#$%         cruise missile, it meets the speed constraints; and
+#$%        that the type of track is $ActiveNonVisual$code. (dew  1/01)
+#$%   b) the initial range between any potential target and the CAP position
+#$%      is constrained by: rangelimit = 10.5 + 1.67 * UNT$CapRange$I 
+#$%   c) the CAP a/c can attempt its first AAM launch at the target without
+#$%         itself going outside its 'action' radius. (jb  10/30/00)  
+#$%   d) Among all viable targets, there is no sooner intercept time, consider-
+#$%      ing both the geographical and altitude requirements.
+#$%   e) The target isn't already under attack. (jb  1/26/01)
+#$%
+#$% Called By:  ASSGNT (WGMDENG)
+#$%
+#$% Calls:  Longest_AAM_range   CKROE_RMT   RLL2RB
+#$%         RPRJCT2     RMIN_TO_TARGET       # jb 10/30/00
+#$%  (No longer called:  Vector_entry   CPA  # jb 10/30/00   
+#$%
+#$% Tables: UNT RMT
+#$%
+#$% Date:   15 JUNE 1992
+#$%
+#$% Author: Susan Miller
+#$%
+################################################################################
+BBCommon
+
+literal CSTRIP8                  # jb  E2145 6/28/00
+real    UNT$CapLatitude$f, UNT$CAPLongitude$f,  # CAP posit
+        RMT$ApparentLon$f, RMT$ApparentLat$f,   # RMT track posit
+        initial_range, initial_bearing, # init rng and brg btwn CAP A/C & target
+        TIM1, TIM2,             # RPRJCT2 arguments              # jb 10/31/00
+        RTIM,                   # RMIN_TO_TARGET argument        # jb 10/31/00
+        Action_distance # jb Targeting rng frm CAPstation center # jb 10/30/00 
+real    Track_course_radians  # jb remove , A_C_course_radians       12/26/00
+real    earliest_intercept  # intercept_time,                   # jb 11/1/00
+real    CAP_range_to_center, CAP_bearing_to_center,             # jb 10/31/00 
+        tgt_to_CAP_rng, #(n.mi.) Initial rng between units real # jb 10/31/00 
+        tgt_to_CAP_BRG  #(radians) init. brg FROM tgt TO INTERCEPTOR # jb 10/00 
+REAL    UNT$Intercepttime$F                                 # jb  E2145 6/28/00
+Integer UNT$Pointer,
+    VUE$Pointer, UNT$CapRange$I,                     # jb  E2145 11/1/00                          
+    RMT$Pointer,                                     # jb  E2145 6/28/00
+    UNT2$Pointer,UNT2$Type$I,                        # jb  E2145 6/28/00
+    UNT2$TrueAltDepth$I,UNT2$UnderAttack$I,          # jb  E2145 1/30/01
+    ACC$Pointer, ACC$VectorSpeed$i,                  # jb  E2145 11/1/00
+    ACC$MaxClimb$i                                   # jb  E2145 1/18/01
+integer RMT$Speed$I,          # RMT track speed
+        RMT$DetectionType$I,    # jb from [aai01...mods]    1/23/01
+        First_RMT_Index, Last_RMT_Index,    
+        meets_ROE,                          # flag yes if track meets ROE
+        Missile_index, Max_missile_range,
+        Last_RMT_pointer, assign_this_track,
+        UNT$TrueAltDepth$I                           # jb  E2145 1/18/01
+
+REAL    ALT_Diff,               # jb Interceptor/tgt alt sep, ft 1/18/01
+        Time_for_Climb,         # jb Minutes for climb/dive #    1/18/01
+        Min_Avail_Intcpt,       # jb # of minutes when can intcpt 1/18/01
+        rangelimit,             # jb limit target "universe" 12/21/00
+        tgt_heading_radians,     # = Track_course_radians  # jb 11/14/00
+        tgt_speed,               #=  float(RMT$Speed$I)    # jb 11/14/00
+        tgt_Latitude,           # = xUNT2$TrueLatitude$f   # jb 11/14/00
+        tgt_Longitude,           # = xUNT2$TrueLongitude$f # jb 11/14/00
+        UNT$OrderedCourse$F,UNT$Orderedspeed$F,            # jb 11/14/00
+        UNT$RangeToNext$F,  COSlat, tgt_travel,            # jb 11/14/00
+        UNT$CosTrueLat$F,UNT$TrueLatitude$f,UNT$TrueLongitude$f # jb 2/7/01
+
+earliest_intercept = 9999.
+
+# find the AAM with the longest range for the CAP a/c
+call Longest_AAM_range (UNT$Pointer,        # send CAP a/c pointer
+                        Max_missile_range,  # receive longest range
+                        Missile_index)      # receive missile index
+
+# extract the CAP view and get the first RMT entry for that view
+VUE$Pointer$To xUNT$View$I
+First_RMT_Index = xVUE$FirstRMTIndx$I
+Last_RMT_Index = xVUE$LastRMTIndx$I
+RMT$Pointer$To Last_RMT_Index
+Last_RMT_pointer = RMT$Pointer
+
+UNT$TrueLongitude$f = xUNT$TrueLongitude$f # jb     2/7/01
+UNT$TrueLatitude$f  = xUNT$TrueLatitude$f  # jb     2/7/01
+UNT$CosTrueLat$F    = xUNT$CosTrueLat$F    # jb     2/7/01 
+UNT$TrueAltDepth$I = XUNT$TrueAltDepth$I   # jb  Ft.    1/18/01
+# 3 lines moved up out of RMT loop:        # jb 10/31/00
+UNT$CAPLatitude$f = xUNT$CAPLatitude$f
+UNT$CAPLongitude$f = xUNT$CAPLongitude$f
+UNT$CapRange$I    = xUNT$CapRange$I        # jb 10/30/00
+# jb  3 lines moved up out of RMT loop  2/7/01:
+acc$pointer = Xunt$AccPntr$i
+acc$MaxClimb$I =MAX(Xacc$MaxClimb$I, 1) # jb Ft/Min, climb or dive 1/18/01
+acc$VectorSpeed$i = Xacc$VectorSpeed$i
+
+#$% Constrain 'universe' of targets to consider, jb 12/21/00
+#$% allowing for 1 minute radial closure at 600 knots...
+rangelimit = 10.5 + 1.67 * UNT$CapRange$I    # jb  1.67 vs 1.333   1/2/01
+
+# jb Compute (real) CAP_range_to_center (range from CAP a/c to
+#        geographical center of its CAPStation        10/31/00
+call RLL2RB(_                 #Rhumb line Lat/Lon to Range/Bearing
+            UNT$TrueLatitude$f,      # send attacker CAP latitude
+            UNT$TrueLongitude$f,     # send attacker CAP longitude
+            UNT$CosTrueLat$F,      
+            UNT$CAPLatitude$f,           # send lat. of track at CPA
+            UNT$CAPLongitude$f,          # send long. of track at CPA
+            COS(UNT$CAPLatitude$f),      
+            CAP_range_to_center,       # receive float range
+            CAP_bearing_to_center)     # receive float bearing
+     $ang2pi(CAP_bearing_to_center) # jb IN CASE OF future USE... 12/21/00   
+
+# loop through the RMT table
+For (RMT$Pointer$To First_RMT_Index; 
+     RMT$Pointer <= Last_RMT_pointer;
+     RMT$Pointer$Next)     
+    {
+     # if slot not in use, get next
+     if (xRMT$InUse$I == $no) next
+     if (xRMT$Detector$I == $no) next
+#############################################################################
+     if (xRMT$Class$I != $Air$code) next  # dew 1/01 (frm [aai01...mods])
+        #$% get detection type
+     rmt$DetectionType$i = xrmt$DetectionType$i # dew 1/01
+        #$% if detection is not an active non-visual code, get next entry
+     if (rmt$DetectionType$i != $ActiveNonVisual$code  ) next   # dew 1/01
+##############################################################################
+     UNT2$Pointer$TO  xRMT$Detectee$I
+     unt2$UnderAttack$I = XUNT2$UnderAttack$I   # jb (debug) 1/30/00
+     if (Xunt2$Status$I == $BeingDeleted$Code |
+         unt2$UnderAttack$I != $NO) NEXT  # jb !-$NO  1/29/01
+
+     UNT2$Type$I = xUNT2$Type$I      
+     RMT$Speed$I = xRMT$Speed$I     # jb    11/1/00
+ 
+     # if the target is a cruise missile and its track speed exceeds
+     # the max interceptable speed, skip it
+     If ((UNT2$Type$I == $CruiseMissile$Code) & 
+         (RMT$Speed$I > INT(MaxCruiseMissile$Speed)))
+        NEXT
+
+        # Should this next IF be an ELSE IF instead ?  # dew 1/01
+     # check whether the air track meets the CAP A/C's rules of engagement
+     ELSE If (UNT2$Type$I == $Air$Code)     # jb  ELSE  1/23/01
+        {
+         call CKROE_RMT (UNT$Pointer,   # send A/C UNT Pointer
+                         RMT$Pointer,   # send RMT track to check
+                         meets_ROE)     # receive flag 
+
+         if (meets_ROE != $YES) NEXT    # track didn't meet ROE
+        }
+     else # it's not an air track, so let someone else handle it
+        NEXT
+
+     RMT$ApparentLon$f = xRMT$ApparentLon$f
+     RMT$ApparentLat$f = xRMT$ApparentLat$f
+
+     # computer initial range between CAP station and track
+     call RLL2RB (_             # swapped CAP posit and RMT posit SMM 5/93
+                  UNT$CAPLatitude$f,      # send attacker CAP latitude
+                  UNT$CAPLongitude$f,     # send attacker CAP longitude
+                  COS(UNT$CAPLatitude$f),      
+                  RMT$ApparentLat$f,      # send track latitude
+                  RMT$ApparentLon$f,      # send track longitude
+                  COS(RMT$ApparentLat$f),
+                  initial_range,          # receive initial range
+                  initial_bearing)        # receive initial bearing in radians
+     $ANG2PI(initial_bearing)       # jb  fix southerly diversion!!?? 12/21/00
+                                    #  initial brg from station center to trk
+
+     # if initial range from CAPstation center to track is too great, 
+     # skip this track & check the next
+     if (INT(initial_range) > rangelimit)  # jb Constrain target range 12/21/00
+        NEXT # jb see above: rangelimit = 10.5 + 1.67 * UNT$CapRange$I  
+
+     Track_Course_radians = (xRMT$Course$I * $PI/180.0)
+
+##  Begin replacement code entered 10/30/00: (CONTINUE LOOP THRU RMT TABLE):
+
+# Compute desired closure ('action') distance for determining targets,
+# depending on whether the CAP a/c has strayed a bit:
+     action_distance = UNT$CapRange$I  # partial value     10/31/00
+     If (CAP_range_to_center <= action_distance)  # Add some? 
+        {
+        action_distance = action_distance + # jb too-long missile rng? 12/21/00 
+            MIN(0.5*Max_missile_range, 0.166 * UNT$CapRange$I) # jb 12/21/00
+        }
+     TIM2 = 0.0     # jb  Initialize before setting below    jb 10/31/00
+     if (RMT$Speed$I == 0)  # If ('target' not in motion)
+       {
+        if (initial_range > action_distance )  # jb (action_distance) 11/20/00
+          { NEXT } # Outside jb 10/31/00
+        else   # Set TIM1 & TIM2 here INSTEAD of in RPRJCT2  jb 10/31/00  
+          { TIM1 = 0.0  # tgt already inside CAPstation radius jb 10/31/00
+            TIM2 = -9.0 # Flag tgt speed is zero               jb 10/31/00
+          }
+       }
+     ELSE   #
+      {   
+#  a.  Solve for the two times at which the track may cross the circle cen-
+#   tered on the CAPstation, with radius action_distance (see above).
+
+      Call RPRJCT2 (_                    # jb 10/30/00
+       action_distance,  # separation dist (n. miles) to close to for action
+       0.0,                         # (radians) 'course' of CAPstation
+       0.0,                         # (knots  ) 'speed'  of CAPstation
+       Track_course_radians,        # (radians):course of track
+       float(RMT$Speed$I),           # the track's speed (knots)
+       initial_range,               # Initial range between objects
+       initial_bearing,    #(radians) init. brg frm station center to track
+       TIM1,  # Elapsed min. to the earlier of 2 possible solutions
+       TIM2 ) # Elapsed min. to the later of the  2 possible solutions  10/24/00
+       # TIM2 includes the minutes elapsed in TIM1, and will be the greater
+       #  except in the case of a coincidental equality (tgt at CPA).
+       #     If the initial range between the units isn't decreasing, TIM1 is
+       # returned as -7.0.  If the discriminant is negative (no solution), TIM1
+       # is -1.0.  If TIM1 is 0.0, initial range is less than action_diatance.  
+      }     # End of ELSE ..call RPRJCT2
+
+######################################
+ #$%     0.0 for TIM1: initial separation is within DIST.
+ #$%    -1.00 fpr TIM1: No solution(s) at all available. CANNOT SOLVE!
+ #$%    -7.0 for TIM!: Range is not presently decreasing, BUT logic may
+ #$%         still be able to comput TIM2, if geometry/vectors permit.
+ #$%   -60.0 for TIM1:  (see below for TIM2 set to 60.0)
+ #$%
+ #$%    -9.0 for tim2: speed-zero unit, now within CAPstation radius.
+ #$%   -60.0 for TIM2: Precludes consideration of this unit as a target.
+ #$%      Initial separation exceeds DIST; AND, TIM1 has just been flagged
+ #$%      to indicate no arrival in the next hour.
+ #$%      SOLUTION NOT ATTEMPTED because of this arbitrary limit, which
+ #$%      is now aimed at airborne (faster) units.  When/if we use this
+ #$%      also for ships, we can increase the limit--but some limit is
+ #$%      needed,to avoid possibility of overflow during division. 
+ #$%  -120.0 for TIM2: Does NOT preclude consideration of this target.  TIM1
+ #$%      has NOT been flagged for no arrival in the next hour, BUT Elapsed-
+ #$%      time for target to complete its transit thru the action-area exceeds
+ #$%      2 hours.  Implication:  the speed of this potential target is either:
+ #$%         zero; or, at least, slow in comparison to the extent of its
+ #$%         transit thru the action area.
+
+####################################
+     If ( TIM1 == -1.0 | TIM1 == -60.0)  # jb No practical solution  11/13/00
+       { NEXT }  # (No solution; or, target not suitable, per ground-rules. 
+      
+        #$%  At this point, TIM1 is either -7.0 or 0.0 or larger (computed).
+        #$%  TIM2 is either -9.0,  -120.0 or a computed positive real >= TIM1. 
+        #$%  So, range may not be closing but if so, the target should be
+        #$%  in the arena.  And the target may be moving very slowly or not
+        #$%  at all (may suggest an ASW helicopter..)
+
+#$%         3-D/A logic for climb/dive                            1/18/01        
+     If (TIM2 >= 1.0)   # jb Limited time before 'window" closes  1/18/01
+        {
+        If (TIM1 >= 0.0)  # jb  Target entering arena now           1/18/01
+             Min_Avail_Intcpt = (TIM2 - TIM1) # jb Intercept window 1/18/01
+        Else Min_Avail_Intcpt = TIM2  # jb Target already in arena  1/18/01 
+        }
+     Else  Min_Avail_Intcpt = 60.0   # jb (Nominal Intercept window 1/18/01 
+                                     ##       for very slow targets)
+     
+     UNT2$TrueAltDepth$I = XUNT2$TrueAltDepth$I       # jb  Ft.    1/18/01
+     ALT_Diff = ABS(UNT2$TrueAltDepth$I - UNT$TrueAltDepth$I) - # jb 1/18/01
+                                          1.0*OK_deltaALT   # jb 1/22/01
+     ALT_Diff = MAX(0.0,ALT_Diff)                           # jb 1/22/01
+
+     Time_for_Climb = ALT_Diff/REAL(acc$MaxClimb$I)            #jb 1/18/01
+     If (Time_for_CLIMB >= Min_Avail_Intcpt)  NEXT # jb Too high/low!  1/18/01
+
+        #$% Now, get data for possible call to RMIN_to_TARGET:
+     call RLL2RB(_                 #Rhumb line Lat/Lon to Range/Bearing
+            xUNT2$TrueLatitude$f,      # send target latitude,
+            xUNT2$TrueLongitude$f,     #             longitude,
+            xUNT2$CosTrueLat$F,        #  and cosine(latitude)
+            UNT$TrueLatitude$f,      # send CAP a/c latitude,
+            UNT$TrueLongitude$f,     #             longitude,
+            UNT$CosTrueLat$F,        #  and cosine(latitude)
+            tgt_to_CAP_rng,           # receive float range
+            tgt_to_CAP_BRG )          # receive float bearing
+     $ang2pi(tgt_to_CAP_BRG)   
+    
+        #$% Determine need to call RMIN_To_Target    # jb  11/20/00 
+     IF ( (tgt_to_CAP_rng <   # jb (re: Proc_Cap): MIN(  12/21/00
+         MIN (0.5 * Max_missile_range, 1.166 * UNT$CapRange$I)) &
+         Time_for_CLIMB < 0.3 )                 # jb        1/18/01
+        {   
+        RTIM = -3.0 # jb Flag RTIM to SELECT THIS TARGET  
+        }
+     ELSE 
+        {
+        Call RMIN_TO_TARGET(_          # jb    10/31/00
+            0.0,  # Desig. intercept distance   # jb 1/2/01
+            Track_course_radians,  # (radians) course of TARGET        real
+             real(RMT$Speed$I),    # (knots)   speed  of TARGET        real
+            real(acc$VectorSpeed$i), # (kts)  speed  of INTERCEPTOR   real
+            tgt_to_CAP_rng,        # (n.mi.) Initial rng between units real
+            tgt_to_CAP_BRG,        # (radians) init. brg FRM tgt TO INTERCEPTOR
+            RTIM )    # RETURNED value (min.) elapsed time to reach RADIUS
+        }
+
+# If the initial range isn't greater than the first input, -3.0 is return-
+# ed.  If there's no practical solution, -1.0 is returned.  If elapsed time
+# would be greater than 12 hours, -7.0 is returned.  
+# Otherwise, a positive real (elapsed minutes) is returned.
+
+     If (RTIM < 0.0 & RTIM != -3.0) # jb No practical solution  11/1/00
+      {  NEXT }       # (This target not 'available')
+
+        #$% At this point, RTIM is either -3.0 or >= 0.0; and,
+        #$%  TIM1 is >= 0.0 and  TIM2 is either
+        #$%  -120.0 (slow target within the arena)
+        #$%  or it's >= TIM1.     
+
+     If (RTIM == -3.0 & Time_for_CLIMB < 0.3 ) # jb        1/18/01
+             RTIM = 0.0  # jb Convert -3.0 flag for use below 11/20/00
+     Else RTIM = MAX(RTIM, Time_for_CLIMB)         #        jb 1/22/01
+
+     If( (RTIM == 0.0 | (TIM2 == -120.0 & initial_range <= action_distance) ) |
+       (RTIM > TIM1-1.4 & RTIM < TIM2-1.0) ) # (Intercept before tgt escapes--
+        { CONTINUE }   # --but not before tgt's about to enter the arena)
+     ELSE  { NEXT }    # Target 'got away' or, we need to wait for next cycle
+
+
+     if  (RTIM < earliest_intercept) # jb 11/1/00
+        {
+         earliest_intercept = RTIM              # jb (No MAX)     11/2/00
+         assign_this_track = UNT2$Pointer$Index # jb UNT2 vs RMT  11/2/00
+##         assign_this_track = rmt$pointer$index
+        tgt_heading_radians = Track_course_radians   # jb 11/14/00
+        tgt_speed =  real(RMT$Speed$I)               # jb (real) 12/26/00
+        tgt_Latitude = xUNT2$TrueLatitude$f          # jb 11/14/00
+        tgt_Longitude = xUNT2$TrueLongitude$f        # jb 11/14/00
+
+        If ( RTIM == 0.0 ) # jb Can't get any earlier!!  11/14/00    
+            BREAK          # jb OUT of RMT loop..
+        }
+    
+     ELSE  # not the best-so-far candidate target; try the next 
+       { NEXT }
+    
+    } # end of for loop through RMT table
+
+
+# Check that earliest_intercept is not the initial default value SMM 5/93
+if ((earliest_intercept >= 0.0) & (earliest_intercept != 9999.))
+    {
+     putUNT$AssignedTarget$I (assign_this_track) # jb  12/20/00
+     putUNT$AttackIndx$I (assign_this_track)     # jb  11/2/00
+
+     UNT2$Pointer$TO (assign_this_track)          # jb  1/30/01
+     UNT2$UnderAttack$I =  $yes   # jb (debug)                        1/30/01
+     putUNT2$UnderAttack$I        # jb Signal: avoid duplicate assign.1/26/01
+     if (trace$engage$exe != $no)
+        {
+         call echor
+         call echov ("In Get_CAP_Target assigning a target (UNT # ")
+         call echoi (assign_this_track)           # jb  11/2/00
+         call echov (" ) as target for ")
+         call echohn (Xunt$name$c,$$MaxLit)
+         call echov (".")
+         call echor
+        }
+     unt$InterceptTime$f = game$time + MAX(0.,earliest_intercept)
+     PUTunt$InterceptTime$f
+##==============  Additions to set more UNT fields:     11/14/00
+# Find Intercept position       $ jb  11/14/00
+#       Track_course_radians,  # (radians) course of TARGET        real
+#       tgt_speed =float(RMT$Speed$I),    # (knots)   speed  of TARGET real
+#         earliest_intercept = RTIM
+#         assign_this_track = UNT2$Pointer$Index # jb UNT2 vs RMT  11/2/00
+#        tgt-Latitude = xUNT2$TrueLatitude$f,      # send target latitude,
+#        tgt_Longitude = xUNT2$TrueLongitude$f,     #             longitude,
+
+    COSlat =    UNT$CosTrueLat$F  # jb Approx same as for target 11/14/00 
+    tgt_travel = tgt_speed * (earliest_intercept/60.)   # jb /60. 1/3/01
+    call RRB2LL(_
+               tgt_Latitude,    # now; and at intercept
+               tgt_Longitude,   # now; and at intercept
+               tgt_travel,      # to intercept (sent) 
+                0.0,            # sent (straight ahead) 
+                tgt_heading_radians, # sent 
+                COSlat)   # sent and received
+
+# Find CAP a/c course, speed, rangetonext
+    UNT$OrderedSpeed$F = real(acc$VectorSpeed$i) # (kts) speed of INTERCEPTOR
+
+    call RLL2RB(_                 #Rhumb line Lat/Lon to Range/Bearing
+            UNT$TrueLatitude$f,      # send attacker CAP latitude
+            UNT$TrueLongitude$f,     # send attacker CAP longitude
+            UNT$CosTrueLat$F,      
+            tgt_Latitude,           # send lat. of track at intercept
+            tgt_Longitude,          # send long. of track at intercept
+            COSlat,                 # (see RRB2LL call above)
+            UNT$RangeToNext$F,       # receive float range
+            UNT$OrderedCourse$F)     # receive float bearing
+    $ang2pi(UNT$OrderedCourse$F)
+
+    PutUNT$OrderedCourse$F
+    PutUNT$Orderedspeed$F
+    PutUNT$RangeToNext$F
+    PutUNT$OrderedAltDepth$I (UNT2$TrueAltDepth$i) # jb 1/16/01  (Avoid being
+    }                           ## "not in range" because of altitude"
+##====== End Additions to set UNT fields:   jb  11/14/00
+
+return
+end # of Get_CAP_target
+
+
+Subroutine Longest_AAM_range (UNT$Pointer,      # receive CAP a/c pointer
+                              Max_range,        # return longest range
+                              Missile_index)    # return index of longest range
+                                                # missile
+                           
+################################################################################
+#$%
+#$% Purpose:    Longest_AAM_range loops through the array Eqlist, which was 
+#$%             filled in DEQGET as follows:
+#$%                  eqlist[1,nfound] = DEQ$Pointer$index # save index of eqpmt
+#$%                  eqlist[2,nfound] = Xdeq$pntr$i       # equipment pointer
+#$%                  eqlist[3,nfound] = deq$remaining$i   # equipment count
+#$%                  eqlist[4,nfound] = 0                 #
+#$%                  eqlist[5,nfound] = 0                 #
+#$%             and finds the AAM with the longest range.
+#$%
+#$% Called By:  Get_CAP_target, ASSGNT
+#$%
+#$% Calls:  DEQGET
+#$%
+#$% Tables: UNT
+#$%
+#$% Date:   18 JUNE 1992
+#$%
+#$% Author: Susan Miller
+#$%         
+################################################################################
+BBCommon
+
+integer N, Number_found, Eqlist[5,30],    # equipment list
+        Missile_index, Max_range
+Integer UNT$Pointer,            # jb E2145  6/28/00
+    MC$Pointer,MC$Maxrange$I    # jb E2145  6/28/00
+
+# find the AAM with the longest range
+number_found = 0                    # init item count
+call DEQGET(UNT$Pointer,            # receive UNT pointer
+            $AAM$CODE,              # receive equipment ident code
+            number_found,           # receive/return nbr items found
+            Eqlist)                 # receive/return list of EQ
+
+if(number_found == 0)                     # if no AAM'S found
+   {
+    call none_found(UNT$Pointer,    # send attacker's UNT pointer
+                    0,              # send LCL pointer, not set
+                    0)              # send # in target flight, not set
+    return
+   }
+
+max_range = 0   # initialize max range
+
+for (N=1; N <= Number_found; N=N+1)       # do for all missiles found
+    {
+     if (Eqlist[3,N] <= 0) next           # out of stock  
+
+     MC$Pointer = Eqlist[2,N]             # get missile pointer
+ 
+     MC$MaxRange$I = xMC$MaxRange$I       # get missile max range
+     MC$MaxRange$I = max(1,MC$MaxRange$I) 
+     Eqlist[4,N]   = MC$MaxRange$I        # save the range
+
+     if(MC$MAXRANGE$I > Max_range)        # if a longer range missile
+        {
+         Max_range = MC$MaxRange$I        # save new missile range
+         Missile_index = N                # save missile index
+        }   # end if closer range
+    }   # end do all missiles
+
+return
+end     # end of Longest_AAM_range

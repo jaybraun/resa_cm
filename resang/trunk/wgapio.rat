@@ -1,0 +1,506 @@
+include "bbctl.inc"
+include "bbcode.inc"
+include "ascii.inc"
+include "macros.inc"
+ 
+# Note:  The maximum size of an ALSP message has been increased from
+# 2700 to 20000 (E1693) - clk 12/96.
+ 
+define ($max$ALSP_Message_Size,20480)   # E2158 dew 10/99 - This must be equal-to or larger than ACM
+define ($max$ALSP_MBX_Buffer,13000)     # 65K is VMS Max (16 bits)
+ 
+undefine read
+undefine write
+undefine err
+ 
+define ($debug,#)
+ 
+subroutine close_alsp_log_file ()
+ 
+# PURPOSE:  Close_ALSP_Log_File will close out the ALSP message
+#           log file and reopen a new version of the file.
+#
+# CALLS:    WRITE           CLOSE
+#           OPEN            PRINT
+#
+# DATE:     Jan. 1994
+#
+# AUTHOR:   Carol Kropp
+implicit none
+integer     err_rtn
+#VMSchar     datetime*24
+VMSchar*50	ALSP_log_file
+include "alsp_io_rat.inc"
+ 
+if (msg_log_open)
+    {
+    close (msg_log_unit)
+ 
+	call ALSP_log_file_unique( alsp_log_file )
+    open (access='SEQUENTIAL',
+            file=ALSP_log_file,
+            recl=arith($max$ALSP_Message_Size,+,64),    # add room for date/time
+            iostat=err_rtn,
+            status='UNKNOWN',
+            unit=msg_log_unit)
+ 
+    if (err_rtn .ne. 0)
+        {
+        print *,' Error checkpointing ALSP mailbox log file: ',err_rtn
+ 
+        msg_log_open = .false.
+        }
+    else
+        {
+        msg_log_open = .true.
+        }
+    }
+ 
+return
+end
+ 
+
+ 
+subroutine next_nonblank_field(buf, buf_len, pos, str, len)
+ 
+#This subroutine returns the next non-blank string in the buffer.
+#
+# buf - buffer
+# buf_len - number of characters in buf
+# pos - Current character position in buffer (1 origin)
+# str - next string (no leading or trailing blanks)
+# len - number of characters in str
+ 
+VMSchar*(*) buf, str
+integer pos, len, buf_len
+ 
+len = 0
+if (pos > buf_len) return
+ 
+while (buf[pos:pos] == "")
+{
+    pos = pos + 1
+    if (pos > buf_len) return
+}
+ 
+while (buf[pos:pos] != ' ')
+{
+    len = len + 1
+    str[len:len] = buf[pos:pos]
+    pos = pos + 1
+    if (pos > buf_len) break
+}
+ 
+return
+end
+ 
+
+ 
+subroutine skip_leading_blanks(buf, buf_len, pos)
+ 
+#This subroutine skips leading blanks in the buffer.
+#
+# buf - buffer
+# buf_len - number of characters in buf
+# pos - Current character position in buffer (1 origin)
+ 
+VMSchar*(*) buf
+integer pos, buf_len
+ 
+if (pos > buf_len) return
+ 
+while (buf[pos:pos] == "")
+{
+    pos = pos + 1
+    if (pos > buf_len) return
+}
+ 
+return
+end
+ 
+
+subroutine alsp_log_msg(type_io,str_len,str)
+ 
+# This subroutine will write out alsp mailbox messages to a log file
+# if logging of the appropriate READ or WRITE msgs is turned on.
+ 
+# The log file will be opened if it is not currently open.
+ 
+# Input parameters:
+#    type_io     character containing 'READ:' or 'WRITE:'
+#    str_len     number(int) of characters in string being passed
+#    str         character string of message to be logged
+ 
+BBcommon
+ 
+VMSchar*(*) type_io, str
+integer     str_len
+integer     gm
+integer     str_len_good,err_rtn
+VMSchar     datetime*23 # Formatted as "dd-mmm-yyyy hh:mm:ss.ss "   # dew 10/99
+VMSchar*50	ALSP_log_file
+include "alsp_io_rat.inc"
+ 
+#data msg_log_unit,msg_log_open,msg_log_read,msg_log_write/88, 3*.false./
+#data msg_log_open/.false./
+#data msg_log_read/.false./
+#data msg_log_write/.false./
+ 
+if (ALSP$Logging == $no) return         # JOA UFL05
+ 
+if (ALSP$Review == $yes) return
+ 
+# protect from bad length of character string being passed
+if (str_len <= 0) return
+str_len_good = str_len
+ 
+# check for opening alsp mailbox msg log file if needed & not open
+ 
+if ( (msg_log_read  & (type_io[1:5] == "READ:")) |
+     (msg_log_write & (type_io[1:6] == "WRITE:")))
+    {
+ 
+    # check if log file is open
+    if ( ! msg_log_open)
+        {
+        # log file is not open so open it
+ 
+		call ALSP_log_file_unique( alsp_log_file )
+    	open (access='SEQUENTIAL',
+            file=alsp_log_file,
+            recl=arith($max$ALSP_Message_Size,+,64),    # add room for date/time
+            iostat=err_rtn,
+            status='UNKNOWN',
+            unit=msg_log_unit)
+#            shared)
+ 
+        if (err_rtn != 0)
+            {
+            print *,' Error opening mailbox msg log file: ',err_rtn
+            msg_log_open = .false.
+            }
+        else
+            {
+ 
+            msg_log_open = .true.
+            }
+        }
+ 
+    if (msg_log_open)
+        {
+        # log file was opened successfully so now write out msg
+ 
+        call lib$date_time (datetime)                               # dew 10/99
+        gm = game$minute
+        write(unit=msg_log_unit,fmt='(a,1x,i6,1x,a,1x,i5,1x,a)') datetime, gm, type_io,
+                str_len, str[1:str_len]
+ 
+        }
+    }
+ 
+return
+end
+
+ 
+subroutine ALSP_log_file_unique( filename_v )		# Include game$minute to make unique alsp log file
+BBcommon
+vmschar*(*)   filename_v
+character 	  filename[ARB]
+string ALSP_log_file_base 'alsp_msg'
+string ALSP_log_file_ext 'log'
+integer kk
+ 
+kk = 0
+call smovhn(ALSP_log_file_base, ARB, filename, kk)
+call smov  (UNDERLINE, filename, kk)
+call smovhn (scenario$name, $$Maxlit, filename, kk)
+call smov  (UNDERLINE, filename, kk)
+call smovi (game$minute, filename, kk)
+call smov  (PERIOD, filename, kk)
+call smovhn(ALSP_log_file_ext, ARB, filename, kk)
+call smov  (EOS, filename, kk)
+call rs2fs(filename, filename_v)
+return
+end
+
+# Base port for hub and input and output port offsets
+define (BASEPORT_READ_OFFSET,810)
+define (BASEPORT_WRITE_OFFSET,821)
+define (BASEPORT_STA_OFFSET,0)
+define (HUB_IO_DELAY, 1)					# Delay between read/write attempts in milliseconds
+define ($max$ALSP_Message_Size,20480)   # E2158 dew 10/99 - This must be equal-to or larger than ACM
+define ($max$ALSP_MBX_Buffer,13000)     # 65K is VMS Max (16 bits)
+define ($max$ALSP_MBX_msgs,3)
+ 
+undefine read
+undefine write
+undefine err
+ 
+define ($debug,#)
+ 
+
+subroutine alsp_read_mbx(msg,msg_length,wait_flag,err_val)
+ 
+#***********************************************************************
+# This subroutine will first check to see if the mailbox specified by  *
+# read_unit is open.  If not, it will open it before proceeding.  This *
+# routine provides two types of reads determined by the value of the   *
+# variable wait_flag.  If wait_flag is true, the read will block until *
+# there is a message in the mailbox to read.  If wait_flag is false, it*
+# will read a message if one is in the box but will not wait if one is *
+# not there.                                                           *
+#                                                                      *
+# If an error occurs during the open, the error code returned (this    *
+# will be the negation of the error returned by the assign or crembx)  *
+# will be returned to the calling routine.                             *
+#                                                                      *
+# If the read is successful, an error value of 0 is returned via the   *
+# parameter, err_val.  If there is an error, the value returned from   *
+# call to QIOW is returned in err_val.  Since a return value of 1 indi-*
+# cates a successful return from QIOW, an err_val value returned to the*
+# calling program of 1 indicates QIOW returned a 0 (indicating an un-  *
+# successful read).                                                    *
+#                                                                      *
+#  Wayne Anderson                          January 2, 1992             *
+#                                                                      *
+#***********************************************************************
+implicit none
+ 
+include "alsp_io_rat.inc"
+ 
+integer     msg_length,err_val
+integer		eric[5]
+VMSchar*(*) msg
+logical     wait_flag
+VMSchar     msg_tmp*arith($max$ALSP_Message_Size,+,1)
+ 
+# Clear out input buffer, msg_tmp
+msg_tmp = ""
+ 
+# Is this a blocking read?
+ 
+if (wait_flag)
+	{
+	$debug  print *,' ALSP_READ_HUB:  doing a blocking read'
+	msg_length = 0
+	while (msg_length <= 0)
+		{
+		call fortran_tcp_blocking_read_record( alsp_input_socket,
+        	                          msg,
+        	                          msg_tmp,
+        	                          eric,
+        	                          msg_length)
+		if (msg_length <= 0) call fortran_millisleep( HUB_IO_DELAY )
+		}
+ 
+	$debug  print *,msg_length,msg[1:msg_length]
+    }
+else
+    {
+	call fortran_tcp_nonblocking_read_record( alsp_input_socket,
+                                  msg,
+                                  msg_tmp,
+                                  eric,
+                                  msg_length)
+ 
+	msg_length = max(0, msg_length)		# Could be -1
+	$debug  print *,msg_length,msg[1:msg_length]
+    }
+ 
+err_val = 0
+ 
+if (msg_length > 0) call alsp_log_msg('READ: ',msg_length,msg)
+ 
+return
+end
+
+ 
+ 
+subroutine alsp_open_read(err_val)
+BBcommon 
+include "alsp_io_rat.inc"
+integer	err_val
+ 
+alsp_input_port = BASE$PORT + BASEPORT_READ_OFFSET
+call fortran_tcp_client_init(alsp_input_port, alsp_input_socket)
+ 
+read_open = .true.
+err_val = 0
+ 
+return
+end
+
+subroutine alsp_write_mbx(msg,msg_length,wait_flag,err_val)
+ 
+#***********************************************************************
+# This subroutine will first check to see if the mailbox specified by  *
+# write_unit is open.  If not it will open it before proceeding.  This *
+# routine provides two types of writes determined by the value of the  *
+# variable wait_flag.  If wait_flag is true, the write will block until*
+# the message written is read.  If wait_flag is false, it will write to*
+# the mailbox but not wait_flag for the message to be read.            *
+#                                                                      *
+# If an error occurs during the open, the error code returned (this    *
+# will be the negation of the error returned by the assign or crembx)  *
+# will be returned to the calling routine.                             *
+#                                                                      *
+# If the write is successful and error value of 0 is returned in the   *
+# argument, err_val.  If there is an error, the value returned from the*
+# call to QIOW is returned in err_val.  Since a return value of 1 indi-*
+# cates a successful return from QIOW, an err_val value returned to the*
+# calling program of 1 indicates that QIOW returned a 0.               *
+#                                                                      *
+#  Wayne Anderson                          January 2, 1992             *
+#                                                                      *
+#                                                                      *
+# Revisions:                                                           *
+#                                                                      *
+#   Jan. 12, 1992 - modified to accept length of msg to be written as  *
+#                   a parameter rather than computing it.  JWA         *
+#                                                                      *
+#***********************************************************************
+ 
+BBcommon
+ 
+include "alsp_io_rat.inc"
+ 
+integer     msg_length
+character   msg[ARB]
+VMSchar*$max$ALSP_Message_Size    msg_v
+logical     wait_flag
+integer     stat,err_val
+integer	    hub_msg_length
+define(NEWLINE,10)
+# Check to see if output mailbox opened.  If not, open it.
+ 
+if (ALSP$Review == $yes) return
+ 
+#$debug print *,' ALSP_WRITE_HUB: message length = ',msg_length
+#$debug print *,msg(1:msg_length)
+#$debug print *
+ 
+call rs2fs( msg, msg_v )
+ 
+# Add newline to end of record for hub
+hub_msg_length = msg_length + 1
+msg_v[hub_msg_length:hub_msg_length] = char(NEWLINE)
+ 
+if (wait_flag)
+    {
+	$debug print *,' ALSP_WRITE_HUB: doing a blocking write'
+	call fortran_tcp_write_record( alsp_output_socket,
+                                   hub_msg_length,
+                                   msg_v)
+    }
+else
+    {
+	call fortran_tcp_write_record( alsp_output_socket,
+                                   hub_msg_length,
+                                   msg_v)
+    }
+ 
+err_val = 0
+ 
+# check for logging msg if logging write messages is set
+ 
+call alsp_log_msg('WRITE:',msg_length,msg_v)
+ 
+return
+end
+
+subroutine alsp_open_write(err_val)
+BBcommon 
+include "alsp_io_rat.inc"
+ 
+data write_open/.false./
+data    max_msg     / $max$ALSP_Message_Size / ,
+        capacity    / $max$ALSP_MBX_Msgs     / ,
+        quota       / $max$ALSP_MBX_Buffer   /
+ 
+data msg_log_read,msg_log_write/.true.,.true./
+ 
+integer     err_val
+ 
+alsp_output_port = BASE$PORT + BASEPORT_WRITE_OFFSET
+call fortran_tcp_client_init(alsp_output_port, alsp_output_socket)
+ 
+err_val = 0
+write_open = .true.
+ 
+return
+end
+ 
+
+subroutine alsp_close_socket(err_val)
+implicit none
+ 
+include "alsp_io_rat.inc"
+integer     err_val
+ 
+call fortran_tcp_close_socket(alsp_input_socket)
+call fortran_tcp_close_socket(alsp_output_socket)
+ 
+ 
+read_open = .false.
+write_open = .false.
+err_val = 0
+ 
+return
+end
+ 
+
+ 
+subroutine make_sta_hub_write_id (ista,id)
+BBcommon
+integer         ista, id
+integer		jj, length, k
+ 
+# JPL hub port id for each station
+id = BASE$PORT + BASEPORT_STA_OFFSET + (10 * ista) + 1
+return
+end
+
+subroutine make_sta_hub_read_id (ista,id)
+BBcommon
+integer         ista, id
+integer		jj, length, k
+ 
+# JPL hub port id for each station
+id = BASE$PORT + BASEPORT_STA_OFFSET + (10 * ista)
+return
+end
+ 
+
+ 
+subroutine write_Mailbox (ichan, buffer)
+ 
+####################################################################
+#$%
+#$% Purpose:    WRITE_MAILBOX generates a write request to the mailbox
+#$%
+#$% Called by:  NONE
+#$%
+#$% Calls:      TYPERR
+#$%
+#$% Author:     DANA WILLS
+#$%
+#$% Date:       SEPT 82
+#$%
+#####################################################################
+IMPLICIT NONE                                           # jb  12/10/98
+ 
+Integer     len,rc,LENGTH
+vmschar*(*)	buffer
+integer 	ichan
+ 
+#$% get buffer length
+len = length (buffer)
+ 
+call fortran_tcp_write_record( ichan,
+                               len,
+                               buffer)
+ 
+return
+end
+ 
+ 

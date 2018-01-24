@@ -1,0 +1,4832 @@
+## BTPROC.RAT
+###
+### Modifications:
+###     12/93   Tom Smith   Modified calls to SMOVH using string literals to use
+###                         SMOVV instead.
+###
+ 
+define(DEBUG,#)
+define(DEBUGT,#)
+ 
+ 
+include "ascii.inc"
+include "macros.inc"
+include "clidef.inc"
+include "bbctl.inc"
+include "bbcode.inc"
+include "bbacc.inc"              # These are
+include "bbshc.inc"              #    used to      jb    3/15/89
+include "bbord.inc"              #        be able
+include "bbrto.inc"              #         to
+include "bbpat.inc"              #           step through
+include "bbmem.inc"              #               Var length entries
+include "bbown.inc"
+ 
+include "gcgam.inc"
+ 
+include "btmain.inc"          # Sets bbimplicit to IMPLICIT NONE;
+                    # specifies BBCOMMON, within TESTCOMMON etc..
+ 
+undefine write
+ 
+ 
+integer function ibbadd (iadd)
+ 
+#############################################################
+#$%
+#$% Purpose:   IBBADD is called to map in address.
+#$%
+#$% Called By: BTEXIT     COMPBB     DEFARG     DISBIT
+#$%            DSPASC     DSPFLD     DSPFLT     DSPINT
+#$%            DSPMEM     DSPOCT     EXPARG     FNDVAL
+#$%            GETSUB     IGETAD     LFILE      LSARG
+#$%            PUTBIT     PUTVAL     PUTZER
+#$%
+#$% Calls:     FPMAP
+#$%
+#$% Tables:    None
+#$%
+#$% Date:      DEC 80
+#$%
+#$% Author:    Dana Wills
+#$%
+#############################################################
+ 
+TESTcommon
+integer*4   iadd
+real*4      r, random
+ 
+#$% get blackboard address
+ibbadd = iadd
+ 
+#$% get random number
+r= random(seed)
+ 
+return
+end
+ 
+ 
+ 
+subroutine disp
+ 
+#############################################################
+#$%
+#$% Purpose:   DISP is called to display the current
+#$%            memory address.
+#$%
+#$% Called By: BBTEST
+#$%
+#$% Calls:     DSPSEG     DSPSET     DSPTBL      DSPFLD
+#$%            DSPVAR     DSPMEM     ECHO       ECHOI
+#$%
+#$% Tables:    None
+#$%
+#$% Date:      DEC 80
+#$%
+#$% Author:    Dana Wills
+#$%
+#############################################################
+ 
+TESTcommon
+integer*4   m, n, istat
+ 
+#$% if valid file and address, zero table
+if (Cfile == 2 | cadd < $$BB$begintables) ctbl = 0
+ 
+#$% get address
+m = cadd
+ 
+#$% display address
+call echo ($SPACE)
+call echoi (cadd)
+call echo ($COLON)
+call echo ($SPACE)
+ 
+if      (Cfile == 2 |
+         cadd <= $$BB$lastconstant) continue
+##else if (cadd < $$BB$beginPtrSets) call dspseg  # generate name of seg set
+else if (cadd < $$BB$begintables)  call dspset       # generate name of ptr set
+else                            call dsptbl (n,m) # generate name of table
+ 
+call dspfld (istat)                             # generate bit fields
+ 
+if (istat == $yes)
+   {
+#$% display address
+    call echo ($SPACE)
+    call echoi (cadd)
+    call echo ($COLON)
+    call echo ($SPACE)
+ 
+    if      (Cfile == 2 |
+             cadd <= $$BB$lastconstant) continue
+#    else if (cadd < $$BB$beginPtrSets) call dspseg    # generate name of seg set
+    else if (cadd < $$BB$begintables)  call dspset     # generate name of ptr set
+    else                            call dsptbl (n,m) # generate name of table
+   }
+ 
+ 
+#$% generate the names of a variable
+call dspvar (m)
+ 
+call dspmem                                     # generate contents
+ 
+return
+end
+ 
+
+ 
+subroutine dspfld (istat)
+ 
+############################################################
+#$%
+#$% Purpose:   DSPFLD is called to generate defined
+#$%            bit fields.
+#$%
+#$% Called By: DISP
+#$%
+#$% Calls:     GETSUB     ECHOR      ECHOH
+#$%            ECHOIB     ECHOHN     ECHOI
+#$%
+#$% Tables:    None
+#$%
+#$% Date:      DEC 80
+#$% Modified:  Feb 86-CLF
+#$%
+#$% Author:    Dana Wills
+#$%
+############################################################
+ 
+TESTcommon
+integer             flds[0:32], name[0:32]
+Vaxcharacter*(ARB)  vstrip, vwork
+external            vstrip
+Integer*4           Istat, K, N, M, Iadd, Ibase, Kk, Nbit, Ipnt, Ibbadd, I, Ival
+ 
+#$% initialize status
+istat = $no
+ 
+#$% zero fields and names
+for (k=0; k<= 32; k=k+1)
+   {
+    flds[k] = 0
+    name[k] = 0
+   }
+ 
+call getsub (n,m,iadd,ibase)            # get current tbl/word positions
+ 
+#$% if table not valid, return
+if (ctbl < 0 | ctbl > $$$$LastTable | m < 1 ) return
+ 
+#$% for each field
+for (k = 1; k <= $$LastName; k=k+1)
+   {
+    if (vars[$$vars_tbl,k]  != ctbl) next         # not same tbl set
+    if (vars[$$vars_word,k] != m   ) next         # not same word
+    if (vars[$$vars_bits,k] == 0   ) next         # 0 bits (32 perm)
+    if (vars[$$vars_bits,k] == 32  ) next         # 32 bits
+    if (vars[$$vars_bits,k] == 64  ) next         # 64 bits
+ 
+    #$% reset status
+    istat = $yes
+    call echor
+ 
+    #$% got one - display it
+    kk = vars[$$vars_lbit,k]                     # get Lbit
+    nbit = vars[$$vars_bits,k]                   # get nbr of bits
+ 
+    #$% display message to user
+    call echov ("     ")
+    if (vars[$$vars_char,k] == $YES)
+        {
+        call echoib (nbit,2)
+        call echov (" char @ ")
+        call echoib (kk,2)
+        }
+    else
+        {
+        call echoib (nbit,2)
+        call echov (" bits @ ")
+        call echoib (kk,2)
+        }
+ 
+    ipnt = name[k]
+ 
+    if (vars_name[k] != "") # name[Lbit] = k
+       {
+        call echov (": ")
+        call echovn (vars_name[k])
+       }
+ 
+    if (vars[$$vars_char,k] == $YES)
+        {
+        call echov (': v="')
+        vwork = vstrip (ibb[ibbadd(cadd)] , kk, nbit )
+        call echov (vwork[1:min(ARB,nbit)] )
+        call echov ('"')
+        }
+    else
+        {
+        call echov (": i=")
+ 
+        i = ibb[ibbadd(cadd)]
+        ival = istrip (i,kk,mask[nbit])
+        call echoi (ival)
+        }
+    }
+ 
+if (istat == $no) return
+call echor
+ 
+return
+end
+ 
+
+ 
+subroutine dspvar (m)           # display name of variable
+ 
+########################################################
+#$%
+#$% Purpose:   DSPVAR is called to generate the
+#$%            name of a variable.
+#$%
+#$% Called By: DISP
+#$%
+#$% Calls:     ECHOH      ECHOHN
+#$%
+#$% Tables:    None
+#$%
+#$% Date:      DEC 80
+#$%
+#$% Author:    Dana Wills
+#$%
+########################################################
+ 
+TESTcommon
+Integer*4   K, M
+ 
+for (k=1; k<= $$LastName; k=k+1)    # search for variable name
+   {
+    if (vars[$$vars_tbl,k]  != ctbl) next
+    if (vars[$$vars_word,k] != m   ) next
+    if (vars[$$vars_bits,k] != 0  &
+        vars[$$vars_bits,k] != 32 &
+        vars[$$vars_bits,k] != 64  ) next
+    if (vars[$$vars_bits,k] == 0  &
+        Cfile               == 2   ) next
+ 
+    #$% display variable name and break
+    call echovn (vars_name[k])
+    call echov (": ")
+    break
+   }
+ 
+return
+end
+ 
+ 
+ 
+subroutine dspset
+ 
+##########################################################
+#$%
+#$% Purpose:   DSPSET is called to generate the name
+#$%            of a pointer set.
+#$%
+#$% Called By: DISP
+#$%
+#$% Calls:     ECHO       ECHOH      ECHOHN
+#$%            ECHOI
+#$%
+#$% Tables:    None
+#$%
+#$% Date:      DEC 80
+#$%
+#$% Author:    Dana Wills
+#$%
+##########################################################
+ 
+TESTcommon
+Integer*4   I, J, K, Name
+ 
+i = cadd - $$BB$beginptrsets
+ 
+k = (i/$$BB$ptrsetsize) + 1
+ 
+#$% j is zero for every increment of setsize
+j = mod (i,$$BB$ptrsetsize)
+ 
+#$% display message
+call echov ("Set #")
+call echoi (k)
+call echo ($space)
+ 
+#$% if address outside table, set name to ???
+if (k > $$$$LastTable)  name = '???'
+else                    name = ibbp[$$ptrname,k]
+ 
+#$% display name and $
+call echohn (name,5)
+call echo ($dollar)
+ 
+     #$% test for pointer location
+     if (j == $$PTRBASE -1) call echov ("BASE ")
+else if (j == $$PTRSIZE -1) call echov ("SIZE ")
+else if (j == $$PTRUSED -1) call echov ("USED ")
+else if (j == $$PTRNAME -1) call echov ("NAME ")
+else if (j == $$PTRLEN  -1) call echov ("LEN  ")
+#else if (j == $$PTRSEG  -1) call echov ("SEG  ")
+else
+   {
+    #$% display message
+    call echov ("WORD")
+    call echoi (j+1)
+   }
+#$% display colon and sapce
+call echo ($colon)
+call echo ($space)
+ 
+ 
+return
+end
+ 
+ 
+ 
+subroutine dsptbl (n,m)
+ 
+##########################################################
+#$%
+#$% Purpose:   DSPTBL is called to generate the name
+#$%            of a table.
+#$%
+#$% Called By: DISP
+#$%
+#$% Calls:     GETSUB     ECHO       ECHOH
+#$%            ECHOHN     ECHOI
+#$%
+#$% Tables:    None
+#$%
+#$% Date:      DEC 80
+#$%
+#$% Author:    Dana Wills
+#$%
+##########################################################
+ 
+TESTcommon
+Integer*4   N, M, Iadd, Ibase, Name
+ 
+#$% get current table/word positions
+call getsub (n,m,iadd,ibase)
+ 
+#$% get table name
+name = ctbln
+ 
+#$% display "<name> [<address>] or [<n>,<m>]:
+call echohn (name,5)
+call echo ($LBRACK)
+call echoi (iadd)
+call echov ("] or [")
+ 
+ctble = n
+ctblp = m
+ 
+call echoi (n)
+call echo ($comma)
+call echoi (m)
+ 
+call echo ($RBRACK)
+call echo ($colon)
+call echo ($space)
+ 
+return
+end
+ 
+ 
+ 
+subroutine dspmem                        # display contents of memory
+ 
+##########################################################
+#$%
+#$% Purpose:   DSPMEM is called to generate the con-
+#$%            tents of memory.
+#$%
+#$% Called By: DISP
+#$%
+#$% Calls:     DSPASC     DSPINT     DSPFLT
+#$%            DSPOCT     IBBADD     IFASC
+#$%            IFFLT      IFINT      IFOCT
+#$%
+#$% Tables:    None
+#$%
+#$% Date:      DEC 80
+#$%
+#$% Author:    Dana Wills
+#$%
+##########################################################
+ 
+TESTcommon
+integer*4   iword, ibbadd, ifquad, ifasc, ifint, ifflt, ifhex, ifoct
+ 
+#$% map in blackboard address word
+iword = ibb[ibbadd(cadd)]
+ 
+#$% test variable to be displayed in ASCII, INTEGER, FLOATING PT, or OCTAL
+if (ifquad(ibb[ibbadd(cadd)])   == $yes)  call dspquad
+if (Rasc == $yes | ifasc(iword) == $yes)  call dspasc
+if (Rint == $yes | ifint(iword) == $yes)  call dspint
+if (Rflt == $yes | ifflt(iword) == $yes)  call dspflt
+if (Rhex == $yes | ifhex(iword) == $yes)  call dsphex
+if (Roct == $yes | ifoct(iword) == $yes)  call dspoct
+if (Rbin == $yes                       )  call dspbin
+ 
+return
+end
+ 
+ 
+ 
+subroutine dspflt
+ 
+########################################################
+#$%
+#$% Purpose:   DSPFLT is called to display contents
+#$%            in floating point.
+#$%
+#$% Called By: DSPMEM
+#$%
+#$% Calls:     ECHOH      ECHOF      IBBADD
+#$%
+#$% Tables:    None
+#$%
+#$% Date:      DEC 80
+#$%
+#$% Author:    Dana Wills
+#$%
+########################################################
+ 
+TESTcommon
+Integer*4   Ibbadd, ifflt
+real*4      V
+ 
+#$% display the promptfor floating point contents
+call echov (" r=")
+ 
+#$% map in blackboard address word
+v = fbb[ibbadd(cadd)]
+ 
+if (ifflt(v) >= $no)
+    call echof (v,6)
+else
+    call echov("NaN")
+ 
+return
+end
+ 
+ 
+ 
+subroutine dspint
+ 
+########################################################
+#$%
+#$% Purpose:   DSPINT is called to display contents
+#$%            in integer.
+#$%
+#$% Called By: DSPMEM
+#$%
+#$% Calls:     ECHO       ECHOI      ECHOH
+#$%            IBBADD
+#$%
+#$% Tables:    None
+#$%
+#$% Date:      DEC 80
+#$%
+#$% Author:    Dana Wills
+#$%
+########################################################
+ 
+TESTcommon
+Integer*4   Ibbadd, I
+ 
+#$% dispaly display prompt for initeger
+call echov (" i=")
+ 
+#$% get and display integer value
+i = ibb[ibbadd(cadd)]
+call echoi (i)
+call echo ($space)
+ 
+return
+end
+ 
+ 
+ 
+subroutine dspasc
+ 
+#########################################################
+#$%
+#$% Purpose:   DSPASC is called to display contents
+#$%            in ASCII.
+#$%
+#$% Called By: DSPMEM
+#$%
+#$% Calls:     ECHO       ECHOH      IBBADD
+#$%
+#$% Tables:    None
+#$%
+#$% Date:      DEC 80
+#$%
+#$% Author:    Dana Wills
+#$%
+#########################################################
+ 
+TESTcommon
+Integer*4   Ibbadd, K, Iword, ichar, igbyte, ifasc
+ 
+#$% display prompt for ascii
+call echov (" a=")
+ 
+#$% get word to be displayed
+iword = ibb[ibbadd(cadd)]
+ 
+#$% display opening quote
+call echo ($SQUOTE)
+ 
+#$% get each character in the word
+for (k=1; k<=4; k=k+1)
+   {
+    ichar = igbyte(iword,k)
+ 
+    #$% if character is not a letter, make the character a ?
+    if (ichar < $space | ichar >= $DEL) ichar = $quest
+ 
+    #$% display the character
+    call echo (ichar)
+   }
+ 
+#$% get word in ascii
+iword = ibb[ibbadd(cadd + 1)]
+ 
+#$% if the word is ascii, display it
+if (ifasc(iword) == $yes) call echoh (iword,4)
+ 
+#$% display closing quote
+call echo ($SQUOTE)
+call echo ($space)
+ 
+return
+end
+ 
+ 
+ 
+subroutine dspoct
+ 
+########################################################
+#$%
+#$% Purpose:   DSPOCT is called to display contents
+#$%            in OCTAL.
+#$%
+#$% Called By: DSPMEM
+#$%
+#$% Calls:     ECHO       ECHOO      ECHOH
+#$%            IBBADD
+#$%
+#$% Tables:    None
+#$%
+#$% Date:      DEC 80
+#$%
+#$% Author:    Dana Wills
+#$%
+########################################################
+ 
+TESTcommon
+Integer*4   Ibbadd, I
+ 
+#$% display prompt for octal
+call echov (" o=")
+ 
+#$% get octal
+i = ibb[ibbadd(cadd)]
+ 
+#$% display in octal
+call echoo (i,12)
+ 
+call echo ($space)
+ 
+return
+end
+ 
+ 
+ 
+subroutine dsphex
+ 
+########################################################
+#$%
+#$% Purpose:   DSPHEX is called to display contents
+#$%            in hexidecimal.
+#$%
+#$% Called By: DSPMEM
+#$%
+#$% Calls:     ECHO       ECHOX      ECHOH
+#$%            IBBADD
+#$%
+#$% Tables:    None
+#$%
+#$% Date:      DEC 80
+#$%
+#$% Author:    Dana Wills
+#$%
+########################################################
+ 
+TESTcommon
+Integer*4   Ibbadd, I
+ 
+#$% display hex prompt
+call echov (" x=")
+ 
+#$% get hex value
+i = ibb[ibbadd(cadd)]
+ 
+#$% display hex value
+call echox (i,8)
+ 
+call echo ($space)
+ 
+return
+end
+ 
+
+ 
+subroutine dspbin
+ 
+########################################################
+#$%
+#$% Purpose:   DSPBIN is called to display contents
+#$%            in binary.
+#$%
+#$% Called By: DSPMEM
+#$%
+#$% Calls:     ECHO       ECHOX      ECHOH
+#$%            IBBADD
+#$%
+#$% Tables:    None
+#$%
+#$% Date:      MAY 95
+#$%
+#$% Author:    Dane Wills
+#$%
+########################################################
+ 
+TESTcommon
+Integer*4   Ibbadd, I
+ 
+#$% display binary prompt
+call echov (" b=")
+ 
+#$% get binary value
+i = ibb[ibbadd(cadd)]
+ 
+#$% display binary value
+call echobn (i,32)
+ 
+call echo ($space)
+ 
+return
+end
+ 
+ 
+ 
+subroutine dspquad
+ 
+########################################################
+#$%
+#$% Purpose:   DSPQUAD is called to display contents
+#$%            in quadword real.
+#$%
+#$% Called By: DSPMEM
+#$%
+#$% Calls:     ECHO       ECHOH     IBADD
+#$%
+#$% Tables:    None
+#$%
+#$% Date:      DEC 80
+#$%
+#$% Author:    Dana Wills
+#$%
+########################################################
+ 
+TESTcommon
+Integer*4   Ibbadd
+real*4      V
+ 
+integer val4[2], ifquad
+literal val8
+equivalence (val8,val4)
+ 
+#$% display prompt for quad word
+call echov (" q=")
+ 
+#$% get quad word
+val4[1] = ibb[ibbadd(cadd)]
+val4[2] = ibb[ibbadd(cadd + 1)]
+ 
+if (ifquad(ibb[ibbadd(cadd)]) >= $no)
+    {
+    v = val8
+    call echof (v,6)
+    }
+else
+    {
+    call echov("invalid")
+    }
+ 
+call echo ($space)
+ 
+return
+end
+ 
+ 
+ 
+
+ 
+integer function ifquad(i)
+ 
+########################################################
+#$%
+#$% Purpose:   IFQUAD is called to test contents for
+#$%            quad word.
+#$%
+#$% Called By: DSPMEM
+#$%
+#$% Calls:     NONE
+#$%
+#$% Tables:    None
+#$%
+#$% Date:      DEC 80
+#$%
+#$% Author:    Dana Wills
+#$%
+########################################################
+ 
+TESTcommon
+Integer*4   K, I[2], ifasc
+ 
+#$% initialize values
+ifquad = $no
+ 
+if (ifasc(i[1]) == $yes | ifasc(i[2]) == $yes)  # ASCII, cannot be Quad-real....
+    return
+ 
+if ((i[1] & "0000FF80"x) == 0 & i[2] != 0)
+    {
+    return (-$yes)              # Return special value (-1 not 0)
+    }
+ 
+#$% for each word
+for (k = 1; k <= $$LastName; k=k+1)
+   {
+    if (vars[$$vars_bits,k] != 64  ) next         # 64 bits
+    if (vars[$$vars_tbl,k] != ctbl) next         # not same tbl set
+    if (vars[$$vars_word,k] != ctblp) next         # not same position
+ 
+    #$% reset flag, it is a quadword
+    return ($YES)
+    }
+ 
+return
+end
+ 
+
+ 
+integer function ifasc (iw)
+ 
+########################################################
+#$%
+#$% Purpose:   IFASC is called to test contents for
+#$%            ASCII.
+#$%
+#$% Called By: IFOCT   IFHEX
+#$%
+#$% Calls:     IGBYTE
+#$%
+#$% Tables:    None
+#$%
+#$% Date:      DEC 80
+#$%
+#$% Author:    Dana Wills
+#$%
+########################################################
+ 
+TESTcommon
+Integer*4   K
+integer*4   iw
+ 
+integer*4   iwo
+byte        i[4]
+equivalence (iwo, i)
+ 
+#$% initialize values
+iwo = iw
+ifasc = $no
+ 
+#$% get each character in the word
+for (k=1; k<=4; k=k+1)
+   {
+    #$% if not ascii, return
+    if (i[k] <  $space) return
+    if (i[k] >= $del  ) return
+   }
+ 
+#$% reset flag if word is ascii
+ifasc = $yes
+ 
+return
+end
+ 
+ 
+ 
+
+ 
+integer function ifflt (k)
+ 
+########################################################
+#$%
+#$% Purpose:   IFFLT is called to test contents for
+#$%            floating point.
+#$%
+#$% Called By: IFOCT   IFHEX
+#$%
+#$% Calls:     IFINT
+#$%
+#$% Tables:    None
+#$%
+#$% Date:      DEC 80
+#$%
+#$% Author:    Dana Wills
+#$%
+########################################################
+ 
+TESTcommon
+ 
+Integer i, k, result
+Integer Count, Code
+Real    y, x
+Equivalence (i,y)
+vaxcharacter    temp*20
+ 
+#$% set flag to indicate floating point
+result = $Yes
+ 
+if (k == 0)
+    {
+    result = $yes
+    }
+else
+    {
+    #$% set x to a positive value
+    i = k
+ 
+    write (unit=temp,fmt=9001) y          # convert it to text ==> temp
+    9001 format (E20.6)
+    if (temp == "NaN")                   # Invalid?
+        {
+        return (- $yes)                   # Return special value (-1 not 0)
+        }
+ 
+    x = abs(y)
+ 
+    #$% if x is not a number in the range, return
+    if (x <  .0001) result = $No
+    if (x > 99999.) result = $No
+ 
+    }
+ 
+return (result)
+end
+ 
+ 
+
+ 
+integer function ifint (k)
+ 
+########################################################
+#$%
+#$% Purpose:   IFINT is called to test contents for
+#$%            integer.
+#$%
+#$% Called By: IFFLT   IFHEX   IFOCT
+#$%
+#$% Calls:     NONE
+#$%
+#$% Tables:    None
+#$%
+#$% Date:      DEC 80
+#$%
+#$% Author:    Dana Wills
+#$%
+########################################################
+ 
+TESTcommon
+Integer*4   K, I
+ 
+#$% intialize flag
+ifint = $no
+ 
+if (k == "80000000"X) return
+ 
+#$% make input value positive integer
+i = iabs(k)
+ 
+#$% if outside range
+if (i > 9999999) return
+ 
+#$% reset flag for integer
+ifint = $yes
+ 
+return
+end
+ 
+ 
+
+ 
+integer function ifoct (k)
+ 
+########################################################
+#$%
+#$% Purpose:   IFOCT is called to test contents for
+#$%            octal.
+#$%
+#$% Called By: DSPMEM
+#$%
+#$% Calls:     IFASC   IFINT   IFFLT   IFHEX
+#$%
+#$% Tables:    None
+#$%
+#$% Date:      DEC 80
+#$%
+#$% Author:    Dana Wills
+#$%
+########################################################
+ 
+TESTcommon
+Integer*4   K, ifint, ifasc, ifflt, ifhex
+ 
+#$% intialize flag
+ifoct = $no
+ 
+#$% if ascii, integer, floating point or hex, return
+if (ifasc(k) == $yes) return
+if (ifint(k) == $yes) return
+if (ifflt(k) == $yes) return
+if (ifhex(k) == $yes) return
+ 
+#$% reset octal flag
+ifoct = $yes
+ 
+return
+end
+ 
+ 
+
+ 
+integer function ifhex(k)
+ 
+########################################################
+#$%
+#$% Purpose:   IFHEX is called to test contents for
+#$%            hexidecimal.
+#$%
+#$% Called By: IFOCT
+#$%
+#$% Calls:     IFASC   IFINT   IFFLT
+#$%
+#$% Tables:    None
+#$%
+#$% Date:      DEC 80
+#$%
+#$% Author:    Dana Wills
+#$%
+########################################################
+ 
+TESTcommon
+Integer*4   K, ifasc, ifint, ifflt
+ 
+#$% initialize hex flag
+ifhex = $no
+ 
+#$% if ascii, integer or floating point, return
+if (ifasc(k) == $yes) return
+if (ifint(k) == $yes) return
+if (ifflt(k) == $yes) return
+ 
+#$% reset hex flag
+ifhex = $yes
+ 
+return
+end
+ 
+ 
+
+ 
+subroutine exparg (line,maxlen,exline,maxex)
+ 
+########################################################
+#$%
+#$% Purpose:   EXPARG is called to expand Super
+#$%            Arguments.
+#$%
+#$% Called By: GETIN
+#$%
+#$% Calls:     TSARGS     SMOV       SMOVH
+#$%
+#$% Tables:    None
+#$%
+#$% Date:      DEC 80
+#$%
+#$% Author:    Dana Wills
+#$%
+########################################################
+ 
+TESTcommon
+ 
+integer  maxlen, maxex, ilen, icol, ichar, igbyte, nlen, jchar, narg,
+         iadd, ibbadd, klen
+literal  name, line[ARB], exline[ARB]
+ 
+ilen = 0
+ 
+#$% for each input
+for (icol = 1; icol <= maxlen & ilen <= maxex; )
+   {
+    #$% get each character
+    ichar = igbyte (line,icol)
+ 
+    #$% if the character is not a %
+    if (ichar != $percent)
+       {
+        #$% move charactrer into array
+        call smov (ichar,exline,ilen)
+ 
+        icol = icol + 1
+        next
+       }
+ 
+    nlen = 0
+    name = $BLANKI4
+ 
+    for (icol=icol+1; icol <= maxlen & ilen <= maxex; icol=icol+1)
+       {
+        jchar = igbyte (line,icol)
+ 
+        if (jchar == $percent & nlen == 0)      # if two %'s in a row
+           {
+            call smov (jchar,exline,ilen)       # output one of them
+            icol = icol + 1
+            break
+           }
+ 
+        if (jchar >= $lita &
+            jchar <= $litz ) jchar = jchar - $space     # fold to UPPERcase
+ 
+        #$% if the character is a number
+        if (jchar >= $dig0 & jchar <= $dig9)
+           {
+            #$% if at the end of the line, break
+            if (nlen == 0) break
+           }
+        #$% else if the character is a letter
+        else if (jchar >= $LetA & jchar <= $LetZ)
+           {
+            continue
+           }
+        else break
+ 
+        #$% if length is 4 bytes or less, move characters into array
+        if (nlen < 5) call smov (jchar,name,nlen)
+       }
+ 
+    #$% if no characters left, get next
+    if (nlen == 0) next
+ 
+    for (narg = 1; narg <= $$SuperArgs; narg=narg+1)
+       {
+        if (Sargt[narg] == $$blank) next
+ 
+        if (Sargn[narg] != name) next
+ 
+        if (Sargt[narg] < 0)            # indirect
+           {
+            iadd = Sargv[narg]          # current address
+ 
+            Sargv[narg] = ibb[ibbadd(iadd)] # current value at indir address
+ 
+            call TSArgs (narg)          # test and set Sargs
+ 
+            Sargt[narg] = -Sargt[narg]  # negate type
+            Sargv[narg] = iadd          # current address
+           }
+ 
+        klen = min0(Sargl[narg],maxex-ilen)
+ 
+        call smovh (Sargs[1,narg],klen,exline,ilen)
+       }
+   }
+ 
+while (ilen < maxex) call smov ($space,exline,ilen)
+ 
+return
+end
+ 
+ 
+ 
+subroutine brkin (line)
+ 
+########################################################
+#$%
+#$% Purpose:   BRKIN breaks a command into each of
+#$%            its arguments.
+#$%
+#$% Called By: GETIN
+#$%
+#$% Calls:     GET_ARG     ECHO       ECHOH
+#$%            ECHOHN     ECHOI      ECHOR
+#$%
+#$% Tables:    None
+#$%
+#$% Date:      DEC 80
+#$%
+#$% Author:    Dana Wills
+#$%
+########################################################
+ 
+TESTcommon
+ 
+literal  line[$$maxline]
+integer icol
+ 
+nargs = 0
+icol = 1                        # start parsing line at column 1
+ 
+repeat
+   {
+    nargs = nargs + 1
+ 
+    #$% get arguments
+    call get_arg (line,icol)
+ 
+    DEBUG   if (argt[nargs] != 0)
+    DEBUG      {
+    DEBUG       call echov (".A=")
+    DEBUG       call echoi (nargs)
+    DEBUG       call echov (".T=")
+    DEBUG       call echoi (argt[nargs])
+    DEBUG       call echov (".V=")
+    DEBUG       call echoi (argv[nargs])
+    DEBUG       call echov (".E=")
+    DEBUG       call echo ($Dquote)
+    DEBUG       call echohn(args[1,nargs],30)
+    DEBUG       call echo ($Dquote)
+    DEBUG       call echov (".S=")
+    DEBUG       call echoi (RHEX)
+    DEBUG       call echo ($comma)
+    DEBUG       call echoi (ROCT)
+    DEBUG       call echo ($comma)
+    DEBUG       call echoi (RINT)
+    DEBUG       call echo ($comma)
+    DEBUG       call echoi (RFLT)
+    DEBUG       call echo ($comma)
+    DEBUG       call echoi (RASC)
+    DEBUG       call echor
+    DEBUG      }
+ 
+ 
+    #$% if number of input arguments exceeds max, break loop
+    if (nargs >= $$maxargs) break
+ 
+     #$% continue until blank is received
+   } until (argt[nargs] == $$blank)
+ 
+#$% if argument is blank, flag argument type, down
+if (argt[1] == $$blank) argt[1] = $$down
+ 
+return
+end
+ 
+ 
+ 
+subroutine get_arg (line,icol)   # get one argument from line, start at icol
+ 
+########################################################
+#$%
+#$% Purpose:   GET_ARG gets the next argument from
+#$%            the command line.
+#$%
+#$% Called By: BRKIN
+#$%
+#$% Calls:     IPBYTE     ROTAT
+#$%
+#$% Tables:    None
+#$%
+#$% Date:      DEC 80
+#$%
+#$% Author:    Dana Wills
+#$%
+########################################################
+ 
+TESTcommon
+ 
+literal line[80],jname
+integer icol, k, ichar, igbyte, istop, icnt, ierr, j10, jsgn, ival, jval, k2,
+        jpnt, k3, lcomp_v
+real*4  rval
+#----------------------------------------
+LitCharEquiv(kwords, 2, 147)
+ 
+define (Data$fmt_key_name,
+    DATA kwordsC [1,$use(Data_Count)])
+ 
+define (Data$fmt_key_value,
+    DATA kwords [2,$use(Data_Count)])
+ 
+define (Data$keyword,
+     $incr(Data_Count)
+     Data$fmt_key_name / @1 /
+     Data$fmt_key_value / @2 /
+)
+ 
+#----------------------------------------
+#data    kwords/_ #key    value
+$set (data_count,0)
+Data$keyword("?    ", $$help)
+Data$keyword("ARG  ", $$arg)
+Data$keyword("AS   ", $$Gasc)
+Data$keyword("ASC  ", $$Gasc)
+Data$keyword("ASCI ", $$Gasc)
+Data$keyword("ASCII", $$Gasc)
+Data$keyword("BY   ", $$exit)
+Data$keyword("BI   ", $$Gbin)
+Data$keyword("BIN  ", $$Gbin)
+Data$keyword("BINA ", $$Gbin)
+Data$keyword("BINAR", $$Gbin)
+Data$keyword("BINARY", $$Gbin)
+Data$keyword("BYE  ", $$exit)
+Data$keyword("CL   ", $$clear)
+Data$keyword("CLE  ", $$clear)
+Data$keyword("CLEA ", $$clear)
+Data$keyword("CLEAR", $$clear)
+Data$keyword("CO   ", $$compBB)
+Data$keyword("COMP ", $$compBB)
+Data$keyword("DEF  ", $$define)
+Data$keyword("DEFI ", $$define)
+Data$keyword("DEFIN", $$define)
+Data$keyword("DEFINE", $$define)
+Data$keyword("DEG  ", $$Degrees)
+Data$keyword("DEGR ", $$Degrees)
+Data$keyword("DEGRE", $$Degrees)
+Data$keyword("DEGREE", $$Degrees)
+Data$keyword("EN   ", $$entry)
+Data$keyword("ENT  ", $$entry)
+Data$keyword("ENTR ", $$entry)
+Data$keyword("ENTRY", $$entry)
+Data$keyword("EX   ", $$exit)
+Data$keyword("EXI  ", $$exit)
+Data$keyword("EXIT ", $$exit)
+Data$keyword("FF   ", $$findf)
+Data$keyword("FILE ", $$file)
+Data$keyword("FILL ", $$fillBB)
+Data$keyword("FIN  ", $$find)
+Data$keyword("FIND ", $$find)
+Data$keyword("FINDF", $$findf)
+Data$keyword("FINDR", $$findr)
+Data$keyword("FORK ", $$fork)
+Data$keyword("FR   ", $$findr)
+Data$keyword("GO   ", $$goto)
+Data$keyword("GOTO ", $$goto)
+Data$keyword("HEL  ", $$help)
+Data$keyword("HELP ", $$help)
+Data$keyword("HEX  ", $$Ghex)
+Data$keyword("HUSH ", $$hush)
+Data$keyword("IF   ", $$if)
+Data$keyword("INC  ", $$inc)
+Data$keyword("INT  ", $$Gint)
+Data$keyword("INTE ", $$Gint)
+Data$keyword("INTEG", $$Gint)
+Data$keyword("INTEGE", $$Gint)
+Data$keyword("INTEGER", $$Gint)
+Data$keyword("LABEL", $$label)
+Data$keyword("LAS  ", $$last)
+Data$keyword("LAST ", $$last)
+Data$keyword("LOAD ", $$load)
+Data$keyword("MCO  ", $$mcompBB)
+Data$keyword("MCOM ", $$mcompBB)
+Data$keyword("MCOMP", $$mcompBB)
+Data$keyword("NA   ", $$Nasc)
+Data$keyword("NAS  ", $$Nasc)
+Data$keyword("NASC ", $$Nasc)
+Data$keyword("NASCI", $$Nasc)
+Data$keyword("NASCII", $$Nasc)
+Data$keyword("NB   ", $$Nbin)
+Data$keyword("NBI  ", $$Nbin)
+Data$keyword("NBIN ", $$Nbin)
+Data$keyword("NBINA", $$Nbin)
+Data$keyword("NBINAR", $$Nbin)
+Data$keyword("NBINARY", $$Nbin)
+Data$keyword("NE   ", $$next)
+Data$keyword("NEW2 ", $$new7)
+Data$keyword("NEW5 ", $$new7)
+Data$keyword("NEW7 ", $$new7)
+Data$keyword("NEW8 ", $$new8)
+Data$keyword("NEW9 ", $$new9)
+Data$keyword("NEX  ", $$next)
+Data$keyword("NEXT ", $$next)
+Data$keyword("NHEX ", $$Nhex)
+Data$keyword("NI   ", $$Nint)
+Data$keyword("NIN  ", $$Nint)
+Data$keyword("NINT ", $$Nint)
+Data$keyword("NINTE", $$Nint)
+Data$keyword("NINTEG", $$Nint)
+Data$keyword("NINTEGE", $$Nint)
+Data$keyword("NINTEGER", $$Nint)
+Data$keyword("NO   ", $$Noct)
+Data$keyword("NOC  ", $$Noct)
+Data$keyword("NOCT ", $$Noct)
+Data$keyword("NOCTA", $$Noct)
+Data$keyword("NOCTAL", $$Noct)
+Data$keyword("NR   ", $$Nflt)
+Data$keyword("NRE  ", $$Nflt)
+Data$keyword("NREA ", $$Nflt)
+Data$keyword("NREAL", $$Nflt)
+Data$keyword("O    ", $$Goct)
+Data$keyword("OC   ", $$Goct)
+Data$keyword("OCT  ", $$Goct)
+Data$keyword("OCTA ", $$Goct)
+Data$keyword("OCTAL", $$Goct)
+Data$keyword("PUT  ", $$put )
+Data$keyword("Q    ", $$exit)
+Data$keyword("QU   ", $$exit)
+Data$keyword("QUI  ", $$exit)
+Data$keyword("QUIT ", $$exit)
+Data$keyword("REA  ", $$Gflt)
+Data$keyword("REAL ", $$Gflt)
+Data$keyword("REP  ", $$repeat)
+Data$keyword("REPE ", $$repeat)
+Data$keyword("REPEA", $$repeat)
+Data$keyword("REPEAT", $$repeat)
+Data$keyword("RES  ", $$resume)
+Data$keyword("RESU ", $$resume)
+Data$keyword("RESUM", $$resume)
+Data$keyword("RESUME", $$resume)
+Data$keyword("S    ", $$show)
+Data$keyword("SAY  ", $$say)
+Data$keyword("SET  ", $$set)
+Data$keyword("SH   ", $$show)
+Data$keyword("SHO  ", $$show)
+Data$keyword("SHOW ", $$show)
+Data$keyword("SL   ", $$sleep)
+Data$keyword("SLE  ", $$sleep)
+Data$keyword("SLEE ", $$sleep)
+Data$keyword("SLEEP", $$sleep)
+Data$keyword("SN   ", $$snapshot)
+Data$keyword("SNA  ", $$snapshot)
+Data$keyword("SNAP ", $$snapshot)
+Data$keyword("SNAPS", $$snapshot)
+Data$keyword("TAKE ", $$take)
+Data$keyword("TALK ", $$hush)
+Data$keyword("TC   ", $$tclear)
+Data$keyword("TCL  ", $$tclear)
+Data$keyword("TCLE ", $$tclear)
+Data$keyword("TCLEA", $$tclear)
+Data$keyword("TCLEAR", $$tclear)
+Data$keyword("V    ", $$view)
+Data$keyword("VI   ", $$view)
+Data$keyword("VIE  ", $$view)
+Data$keyword("VIEW ", $$view)
+Data$keyword("ZER  ", $$zapBB)
+Data$keyword("ZERO ", $$zapBB)
+Data$keyword("ZZZZZ", $no)
+ 
+ 
+#$% initialize values
+argt[nargs] = $$blank
+argv[nargs] = 0
+ 
+for (k=1; k<=$$MaxText; k=k+1)          # clear out old arg
+   {
+    args[k,nargs] = $BLANKLIT
+   }
+ 
+repeat                          # ignore preceeding spaces
+   {
+    #$% if max length for input is exceeded
+    if (icol >= $$maxline*4) return
+    #$% get each character input starting at icol
+    ichar = igbyte (line,icol)
+    #$% if the character is not a space, break
+    if (ichar != $space) break
+    icol = icol + 1
+   }
+ 
+#$% if the character is an squote or dquote
+if (ichar == $SQUOTE | ichar == $DQUOTE)
+   {
+    #$% get inputs
+    argt[nargs] = $$ascii
+    istop = ichar
+    icol = icol + 1
+   }
+else
+    istop = $space
+ 
+icnt = 0
+ierr = $no
+ 
+j10 = $no
+jsgn = 1
+ival = 0                        # integer value
+jval = 0                        # octal value
+rval = 0.0                      # real value
+ 
+repeat                          # bld the arg
+   {
+    #$% if max length for input is exceeded
+    if (icol >= $$maxline*4) break
+    #$% get each character
+    ichar = igbyte (line,icol)
+ 
+    #$% if lower case letter, make it upper case
+    if (ichar >= $lita &
+        ichar <= $litz &
+        argt[nargs] != $$ascii) ichar = ichar - $space  # fold to UPPERcase
+ 
+    icol = icol + 1
+ 
+    if (ichar == istop) break
+ 
+    if (icnt >= $$MaxText*4) next
+    icnt = icnt + 1
+    call ipbyte (args[1,nargs],icnt,ichar)
+    if (argt[nargs] == $$ascii) next
+ 
+    else if (argt[nargs] == $$blank)            # verify first character
+       {
+        #$% test to set what the character is
+        if (ichar == $dig0) argt[nargs] = $$octal
+        else if (ichar == $period)
+           {
+            argt[nargs] = $$decimal
+            j10 = $yes
+            next
+           }
+        else if (ichar == $minus)
+           {
+            argt[nargs] = $$integer
+            jsgn = -1
+            next
+           }
+        else if (ichar >= $dig1 & ichar <= $dig9) argt[nargs] = $$integer
+        else if (ichar >= $LETA & ichar <= $LETZ) argt[nargs] = $$table
+        else if (ichar == $UPARROW | ichar == $EXCLAIM)
+           {
+            argt[nargs] = $$up
+            break
+           }
+        else if (ichar == $SEMICOLON | ichar == $COLON)
+           {
+            argt[nargs] = $$same
+            break
+           }
+        else if (ichar == $plus)
+           {
+            argt[nargs] = $$down
+            break
+           }
+        else if (ichar == $pound)
+           {
+            argt[nargs] = $$entry
+            break
+           }
+        else if (ichar == $comma)
+           {
+            argt[nargs] = $$position
+            break
+           }
+        else if (ichar == $atsign)
+           {
+            argt[nargs] = $$take
+            break
+           }
+        else if (ichar == $quest)
+           {
+            argt[nargs] = $$help
+            break
+           }
+        else
+           {
+            return
+ 
+           }
+ 
+ 
+        jval = jval * 8 + ichar-$dig0
+        ival = ival * 10 + ichar-$dig0
+       }
+    else if (ichar == $semicolon |              # test for special codes
+             ichar == $colon     |
+             ichar == $pound     |
+             ichar == $comma     |
+             ichar == $plus      |
+             ichar == $exclaim   |
+             ichar == $uparrow    )
+       {
+        call ipbyte (args[1,nargs],icnt,$space)
+        icol = icol - 1
+        icnt = icnt - 1
+        break
+       }
+ 
+    else if (argt[nargs] == $$decimal)          # verify decimal
+       {
+        if (ichar < $dig0 | ichar > $dig9)
+           {
+            argt[nargs] = $$name
+            next
+           }
+        if (j10 != $no) j10 = j10 + 1
+ 
+        rval = rval * 10.0 + float(ichar-$dig0)
+       }
+ 
+    else if (argt[nargs] == $$octal)            # verify octal
+       {
+        if (ichar < $dig0 | ichar > $dig7)
+           {
+            if (ichar >= $dig0 & ichar <= $dig9) argt[nargs] = $$decimal
+            else if (ichar == $period)           argt[nargs] = $$decimal
+            else                                 argt[nargs] = $$name
+           }
+ 
+        jval=ishft(jval,3)                     # shift left 3 bits
+        jval = jval .OR. (ichar .AND. 7)
+ 
+        rval = rval * 10.0 + float(ichar-$dig0)
+        ival = ival * 10 + ichar-$dig0
+       }
+ 
+    else if (argt[nargs] == $$table)            # verify tbl name
+       {
+        if (ichar < $LETA | ichar > $LETZ) argt[nargs] = $$name
+        if (icnt > 3)                      argt[nargs] = $$name
+       }
+ 
+    else if (argt[nargs] == $$ascii)            # verify ascii value
+       {
+        if (icnt > 4) argt[nargs] = $$name
+       }
+ 
+    else if (argt[nargs] == $$integer)          # verify integer
+       {
+        if (ichar == $period)
+           {
+            argt[nargs] = $$decimal
+            j10 = $yes
+            next
+           }
+        else if (ichar < $dig0 | ichar > $dig9) argt[nargs] = $$name
+ 
+        ival = ival * 10 + ichar-$dig0
+       }
+   }
+ 
+if (argt[nargs] == $$name | argt[nargs] == $$table)     # search keywords...
+   {
+    jname = args[1,nargs]
+    call scnset (jname,k)
+ 
+    if (k == 0)
+       {
+        k2 = 0
+ 
+        for (jpnt = 1; lcomp_v(kwords[1,jpnt],"ZZZZZ") != 0; jpnt = jpnt + 1)
+           {
+            if (args[1,nargs] != kwords[1,jpnt]) next       # no match yet
+ 
+            k2 = kwords[2,jpnt]                             # got it
+            break
+           }
+ 
+        if (k2 != 0) argt[nargs] = k2
+       }
+    k3=0
+    call smovh (args[1,nargs],4,argv[nargs],k3)
+   }
+ 
+else if (argt[nargs] == $$octal)
+   {
+    argv[nargs] = jval
+   }
+ 
+else if (argt[nargs] == $$integer)
+   {
+    argv[nargs] = ival * jsgn
+   }
+ 
+else if (argt[nargs] == $$decimal)
+   {
+    argf[nargs] = ival*jsgn + (rval * jsgn) / 10 ** (j10-1)
+   }
+ 
+else
+   {
+    k3=0
+    call smovh (args[1,nargs],4,argv[nargs],k3)
+   }
+ 
+ 
+return
+end
+ 
+ 
+ 
+subroutine execut
+ 
+##########################################################
+#$%
+#$% Purpose:   EXECUT is called to execute arguments.
+#$%
+#$% Called By: GETIN
+#$%
+#$% Calls:     CMDRPT     LABEL      EXECU1
+#$%
+#$% Tables:    None
+#$%
+#$% Date:      DEC 80
+#$%
+#$% Tables:    Dana Wills
+#$%
+##########################################################
+ 
+TESTcommon
+Integer*4   I
+ 
+#$% loop through arguments to execute
+for (i = 1; i <= nargs; i = i + 1)
+   {
+    #$% test argument type and call to execute appropriate routines
+    if      (argt[i] == $$label   ) call label (i)
+    if (CmndLb  != 0         ) continue
+    else if (argt[i] == $$repeat  ) call cmdrpt (i)
+    else                            call execu1 (i)
+   }
+ 
+return
+end
+ 
+ 
+ 
+ 
+
+subroutine cmdrpt (init)
+ 
+####################################################
+#$%
+#$% Purpose:   CMDRPT executes command line a
+#$%            multiple of times.
+#$%
+#$% Called By: EXECUT
+#$%
+#$% Calls:     EXECU1     ECHOH      ECHOR
+#$%
+#$% Tables:    None
+#$%
+#$% Date:      DEC 80
+#$%
+#$% Author:    Dana Wills
+#$%
+####################################################
+ 
+TESTcommon
+character       xchar
+integer*4       init, icount, k, dummy, I
+ 
+#$% if input array positon does not exceed max, increment it
+if (init < $$maxargs) init = init + 1
+ 
+     #$% test argument type for integer or decimal
+     if (argt[init] == $$integer) icount = argv[init]
+else if (argt[init] == $$decimal) icount = argf[init]
+else
+   {
+    #$% send warning message to user
+    call echov ("Improper count for REPEAT.  Line Rejected!")
+    call echor
+    init = $$maxargs + 1
+   }
+ 
+#$% execute the command
+for (k = 1; k <= icount; k = k + 1)
+   {
+    call ttynow (xchar,dummy)
+    if      (xchar == $control(k)) break
+    else if (xchar == $control(c)) break
+ 
+    for (i = init + 1; i <= nargs; i = i + 1)
+       {
+        call execu1 (i)
+       }
+   }
+ 
+init = $$maxargs + 1
+ 
+return
+end
+ 
+
+ 
+subroutine execu1 (i)           # execute arguments
+ 
+##########################################################
+#$%
+#$% Purpose:   EXECU1 tests for which arguments are
+#$%            to be executed.
+#$%
+#$% Called By: EXECUT     CMDRPT
+#$%
+#$% Calls:     BTEXIT     CFORK      CLRBIT
+#$%            COMPBB     DEFARG     DEFBIT
+#$%            DISBIT     DSPEXT     DSPHLP
+#$%            FNDTBL     FNDVAL     FNDVAR
+#$%            INCADD     LABEL      LFILE
+#$%            LFORK      NEWCMD     PUTBIT
+#$%            PUTVAL     PUTZER     SLEEP
+#$%            TBLINC     TSTIF      VUEMEM
+#$%            XGOTO      XHUSH      XTAKE
+#$%
+#$% Tables:    None
+#$%
+#$% Date:      DEC 80
+#$%
+#$% Author:    Dana Wills
+#$%
+##########################################################
+ 
+TESTcommon
+Integer*4   I, ixmax
+ 
+ 
+     #$% test for appropriate argument execution
+     if (argt[i] == $$address ) cadd = argv[i]
+else if (argt[i] == $$table   ) call fndtbl(i)
+else if (argt[i] == $$name    ) call fndvar(i)
+else if (argt[i] == $$down    ) cadd = cadd + 1
+else if (argt[i] == $$same    ) call dspext
+else if (argt[i] == $$up      ) cadd = cadd - 1
+else if (argt[i] == $$next    ) call tblinc (i)
+else if (argt[i] == $$last    ) call tblinc (i)
+else if (argt[i] == $$entry   ) call tblinc (i)
+else if (argt[i] == $$position) call tblinc (i)
+else if (argt[i] == $$put     ) call putval (i)
+else if (argt[i] == $$set     ) call putbit (i)
+else if (argt[i] == $$zapBB   ) call putzer (i)
+else if (argt[i] == $$fillBB  ) call putpat (i)
+else if (argt[i] == $$compBB  ) call compbb (i)
+else if (argt[i] == $$mcompBB ) call compbb (i)
+else if (argt[i] == $$octal   ) continue
+else if (argt[i] == $$ascii   ) continue
+else if (argt[i] == $$integer ) cadd = argv[i]
+else if (argt[i] == $$decimal ) cadd = argf[i]
+else if (argt[i] == $$exit    ) call btexit (i)
+else if (argt[i] == $$Ghex    ) Rhex = $yes
+else if (argt[i] == $$Nhex    ) Rhex = $no
+else if (argt[i] == $$Goct    ) Roct = $yes
+else if (argt[i] == $$Noct    ) Roct = $no
+else if (argt[i] == $$Gasc    ) Rasc = $yes
+else if (argt[i] == $$Nasc    ) Rasc = $no
+else if (argt[i] == $$Gint    ) Rint = $yes
+else if (argt[i] == $$Nint    ) Rint = $no
+else if (argt[i] == $$Gflt    ) Rflt = $yes
+else if (argt[i] == $$Nflt    ) Rflt = $no
+else if (argt[i] == $$Gbin    ) Rbin = $yes
+else if (argt[i] == $$Nbin    ) Rbin = $no
+else if (argt[i] == $$find    ) call fndval (i)
+else if (argt[i] == $$findf   ) call fndval (i)
+else if (argt[i] == $$findr   ) call fndval (i)
+else if (argt[i] == $$inc     ) call incadd (i)
+else if (argt[i] == $$view    ) call vuemem (i)
+else if (argt[i] == $$help    ) call dsphlp (i)
+else if (argt[i] == $$repeat  ) i = i + 1
+else if (argt[i] == $$show    ) call disbit (i)
+else if (argt[i] == $$define  ) call defbit (i)
+else if (argt[i] == $$clear   ) call clrbit (i)
+else if (argt[i] == $$tclear  ) call clrbit (i)
+else if (argt[i] == $$sleep   ) call sleep (i)
+else if (argt[i] == $$arg     ) call defarg (i)
+else if (argt[i] == $$if      ) call tstif (i)
+else if (argt[i] == $$goto    ) call xgoto (i)
+else if (argt[i] == $$take    ) call xtake (i)
+else if (argt[i] == $$label   ) call label (i)
+else if (argt[i] == $$hush    ) call xhush (i)
+else if (argt[i] == $$degrees ) call dspdeg (i)
+else if (argt[i] == $$load    ) call loaddef(i)
+else if (argt[i] == $$snapshot) call snapshot(i)
+else if (argt[i] == $$say     ) call xsay (i)
+else if (argt[i] == $$new7    ) call newcmd (i)
+else if (argt[i] == $$new8    ) call newcmd (i)
+else if (argt[i] == $$new9    ) call newcmd (i)
+ 
+ixmax = $$BBMaxSize
+ 
+for (; cadd < 1     ; cadd = cadd + ixmax) ;
+for (; cadd > ixmax ; cadd = cadd - ixmax) ;
+ 
+return
+end
+ 
+
+ 
+subroutine xgoto (i)
+ 
+####################################################
+#$%
+#$% Purpose:   XGOTO processes a GOTO command.
+#$%
+#$% Called By: EXECU1
+#$%
+#$% Calls:     ECHO       ECHOH      ECHOR
+#$%            FSFPTR     TYPERR
+#$%
+#$% Tables:    None
+#$%
+#$% Date:      DEC 80
+#$%
+#$% Author:    Dana Wills
+#$%
+####################################################
+ 
+TESTcommon
+Integer*4   I, n
+ 
+literal name
+integer xstat,xjfn
+common /Cgetch/ Xjfn,Xstat
+ 
+name = 0
+ 
+i = i + 1
+#$% look for name or table
+if (argt[i] == $$name |
+    argt[i] == $$table )
+   {
+    #$% if command file status is no or not using disk
+    if (Cmnd == $no | Xstat != 'DSK')
+       {
+        Cmnd = $no
+ 
+        call echop ("RELS")      # turn on tty output
+ 
+        #$% display warning message
+        call echov (" Cannot GoTo W/out Take Input.")
+        call echor
+ 
+        i = $$maxargs + 1
+        return
+       }
+ 
+    name = args[1,i]
+   }
+else
+   {
+    call echop ("RELS")  # turn on tty output
+ 
+    call echov (" Invalid Label Name.")
+    call echor
+ 
+    i = $$maxargs + 1
+    return
+   }
+ 
+#ipos = 0
+#call FSFPTR (Xjfn,ipos,ierr,*8000)
+ 
+CmndLb = name
+ 
+if (c_labels <= 0)
+    {
+    # call seek(offset,xjfn)              # offset of (0,0) reverts to B-O-F
+    }
+else
+    {
+    for (n = 1; n <= c_labels; n = n + 1)
+        {
+        if (CmndLb != F_Labels[n]) next
+ 
+        call seek(m_labels[n],xjfn)       # offset to line after label
+        CmndLb = 0                        # clear the name
+        break
+        }
+    }
+ 
+return
+ 
+#8000                                    # error
+#
+#call echo ("RELS")  # turn on tty output
+#call echor
+#call typerr (ierr)
+#
+#return
+ 
+end
+ 
+
+ 
+subroutine xtake (i)
+ 
+##########################################################
+#$%
+#$% Purpose:   XTAKE sets up and processes a TAKE
+#$%            command for "taking" commands from
+#$%            a text file via TTY.
+#$%
+#$% Called By: EXECU1
+#$%
+#$% Calls:     ECHO       ECHOH      ECHOR
+#$%            FGTJFN     FOPENF     FCLOSF
+#$%            TYPERR     SMOV       SMOVHN
+#$%
+#$% Tables:    None
+#$%
+#$% Date:      DEC 80
+#$%
+#$% Author:    Dana Wills
+#$%
+##########################################################
+ 
+TESTcommon
+ 
+literal name
+integer xstat,xjfn,open_ # jb Omit CLOSE, for ALPHA  5/18/98
+common /Cgetch/ Xjfn,Xstat
+EXTERNAL close          # jb Declared for ALPHA     5/28/98
+ 
+vaxcharacter*40 bname
+integer         blen, try, i, ilen, jfn
+integer         i_switch_1
+ 
+call echop ("RELS")  # turn on tty output
+ 
+i = i + 1                                       # get file name
+if (argt[i] == $$name |
+    argt[i] == $$ascii )
+   {
+    ilen = 0
+    call smovhn (args[1,i],30,Cmnds,ilen)
+    call smov ($null,Cmnds,ilen)
+ 
+    bname = ""
+    blen = 0
+    call vmovhn (args[1,i],30,bname,blen)
+   }
+else
+   {
+    call echov ("Invalid File Name for Take.")
+    call echor
+ 
+    i = $$maxargs + 1
+    return
+   }
+ 
+i = i + 1                                       # get label name
+if      (argt[i] == $$name|
+         argt[i] == $$table)  name = args[1,i]
+else if (argt[i] == $$blank)  name = 0
+else
+   {
+    call echov ("Invalid Label Name.")
+    call echor
+ 
+    i = $$maxargs + 1
+    return
+   }
+ 
+c_labels = 0                # clear found label count           # DEW 3/30/92
+try = 0
+ 
+repeat
+    {
+    try = try + 1
+    jfn = open_(cmnds,READ)
+ 
+    if (jfn != ERR) break
+ 
+    switch (try)
+        {
+        case 1:
+            {
+            ilen = 0
+            call smovvn (bname,Cmnds,ilen)
+            call smovv  (".BT",Cmnds,ilen)
+            call smov ($null,Cmnds,ilen)
+            }
+        case 2:
+            {
+            ilen = 0
+            call smovv  ("NEW_BASE:",Cmnds,ilen)
+            call smovvn (bname,Cmnds,ilen)
+            call smov ($null,Cmnds,ilen)
+            }
+        case 3:
+            {
+            ilen = 0
+            call smovv  ("NEW_BASE:",Cmnds,ilen)
+            call smovvn (bname,Cmnds,ilen)
+            call smovv  (".BT",Cmnds,ilen)
+            call smov ($null,Cmnds,ilen)
+            }
+        default:
+            {
+            call echor
+            call echov ("Open file error..")
+            call echor
+            return
+            }
+        } # end switch
+    }
+ 
+##call FCLOSF (xjfn,0,ierr)
+ 
+call close(xjfn)
+ 
+call echov ("Taking commands from: ")
+call echohn (cmnds,40)
+if (name != 0)
+    {
+    call echov (" at label: ")
+    call echohn (name,$$MaxLit)
+    }
+call echor
+ 
+xjfn = jfn
+xstat = 'DSK'
+ 
+CmndLb = name
+Cmnd = $yes
+ 
+return
+ 
+## 8000  # error jb removed 4 lines (no path to here) 8/19/98
+## call echor
+##call typerr (ierr)
+##return
+ 
+end
+ 
+
+ 
+subroutine xhush (i)
+ 
+########################################################
+#$%
+#$% Purpose:   XHUSH is called to turn on or off,
+#$%            TTY output.
+#$%
+#$% Called By: EXECU1
+#$%
+#$% Calls:     ECHO
+#$%
+#$% Tables:    None
+#$%
+#$% Date:      DEC 80
+#$%
+#$% Author:    Dana Wills
+#$%
+########################################################
+ 
+TESTcommon
+ 
+integer     I
+ 
+#$% if argument is hush send hold to tty
+hushed = (argv[i] == 'HUSH')
+ 
+if (hushed) call echop ("HOLD")
+else        call echop ("RELS")
+ 
+return
+end
+ 
+
+ 
+subroutine label (i)
+ 
+#############################################################
+#$%
+#$% Purpose:   LABEL is called to by-pass label commands.
+#$%
+#$% Called By: EXECU1
+#$%
+#$% Calls:     None
+#$%
+#$% Tables:    None
+#$%
+#$% Date:      DEC 80
+#$%
+#$% Author:    Dana Wills
+#$%
+#############################################################
+ 
+TESTcommon
+ 
+integer  xstat, xjfn, i, n
+common /Cgetch/ Xjfn,Xstat
+logical   imatch
+ 
+i = i + 1       # skip label
+if (CmndLb == args[1,i]) CmndLb = 0
+ 
+for (n = 1; n <= c_labels; n = n + 1)                           # DEW 3/30/92
+    {
+    imatch = (f_labels[n] == args[1,i])     # see if label/mark has been saved
+ 
+    if (imatch) break
+    }
+ 
+if (c_labels < $$maxlabels & ! imatch)                          # DEW 3/30/92
+    {
+    c_labels = c_labels + 1                 # Increment the counter
+    f_labels[c_labels] = args[1,i]          # save the name
+    call markl (Xjfn, m_labels[c_labels])   # save the file position (for SEEK)
+    }
+ 
+i = i + 1
+ 
+return
+end
+ 
+
+ 
+subroutine xsay (i)
+ 
+#############################################################
+#$%
+#$% Purpose:   XSAY is called to display the following string which
+#$%            might have had arguments replaced.  If HUSHED, it
+#$%            un-hush first, and re-hush after.
+#$%
+#$% Called By: EXECU1
+#$%
+#$% Calls:     None
+#$%
+#$% Tables:    None
+#$%
+#$% Date:      MAR 92
+#$%
+#$% Author:    Dane Wills
+#$%
+#############################################################
+ 
+TESTcommon
+integer     I, ilen, igbyte
+ 
+i = i + 1       # skip SAY
+ 
+if (hushed) call echop ("RELS")
+ 
+ilen = $$MaxText*8
+for (ilen = $$MaxText*8; ilen > 0; ilen = ilen - 1)
+    {
+    if (igbyte(args[1,i],ilen) != $space) break
+    }
+ 
+call echoh (args[1,i],ilen)
+call echor
+ 
+if (hushed) call echop ("HOLD")
+ 
+# i = i + 1
+ 
+return
+end
+ 
+
+ 
+subroutine defarg (i)
+ 
+########################################################
+#$%
+#$% Purpose:   DEFARG is called to define a Super
+#$%            Argument.
+#$%
+#$% Called By: EXECU1
+#$%
+#$% Calls:     ECHOH      ECHOR      LSARGS
+#$%            TSARGS     SMOV       SMOVI
+#$%            SMOVH      LSARG      IBBADD
+#$%
+#$% Tables:    None
+#$%
+#$% Date:      DEC 80
+#$%
+#$% Author:    Dana Wills
+#$%
+########################################################
+ 
+TESTcommon
+ 
+# ARG <name> ADDR
+# ARG <name> MEM
+# ARG <name> INC <integer>
+# ARG <name> INC <real>
+# ARG <name> <ascii>
+# ARG <name> <integer>
+# ARG <name> <real>
+# ARG <name> <blank>
+# ARG <name> [ + | - | * | / ] <value> <value>
+#
+# Possible New Commands:                        # DEW 19-Mar-1992
+#
+# ARG <name> ENTry
+# ARG <name> FIELD <field name>
+#
+#
+#
+ 
+Literal Marg
+integer     I, ichar, igbyte, K, narg, iword, ibbadd, n, m,
+            iadd_junk, Ibase_junk, nbit, lbit, J, isave, ilen
+real        val
+ 
+if (i < $$maxargs) i = i + 1                    # get <name>
+ 
+#$% get character
+ichar = igbyte(argv[i],1)
+#$% if argument calls for clear
+if (argv[i] == 'CLR*')
+   {
+    #$% clear arguments
+    for (k=1; k<=$$SuperArgs; k=k+1)
+       {
+        Sargt[k] = $$blank
+       }
+ 
+    #$% display message to user
+    call echov ("All Arguments Cleared.")
+    call echor
+    return
+   }
+#$% else if a letter and not in ascii
+else if (ichar   >= $LetA     &
+         ichar   <= $LetZ     &
+         argt[i] != $$ascii    )
+   {
+    #$% set values
+    narg = -1
+    Marg = $BLANKLIT
+    k=0
+    call smovhn(args[1,i],8,Marg,k)
+ 
+    #$% check for valid arguments
+    for (k = 1; k <= $$SuperArgs; k=k+1)
+       {
+        if (Sargt[k] == $$blank & narg < 0) narg = k
+ 
+        if (Sargn[k] != Marg) next
+ 
+        narg = k
+        break
+       }
+ 
+    #$% if table full
+    if (narg < 0)
+       {
+        call echov ("All Arguments In Use.")
+        call LSargs                                 # List Super Args
+ 
+        i = $$maxargs + 1
+        return
+       }
+ 
+    Sargn[narg] = Marg
+   }
+else
+   {
+    narg = -1
+   }
+#$% if not valid
+if (narg < 0 | narg > $$SuperArgs)
+   {
+    #call echov ("Invalid Argument Name.")
+    call LSargs                                 # List Super Args
+ 
+    i = $$maxargs + 1
+    return
+   }
+ 
+i = i + 1                                       # get <value>,INC,MEM,or ADD
+if (argv[i] == 'MEM')                          # indirect value of memory
+   {
+    iword = ibb[ibbadd(cadd)]
+ 
+    Sargv[narg] = iword
+ 
+    call TSArgs (narg)          # test and set Sargs
+ 
+    Sargt[narg] = -Sargt[narg]  # negate type
+    Sargv[narg] = cadd          # current address
+   }
+else if (argv[i] == 'VAL')                     # current value of memory
+   {
+    iword = ibb[ibbadd(cadd)]
+ 
+    Sargv[narg] = iword
+ 
+    call TSArgs (narg)          # test and set Sargs
+   }
+else if (argv[i] == 'ENT' |                    # current Entry value
+         argv[i] == 'ENTR' )
+   {
+    call getsub (n,m,iadd_junk,ibase_junk)
+ 
+    iword = n
+ 
+    Sargv[narg] = iword
+ 
+    call TSArgs (narg)          # test and set Sargs
+   }
+else if (argv[i] == 'BITS')                     # current value of field
+   {
+    i = i + 1
+    if (i < nargs & argt[i] == $$integer) nbit = argv[i]
+    else                                  nbit = 31
+ 
+    i = i + 1
+    if (i < nargs & argt[i] == $$integer) lbit = argv[i]
+    else                                  lbit = 0
+ 
+    iword = ibb[ibbadd(cadd)]
+ 
+    k = $$extract(iword,lbit,mask[nbit])
+    Sargv[narg] = k
+    Sargt[narg] = $$integer
+ 
+    Sargl[narg] = 0
+    call smovi (k,Sargs[1,narg],Sargl[narg])
+   }
+else if (argv[i] == 'ADD' |                    # current address
+         argv[i] == 'ADDR'  )
+   {
+    Sargt[narg] = $$integer
+    Sargv[narg] = cadd
+ 
+    Sargl[narg] = 0
+    call smovi (cadd,Sargs[1,narg],Sargl[narg])
+   }
+else if (argv[i] == 'INC')
+   {
+    i = i + 1                                   # get INC <value>
+    if (argt[i] == Sargt[narg] &
+        argt[i] == $$integer    )
+       {
+        Sargv[narg] = Sargv[narg] + argv[i]
+ 
+        Sargl[narg] = 0
+        call smovi (Sargv[narg],Sargs[1,narg],Sargl[narg])
+       }
+    else if (argt[i] == Sargt[narg] &
+             argt[i] == $$decimal    )
+       {
+        Sargf[narg] = Sargf[narg] + argf[i]
+        val = Sargf[narg]
+ 
+        Sargl[narg] = 0
+        if (val < 0)
+           {
+            call smov ($minus,Sargs[1,narg],Sargl[narg])
+            val = val * -1
+           }
+ 
+        k = val
+        if (k != 0) call smovi (k,Sargs[1,narg],Sargl[narg])
+ 
+        call smov ($period,Sargs[1,narg],Sargl[narg])
+ 
+        j = (val - k) * 1000000.0
+ 
+        if (j != 0) call smovi (j,Sargs[1,narg],Sargl[narg])
+       }
+    else
+       {
+        call echov ("Invalid Increment Value.")
+        call echor
+ 
+        i = $$maxargs + 1
+        return
+       }
+   }
+else if (argv[i] == $PLUS  |                    # process   +, -, *, &  /
+         argv[i] == $MINUS |
+         argv[i] == $SLASH |
+         argv[i] == $ASTER  )
+   {
+    isave = i
+ 
+    i = i + 1                                   # get INC <value>
+ 
+ 
+    if (argt[i] == Sargt[narg] &
+        argt[i] == $$integer    )
+       {
+        Sargv[narg] = Sargv[narg] + argv[i]
+ 
+        Sargl[narg] = 0
+        call smovi (Sargv[narg],Sargs[1,narg],Sargl[narg])
+       }
+   }
+else
+   {
+    if (argt[i] == $$octal) argt[i] = $$integer
+    Sargt[narg] = argt[i]
+    Sargv[narg] = argv[i]
+ 
+    ilen = $$MaxText*8
+    for (ilen = $$MaxText*8; ilen > 0; ilen = ilen - 1)
+       {
+        if (igbyte(args[1,i],ilen) != $space) break
+       }
+    Sargl[narg] = 0
+    call smovh (args[1,i],ilen,Sargs[1,narg],Sargl[narg])
+   }
+ 
+if (Sargt[narg] != $$blank) call LSArg (narg)
+ 
+return
+end
+ 
+
+ 
+subroutine TSArgs (narg)
+ 
+############################################################
+#$%
+#$% Purpose:   TSARGS is used to determine the "type"
+#$%            of a Super arg (Integer, ASCII...etc).
+#$%
+#$% Called By: DEFARG     EXPARG     LSARG
+#$%
+#$% Calls:     SMOV       SMOVI      IFASC
+#$%            IFFLT
+#$%
+#$% Tables:    None
+#$%
+#$% Date:      DEC 80
+#$%
+#$% Author:    Dana Wills
+#$%
+############################################################
+ 
+TESTcommon
+integer     Iword, narg, ifasc, KK, IfFlt, K, J
+real        val
+ 
+#$% get argument
+iword = Sargv[narg]
+ 
+#$% test to see if ascii and set values
+if (ifasc(iword) == $yes)
+   {
+    Sargt[narg] = $$ascii
+    Sargs[1,narg] = $BLANKI4
+    kk=0; call smovh (Sargv[narg],4,Sargs[1,narg],kk)
+    Sargl[narg] = kk
+   }
+#$% else see if floating point
+else if (ifflt(iword) == $yes)
+   {
+    Sargt[narg] = $$decimal
+    val = Sargf[narg]
+ 
+    Sargl[narg] = 0
+    if (val < 0)
+       {
+        call smov ($minus,Sargs[1,narg],Sargl[narg])
+        val = val * -1
+       }
+ 
+    k = val
+    if (k != 0) call smovi (k,Sargs[1,narg],Sargl[narg])
+ 
+    call smov ($period,Sargs[1,narg],Sargl[narg])
+ 
+    j = (val - k) * 1000000.0
+ 
+    if (j != 0) call smovi (j,Sargs[1,narg],Sargl[narg])
+   }
+else
+   {
+    Sargt[narg] = $$integer
+ 
+    Sargl[narg] = 0
+    call smovi (Sargv[narg],Sargs[1,narg],Sargl[narg])
+   }
+ 
+return
+end
+ 
+
+ 
+subroutine LSArgs
+ 
+########################################################
+#$%
+#$% Purpose:   LSARGS is called to list all Super
+#$%            Arguments in alphabetic order.
+#$%
+#$% Called By: DEFARG
+#$%
+#$% Calls:     LSARG      ECHOH      ECHOR
+#$%
+#$% Tables:    None
+#$%
+#$% Date:      DEC 80
+#$%
+#$% Author:    Dana Wills
+#$%
+########################################################
+ 
+TESTcommon
+ 
+integer icnt, isave, K, litcmp, ksave, lcomp_v
+Literal ilow,ikey
+ 
+icnt = 0
+ikey = $ATSIGN
+ 
+repeat
+   {
+    isave = icnt
+    ilow = 'zzzzz'
+ 
+    #$% set arguments in alphabetical order
+    for (k=1; k<= $$SuperArgs; k=k+1)
+       {
+        if (Sargt[k] == $$blank) next
+ 
+        if (litcmp (Sargn[k], ilow) > 0) next
+ 
+        if (litcmp (Sargn[k], ikey) <= 0) next
+ 
+        ilow = Sargn[k]
+        ksave = k
+       }
+ 
+    #$% if arguments in valid range
+    if (lcomp_v(ilow, "zzzzz") != 0)
+       {
+        #$% get arguments
+        ikey = Sargn[ksave]
+ 
+        #$% increment counter
+        icnt = icnt + 1
+        #$% if arguments present, display them
+        if (icnt == 1)
+           {
+            call echov ("  Arguments available are:")
+            call echor
+           }
+ 
+        call LSArg (ksave)
+       }
+ 
+   } until (isave == icnt)
+ 
+#$% if no count, display message
+if (icnt == 0) call echov ("  No Arguments defined.")
+call echor
+ 
+return
+end
+ 
+ 
+
+ 
+ 
+subroutine LSArg (narg)
+ 
+########################################################
+#$%
+#$% Purpose:   LSARG is called to list a single
+#$%            Super Argument.
+#$%
+#$% Called By: DEFARG     LSARGS
+#$%
+#$% Calls:     ECHO       ECHOH      ECHOHN
+#$%            ECHOI      ECHOR      TSARGS
+#$%            IBBADD
+#$%
+#$% Tables:    None
+#$%
+#$% Date:      DEC 80
+#$%
+#$% Author:    Dana Wills
+#$%
+########################################################
+ 
+TESTcommon
+integer     narg, iadd, ibbadd, itype, J
+ 
+call echov ("    %")
+call echohn(Sargn[narg],5)
+ 
+call echov (" [")
+ 
+if (Sargt[narg] < 0)            # indirect
+   {
+    iadd = Sargv[narg]          # current address
+ 
+    #$% display address with asterisk and minus sign
+    call echo ($aster)
+    call echoi (iadd)
+    call echo ($minus)
+ 
+    Sargv[narg] = ibb[ibbadd(iadd)]     # current value at indir address
+ 
+    call TSArgs (narg)          # test and set Sargs
+ 
+    Sargt[narg] = -Sargt[narg]  # negate type
+    Sargv[narg] = iadd          # current address
+   }
+ 
+#$% get type and test
+itype = abs(Sargt[narg])
+if      (itype == $$Integer) j = $LetI
+else if (itype == $$decimal) j = $LetR
+else if (itype == $$octal  ) j = $LetI
+else if (itype == $$ascii  ) j = $LetA
+else                         j = $LetN
+ 
+call echo (j)
+call echov ("] = ")
+ 
+call echoh (Sargs[1,narg],Sargl[narg])
+call echor
+ 
+return
+end
+ 
+
+ 
+subroutine tstif (i)            # test condition
+ 
+########################################################
+#$%
+#$% Purpose:   TSTIF processes the IF command.
+#$%
+#$% Called By: EXECU1
+#$%
+#$% Calls:     ECHOH      ECHOR
+#$%
+#$% Tables:    None
+#$%
+#$% Date:      DEC 80
+#$%
+#$% Author:    Dana Wills
+#$%
+########################################################
+ 
+TESTcommon
+ 
+integer ctype,arg1t,arg1v,arg2t,arg2v, I, K, iok
+real    arg1f,arg2f, dif
+ 
+integer relat[-1:2,6], tests[2,18]
+ 
+#              LT , EQ , GT ,Relation
+data    relat/$no ,$yes,$no ,'EQ',
+              $yes,$no ,$yes,'NE',
+              $yes,$no ,$no ,'LT',
+              $yes,$yes,$no ,'LE',
+              $no ,$no ,$yes,'GT',
+              $no ,$yes,$yes,'GE'/
+ 
+data tests/$$decimal,$$decimal,
+           $$decimal,$$integer,
+           $$decimal,$$octal  ,
+           $$integer,$$integer,
+           $$integer,$$octal  ,
+           $$integer,$$table  ,
+           $$integer,$$name   ,
+           $$integer,$$ascii  ,
+           $$octal  ,$$octal  ,
+           $$octal  ,$$table  ,
+           $$octal  ,$$name   ,
+           $$octal  ,$$ascii  ,
+           $$table  ,$$table  ,
+           $$table  ,$$name   ,
+           $$table  ,$$ascii  ,
+           $$name   ,$$name   ,
+           $$name   ,$$ascii  ,
+           $$ascii  ,$$ascii  /
+ 
+ 
+ctype = 0
+ 
+#$% if in range
+if (i+4 < $$maxargs)
+   {
+    i = i + 1                   # get first arg
+    if (argt[i] == $$decimal)
+       {
+        arg1t = $$decimal
+        arg1f = argf[i]
+        arg1v = arg1f
+       }
+    else
+       {
+        arg1t = argt[i]
+        arg1v = argv[i]
+        arg1f = arg1v
+       }
+ 
+    i = i + 1                   # get second arg
+    for (k = 1; k <= 6; k=k+1)
+       {
+        if (argv[i] != relat[2,k]) next
+ 
+        ctype = k
+        break
+       }
+ 
+    i = i + 1                   # get third arg
+    if (argt[i] == $$decimal)
+       {
+        arg2t = $$decimal
+        arg2f = argf[i]
+        arg2v = arg2f
+       }
+    else
+       {
+        arg2t = argt[i]
+        arg2v = argv[i]
+        arg2f = arg2v
+       }
+ 
+    iok = $no
+    for (k = 1; k <= 17; k= k+1)
+       {
+        if      (tests[1,k] == arg1t & tests[2,k] == arg2t) iok = $yes
+        else if (tests[1,k] == arg2t & tests[2,k] == arg1t) iok = $yes
+        else                                                next
+ 
+        break
+       }
+   }
+ 
+if (ctype < 1 | iok == $no)
+   {
+    call echov ("Invalid Comparison.")
+    call echor
+ 
+    i = $$maxargs + 1
+    return
+   }
+ 
+if (arg1t == $$decimal | arg2t == $$decimal) dif = arg1f - arg2f
+else                                         dif = arg1v - arg2v
+ 
+if      (dif < 0.0) k = -1
+else if (dif > 0.0) k =  1
+else                k =  0
+ 
+if (relat[k,ctype] == $no) i = $$maxargs + 1
+ 
+return
+end
+ 
+
+ 
+subroutine sleep (i)
+ 
+########################################################
+#$%
+#$% Purpose:   SLEEP processes a delay by isleep secs
+#$%
+#$% Called By: EXECU1
+#$%
+#$% Calls:     ECHOH      ECHOR      DELAY
+#$%
+#$% Tables:    None
+#$%
+#$% Date:      DEC 80
+#$%
+#$% Author:    Dana Wills
+#$%
+########################################################
+ 
+TESTcommon
+character       xchar
+integer     I, isleep, dummy
+ 
+#$% if in the range
+if (i < $$maxargs) i = i + 1                    # get <#>
+     #$% if sleep value integer or decimal, get isleep value
+     if (argt[i] == $$integer) isleep = argv[i]
+else if (argt[i] == $$decimal) isleep = argf[i]
+else
+   {
+    #$% display warning message to user
+    call echov ("Invalid Sleep value.")
+    call echor
+ 
+    i = $$maxargs + 1
+    return
+   }
+ 
+#$% make initial isleep value a minimum of 1 sec
+isleep = isleep * 1000
+ 
+#$% do not let isleep go below 50 millisecs
+if (isleep < 50) isleep = 50
+ 
+call ttynow (xchar,dummy)                       # flush TTY output
+if      (xchar == $control(k)) return
+else if (xchar == $control(c)) return
+ 
+#$% delay by isleep secs
+call delay (isleep)
+ 
+return
+end
+ 
+
+ 
+subroutine newcmd (i)
+ 
+########################################################
+#$%
+#$% Purpose:   NEWCMD (Dummy Routine)
+#$%
+#$% Called By: EXECU1
+#$%
+#$% Calls:     ECHOH      ECHOR      RAN
+#$%
+#$% Tables:    None
+#$%
+#$% Date:      DEC 80
+#$%
+#$% Author:    Dana Wills
+#$%
+########################################################
+ 
+TESTcommon
+integer     I
+real        R
+real        random
+i = $$maxargs + 1
+ 
+call echov ("This command is not active.  ")
+ 
+#$% get random number
+r = random(seed)
+ 
+#$% display message according to random number
+if      (r <= .20) call echov ("Have a nice day.")
+else if (r <= .40) call echov ("I hope things go better for you.")
+else if (r <= .60) call echov ("Don't come back too soon!")
+else if (r <= .80) call echov ("Let's call it a day.")
+else               call echov ("Don't blow it again!")
+ 
+call echor
+ 
+return
+end
+ 
+
+ 
+subroutine btexit (i)
+ 
+########################################################
+#$%
+#$% Purpose:   BTEXIT exits from the blackboard test.
+#$%
+#$% Called By: EXECU1
+#$%
+#$% Calls:     ECHO       ECHOH      ECHOR
+#$%            HLTSLF     IBBADD     RAN
+#$%
+#$% Tables:    None
+#$%
+#$% Date:      DEC 80
+#$%
+#$% Author:    Dana Wills
+#$%
+########################################################
+ 
+TESTcommon
+integer     I, idummy, ibbadd, rc, c_munmap
+real        R, random
+ 
+i = $$maxargs + 1
+ 
+BBUnMap
+ 
+call echor
+ 
+#$% get random number
+r = random(seed)
+ 
+#$% display message according to random number
+if      (r <= .20) call echov ("Have a nice day.")
+else if (r <= .40) call echov ("I hope things go better for you.")
+else if (r <= .60) call echov ("Don't come back too soon!")
+else if (r <= .80) call echov ("Let's call it a day.")
+else               call echov ("Don't blow it again!")
+ 
+call echor
+ 
+#call echo ("XTEE")                            # close typescript file
+ 
+bbunmap
+ 
+call hltslf
+ 
+call exit
+#BBMap
+ 
+idummy = ibbadd(cadd+5120)                    # force remap of current page
+ 
+return
+end
+ 
+
+ 
+subroutine dsphlp (i)
+ 
+########################################################
+#$%
+#$% Purpose:   DSPHLP is called to display HELP
+#$%            information to user.
+#$%
+#$% Called By: EXECU1
+#$%
+#$% Calls:     ECHOH      ECHOR
+#$%
+#$% Tables:    None
+#$%
+#$% Date:      DEC 80
+#$%
+#$% Author:    Dana Wills
+#$%
+########################################################
+ 
+#todo: alternate way to display help info
+#TESTcommon
+ 
+#character       command[ARB]
+#descriptor      descrip
+#integer         I, KK, karg, rc, rc2,
+#                lib$spawn, sys$waitfr
+ 
+#karg = argv[i + 1]
+#i = $$maxargs + 1
+ 
+#$% move string and msg into command array
+#kk = 0
+#call smovv ("HELP/PROMPT @NWISS BBTEST COMMAND ",command,kk)
+ 
+#rc = lib$spawn (descrip(command,kk),            # command to execute
+#                ,                               # input file (use default)
+#                ,                               # output file (use default)
+#                CLI$M_NOCLISYM,                 # (dropped CLI$M_NOWAIT)
+#                ,                               # process name
+#                ,                               # process id
+#                rc2,                            # completion status
+#                0,                              # completion event flag nbr
+#                ,                               # completion AST
+#                )                               # completion AST parameter
+#
+#$% wait until help process is completed
+#rc = sys$waitfr (%%val(0))
+ 
+return
+end
+ 
+ 
+ 
+subroutine dspext
+ 
+##############################################################
+#$%
+#$% Purpose:   DSPEXT is called to display an extra line.
+#$%
+#$% Called By: EXECU1     VUEMEM
+#$%
+#$% Calls:     DISP       ECHOR
+#$%
+#$% Tables:    None
+#$%
+#$% Date:      DEC 80
+#$%
+#$% Author:    Dana Wills
+#$%
+##############################################################
+ 
+TESTcommon
+ 
+#$% display current memory address
+call disp
+call echor
+ 
+return
+end
+ 
+ 
+ 
+ 
+subroutine vuemem(i)            # view memory
+ 
+####################################################
+#$%
+#$% Purpose:   VUEMEM displays N words of the
+#$%            blackboard.
+#$%
+#$% Called By: EXECU1
+#$%
+#$% Calls:     DSPEXT     ECHOH      ECHOR
+#$%
+#$% Tables:    None
+#$%
+#$% Date:      DEC 80
+#$%
+#$% Author:    Dana Wills
+#$%
+####################################################
+ 
+TESTcommon
+integer     I, K, M
+ 
+#$% if args within range
+if (i < $$maxargs) i = i + 1
+ 
+     #$% if the argument is an integer or a dsecimal
+     if (argt[i] == $$integer)  k = argv[i]
+else if (argt[i] == $$decimal)  k = argf[i]
+else
+   {
+    #$% send warning message to user and return
+    call echov ("Improper Value for VIEW.  Line Rejected!")
+    call echor
+    i = $$maxargs + 1
+    return
+   }
+ 
+for (m=1; m <= iabs(k); m=m+1)
+   {
+    #$% display extra line and address
+    call dspext
+    cadd = cadd + 1
+   }
+ 
+return
+end
+ 
+ 
+ 
+subroutine putval(i)            # update data base
+ 
+##########################################################
+#$%
+#$% Purpose:   PUTVAL processes PUT command, updates
+#$%            a blackboard value.
+#$%
+#$% Called By: EXECU1
+#$%
+#$% Calls:     ECHOH      ECHOR      IBBADD
+#$%
+#$% Tables:    None
+#$%
+#$% Date:      DEC 80
+#$%
+#$% Author:    Dana Wills
+#$%
+##########################################################
+ 
+TESTcommon
+integer     I, ibbadd
+ 
+#$% if arguments within range
+if (i < $$maxargs) i = i + 1
+ 
+     #$% test for argument type and put value to blackboard
+     if (argt[i] == $$integer) ibb[ibbadd(cadd)] = argv[i]
+else if (argt[i] == $$octal  ) ibb[ibbadd(cadd)] = argv[i]
+else if (argt[i] == $$ascii  ) ibb[ibbadd(cadd)] = argv[i]
+else if (argt[i] == $$decimal) fbb[ibbadd(cadd)] = argf[i]
+else
+   {
+    #$% send error message to user
+    call echov ("Improper Value for PUT.  Line Rejected!")
+    call echor
+    i = $$maxargs + 1
+   }
+ 
+return
+end
+ 
+ 
+ 
+subroutine dspdeg(i)
+ 
+##########################################################
+#$%
+#$% Purpose:   DSPDEG displays a radian value in degrees/minutes
+#$%
+#$% Called By: EXECU1
+#$%
+#$% Calls:     ECHOH      ECHOR      ECHOR     ECHOI
+#$%
+#$% Tables:    None
+#$%
+#$% Date:      FEB 82
+#$%
+#$% Author:    Dana Wills
+#$%
+##########################################################
+ 
+TESTcommon
+character   dest[20]
+integer*2   hems
+integer     I, len2
+real        radian
+ 
+#$% if in range of vlues
+if (i < $$maxargs) i = i + 1
+ 
+     #$% if input value is an integer or decimal, set radian value
+     if (argt[i] == $$integer) radian = argv[i]
+else if (argt[i] == $$decimal) radian = argf[i]
+else
+   {
+    #$% display error message to user
+    call echov ("Improper Value for DEGREES.  Line Rejected!")
+    call echor
+    i = $$maxargs + 1
+   }
+ 
+#$% display radian value
+call echof (radian,6)
+call echov (" Radians == ")
+ 
+hems = %'^v'%
+ 
+len2 = 0
+call smovlls (radian,"^v",dest,len2)
+ 
+call echoh (dest,len2)
+call echov ("  (^=N/E,v=S/W)")
+call echor
+ 
+return
+end
+ 
+
+ 
+subroutine putzer(i)
+ 
+########################################################
+#$%
+#$% Purpose:   PUTZER processes zero command, sets
+#$%            area of blackboard to zero.
+#$%
+#$% Called By: EXECU1
+#$%
+#$% Calls:     ECHOH      ECHOR      IBBADD
+#$%
+#$% Tables:    None
+#$%
+#$% Date:      DEC 80
+#$%
+#$% Author:    Dana Wills
+#$%
+########################################################
+ 
+TESTcommon
+integer     I, iqty, K, ibbadd
+ 
+#$% if arguments in valid range
+if (i < $$maxargs) i = i + 1
+ 
+     #$% if argument is integer or decimal, get iqty
+     if (argt[i] == $$integer) iqty = argv[i]
+else if (argt[i] == $$decimal) iqty = argf[i]
+else
+   {
+    #$% send error message to user
+    call echov ("Improper qty for ZERO.  Line Rejected!")
+    call echor
+    i = $$maxargs + 1
+   }
+ 
+for (k=0; k<iqty; k=k+1)
+   {
+    ibb[ibbadd(cadd+k)] = 0
+   }
+ 
+cadd = cadd + iqty
+ 
+return
+end
+ 
+
+ 
+subroutine putpat(i)
+ 
+########################################################
+#$%
+#$% Purpose:   PUTPAT processes FILL command, sets
+#$%            area of blackboard to value of current word.
+#$%
+#$% Called By: EXECU1
+#$%
+#$% Calls:     ECHOH      ECHOR      IBBADD
+#$%
+#$% Tables:    None
+#$%
+#$% Date:      Mar 96
+#$%
+#$% Author:    Dane Wills
+#$%
+########################################################
+ 
+TESTcommon
+integer     I, iqty, K, KK, ibbadd
+ 
+#$% if arguments in valid range
+if (i < $$maxargs) i = i + 1
+ 
+     #$% if argument is integer or decimal, get iqty
+     if (argt[i] == $$integer) iqty = argv[i]
+else if (argt[i] == $$decimal) iqty = argf[i]
+else
+   {
+    #$% send error message to user
+    call echov ("Improper qty for FILL.  Line Rejected!")
+    call echor
+    i = $$maxargs + 1
+   }
+ 
+for (k=1; k<=iqty; k=k+1)
+   {
+    kk = cadd + k
+    if (kk > $$BBMaxSize) kk = kk - $$BBMaxSize
+ 
+    ibb[ibbadd(kk)] = ibb[ibbadd(cadd)]
+   }
+ 
+cadd = cadd + iqty
+ 
+return
+end
+ 
+
+ 
+subroutine putbit(i)
+ 
+########################################################
+#$%
+#$% Purpose:   PUTBIT processes SET command, inserts
+#$%            bits into blackboard word.
+#$%
+#$% Called By: EXECU1
+#$%
+#$% Calls:     ECHOH      ECHOR      IDRESS
+#$%            IBBADD
+#$%
+#$% Tables:    None
+#$%
+#$% Date:      DEC 80
+#$%
+#$% Author:    Dana Wills
+#$%
+########################################################
+ 
+TESTcommon
+integer     I, nbit, lbit, ibbadd, ival
+ 
+#$% initialize values
+nbit = -1
+Lbit = -1
+ival = -1
+ 
+#$% if in valid range
+if (i < $$maxargs) i = i + 1                    # get <bits>
+     if (argt[i] == $$integer) nbit = argv[i]
+else if (argt[i] == $$octal  ) nbit = argv[i]
+else if (argt[i] == $$decimal) nbit = argf[i]
+else
+   {
+    #$% sent error message to user and return
+    call echov ("Improper <bits> for SET.  Line Rejected!")
+    call echor
+    i = $$maxargs + 1
+    return
+   }
+ 
+if (i < $$maxargs) i = i + 1                    # get <Lbit>
+     if (argt[i] == $$integer) lbit = argv[i]
+else if (argt[i] == $$octal  ) lbit = argv[i]
+else if (argt[i] == $$decimal) lbit = argf[i]
+else
+   {
+    #$% sent error message to user and return
+    call echov ("Improper <Lbit> for SET.  Line Rejected!")
+    call echor
+    i = $$maxargs + 1
+    return
+   }
+ 
+if (i < $$maxargs) i = i + 1                    # get <value>
+     if (argt[i] == $$integer) ival = argv[i]
+else if (argt[i] == $$octal  ) ival = argv[i]
+else if (argt[i] == $$decimal) ival = argf[i]
+else
+   {
+    #$% sent error message to user and return
+    call echov ("Improper <value> for SET.  Line Rejected!")
+    call echor
+    i = $$maxargs + 1
+    return
+   }
+ 
+$$insert (ival,ibb[ibbadd(cadd)],Lbit,mask[nbit])
+ 
+return
+end
+ 
+
+ 
+subroutine disbit(i)
+ 
+#######################################################
+#$%
+#$% Purpose:   DISBIT is called to display data
+#$%            base (bit field).
+#$%
+#$% Called By: EXECU1
+#$%
+#$% Calls:     ECHOH      ECHOI      ECHOR
+#$%            IBBADD
+#$%
+#$% Tables:    None
+#$%
+#$% Date:      DEC 80
+#$%
+#$% Author:    Dana Wills
+#$%
+#######################################################
+ 
+TESTcommon
+integer     I, nbit, lbit, ibbadd, k, ival, kval
+ 
+#$% initialize values
+nbit = -1
+Lbit = -1
+ 
+if (i < $$maxargs) i = i + 1                    # get <bits>
+     if (argt[i] == $$integer) nbit = argv[i]
+else if (argt[i] == $$octal  ) nbit = argv[i]
+else if (argt[i] == $$decimal) nbit = argf[i]
+ 
+if (nbit < 1 | nbit > 31)
+   {
+    #$% display error message to user and return
+    call echov ("Improper <bits> for SHOW.  Line Rejected!")
+    call echor
+    i = $$maxargs + 1
+    return
+   }
+ 
+if (i < $$maxargs) i = i + 1                    # get <Lbit>
+     if (argt[i] == $$integer) lbit = argv[i]
+else if (argt[i] == $$octal  ) lbit = argv[i]
+else if (argt[i] == $$decimal) lbit = argf[i]
+ 
+if (Lbit < 0 | Lbit > 32)
+   {
+    #$% display error message to user and return
+    call echov ("Improper <Lbit> for SHOW. Line Rejected!")
+    call echor
+    i = $$maxargs + 1
+    return
+   }
+ 
+k = ibb[ibbadd(cadd)]
+ival = $$extract(k,Lbit,mask[nbit])
+ 
+#$% display value
+call echov ("Value =")
+call echoi (ival)
+ 
+# following line causes g77 compiler error
+#kval = $$extract_x(k,Lbit,mask[nbit])
+ 
+#if (ival != kval)
+#    {
+#    call echov ("   (or ")
+#    call echoi (kval)
+#    call echov (" if signed)")
+#    }
+ 
+call echor
+ 
+return
+end
+ 
+
+ 
+subroutine snapshot (i)                 # save a copy of the blackboard
+#
+#       Use the first argument as the file name to be saved to.
+#
+#       Format of the command is:
+#
+#               SNAPSHOT <name>
+#
+#
+ 
+TESTcommon
+character       fname[ARB]
+vmschar*ARB     fname_v
+equivalence     (fname, fname_v)
+ 
+integer         I, iname, k, ios, ifile
+ 
+iname = 0
+ 
+if (i < $$maxargs) i = i + 1
+ 
+if (argt[i] == $$ascii   |
+    argt[i] == $$name     )                     # get <name>
+    {
+    k = 0
+    call smovhn(args[1,i],80,fname,k)
+    call smov (EOS,fname,k)
+ 
+    #____________________________________________________________
+    # Open the save file     #?????????????????
+ 
+    open (unit    = $LFC$Save,
+          file    =  fname_v,
+          access  = "direct",
+          form    = "unformatted",
+          status  = "new",
+          recl    =  128,
+#          dispose = "save",
+          iostat  =  ios,
+          %err%   =  9100)
+ 
+    ifile = $lfc$Save
+ 
+    goto 6000
+        {
+        9100
+        ifile = ERR
+ 
+        k = k - 1
+        call smovv (", Open Error #",fname,k)
+        call smovi (ios,fname,k)
+        call smov (EOS,fname,k)
+        }
+    6000 continue
+ 
+    #____________________________________________________________
+ 
+    }
+else
+    {
+    k = 0
+    call smovv ("Not-Specified",fname,k)
+    call smov  (EOS,                fname,k)
+ 
+    ifile = ERR
+    }
+ 
+if (ifile == ERR)
+    {
+    call echov ("Improper <name> (")
+    call echohn(fname,ARB)
+    call echov (") for SNAPSHOT.  Line Rejected!")
+    call echor
+    i = $$maxargs + 1
+    return
+    }
+ 
+#____________________________________________________________
+# make the SAVE
+ 
+ 
+call writem             # found in WGMDSAVE.rat
+ 
+#____________________________________________________________
+# All Done
+ 
+call echor
+ 
+close (unit=$lfc$save)
+ 
+return
+end
+ 
+
+ 
+subroutine loaddef (i)            # load data base defines (bit field)
+ 
+#######################################################################
+#       load a file of defines.
+#
+#       Use the first argument as the file name to be loaded.
+#
+#       Format of the command is:
+#
+#               LOAD <name>
+#
+#           or:
+#
+#               LOAD *
+#
+#
+#       the first line in the file must contain the table name,
+#       followed by many lines of:
+#
+#               DEFine ,<word> <name> <nbits> <Lbit>
+#
+#######################################################################
+ 
+TESTcommon
+character       fname[ARB], line[200], work[50]
+integer         open_, getwrd, getlin, ctoi
+integer         I, nbit, lbit, iword, iname, K, ifile, n, m, iadd,
+                ibase, KK, JJ, J, klen, ipnt, ilen
+integer         lenbuf, trnlog_v, equal_hv, lcomp_v
+character       tbuf[ARB]
+EXTERNAL close        # jb  Declared for ALPHA      5/28/98
+ 
+nbit  = -1
+Lbit  = -1
+iword = -1
+iname = 0
+ 
+if (i < $$maxargs) i = i + 1
+ 
+lenbuf = trnlog_v("TST_BASE",tbuf)        # Translate Input TTY to device name
+if (equal_hv(tbuf, "TST_BASE") == YES) lenbuf = 0
+ 
+if (argt[i] == $$ascii   |
+    argt[i] == $$name     )                     # get <name>
+    {
+    k = 0
+	if (lenbuf > 0)      				 # Directory for bb*.tst
+    	call smovh  (tbuf,lenbuf,fname,k)
+    call smovhn(args[1,i],80,fname,k)
+    call smov (EOS,fname,k)
+	call fold (fname)
+ 
+    ifile = open_ (fname,READ)
+    }
+else if (lcomp_v(args[1,i], "*")==0)
+    {
+    k = 0
+	if (lenbuf > 0)      				 # Directory for bb*.tst
+    	call smovh  (tbuf,lenbuf,fname,k)
+    call smovv  ("bb",fname,k)
+    call smovhn (ctbln,4, fname,k)
+    call smovv  (".tst",  fname,k)
+    call smov   (EOS,     fname,k)
+	call fold(fname)
+ 
+    ifile = open_ (fname,READ)
+    }
+else
+    {
+    k = 0
+    call smovv ("Not-Specified",fname,k)
+    call smov  (EOS,                fname,k)
+ 
+    ifile = ERR
+    }
+ 
+if (ifile == ERR)
+    {
+    call echov ("Improper <name> (")
+    call echohn(fname,ARB)
+    call echov (") for LOAD.  Line Rejected!")
+    call echor
+    i = $$maxargs + 1
+    return
+    }
+ 
+call getsub (n,m,iadd,ibase)            # get current tbl/word positions
+ 
+if (ctbl < 1 | ctbl > $$$$LastTable | m < 1 )
+   {
+    call echov ("Improper address for LOAD.  Line Rejected!")
+    call echor
+    i = $$maxargs + 1
+ 
+    call close (ifile)
+    return
+   }
+ 
+kk = getlin (line,ifile)
+ 
+call upper (line)
+ 
+jj = 0; call smovhn (ctbln,4,work,jj)
+ 
+for (j=1; j <= jj | j < kk; j=j+1)
+    {
+    if (work[j] == line[j]) next
+ 
+    call echov ("Mis-Match of Table name for LOAD.  Line Rejected!")
+    call echor
+    i = $$maxargs + 1
+ 
+    call close (ifile)
+    return
+    }
+ 
+for (kk = getlin (line,ifile); kk != EOF; kk = getlin (line,ifile))
+    {
+    #           DEFine ,<word> <name> <nbits> <Lbit>
+ 
+    # read past the comma
+ 
+    for (jj = 1; line[jj] != EOS; jj=jj+1)
+        {
+        if (line[jj] == $COMMA) break
+        }
+ 
+    if (jj < 5 | line[jj] != $COMMA)
+        {
+        call echov ('-')
+        next
+        }
+ 
+    jj = jj + 1
+ 
+#   call upper (line)
+ 
+    iword = ctoi (line,jj)
+    klen  = getwrd (line,jj,work)
+    nbit  = ctoi (line,jj)
+    lbit  = ctoi (line,jj)
+ 
+    m = iword
+ 
+    ############# the following could be a subroutine (for loaddef & defbit)
+ 
+    ipnt = $$LastName
+    for (k = 1; k <= $$LastName; k=k+1)
+       {
+        if (vars[$$vars_word,k] ^= 0) next
+        if (Lbit == 0 & nbit == 0) next
+        ipnt = k
+        break
+       }
+ 
+    vars[$$vars_tbl,ipnt] = ctbl
+    vars[$$vars_word,ipnt] = m
+    vars[$$vars_lbit,ipnt] = Lbit
+    vars[$$vars_bits,ipnt] = nbit
+ 
+    vars_name[ipnt] = " "
+    ilen = 0
+    call vmovhn (work,klen,vars_name[ipnt],ilen)
+ 
+    vars[$$vars_char,ipnt] = $no
+    if (vars_name[ipnt][ilen-1:ilen] == "$V")
+        vars[$$vars_char,ipnt] = $yes
+ 
+ 
+#  Progress bar not needed on fast linux box
+#    call tty_set_flush (0)
+#    call echov ('*')
+#    call tty_set_flush (NEWLINE)
+    }
+ 
+call echor
+ 
+call close (ifile)
+ 
+return
+end
+ 
+
+ 
+subroutine defbit(i)            # define data base (bit field)
+#
+#       define a bit field and associate it with:
+#
+#               a) a symbolic name (optional)
+#               b) a table (current table: UNT, VUE, or 0 if Constant)
+#               c) a word within a table (current word, or specific)
+#
+#       Formats are:
+#                                                   # defaults:   nbits lbit
+#               DEFine [,<word>] <name>                         #  32    0
+#               DEFine [,<word>] [<name>] <nbits>               #        0
+#               DEFine [,<word>] [<name>] <nbits> <Lbit>
+#
+ 
+ 
+########################################################
+#$%
+#$% Purpose:   DEFBIT is called to define data
+#$%            base (bit fields).
+#$%
+#$% Called By: EXECU1
+#$%
+#$% Calls:     ECHOH      ECHOR      GETSUB
+#$%
+#$% Tables:    None
+#$%
+#$% Date:      DEC 80
+#$%
+#$% Author:    Dana Wills
+#$%
+########################################################
+ 
+TESTcommon
+integer         I, nbit, lbit, iword, iname, n, m,
+                iadd, ibase, ipnt, K, ilen
+ 
+#$% initialize values
+nbit  = -1
+Lbit  = -1
+iword = -1
+iname = 0
+ 
+#$% if args invalid range
+if (i < $$maxargs) i = i + 1
+ 
+if (argt[i] == $$position)                      # get <word>
+   {
+    i = i + 1
+    if (argt[i] == $$integer & argv[i] > 0) iword = argv[i]
+    else
+        {
+        #$% display error message to user and return
+        call echov ("Improper <word> for DEFINE.  Line Rejected!")
+        call echor
+        i = $$maxargs + 1
+        return
+        }
+ 
+    i = i + 1
+   }
+ 
+if (argt[i] == $$table | argt[i] == $$name)     # get <name> or <bits>
+   {
+    iname = i
+ 
+    i = i + 1
+    if      (i       >= nargs    ) nbit = 32
+    else if (argt[i] == $$integer) nbit = argv[i]
+    else if (argt[i] == $$octal  ) nbit = argv[i]
+    else if (argt[i] == $$decimal) nbit = argf[i]
+   }
+else if (i       >= nargs    ) nbit = 32
+else if (argt[i] == $$integer) nbit = argv[i]
+else if (argt[i] == $$octal  ) nbit = argv[i]
+else if (argt[i] == $$decimal) nbit = argf[i]
+ 
+if (nbit < 1 | (nbit > 32 & nbit != 64))
+   {
+    #$% display error message to user and return
+    call echov ("Improper <bits> for DEFINE.  Line Rejected!")
+    call echor
+    i = $$maxargs + 1
+    return
+   }
+ 
+i = i + 1                                       # get <Lbit>
+if      (i       >= nargs    ) lbit = 0
+else if (argt[i] == $$integer) lbit = argv[i]
+else if (argt[i] == $$octal  ) lbit = argv[i]
+else if (argt[i] == $$decimal) lbit = argf[i]
+ 
+if (Lbit < 0 | Lbit > 31 | (Lbit != 0 & nbit == 64))
+   {
+    #$% display error message to user and return
+    call echov ("Improper <Lbit> for DEFINE.  Line Rejected!")
+    call echor
+    i = $$maxargs + 1
+    return
+   }
+ 
+call getsub (n,m,iadd,ibase)            # get current tbl/word positions
+ 
+if (ctbl < 0 | ctbl > $$$$LastTable | m < 1 )
+   {
+    #$% display error message to user and return
+    call echov ("Improper address for DEFINE.  Line Rejected!")
+    call echor
+    i = $$maxargs + 1
+    return
+   }
+ 
+if (iword > 0) m = iword
+ 
+ipnt = $$LastName
+for (k = 1; k <= $$LastName; k=k+1)
+   {
+    if (vars[$$vars_word,k] == 0) ipnt = k
+ 
+    if (vars[$$vars_tbl,k]  != ctbl) next
+    if (vars[$$vars_word,k]  != m   ) next
+    if (vars[$$vars_lbit,k] != Lbit) next
+ 
+    if (Lbit == 0 & vars[$$vars_bits,k] == 0) next
+ 
+    ipnt = k
+    break
+   }
+ 
+vars[$$vars_tbl,ipnt] = ctbl
+vars[$$vars_word,ipnt] = m
+vars[$$vars_lbit,ipnt] = Lbit
+vars[$$vars_bits,ipnt] = nbit
+vars_name[ipnt] = ""
+ 
+ilen = 0
+if (iname != 0) call vmovh (args[1,iname],30,vars_name[ipnt],ilen)
+ 
+vars[$$vars_char,ipnt] = $no
+if (vars_name[ipnt][ilen-1:ilen] == "$V")
+    vars[$$vars_char,ipnt] = $yes
+ 
+ 
+return
+end
+ 
+
+ 
+subroutine clrbit(i)
+ 
+########################################################
+#$%
+#$% Purpose:   CLRBIT is called to clear data base
+#$%            (bit field).
+#$%
+#$% Called By: EXECU1
+#$%
+#$% Calls:     ECHOH      ECHOR      GETSUB
+#$%
+#$% Tables:    None
+#$%
+#$% Date:      DEC 80
+#$%
+#$% Author:    Dana Wills
+#$%
+########################################################
+ 
+TESTcommon
+integer         I, itype, N, M, iadd, ibase, isys, ipnt, K
+ 
+#$% get type
+itype = argt[i]
+ 
+call getsub (n,m,iadd,ibase)            # get current tbl/word positions
+ 
+#$% if current table not valid
+if (ctbl < 0 | ctbl > $$$$LastTable | m < 1 )
+   {
+    #$% display error message to user and return
+    call echov ("Improper address for CLEAR.  Line Rejected!")
+    call echor
+    i = $$maxargs + 1
+    return
+   }
+ 
+#$% test to clear all bits
+if (ctbl == 0 & itype == $$tclear & argv[i+1] == 'ALL')
+   {
+    i=i+1
+    isys = -1
+   }
+else
+   {
+    isys = 0
+   }
+ 
+ipnt = $$LastName
+for (k = 1; k <= $$LastName; k=k+1)
+   {
+    if (vars[$$vars_tbl,k] != ctbl) next
+ 
+    if      (vars[$$vars_bits,k] == isys    ) next
+    else if (itype     == $$tclear) continue
+    else if (vars[$$vars_word,k] != m       ) next
+ 
+    #$% zero all bits
+    vars_name[k] = ""
+    vars[$$vars_word,k] = 0
+    vars[$$vars_tbl,k] = 0
+    vars[$$vars_bits,k] = 0
+    vars[$$vars_lbit,k] = 0
+    vars[$$vars_char,k] = 0
+   }
+ 
+ 
+return
+end
+ 
+
+ 
+subroutine incadd(i)
+ 
+########################################################
+#$%
+#$% Purpose:   INCADD is called to increment address
+#$%            by value.
+#$%
+#$% Called By: EXECU1
+#$%
+#$% Calls:     ECHOH      ECHOHN     ECHOR
+#$%
+#$% Tables:    None
+#$%
+#$% Date:      DEC 80
+#$%
+#$% Author:    Dana Wills
+#$%
+########################################################
+ 
+TESTcommon
+integer         I
+ 
+#$% if in range
+if (i < $$maxargs) i = i + 1
+ 
+     #$% if argument is integer of decimal
+     if (argt[i] == $$integer) cadd = cadd + argv[i]
+else if (argt[i] == $$decimal) cadd = cadd + argf[i]
+else
+   {
+    #$% display error message
+    call echov ("Improper Value for INC (")
+    call echohn (args[1,i],30)
+    call echov (").  Line Rejected!")
+    call echor
+    i = $$maxargs + 1
+   }
+ 
+return
+end
+ 
+ 
+ 
+subroutine fndval(i)
+ 
+########################################################
+#$%
+#$% Purpose:   FNDVAL is called to find a value or
+#$%            string in the blackboard.
+#$%
+#$% Called By: EXECU1
+#$%
+#$% Calls:     ECHOH      ECHOR      IBBADD
+#$%
+#$% Tables:    None
+#$%
+#$% Date:      DEC 80
+#$%
+#$% Author:    Dana Wills
+#$%
+########################################################
+ 
+TESTcommon
+integer         I, ilo, ihi, inc, K, ibbadd
+ 
+if (argt[i] == $$findf)         # setup search pattern
+   {
+    ilo = cadd + 1
+    ihi = $$bbMaxsize
+    inc = +1
+   }
+#$% setup to reverse search
+else if (argt[i] == $$findr)
+   {
+    ilo = cadd - 1
+    ihi = 1
+    inc = -1
+   }
+#$% setup to search entire blackboard
+else
+   {
+    ilo = 1
+    ihi = $$bbMaxsize
+    inc = +1
+  }
+ 
+#$% test for maximum BB size
+if (ilo < 1) ilo = 1
+if (ilo > $$BBMaxSIZE) ilo = $$BBMaxSIZE
+if (ihi < 1) ihi = 1
+if (ihi > $$BBMaxSIZE) ihi = $$BBMaxSIZE
+ 
+if (i < $$maxargs) i = i + 1
+ 
+#$% if argument type is integer, octal, ASCII or decimal value
+if (argt[i] != $$integer &
+    argt[i] != $$octal   &
+    argt[i] != $$ascii   &
+    argt[i] != $$decimal  )
+   {
+    #$% display error message
+    call echov ("Improper Value for FIND.  Line Rejected!")
+    call echor
+    i = $$maxargs + 1
+    return
+   }
+ 
+#$% loop through BB and search for a value
+for (k = ilo; k != ihi; k = k + inc)
+   {
+    #$% test if value found in blackboard
+    if (ibb[ibbadd(k)] == argv[i])
+       {
+        cadd = k
+        call echov (" MATCH")
+        break
+       }
+   }
+ 
+#$% if value cannot be found in BB
+if (cadd != k)
+   {
+    #$% display error message
+    call echov (" No MATCH on '")
+    call echoh (argv[i],5)
+    call echov ("'.  Line Rejected!")
+    call echor
+    i = $$maxargs + 1
+   }
+ 
+return
+end
+ 
+ 
+ 
+subroutine tblinc(i)
+ 
+########################################################
+#$%
+#$% Purpose:   TBLINC decrements table entries.
+#$%
+#$% Called By: EXECU1
+#$%
+#$% Calls:     ECHOH      GETSUB     IGETAD
+#$%
+#$% Tables:    None
+#$%
+#$% Date:      DEC 80
+#$%
+#$% Author:    Dana Wills
+#$%
+########################################################
+ 
+TESTcommon
+integer         I, N, M, iadd, ibase, inc, igetad
+ 
+#$% get current tbl/word positions
+call getsub (n,m,iadd,ibase)
+ 
+#$% if value found
+if (ctbl != 0)
+   {
+    inc = m - 1
+ 
+         #$% set ctable
+         if (argt[i] == $$next) ctble = ctble + 1
+    else if (argt[i] == $$last) ctble = ctble - 1
+    else if (argt[i] == $$entry)
+       {
+        #$% if args not exceeded
+        if (i < $$maxargs) i = i + 1
+             #$% if args an integer or decimal
+             if (argt[i] == $$integer) ctble = argv[i]
+        else if (argt[i] == $$decimal) ctble = argf[i]
+       }
+    else          # == $$position
+       {
+        #$% if args not exceeded
+        if (i < $$maxargs) i = i + 1
+             #$% if args an integer or decimal
+             if (argt[i] == $$integer) inc = argv[i] - 1
+        else if (argt[i] == $$decimal) inc = argf[i] - 1
+       }
+ 
+    #$% set min for ctble
+    if (ctble <= 1) ctble = 1
+ 
+    if (tbl$Len < 0) call echov ("VLT ")
+ 
+    #$% get address
+    cadd = igetad(inc)
+   }
+else
+   {
+    continue
+ 
+   }
+ 
+return
+end
+ 
+
+ 
+ 
+define (acc$pointer,ipntr)
+define (shc$pointer,ipntr)          ## 3/20/89
+define (own$pointer,ipntr)
+define (ord$pointer,ipntr)
+define (rto$pointer,ipntr)
+define (pat$pointer,ipntr)
+define (mem$pointer,ipntr)
+ 
+integer function igetad (inc)
+ 
+#############################################################
+#$%
+#$% Purpose:   IGETAD determines entry and word addresses.
+#$%
+#$% Called By: FNDVAR     TBLINC
+#$%
+#$% Calls:     IBBADD
+#$%
+#$% Tables:    ACC        OWN
+#$%            ORD        PAT        MEM
+#$%
+#$% Date:      DEC 80
+#$%
+#$% Author:    Dana Wills
+#$%
+#############################################################
+ 
+TESTcommon
+integer         INC, loop, ipntr, ibbadd
+ 
+if (tbl$Len > 0)                        # fixed length entries
+   {
+    igetad = tbl$ABase + (ctble-1)*tbl$Len + inc
+    return
+   }
+ 
+igetad = tbl$ABase                       # variable length entries
+ 
+#$% loop through table entry and get address
+for (loop=1; loop < ctble; loop = loop + 1)
+   {
+    ipntr = ibbadd(igetad)
+    if (igetad > tbl$Last)   igetad = igetad + iabs(tbl$Len)
+    else if (ctbl == $$ACC)  igetad = igetad + ACC$entry
+    else if (ctbl == $$SHC)  igetad = igetad + SHC$entry
+    else if (ctbl == $$OWN)  igetad = igetad + OWN$entry
+    else if (ctbl == $$ORD)  igetad = igetad + ORD$entry
+    else if (ctbl == $$RTO)  igetad = igetad + RTO$entry
+    else if (ctbl == $$PAT)  igetad = igetad + PAT$entry
+    else if (ctbl == $$MEM)  igetad = igetad + MEM$entry
+    else                     igetad = igetad + iabs(tbl$Len)
+   }
+ 
+igetad = igetad + inc
+ 
+return
+end
+ 
+ 
+ 
+subroutine getsub (n,m,iadd,ibase )
+ 
+########################################################
+#$%
+#$% Purpose:   GETSUB determines entry and word
+#$%            addresses from cadd.
+#$%
+#$%            All arguments are generated
+#$%              N     = the entry number (slot)
+#$%              M     = the word in the entry (1...X words)
+#$%              iadd  = the word in the table
+#$%              ibase = the base address of the table (or Zero if not a table)
+#$%
+#$% Called By: CLRBIT     DEFBIT     DSPFLD
+#$%            DSPTBL     TBLINC
+#$%
+#$% Calls:     ECHO       SMOVHN     IBBADD
+#$%
+#$% Tables:    ACC        OWN
+#$%            ORD        PAT        MEM
+#$%
+#$% Date:      DEC 80
+#$%
+#$% Author:    Dana Wills
+#$%
+########################################################
+ 
+TESTcommon
+integer         N, M, iadd, ibase, ihold, name, ilast, ktbl,
+                jbase, jmax, jlen, ilen, K, ipntr, ibbadd, iinc
+ 
+#$% if not a valid entry
+if (Cfile == 2 | cadd < $$BB$begintables)
+   {
+    #$% set values and return
+    n = 1
+    m = cadd
+    iadd = cadd
+    ibase = 0
+    ctbl = 0
+    ctble = 1
+    ctblp = 0
+ 
+    return
+   }
+ 
+ihold = ctbl
+name = '???'
+ilast = 0
+ktbl = 1
+ 
+#$% if valid entry
+for (ctbl=1; ctbl <= $$$$LastTable; ctbl=ctbl+1)
+   {
+    jbase = tbl$ABase
+    if (cadd < jbase) next
+ 
+    jmax  = jbase + tbl$Size - 1
+    if (cadd <= jmax)
+       {
+        ibase = jbase
+ 
+        if (ctbl != ihold)
+           {
+            ctble=0
+            call echo ($aster)
+           }
+ 
+        name = tbl$Name
+        ktbl = ctbl
+        break
+       }
+ 
+    if (jbase > ilast)
+       {
+        ibase = jbase
+        ilast = jbase
+        ktbl = ctbl
+ 
+        name = $GREAT
+        jlen = 1
+        call smovhn (tbl$name,3,name,jlen)
+       }
+   }
+ 
+ctbl = ktbl
+ctbln = name
+ 
+iadd = cadd - ibase + 1
+ 
+if (tbl$Len >= 0)
+   {
+    ilen = tbl$Len
+    if (ilen < 1) ilen = 1
+    n = (iadd-1)/iLen
+    m = iadd - n * iLen
+    n = n + 1
+    return
+   }
+ 
+k = 0
+ 
+for (n=1; ; n = n + 1)
+   {
+    iadd = tbl$ABase + k
+    ipntr = ibbadd(iadd)
+ 
+    if (iadd > tbl$Last)    iinc = iabs(int(tbl$Len))
+    else if (ctbl == $$ACC) iinc = ACC$entry
+    else if (ctbl == $$SHC) iinc = SHC$entry
+    else if (ctbl == $$OWN) iinc = OWN$entry
+    else if (ctbl == $$ORD) iinc = ORD$entry
+    else if (ctbl == $$RTO) iinc = RTO$entry
+    else if (ctbl == $$PAT) iinc = PAT$entry
+    else if (ctbl == $$MEM) iinc = MEM$entry
+    else                    iinc = iabs(int(tbl$Len))
+ 
+    if (iinc == 0) iinc = 1
+    k = k + iinc
+ 
+    if (cadd >= iadd + iinc) next
+ 
+    m = cadd - iadd + 1
+    iadd = cadd - ibase + 1
+ 
+    break
+   }
+ 
+return
+end
+ 
+define (acc$pointer,kACC)
+define (own$pointer,kown)
+define (shc$pointer,kshc)      #  3/20/89
+define (ord$pointer,kord)
+define (rto$pointer,krto)
+define (pat$pointer,kpat)
+define (mem$pointer,kmem)
+ 
+
+ 
+subroutine scnset(name,k)
+ 
+########################################################
+#$%
+#$% Purpose:   SCNSET is called to search for a
+#$%            table name.
+#$%
+#$% Called By: FNDTBL     FNDVAR     GETARG
+#$%
+#$% Calls:     None
+#$%
+#$% Tables:    None
+#$%
+#$% Date:      DEC 80
+#$%
+#$% Author:    Dana Wills
+#$%
+########################################################
+ 
+TESTcommon
+integer         K, name
+ 
+#$% search through and get name
+for (k=1; k<= $$BB$lastptrset; k=k+1)
+   {
+    if (ibbp[$$ptrname,k] == name) return
+   }
+ 
+k = 0
+ 
+return
+end
+ 
+ 
+ 
+subroutine scnvar(name,len,k)
+ 
+########################################################
+#$%
+#$% Purpose:   SCNVAR is called to search for a
+#$%            variable name in define list.
+#$%
+#$% Called By: FNDVAR
+#$%
+#$% Calls:     IGBYTE
+#$%
+#$% Tables:    None
+#$%
+#$% Date:      DEC 80
+#$%
+#$% Author:    Dana Wills
+#$%
+########################################################
+ 
+TESTcommon
+ 
+LITERAL         name[6]
+character       cupper
+integer         I, K, N, khold, imax, ilen, len, ichar, igbyte
+ 
+#$% initialize values
+khold = 0
+imax = 0
+ilen = len
+ 
+#$% for each name entry
+for (k=1; k <= $$LastName; k=k+1)
+   {
+    #$% set flag
+    n= $yes
+    #$% for each character
+    for (i=1; i<=ilen; i=i+1)
+       {
+        #$% get each character
+        ichar = igbyte(name,i)
+        #$% if character is a space, set length to that value
+        if (ichar == $space) ilen = i
+ 
+        #$% if the upper case characters are not the same
+        if (cupper(ichar) != cupper(igbyte(%%ref(vars_name[k]),i)))
+           {
+            #$% if i exceeds the max
+            if (i>imax)
+               {
+                khold = k
+                imax = i
+               }
+            n = $no
+            break
+           }
+       }
+    if (n==$yes) return
+   }
+ 
+k=0
+if (imax > 5) k = - khold               # match on 5 characters
+ 
+return
+end
+ 
+ 
+ 
+subroutine fndvar(i)
+ 
+#############################################################
+#$%
+#$% Purpose:   FNDVAR is called to find a variable name.
+#$%
+#$% Called By: EXECU1     FNDTBL
+#$%
+#$% Calls:     ECHOH      EHCOHN     ECHOR
+#$%            IPBYTE     SCNSET     SCNVAR
+#$%            IGBYTE     IGETAD
+#$%
+#$% Tables:    None
+#$%
+#$% Date:      DEC 80
+#$%
+#$% Author:    Dana Wills
+#$%
+#############################################################
+ 
+TESTcommon
+ 
+literal set
+integer         I, kvar, J, igetad, name, m, ichar, igbyte, k, c1, c2
+ 
+call scnvar (args[1,i],30,kvar)         # check for variable name
+ 
+#$% if name found
+if (kvar != 0)
+   {
+    #$% get absolute value of variable position
+    j = iabs(kvar)
+ 
+    #$% if array empty
+    if (vars[$$vars_tbl,j] == 0)
+       {
+        #$% get address from from previous array position
+        cadd = vars[$$vars_word,j]
+       }
+    #$% else if variable found
+    else if (vars[$$vars_tbl,j] == ctbl)
+       {
+        #$% get address
+        cadd = igetad (vars[$$vars_word,j]-1)
+       }
+    else
+       {
+        ctbl = vars[$$vars_tbl,j]
+        ctble = 1
+        cadd = tbl$Abase + vars[$$vars_word,j] - 1
+       }
+ 
+    if (kvar > 0) return
+   }
+ 
+name = $BLANKI4                          #   No
+set = $BLANKLIT
+c1 = $space
+c2 = $space
+j = 0
+ 
+for (m=1; m<= 30; m=m+1)                # check for table/segment set name
+   {
+    ichar = igbyte(args[1,i],m)
+    if (ichar == $dollar)
+       {
+        j = 4
+        set = $BLANKLIT
+        c1 = $space
+        c2 = $space
+        next
+       }
+ 
+    j = j + 1
+ 
+    if (j < 5) call ipbyte (name,j,ichar)
+    else       call ipbyte (set,j-4,ichar)
+ 
+    if (j >= 10) break
+ 
+    if      (j == 6) c1 = ichar
+    else if (j == 7) c2 = ichar
+   }
+ 
+#$% match set and get m
+if      (set == 'ABASE') m = $$ptrBase
+else if (set == 'SIZE') m = $$ptrsize
+else if (set == 'USED') m = $$ptrUsed
+else if (set == 'NAME') m = $$ptrname
+else if (set == 'LEN') m = $$ptrlen
+#else if (set == 'SEG') m = $$ptrseg
+else if (set == 'BASE') m = $$ptrbase
+else if (set == 'LAST') m = $$ptrUsed
+else                     m = 0
+ 
+k = 0
+ 
+#$% if data found, search for table name
+if (m != 0) call scnset (name,k)
+ 
+#$% if table name found
+if (k != 0)
+   {
+    #$% get address
+    cadd = (k-1) * $$BB$ptrsetsize + $$BB$beginptrsets - 1 + m
+   }
+#else if (name == 'SEG' & c1 >= $dig1 & c1 <= $dig9)
+#   {
+#    n = c1 - $dig0
+#    if (c2 >= $dig0 & c2 <= $dig9) n = n*10 + c2 - $dig0
+#
+#    cadd = $$BeginSegSets + (n-1) * $$SegSetSize
+#   }
+ 
+#$% if variable not valid
+else if (kvar < 0)
+   {
+    #$% display error message
+    call echov (" (???) ")
+   }
+else
+   {
+    call echov ("Cannot find '")
+    call echohn (args[1,i],30)
+    call echov ("'.  Line Rejected!")
+    call echor
+    i = $$maxargs + 1
+   }
+ 
+return
+end
+ 
+ 
+ 
+subroutine fndtbl(i)
+ 
+##########################################################
+#$%
+#$% Purpose:   FNDTBL is called to find a table name.
+#$%
+#$% Called By: EXECU1
+#$%
+#$% Calls:     FNDVAR     SCNSET
+#$%
+#$% Tables:    ACD        SHD        SB
+#$%
+#$% Date:      DEC 80
+#$%
+#$% Author:    Dana Wills
+#$%
+##########################################################
+ 
+TESTcommon
+integer         I, K, name
+ 
+#$% get name
+name = argv[i]
+ 
+#$% search for name in table
+call scnset (name,k)
+ 
+#$% if name found
+if (k != 0)
+   {
+    #$% set values
+    ctbl = k
+    cadd = tbl$ABase
+    ctble= 1
+    ctbln= ibbp[$$ptrname,k]
+   }
+else
+   {
+    call fndvar (i)
+   }
+ 
+return
+end
+ 
+
+ 
+undefine read
+undefine write
+undefine err
+ 
+subroutine compbb(i)
+ 
+############################################################
+#$%
+#$% Purpose:   COMPBB is called to compare the data
+#$%            base with another file.
+#$%
+#$% Called By: EXECU1
+#$%
+#$% Calls:     DISP       DSPMEM     ECHO       ECHOH
+#$%            ECHOI      ECHOR      FCLOSF     FGTJFN
+#$%            FOPENF     FPMAP      TYPERR     IBBADD
+#$%
+#$% Tables:    None
+#$%
+#$% Date:      DEC 80
+#$%
+#$% Author:    Dana Wills
+#$%
+############################################################
+ 
+TESTcommon
+ 
+character       compnam[ARB]
+vmschar*ARB     compnam_v
+equivalence     (compnam, compnam_v)
+ 
+integer         info[128]
+integer         I, itype, iqty, ihold, icount, ierr, ilo, ihi,
+                ilen, ios, ixpage, npage, iword, ibbadd, khold
+ 
+data compnam[1]/EOS/
+ 
+#$% get type
+itype = argt[i]
+ 
+#$% if arg is in range
+if (i < $$maxargs) i = i + 1
+ 
+     #$% if args is an integer or decimal, set iqty
+     if (argt[i] == $$integer) iqty = argv[i]
+else if (argt[i] == $$decimal) iqty = argf[i]
+else                           iqty = 0
+ 
+#$% if not a dicimal or integer, display warning message and return
+if (iqty == 0)
+   {
+    call echov ("Improper qty for COMP.  Line Rejected!")
+    call echor
+    i = $$maxargs + 1
+    return
+   }
+#$% set values
+ihold = cadd
+icount = 0
+ierr = $yes
+ 
+ilo = cadd
+ihi = min0((cadd + iqty),$$BBMaxSize)
+ 
+#$% if type is compare blackboard
+if (itype == $$compBB)
+   {
+    #$% if name valid, close file
+    if (compnam[1] != 0) Close(unit=41)
+ 
+    if (i < $$maxargs) i = i + 1
+ 
+    ilen= 0
+ 
+    if (argt[i] == $$name) call smovhn(args[1,i],50,compnam,ilen)
+ 
+    call smov (0,compnam,ilen)
+ 
+    #$% if name not end of string
+    if (compnam[1] != EOS)
+      {
+       close (unit    = 41)
+ 
+       #$% open file
+       Open (unit    = 41,
+             file    = compnam_v,
+             access  = "direct",
+             form    = "unformatted",
+             status  = "old",
+             recl    = 128,
+#             dispose = "save",
+             iostat  = ios,
+             err     = 8000)
+      }
+ 
+   }
+#$% if name is file end of string
+if (compnam[1] == EOS)
+   {
+    #$% display warning message and return
+    call echov ("Filename not specified.  Line Rejected!")
+    call echor
+    i = $$maxargs + 1
+    return
+   }
+ 
+ixpage = -1
+ 
+#$% send message to user
+call echor
+call echov ("Starting compare with: ")
+call echoh (compnam,arb)
+call echov (", @ ")
+call echoi (cadd)
+ 
+#$% for each address
+for (cadd = ilo; cadd<ihi; cadd = cadd+1)
+   {
+    npage = (cadd-1) / 128 + 1
+ 
+    if (ixpage != npage)
+       {
+        ixpage = npage
+ 
+        #$% read file
+        read(41,rec=ixpage, iostat=ios, err=8200) info
+#       call FPMAP (XJFN,ixpage,ibb[512*6+1],1,1,xerr,$8000)
+       }
+ 
+#    iword = ibb[mod(cadd-1,512)+512*6+1]
+ 
+    iword = info[mod(cadd-1,128)+1]
+#   call fbin (xjfn,iword,xerr,$8000)
+ 
+    if (iword == ibb[ibbadd(cadd)]) next
+ 
+    icount = icount + 1
+ 
+    call echor
+    call disp                           # display name and current value
+ 
+    call echo ($tab)
+    call echov (" --> ")                # " has changed to"
+ 
+    khold = ibb[ibbadd(cadd)]           # save the bb value
+    ibb[ibbadd(cadd)] = iword           # fill in the value from the file
+ 
+    call dspmem                         # display the value
+ 
+    ibb[ibbadd(cadd)] = khold           # restore the original value
+  }
+ 
+cadd = cadd - 1
+ierr = $no
+ 
+##call FPMAP (-1,ixpage,ibb[512*6+1],1,1,xerr,$8000)
+ 
+goto 6000
+    {
+    #$% send error message
+    8000 call echor
+    call echor
+    call echov ("Cannot open the file: ")
+    ierr = $yes
+    }
+ 
+goto 6000
+    {
+    #$% send error message
+    8200 call echor
+    call echor
+    call echov ("Cannot read record # ")
+    call echoi (ixpage)
+    call echov (" of the file: ")
+    ierr = $yes
+    }
+6000
+ 
+#$% if error in reading file
+if (ierr == $yes)
+   {
+    call echoh (compnam,arb)
+    call echor
+    call typerr (ios)
+    call echor
+ 
+    i = $$maxargs + 1
+    compnam[1] = EOS
+   }
+ 
+#$% send info message to user
+call echor
+call echov ("Finished compare @ ")
+call echoi (cadd)
+call echov (" (")
+call echoi (icount)
+call echov (" differences)")
+call echor
+call echor
+ 
+cadd = ihold
+ 
+return
+end

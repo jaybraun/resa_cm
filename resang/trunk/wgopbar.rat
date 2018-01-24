@@ -1,0 +1,2336 @@
+#####                     File WGOPBAR.rat
+ 
+#####   version 3.1  dated-  7apr81
+###
+### mod to version 3.0          dated 19 feb 1981
+###
+### smn prog    module    comments
+### === ====    ======    =================================================
+### 002 rjw     obarr1    added code to set unt$HasBarrier$i flag
+###             ochaf0    added code to set unt$HasBarrier$i flag
+###
+#####   version 3.0  dated- 22dec80
+#$%
+#$% Modifed:  Susan Miller 6/18/99 (E2102)
+#$%           Replaced all the "dm2rad(int(" with "dms2rad(" so
+#$%           that barriers would be placed in the correct location
+ 
+# 
+ 
+#$%     MODULE                         UTILITY                     DATA
+#$%   SUBROUTINES                    SUBROUTINES                  TABLES
+#$%   ===========                    ===========                  ======
+#$%
+#$%     OBARR                          SEND                         ORD
+#$%     OBARR0                         RLL2RB                       UNT
+#$%     OBARR1                         ANGPI                        ACD
+#$%     OBARR2                                                      SOB
+#$%     UPDBAR
+#$%     DMZRAD                                                      ACC
+#$%     OCHAFF                                                      BOY
+#$%     OCHAF0                                                      ACC
+#$%     OCHAF1                                                      BAR
+#$%     FNDORD <WGORDP>
+#$%
+#$%
+#$%
+#$%   NOTES
+#$%   =====
+#$%
+#$%   1.  <FILENAME> INDICATES WHERE SUBROUTINE IS FOUND.
+#$%
+#$%   2.  UTILITY SUBROUTINES NOT SHOWN ON FLOWCHART.
+#$%
+#$%   3.  * INDICATES NO OTHER SUBROUTINES CALLED.
+#$%
+#$%
+#$%
+#$%   FLOWCHART FOR FILE OBARR
+#$%   ========================
+#$%
+#$%   EXEORD <WGORDP> - OBARR - FNDORD*
+#$%                           - OBARR0 - DMS2RAD*
+#$%                           - OBARR1 - DMS2RAD*
+#$%                           - OBARR2 - UPDBAR*
+#$%                                    - DMS2RAD*
+#$%                           - OCHAFF - OCHAF0*
+#$%                                    - OCHAF1*
+ 
+
+ 
+ include "bbctl.inc"                           #general
+ include "bbcode.inc"                          #      definitions
+ include "orders.inc"                          #player command definitions
+                                      #plus definitions for:
+ include "bbdeq.inc"
+ include "bbunt.inc"
+ include "bbacc.inc"                           #aircraft characteristics table
+ include "bbbar.inc"                           #barrier corners table
+ include "bbboy.inc"                           #buoy table
+ include "bbchf.inc"                           #jb Chaff table        8/8/90
+ include "bbesm.inc"                           #esm characteristics table
+ include "bbord.inc"                           #pending orders table
+ include "bbpim.inc"                           # jb PIM table    8/11/87
+ include "bbrad.inc"                           #radar characteristics table
+ include "bbsob.inc"                           #sonobuoy characteristics table
+ include "ascii.inc"
+ include "macros.inc"
+define (BBImplicit, Implicit None)             # MJC 6/21/2K (E2145 - Implicit None)
+Define ($FIVE65$code,3)         # jb Sonobuoy
+Define ($CONTAIN$code,2)        # jb    Barrier
+Define ($CHEVRON$code,-2)       # jb       Types
+Define ($LINE$code,1)           # jb            8/11/87
+ 
+
+Subroutine BarrierPIM(_         # jb                    8/87
+                UNT$POINTER,ORD$POINTER,IcruiseSPEED)
+ 
+####################################################################
+#$% Purpose: BarrierPIM sets up BBPIM-table slots for aircraft laying
+###  CHEVRON, FIVE65 and CONTAINment sonobuoy barriers.
+###
+#$% Called By: OBARR0
+###
+#$% Calls:      RRB2LL  RLL2RB  BLDCM   fcos    ang2pi
+###             GTUNT   wgoerr
+###
+#$% Tables:    PIM        UNT
+#$%
+#$% Date:      August 1987
+###
+#$% Author:    O. J. Bryant
+###     Notes:  See SBPREP (wgmdsnr); REMOVE and REMBOY (wgmdrem);
+###             RMORD and CANORD (wgop); UNTSTA (wgmdrin);
+###             INTCPT (wgmdmot); OCANCL (wgop); OCHPIM (wgoppim);
+###                     bbBOY.def..
+###     [and OBARR0,OBARR1,OBARR2,UPDBAR,Clear_OLDEST_boy (below)]
+### <<<>>> CANORD (wgop) - line 743??? - TO BE DETERMINED !!!...
+#$%
+#$% Modifed:  Susan Miller 6/18/99 (E2102)
+#$%           Replaced all the "dm2rad(int(" with "dms2rad(" so
+#$%           that barriers would be placed in the correct location
+#$%
+########################################################
+BBcommon
+ 
+BBDeclare  (UNT$View$I,
+            UNT$Pointer,
+            UNT$Name$C,
+            PIM$Pointer,
+            PIM$PTS$Index,
+            ORD$W02$C,
+            ORD$W05$C,
+            ORD$Pointer)                            # MJC 6/21/2K (E2145 - Implicit None)
+literal CSTRIP8,                                    # MJC 6/22/2K (E2145 - Implicit None)
+        ILEX
+integer MTSLOT,NORD,NARGS,ITPOS,NUMBARLINES,
+        I_SWITCH_1,NLEGS,MM,NBUOYS,ICRUISESPEED     # MJC 6/21/2K (E2145 - Implicit None)
+real    SPACNG,FCOS1,STRLENGTH5,SPLUS,DMS2RAD,
+        FCOS5,FCOSN,B63,FCOS2,BZERO,B_63,STRLENGTH,
+        QCOSLAT3,BNEAR,BFAR,RNG5,BRG,RNG2,SAVE,
+        SNTRLAT,SNTRLON,FCOSC,RNG,BRG2,RADIUS,
+        BRG3,BRG4,BRG5,FCSE                         # MJC 6/21/2K (E2145 - Implicit None)
+ 
+real    pimLAT[7], pimLON[7] # 5 for CHEV/CONT; 7 for FIVE65)
+real    length    # length of barrier
+ 
+unt$View$i = Xunt$View$i
+UNT$Name$C = xUNT$Name$C
+ 
+MTslot  = 0                     # Find empty PIM-table slot:
+for(PIM$Pointer$FIRST; PIM$Pointer$VALID; PIM$Pointer$Next)
+  {
+   If (xPIM$UNTindx$i == 0)
+    {
+     MTslot = PIM$Pointer$Index
+     BREAK      # PIM slot is available, and Pointer IS SET ...)
+    } # End if (xPIM$UNTindx$i == 0)
+   NEXT
+  }             # End FOR (PIM$Pointer$First..
+ 
+If (MTslot < 1)         # (No empty PIM slot available)
+    {
+    call wgoerr (unt$View$i,UNT$Name$C,nord,nargs,ilex,"Path table full.")
+    RETURN
+    }
+ 
+  # Else PIM Pointer is set:  commence setup of slot:
+ 
+PUTunt$PIMindx$i                (MTslot)        #               tables..
+iTPOS   = UNT$POINTER$INDEX
+PUTpim$UNTindx$i                (iTPOS)         # Cross-ref. UNT and PIM
+PUTpim$LegNumber$i (1)
+ 
+PUTpim$TimeStart$f      (game$time)
+ 
+#SPACNG = MAX0(int(XORD$w07$c),1)             #get spacing between buoys
+#iSPACE = SPACNG # Spacing betw. buoys AND betw. 5 and 6 lines
+#if (iSPACE < 1) iSPACE = 1
+#
+###  The following statement replaces the code directly above; it allows
+###  for spacing of sonobuoys closer than one nautical mile
+SPACNG = xORD$w07$c
+if (SPACNG < 0.1) SPACNG = 0.1   # The smallest spacing is one-tenth of
+                                 # a nautical mile, or approximately
+                                 # 200 yards
+ 
+# put Aircraft position into pimLAT[1] and pimLON[1] (3 cases):
+pimLAT[1] = xunt$ASSUMEdLatitude$F      # <<<>>> or TRUE???
+pimLON[1] = Xunt$ASSUMEdLongitude$F     # <<<>>> or TRUE???
+fCOS1 = COS(pimLAT[1])                  # DEW                  8/17/88
+ 
+ORD$w02$c = XORD$w02$c          # jb w02 vice w08              8/11/87
+if(ORD$w02$c      == $LEX$FIVE65$)  numBARlines = 3 #vice w08  8/11/87
+else if(ORD$w02$c == $LEX$CONTAIN$) numBARlines = 2 #vice w08  8/11/87
+else if(ORD$w02$c == $LEX$CHEVRON$) numBARlines =-2 #vice w08  8/11/87
+else numBARlines = 1    #  default to single-LINE barrier
+ 
+ORD$w05$c = XORD$w05$c                  # bearing input
+SWITCH (NumBARlines)                    #               8/10/87
+ {
+  case $FIVE65$code:                    # 3
+   {
+    Nlegs = 6                  # 1.11 ~ sqrt(1.23)
+    strlength5 = SPACNG * 4    #  Length of the 5-buoy lines,
+    SPlus = 1.11 * SPACNG      # Travel betw. 5 and 6 lines
+ 
+    pimLAT[5] = dms2rad(XORD$w03$c) # KINGPIN buoy posit
+    pimLON[5] = dms2rad(XORD$w04$c) # KINGPIN buoy posit
+    fCOS5 = COS(pimLAT[5])                # DEW 8/17/88
+ 
+    fCOSn = fCOS5
+    pimLAT[2] = pimLAT[5]       # Prepare to find starting-
+    pimLON[2] = pimLON[5]       #  point of the first string...
+    B63 = (63.435 + ORD$w05$c) * ($PI/180.) # Bearing of the
+                        # barrier lines, PLUS ~ 63 degrees
+    call RRB2LL(pimLAT[2],              # input & output (radians)
+                pimLON[2],              # input & output    "
+                SPlus,          # input (real) dist.
+                B63,            # input (real) bearing
+                0.0,            # input (-> TRUE bearings)
+                fCOSn)          # input & output
+    fCOS2 = fCOSn   # jb Save fCOS2 for COURSE (after SWITCH) 8/18/87
+ 
+    pimLAT[3] = pimLAT[2]       # Prepare to find ending-
+    pimLON[3] = pimLON[2]       #  point of the first string...
+    Bzero =ORD$w05$c *($PI/180.) # Bearing of the barrier lines
+    call RRB2LL(pimLAT[3],              # input & output (radians)
+                pimLON[3],              # input & output    "
+                strlength5,             # length of string
+                Bzero,          # input (real) bearing
+                0.0,            # input (-> TRUE bearings)
+                fCOSn)          # input & output
+ 
+    pimLAT[4] = pimLAT[3]       # Prepare to find ending-point
+    pimLON[4] = pimLON[3]       #  point of the middle string...
+    B_63 = (ORD$w05$c - 63.435) * ($PI/180.) # Bearing of the
+                        # barrier lines, MINUS ~ 63 degrees
+    call RRB2LL(pimLAT[4],              # input & output (radians)
+                pimLON[4],              # input & output    "
+                SPlus,          # input (real) dist.
+                B_63,           # input (real) bearing
+                0.0,            # input (-> TRUE bearings)
+                fCOSn)          # input & output
+ 
+ 
+    fCOSn = fCOS5
+    pimLAT[6] = pimLAT[5]       # Prepare to find starting-
+    pimLON[6] = pimLON[5]       #  point of the third string...
+    call RRB2LL(pimLAT[6],              # input & output (radians)
+                pimLON[6],              # input & output    "
+                SPlus,          # input (real) dist.
+                B_63,           # input (real) bearing
+                0.0,            # input (-> TRUE bearings)
+                fCOSn)          # input & output
+ 
+    pimLAT[7] = pimLAT[6]       # Prepare to find ending-
+    pimLON[7] = pimLON[6]       #  point of the third string...
+    call RRB2LL(pimLAT[7],              # input & output (radians)
+                pimLON[7],              # input & output    "
+                strlength5,             # length of string
+                Bzero,          # input (real) bearing
+                0.0,            # input (-> TRUE bearings)
+                fCOSn)          # input & output
+ 
+   }    # End of case $FIVE65$code
+ 
+  case $CHEVRON$code:                           # -2
+   {
+    Nlegs = 4                                   #       9/1/87
+    LENGTH = XORD$w08$c  # Ordered length of ONE of the 2 legs..
+    if(LENGTH < SPACNG) LENGTH = SPACNG #       9/1/87
+ 
+    nBUOYS = 1.0 + LENGTH/SPACNG #<<<>>> 1.0 or 0.5 or 1.5??? JOE!!!
+    strlength = (nBUOYS-1) * SPACNG # dist. KINGPIN to end <<<>>>JOE!!!
+ 
+    pimLAT[3] = dms2rad(XORD$w03$c) # KINGPIN buoy LAT
+    pimLON[3] = dms2rad(XORD$w04$c) # KINGPIN buoy LONG.
+    QcosLAT3  = COS(pimLAT[3]) #jb (for copying below) 9/1/87 8/17/88
+ 
+    pimLAT[2] = pimLAT[3]       # Prepare to find position of
+    pimLON[2] = pimLON[3]       #  one trailing end of CHEVRON
+    fCOS2 = QcosLAT3            # jb                    9/1/87
+    Bnear = (120. + ORD$w05$c) * ($PI/180.) # Bearing of the
+                        # barrier, PLUS 120 degrees
+    call ang2PI(Bnear)          #adjusted Bnear
+    call RRB2LL(pimLAT[2],              # input & output (radians)
+                pimLON[2],              # input & output    "
+                strlength,      # input (nBUOYS-1) * SPACNG
+                Bnear,          # input (real) bearing
+                0.0,            # input (-> TRUE bearings)
+                fCOS2)          # input & output        fCOS2 !!
+ 
+ 
+    pimLAT[5] = pimLAT[3] # Prepare to find position of the 9/1/87
+    pimLON[5] = pimLON[3] # OTHER trailing end of CHEVRON   9/1/87
+    fCOS5 = QcosLAT3                    # jb                9/1/87
+    Bfar = (ORD$w05$c - 120.) * ($PI/180.) # Bearing of the
+                        # barrier, MINUS 120 degrees
+    call ang2PI(Bfar)           #adjusted Bfar
+    call RRB2LL(pimLAT[5],              # input & output (radians)
+                pimLON[5],              # input & output    "
+                strlength,      # input (nBUOYS-1) * SPACNG
+                Bfar,           # input (real) bearing
+                0.0,            # input (-> TRUE bearings)
+                fCOS5)          # input & output        fCOS5 !!
+ 
+ 
+ 
+                # Find range from one trailing edge to aircraft:
+    call RLL2RB( _               #Rhumb line Lat/Lon to Rng/Bearing
+                   pimLAT[5],    #lat. of CHEVRON trail edge (input)
+                   pimLON[5],    #long.of CHEVRON trail edge (input)
+                   fCOS5,        #cos of lat. of trail edge (input)
+                   pimLAT[1],    # lat. of aircraft        (input)
+                   pimLON[1],    #long. of  aircraft       (input)
+                   fCOS1,        #cos(lat. of aircraft     (input)
+                   RNG5,         #rng  to aircraft         (output)
+                   brg)          #brg  to aircraft         (output)
+ 
+                # Find range to a/c from the OTHER trailing edge:
+    call RLL2RB( _               #Rhumb line Lat/Lon to Rng/Bearing
+                   pimLAT[2],    #lat. of CHEVRON trail edge (input)
+                   pimLON[2],    #long.of CHEVRON trail edge (input)
+                   fCOS2,        #cos of lat. of trail edge (input)
+                   pimLAT[1],    # lat. of aircraft        (input)
+                   pimLON[1],    #long. of  aircraft       (input)
+                   fCOS1,        #cos(lat. of aircraft     (input)
+                   RNG2,         #rng  to aircraft         (output)
+                   brg)          #brg  to aircraft         (output)
+ 
+    if(RNG5 < RNG2 + 11.)  # If the a/c is clearly closer to the OTHER
+     {          # CHEVRON trailing edge, reverse the 2 trailing edges..
+      save = pimLAT[2]
+      pimLAT[2] = pimLAT[5]     # Reverse the LATitudes;
+      pimLAT[5] = save
+ 
+      save = pimLON[2]          # Reverse the LONgitudes;
+      pimLON[2] = pimLON[5]
+      pimLON[5] = save
+                        # Revise brg of start of 2nd buoy string
+      Bfar  = Bnear     # from the KingPin buoy;        jb 9/2/87
+ 
+      save  = fCOS2             # and, reverse the lat-
+      fCOS2 = fCOS5             #       itude COSines..
+      fCOS5 = save
+     }
+ 
+ 
+    pimLAT[4] = pimLAT[3] # Prepare to find position of the  9/1/87
+    pimLON[4] = pimLON[3] # START of the 2nd String of buoys 9/1/87
+#    fCOS4 = QcosLAT3                                        9/2/87
+    call RRB2LL(pimLAT[4],              # input & output (radians)
+                pimLON[4],              # input & output    "
+                SPACNG,         # input (ONE space ONLY...)  9/1/87
+                Bfar,           # input (real) bearing
+                0.0,            # input (-> TRUE bearings)
+                QcosLAT3)       # input & output
+ 
+   }       # End of case $CHEVRON$code
+ 
+ 
+  case $CONTAIN$code:           # = 2
+   {
+    Nlegs = 4
+    strlength = SPACNG
+ 
+    SNTRLAT = dms2rad(XORD$w03$c)   # Lat. and Long. of
+    SNTRLON = dms2rad(XORD$w04$c)   #   case $CONTAIN$code
+ 
+    fCOSc = COS(SNTRLAT)    # Cosine of Latitude of datum point 8/17/88
+    call RLL2RB( _      # FIND BRG FRM DATUM TO A/C:
+                   SNTRLAT,     #lat. of datum (input)
+                   SNTRLON,     #long.of datum (input)
+                   fCOSc,       #cos (lat. of circle cntr (input)
+                   pimLAT[1],   # lat. of aircraft         (input)
+                   pimLON[1],   #long. of  aircraft        (input)
+                   fCOS1,       #COS(lat. of aircraft)     (input)
+                   rng,         #rng  to aircraft          (output)
+                   BRG2)        #BRG  TOward AIRCRAFT      (OUTPUT)
+    call ang2PI(BRG2)           #ADJUSTED brg TOWARD A/C
+ 
+ 
+# Note:  'radius' and bearings (from datum) below are computed
+#       (with respect to SPACNG) so that the two CONTAINMENT
+#       barriers just touch each other, with buoys SPACNG apart...
+ 
+# Set the Lat/Long of START of 1st String (2nd point in PIM):
+    fCOS2  = fCOSc
+#    radius = 2.236068 * ISPACE/4. # sqrt(5)*ISPACE/4  input 9/3/87
+    radius = SPACNG/1.414214            # input 9/8/87
+    pimLAT[2] = SNTRLAT
+    pimLON[2] = SNTRLON
+    call RRB2LL(pimLAT[2],              # input & output (radians)
+                pimLON[2],              # input & output    "
+                radius,         # input circle radius
+                BRG2,           # input brg fm center
+                0.0,            # input (-> TRUE bearings)
+                fCOS2)          # input & output
+ 
+# Set the Lat/Long of END of 1st String (3rd point in PIM):
+#    BRG3 =BRG2 -(126.87 * $PI/180.) # Brg from center to string end..
+    BRG3 =BRG2 - $PI/2. # Brg from center to string end..  9/10/87
+    call ang2PI(BRG3)           # (adjusted Brg)        /\ 9/3/87
+    fCOSn  = fCOSc
+    pimLAT[3] = SNTRLAT         #
+    pimLON[3] = SNTRLON         #
+    call RRB2LL(pimLAT[3],              # input & output (radians)
+                pimLON[3],              # input & output    "
+                radius,         # input circle radius
+                BRG3,           # input brg fm center
+                0.0,            # input (-> TRUE bearings)
+                fCOSn)          # input & output
+ 
+# Set the Lat/Long of START of 2nd String (4th point in PIM):
+    BRG4 = BRG2 + $PI           #                       9/1/87
+    call ang2PI(BRG4)           #adjusted BRG from a/c
+    fCOSn  = fCOSc
+    pimLAT[4] = SNTRLAT         #
+    pimLON[4] = SNTRLON         #
+    call RRB2LL(pimLAT[4],              # input & output (radians)
+                pimLON[4],              # input & output    "
+                radius,         # input circle radius
+                BRG4,           # input brg fm center
+                0.0,            # input (-> TRUE bearings)
+                fCOSn)          # input & output
+ 
+# Set the Lat/Long of END of 2nd String (5th point in PIM):
+#    BRG5 =BRG2 +(53.13 * $PI/180.) # Brg fm center to string end 9/3/87
+    BRG5 =BRG2 + $PI/2. # Brg fm center to string end 9/10/87
+    call ang2PI(BRG5)           #adjusted BRG5
+    fCOSn  = fCOSc
+    pimLAT[5] = SNTRLAT
+    pimLON[5] = SNTRLON
+    call RRB2LL(pimLAT[5],              # input & output (radians)
+                pimLON[5],              # input & output    "
+                radius,         # input circle radius
+                BRG5,           # input brg fm center
+                0.0,            # input (-> TRUE bearings)
+                fCOSn)          # input & output
+ 
+   }       # End of case $CONTAIN$code
+ }      # End SWITCH
+ 
+##---------------------------------------------------------------
+ # Additional actions COMMON to FIVE65/CONTAIN/CHEVRON barriers:
+ 
+    call RLL2RB( _               #Rhumb line Lat/Lon to Rng/Bearing
+                   pimLAT[1],    # lat. of aircraft        (input)
+                   pimLON[1],    # long. of  aircraft      (input)
+                   fCOS1,        # cos(lat. of aircraft)   (input)
+                   pimLAT[2],    #lat. of start of barrier (input)
+                   pimLON[2],    #long.of start of barrier (input)
+                   fCOS2,        # cos (lat. of start)     (input)
+                   RNG2,         # rng to barrier start    (output)
+                   FCSE)         # Course to barrier start (output)
+call ANG2PI(FCSE)                       # jb            8/18/87
+putUNT$OrderedCourse$f (FCSE)
+ 
+PUTpim$Nlegs$i  (Nlegs)
+ 
+## Insert Speed/Latitude/Longitude into the first [Nlegs +1] slots
+##                                      of the pim$PTS subtable:
+for( pim$PTS$index=1;pim$PTS$index <= nLegs +1;
+                     pim$PTS$index = pim$PTS$index + 1 )
+    {
+     if(pim$PTS$index == nLegs +1) mm=4 # jb            9/10/87
+     else mm=1                          # jb            9/10/87
+     PUTpim$PTS$delay$i(mm)             #<<<>>> jb      9/10/87
+     PUTpim$PTS$Speed$i    ( IcruiseSPEED)
+     PUTpim$PTS$Latitude$F ( pimLAT[pim$PTS$index] )
+     PUTpim$PTS$Longitude$F( pimLON[pim$PTS$index] )
+    }
+ 
+if (pim$last < pim$pointer)
+   {
+    pim$USED = pim$pointer$index * pim$entry
+   }
+PUTpim$modified$i ($YES)
+ 
+PUTunt$OrderedLatitude$F   ($PI)
+ 
+ 
+return
+end             # end of Subroutine BarrierPIM
+
+ 
+ Subroutine OBARR(NORD,           #process Order to lay Barrier
+                  ID,             #NORD = code for order
+                  UNT$POINTER)    #ID = id number of order (input)
+                                  #UNT$POINTER = addressee's unit pntr (input)
+ 
+######################################################
+ #$%
+ #$% Purpose:   OBARR processes barrier commands
+ #$%            to lay a barrier.
+ #$%
+ #$% Called By: EXEORD
+ #$%
+ #$% Calls:     FNDORD     OCHAFF     OBARR0
+ #$%            OBARR1     OBARR2
+ #$%
+ #$% Tables:    ORD
+ #$%
+ #$% Date:      APRIL 80
+ #$%
+ #$% Author:    Dana Wills
+ #$%
+ ######################################################
+ 
+ BBcommon
+ BBDeclare (ORD$Pointer,
+            ORD$Phase$I,
+            UNT$Pointer)                 # MJC 6/21/2K (E2145 - Implicit None)
+ integer ID,
+         NORD                            # MJC 6/21/2K (E2145 - Implicit None)
+ literal CSTRIP8                         # MJC 6/22/2K (E2145 - Implicit None)
+ 
+ call FNDORD(ID,ORD$POINTER)            #find pointer to this order
+ 
+ if (ORD$POINTER != 0)                  #unless order could not be found
+    {
+     #$% if first order is chaff barrier
+     if (xord$w01$c == $lex$chaff$)
+        {
+         #$% call to process chaff barrier orders
+         call ochaff(ord$pointer,unt$pointer)
+         return
+        }
+ 
+     ORD$PHASE$I = XORD$PHASE$I                 #get current phase
+ 
+     if (ORD$PHASE$I == 0)                      #if phase is 0
+         call OBARR0(ORD$POINTER,UNT$POINTER)   #process accordingly
+ 
+     else if (ORD$PHASE$I == 1)                 #if phase is 1
+         call OBARR1(ORD$POINTER,UNT$POINTER)   #process accordingly
+ 
+     else if (ORD$PHASE$I == 2)                 #if phase is 2
+         call OBARR2(ORD$POINTER,UNT$POINTER)   #process accordingly
+    }
+ 
+ return
+ end
+
+ 
+ Subroutine OBARR0(ORD$POINTER, #process Order to lay BARRier in phase 0
+                   UNT$POINTER) #ORD$POINTER = order table pointer (in)
+                                #UNT$POINTER = addressee's unit table pntr (in)
+ 
+ 
+######################################################
+ #$%
+ #$% Purpose:   OBARR0 validates barrier orders and
+ #$%            sends the aircraft to the latitude/
+ #$%            longitude starting point.
+ #$%
+ #$% Called By: OBARR
+ #$%
+ #$% Calls:     SEND
+ #$%            clear_maneuver_all
+ #$%
+ #$% Tables:    UNT        SOB
+ #$%            ORD        ACC
+ #$%
+ #$% Date:      APRIL 80
+ #$%
+ #$% Author:    Dana Wills
+ #$%
+ #$% Modified:  James Allen - 12/97 (E1370)
+ #$%            Added call to clear_maneuver_all and
+ #$%            removed clearing GuideIndex and MotionFlags.
+ #$%
+ #$%            Susan Miller - 7/98 (E1983)
+ #$%            Only call clear_maneuver_all if the unit
+ #$%            does not currently have barriers in the water.
+ #$%
+ #$%           Susan Miller 6/18/99 (E2102)
+ #$%           Replaced all the "dm2rad(int(" with "dms2rad(" so
+ #$%           that barriers would be placed in the correct location
+ ######################################################
+ 
+ BBcommon
+ BBDeclare (UNT$Pointer,
+            UNT$View$I,
+            ORD$Pointer,
+            DEQ$Pointer,
+            DEQ$Ident$I,
+            SOB$Pointer,
+            DEQ$Remaining$I,
+            ORD$Deqindx$I,
+            ACC$Pointer,
+            ORD$W06$C,
+            UNT$Name$C,
+            ORD$W02$C,
+            UNT$Orderedspeed$F,
+            UNT$Orderedlatitude$F,
+            UNT$Orderedlongitude$F)                         # MJC 6/21/2K (E2145 - Implicit None)
+ literal CSTRIP8                                            # MJC 6/22/2K (E2145 - Implicit None)
+ integer IUPI, litcmp,
+         KKLEN,
+         NUMBARLINES,
+         ICRUISESPEED                                       # MJC 6/21/2K (E2145 - Implicit None)
+ real DMS2RAD                                               # MJC 6/21/2K (E2145 - Implicit None)
+ 
+ logical INVAL
+ Character msg[ARB]
+ 
+### Begin ---------- tmt 08/17/08
+integer ExceedMAXlimit
+real NBOYS
+real lSPACNG
+real lLENGTH
+### End   ---------- tmt 08/17/08
+ 
+# String MSG1 '       has no        sonobuoys'
+# String MSG2 '      is not an aircraft - barrier command ignored'
+# String MSG3 '       has too few sonobuoys to lay FIVE65 barrier.'
+ 
+ 
+ INVAL = .true.                                 #init invalid-order flag
+ 
+ unt$NAME$C = Xunt$Name$C                       # jb            9/10/87
+ unt$VIEW$i = Xunt$View$i                       # jb            9/10/87
+ if (xunt$type$i == $air$code)                  #if aircraft
+    {
+     # If unit already has a barrier, do not allow unit to have multiple barriers
+ 
+     if (xUNT$HasBarrier$I == $yes | Xunt$status$i == $LayingBarrier$CODE)
+     {
+         kklen = 0
+         Call SMOVHN(unt$name$c,$$MaxLit,msg,kklen)
+         Call SMOVV(" already has barrier - barrier command ignored",msg,kklen)
+         call SEND_ (UNT$VIEW$I,                     #notify player no good
+                   0,
+                   kklen,
+                   MSG) # msg2
+         return
+     }
+     ORD$w06$c = XORD$w06$c                     # jb            8/4/87
+ 
+     iUPI = UNT$Pointer$index
+     for_DEQ_CHAIN (iUPI)
+        {
+         #$% get equipment ID
+         deq$ident$i = Xdeq$ident$i
+         if (xDeq$ident$i == $sonobuoy$code) #if sonobuoy
+            {
+             sob$pointer = xDeq$pntr$i   # characteristics pointer
+             Deq$remaining$i = xDeq$remaining$i
+             if (litcmp(xsob$type$c, ord$w06$c) == 0 &  # same as type ordered 8/4/87
+                 Deq$remaining$i > 0)       #   and supply not depleted
+                {
+                 ord$deqindx$i = Deq$pointer$Index
+                 putord$deqindx$i          # for reference in OBARR1 & OBARR2
+ 
+                 INVAL = .false.           #turn off invalid-order flag
+                 BREAK                          #once found, done
+                }
+            }                                   #end if sonobuoy
+        }                                       #end for each equipment
+ 
+     if (INVAL)                                 #if order invalid
+        {
+         kklen = 0
+         Call SMOVHN(unt$name$c,$$MaxLit,msg,kklen)
+         Call SMOVV(" has no ",msg,kklen)
+         Call SMOVHN(ORD$w06$c,$$MaxLit,msg,kklen)     #               8/4/87
+         Call SMOVV(" sonobuoys.",msg,kklen)
+ 
+         call SEND_ (UNT$VIEW$I,                 #notify originator of order
+                   0,
+                   kklen,
+                   MSG)
+        }
+    }                                           #end if aircraft
+ 
+ else                                           #if not aircraft
+    {
+     kklen = 0
+     Call SMOVHN(unt$name$c,$$MaxLit,msg,kklen)
+     Call SMOVV(" is not an aircraft - barrier command ignored",msg,kklen)
+     call SEND_ (UNT$VIEW$I,                     #notify player no good
+               0,
+               kklen,
+               MSG) # msg2
+    }
+ 
+ if (!INVAL)
+    {
+###----------------  CHEVRON/FIVE65/CONTAIN ------------------  8/87
+     ORD$w02$c = XORD$w02$c             # jb 8/4/87 # w02 vice w08 8/10/87
+     if(ORD$w02$c       == $LEX$FIVE65$) numBARlines = 3 #vice w08 8/10/87
+     else if(ORD$w02$c == $LEX$CONTAIN$) numBARlines = 2 #vice w08 8/10/87
+     else if(ORD$w02$c == $LEX$CHEVRON$) numBARlines =-2 #vice w08 8/10/87
+     else numBARlines = 1       #  default to single-LINE barrier
+ 
+     ### Begin --------------- tmt 08/17/08
+     ExceedMAXlimit = $NO
+     NBOYS = 0
+     lSPACNG = xORD$w07$c
+     lLENGTH = xORD$w08$c
+ 
+     if( xSOB$ActiveSonar$I == $YES ){                 # if active sonobuoys, check for exceeding max limit (8)
+        if( numBARLines == 3 ) ExceedMAXlimit = $YES   # FIVE65 barrier (16 sonobuoys)
+        if( numBARlines == 1 ){                        # single-LINE barrier;
+            if (lSPACNG < 0.1) NBOYS = 1.0             # calculate number of sonobuoys needed.
+            else               NBOYS = lLENGTH/lSPACNG + 1
+            if( NBOYS > 8.0 ) ExceedMAXlimit = $YES
+        }
+        if ( ExceedMAXlimit == $YES ){                 # if exceeding MAX limit, notify player.
+            kklen = 0
+            Call SMOVV("Exceeding maximum number of active sonobuoys allowed.",msg,kklen)
+            call SEND_ (UNT$VIEW$I,0,kklen,msg)
+            return
+        }
+     }
+     else {                                            # if passive sonobuoys, check for exceeding max limit (8)
+        if( numBARlines == 1 ){                        # single-LINE barrier;
+            if (lSPACNG < 0.1) NBOYS = 1.0             # calculate number of sonobuoys needed.
+            else               NBOYS = lLENGTH/lSPACNG + 1
+            if( NBOYS > 32.0 ) ExceedMAXlimit = $YES
+        }
+        if ( ExceedMAXlimit == $YES ){                 # if exceeding MAX limit, notify player.
+            kklen = 0
+            Call SMOVV("Exceeding maximum number of passive sonobuoys allowed.",msg,kklen)
+            call SEND_ (UNT$VIEW$I,0,kklen,msg)
+            return
+        }
+     }
+     ### End --------------- tmt 08/17/08
+ 
+     if( numBARlines == 3 & Deq$remaining$i < 16 )   # FIVE65 barrier
+      {
+       kklen = 0
+       Call SMOVHN(unt$name$c,$$MaxLit,msg,kklen)
+       Call SMOVV(" has too few sonobuoys to lay FIVE65 barrier.",msg,kklen)
+ 
+       call SEND_ (UNT$VIEW$I,     # notify player TOO FEW BUOYS
+               0,
+               kklen,
+               MSG) # msg3
+       RETURN
+      }
+###------------- end  CHEVRON/CONTAIN/FIVE65 ------------------ 8/5/87
+ 
+ 
+     # If unit already has a barrier in the water, don't cancel it.
+     if (xUNT$HasBarrier$I != $yes)    # SMM 5/98 (e1983)
+         call clear_maneuver_all (xORD$Code$I, xORD$Id$I,
+                                  xORD$View$I, UNT$Pointer)  # joa 12/97 (E1370)
+ 
+     ACC$POINTER = Xunt$accPNTR$I # plane's char pointer
+     unt$orderedspeed$f = xacc$cruisespeed$i
+ 
+###----------------  CHEVRON/FIVE65/CONTAIN ------------------  8/87
+     IcruiseSPEED = unt$orderedspeed$f  # For barrierPIM call   3/31/89
+     IF (numBARlines != 1)      # if NOT a SINGLE-LINE barrier..
+      {
+        call barrierPIM(_
+                UNT$POINTER,ORD$POINTER,IcruiseSPEED)
+      }
+     ELSE       # else set position for single-line barrier...
+      {
+###------------- end  CHEVRON / FIVE65 ------------------   8/5/87
+ 
+ 
+       UNT$orderedlatitude$f = dms2rad(XORD$w03$c)  #put starting point of
+       putUNT$orderedlatitude$F                   # barrier in UNT table
+                                                #  as ordered lat/lon
+       UNT$orderedlongitude$f = dms2rad(XORD$w04$c) #   so motion/maneuver
+       putUNT$orderedlongitude$f                  #    will send plane there
+ 
+      }                                 # jb            8/4/87
+ 
+     putUNT$orderedspeed$f      #       jb moved down           8/17/87
+     putunt$status$i ($LayingBarrier$CODE)
+     PUTUNT$RANGETONEXT$F (UNT$orderedspeed$f +5.0) # jb (Arbitrary) 8/28/91
+     PUTORD$PHASE$I     (1)
+    }
+ 
+ return
+ end        # End  OBARR0
+ 
+
+ 
+ Subroutine OBARR1(ORD$POINTER, #process Order to lay BARRier in phase 1
+                   UNT$POINTER) #ORD$POINTER = order table pointer (in)
+                                #UNT$POINTER = addressee's unit table pntr (in)
+ 
+ 
+######################################################
+#$%
+#$% Purpose:   OBARR1 executes barrier orders for
+#$%            the aircraft at the starting point
+#$%            of sonobuoy distribution.
+#$%
+#$% Called By: OBARR
+#$%
+#$% Calls:     SEND       DMS2RAD
+#$%
+#$% Tables:    UNT        SOB
+#$%            ORD        BOY
+#$%            ACC
+#$%
+#$% Date:      APRIL 80
+#$%
+#$% Author:    Dana Wills
+#$%
+#$% Modifed:  Susan Miller 6/18/99 (E2102)
+#$%           Replaced all the "dm2rad(int(" with "dms2rad(" so
+#$%           that barriers would be placed in the correct location
+######################################################
+ 
+BBcommon
+ BBDeclare (UNT$Pointer,
+            UNT$Pimindx$I,
+            UNT$Assumedlatitude$F,
+            UNT$Assumedlongitude$F,
+            UNT$Headingerror$F,
+            UNT$Orderedcourse$F,
+            UNT$Orderedspeed$F,
+            UNT$Orderedaltdepth$I,
+            UNT$Status$I,
+            UNT$Name$C)                             # MJC 6/22/2K (E2145 - Implicit None)
+ BBDeclare (ORD$W02$C,
+            ORD$Pointer,
+            ORD$Boyindx$I,
+            ORD$Phase$I,
+            PIM$Pointer,
+            PIM$PTS$Index,
+            DEQ$Pointer,
+            DEQ$Remaining$I,
+            ACC$Pointer,
+            ACC$Cruisespeed$I,
+            SOB$Pointer,
+            BOY2$Pointer)                           # MJC 6/21/2K (E2145 - Implicit None)
+ BBDeclare (BOY$Pointer,
+            BOY$Type$I,
+            BOY$Ownerindx$I,
+            BOY$Eqpntr$I,
+            BOY$Truedepth$I,
+            BOY$Birthtime$F,
+            BOY$Truelatitude$F,
+            BOY$Truelongitude$F,
+            BOY$Assumedlatitude$F,
+            BOY$Assumedlongitude$F)                 # MJC 6/21/2K (E2145 - Implicit None)
+ BBDeclare (BOY$Nextboy$I,
+            BOY$Nbrtolay$I,
+            BOY$Offset$I,
+            BOY$Killtime$F,
+            BOY$Costruelat$F,
+            BOY$Truedeltalat$F,
+            BOY$Truedeltalon$F,
+            BOY$Assumeddeltalat$F,
+            BOY$Assumeddeltalon$F)                  # MJC 6/22/2K (E2145 - Implicit None)
+ literal CSTRIP8                                    # MJC 6/22/2K (E2145 - Implicit None)
+ integer NUMBARLINES,
+         NTOLAY,
+         NEEDBUOYS,
+         LTOLAY,
+         NREQ,
+         ITOTBY,
+         IBUOY_COUNT,
+         ILAST,
+         NFOUND,
+         IOFFST,
+         IUNDEX,
+         GAME_DTG,
+         J,
+         MOREBUOYS,
+         ITIMLA,
+         I_SWITCH_1,
+         IWAKE,
+         IKILL,
+         LINESINBAR,
+         KKLEN,
+         MAX_BUOY,
+         MAX_BARRIER                                    # MJC 6/21/2K (E2145 - Implicit None)
+ real TESTLAT,
+      DMS2RAD,
+      TESTLON,
+      SPACNG,
+      FLTOLA,
+      ERRLAT,
+      ERRLON,
+      FCOS2,
+      PIMLAT3,
+      PIMLON3,
+      FCOS3,
+      RNG2,
+      TRUBRG,
+      ENDLAT,
+      FCOS4,
+      PIMLAT5,
+      PIMLON5,
+      FCOS5,
+      RNG4,
+      FCOS6,
+      PIMLAT7,
+      PIMLON7,
+      FCOS7,
+      RNG6,
+      FASBRG                                            # MJC 6/21/2K (E2145 - Implicit None)
+ 
+Literal Ctype           # jb                                    9/16/88
+integer Ty_Barrier                      ## tpa 5/24/83
+integer iBoySlots[3]    # jb - 1, 2 or 3 strings of buoys..     8/18/87
+ 
+integer*2 iBUOYS[12]    # jb -to compute 'offset' for ea.line:  8/10/87
+                        # jb - iBUOYS[6] thru [8] for CONTAIN;  8/10/87
+data iBUOYS/6*0,2,2,0,5,6,5/    # [9] thru [12] for FIVE65      8/10/87
+Character msg[ARB]
+real      length        # length of sonobuoy barrier
+real      timla, wake, bkt
+ 
+#String MSG3 '      cannot begin barrier - buoy table full - will keep trying  '
+#String MSG4 '      may exceed normal Max_BUOYs for this CHEVRON barrier '
+#String MSG5 '      abandoning multi-line barrier:  No PIM assigned..'
+#String MSG6 '      is exceeding maximum number of buoys, processing anyway... '
+ 
+if (game$time < order$minute)  return # Game$time for VTS - JFR 3/15/94
+ 
+unt$nAME$c = Xunt$nAME$c                    # jb               9/15/88
+ 
+##-------------------- FIVE65/CHEVRON/CONTAIN ----------------  8/5/87
+ORD$w02$c = XORD$w02$c         # jb    8/4/87  # w02  vice w08 8/10/87
+if (ORD$w02$c   == $LEX$FIVE65$)     numBARlines = 3 #vice w08 8/10/87
+else if (ORD$w02$c == $LEX$CONTAIN$) numBARlines = 2 #vice w08 8/10/87
+else if (ORD$w02$c == $LEX$CHEVRON$) numBARlines =-2 #vice w08 8/10/87
+else numBARlines = 1   #  default to single-line barrier
+ 
+LINESinBAR = ABS(numBARlines)  # jb NOTE! for looping/moved up 8/31/87
+if (LINESinBAR == $LINE$code)  # == 1 (Single-line barrier)
+    {
+    testLAT = DMS2RAD(XORD$w03$c)
+    testLON = DMS2RAD(XORD$w04$c)
+    }
+ELSE                           # NOT a single-line barrier     8/31/87
+    {
+    UNT$PIMindx$i = xUNT$PIMindx$i                       #       8/31/87
+    if(UNT$PIMindx$i == $NO)
+        {
+        kklen = 0
+        Call SMOVHN(unt$name$c,$$MaxLit,msg,kklen)
+        Call SMOVV(" abandoning multi-line barrier:  No PIM assigned..",msg,kklen)
+        call SEND_ (XUNT$VIEW$I,      # notify player
+                  0,                #  abandoning multi-line barrier
+                  kklen,            #  because PIM is missing       8/17/87
+                  MSG)
+        putord$phase$i (0)                 # abandon hope...       8/13/87
+        }
+    else         # Else the required PIM slot exists             8/31/87
+        {
+        PIM$Pointer$TO (UNT$PIMindx$i)
+        pim$PTS$index=2
+        testLAT = Xpim$PTS$Latitude$F
+        testLON = Xpim$PTS$Longitude$F
+        }
+    if (numBARlines == $FIVE65$code)     # = 3
+        {
+        NTOLAY = 16        # <<<>>>  (or 5???) 5-6-5 barrier
+        }
+    else if (numBARlines == $CONTAIN$code)       # = 2
+        {
+        NTOLAY = 4         # Total buoys in CONTAIN type barrier..
+        }
+    NEEDbuoys = NTOLAY   # jb -see below for CHEVRON and LINE-   8/13/87
+    }     # End   Else if NOT a single-line barrier, & PIM slot exists..
+ 
+# ?????
+# As of 5 Jun 91, the Spacing can be Floating point (0.1 miles ==> 100.0)
+# The distance may also be floating point.
+# THE FOLLOWING CODE NEEDS TO CHANGE (and maybe some above in another routine)
+# ?????
+ 
+# ISPACE = MAX0(int(XORD$w07$c),1) # get spacing between buoys   9/1/87
+#ISPACE = XORD$w07$c            # spacing - moved up - jb       8/7/87
+SPACNG = xORD$w07$c
+if (SPACNG < 0.1) SPACNG = 0.1
+ 
+UNT$ASSUMEDLATITUDE$F  = XUNT$ASSUMEDLATITUDE$F
+UNT$ASSUMEDLONGITUDE$F = XUNT$ASSUMEDLONGITUDE$F
+if (UNT$ASSUMEDLATITUDE$F  == testLAT &  #if plane has arrived
+    UNT$ASSUMEDLONGITUDE$F == testLON) # at barr start point
+##------------------end FIVE65/CONTAIN/CHEVRON ---------------- 8/87
+    {
+    Deq$Pointer$TO (xord$deqindx$i)   #retrieve saved equip index 4/13/89
+    Deq$remaining$i = xDeq$remaining$i   #get # of sonobuoys remaining
+ 
+    if (DEQ$REMAINING$I < 1)                #if none left
+        {
+        ORD$PHASE$I = 0                        #will cause deletion of order
+        putord$phase$i
+        }
+    else               # buoys not yet depleted...
+        {
+        SOB$Pointer = xDEQ$Pntr$I            ## set SOB pointer  tpa 5/23/83
+        if (xSOB$ActiveSonar$I == $YES)
+            {
+            Max_Buoy    = 4                     ## max act buoy per barr
+            Max_Barrier = 8                     ## max act buoy tot barr
+            Ty_Barrier  = $ActiveBarrier$Code
+            }
+        else
+            {
+            Max_Buoy    = 16                    ## max pas buoy p/barr
+            Max_Barrier = 32                    ## max pas buoy tot barr
+            Ty_Barrier  = $PassiveBarrier$Code
+            }
+                                #    = 1          = -2
+        if (numBARlines < 2)    # Single-line OR CHEVRON barrier 9/22/87
+            {
+            LENGTH = XORD$w08$c   # jb - w08 vice w02; moved up   9/8/87
+            if (numBARlines != $LINE$code)        # = -2          8/12/87
+                {
+                if(LENGTH < SPACNG) LENGTH = SPACNG         #       9/1/87
+ 
+                nTOLAY = 1.0 + LENGTH/SPACNG                #       9/15/87
+                if (nTOLAY < 2)
+                    {
+                    nTOLAY = 2                        # 2 vice 1      9/2/87
+                    LENGTH = SPACNG                   # jb            9/15/87
+                    }
+                LTOLAY = SPACNG*(NTOLAY -1) #
+ 
+                NREQ =  2 * nTOLAY - 1              # jb            9/2/87
+                NEEDbuoys = NREQ                    # jb            8/13/87
+
+                if(NREQ > deq$remaining$i)
+                    {
+        			ORD$PHASE$I = 0                        #will cause deletion of order
+        			putord$phase$i
+                    kklen = 0
+                    Call SMOVHN(unt$name$c,$$MaxLit,msg,kklen)
+                    Call SMOVV(" has insufficient sonobuoys for this CHEVRON barrier",
+                                  msg,kklen)
+ 
+                    call SEND_ (XUNT$VIEW$I,   # notify player
+                               0,       #  that IN THIS CASE, Max_Buoy
+                               kklen,      #  count may be disregarded (e.g.,
+                               MSG)    #  msg4 more than 4 in active barrier)
+                    }
+                if(NREQ > Max_BUOY)
+                    {
+                    kklen = 0
+                    Call SMOVHN(unt$name$c,$$MaxLit,msg,kklen)
+                    Call SMOVV(" may exceed normal Max_BUOYs for this CHEVRON barrier",
+                                  msg,kklen)
+ 
+                    call SEND_ (XUNT$VIEW$I,   # notify player
+                               0,       #  that IN THIS CASE, Max_Buoy
+                               kklen,      #  count may be disregarded (e.g.,
+                               MSG)    #  msg4 more than 4 in active barrier)
+                    }
+                        # (See below for LTOLAY...)
+                }    # End this is a CHEVRON barrier..
+ 
+            Else  # This is a single-LINE barrier..
+                {
+                if (SPACNG < 0.1) NREQ = 1             #if spacing < 0.1, 1 buoy
+                else            NREQ = LENGTH/SPACNG + 1 #compute # of buoys
+ 
+                NTOLAY = MIN0(NREQ,DEQ$REMAINING$I,Max_Buoy) #to lay 3/31/89
+                LTOLAY = SPACNG*(NTOLAY -1) #
+                NEEDbuoys = NTOLAY                  # jb            8/13/87
+                }
+            FLTOLA = FLOAT(LTOLAY)
+            }
+ 
+        itotby = 0                              ## clear counter
+        call Total_Buoys (UNT$Pointer, Ty_Barrier, itotby)      ## tpa 5/24/83
+        ibuoy_count = itotby + NEEDbuoys ## jb current + needed buoys 8/13/87
+ 
+        while (ibuoy_count > Max_Barrier)       ## while count > max allowed
+            {
+            ilast = ibuoy_count                 ## Save current number of buoys
+ 
+            call Clear_Oldest_BOY (_
+                UNT$Pointer, Ty_Barrier, ibuoy_count, ORD$POINTER) # 8/12/87
+ 
+            if (ilast == ibuoy_count)           ## If it did not change.....
+                {
+                kklen = 0
+                Call SMOVHN(unt$name$c,$$MaxLit,msg,kklen)
+                Call SMOVV(" is exceeding maximum number of buoys, processing anyway... ",
+                            msg,kklen)
+                call SEND_ (1,0,kklen,MSG) # msg6
+                break
+                }
+            }
+ 
+        nFOUND = 0      # jb initlz # of empty BOY slots found  8/5/87
+        for (BOY$POINTER$FIRST;BOY$POINTER$VALID;BOY$POINTER$NEXT)
+            {                                   # find empty slot(s)
+            if (XBOY$TYPE$I == $NULL$CODE)           #  in buoy table
+                {
+                nFOUND = nFOUND +1
+                iBoySlots[nFOUND] = BOY$Pointer
+ 
+                #$% if pointer out of range, reset table limits    9/22/88:
+                if (!boy$pointer$ok) boy$last$to (boy$pointer +boy$entry -1)
+ 
+                if (nFOUND == LINESinBAR)       BREAK
+                }
+            }
+ 
+        if (nFOUND < LINESinBAR) #jb Not enough slot(s)...      8/5/87
+            {
+            kklen = 0
+            Call SMOVHN(unt$name$c,$$MaxLit,msg,kklen)
+            Call SMOVV(" cannot begin barrier - buoy table full - will keep trying",
+                         msg,kklen)
+ 
+            call SEND_ (XUNT$VIEW$I,             #notify player
+                       0,                       #     (but order will
+                       kklen,                      #      remain so that
+                       MSG)   # msg3                 #      automatic re-try
+                                                #      will occur)
+            }
+        else            # else slot(s) available..
+            {
+            ioffst = 0
+            iundex = unt$pointer$index
+ 
+            ## Find offset subtotal attributable to existing slots:
+            for (boy2$pointer$first;boy2$pointer$ok;boy2$pointer$next)
+                {
+                #$% if boy2 owner index matches boy1 owner index AND boy2
+                #$%                    buoy type is active or passive
+                if (xboy2$ownerindx$i == iundex           &
+                    (xboy2$type$i == $activebarrier$code |
+                     xboy2$type$i == $passivebarrier$code))
+                    {
+                     #$% set offset as the higher between compared values
+                     ioffst = max0(xboy2$offset$i+xboy2$nbrbuoys$i,ioffst)
+                    }
+                }
+ 
+            SOB$POINTER = XDEQ$PNTR$I # sonobuoy chrc pointer
+###________________________________________________________________________
+ 
+            Ctype = Xsob$TYPE$c                        # jb 9/15/88
+ 
+            CALL ECHOR                                 # jb 9/15/88
+            CALL ECHOv ('#')                            # jb 9/15/88
+            CALL ECHOIz (Game_DTG(game$time),6)        # jb 9/15/88
+            CALL ECHOv   (' ')                          # jb 9/15/88
+            CALL ECHOI  (NEEDbuoys)                    # jb 9/15/88
+            CALL ECHOv   (' SBUO ')                   # jb 9/15/88
+            CALL ECHOv  ("BEING DROPPED AS BARRIER BY ") #9/16/88
+            CALL ECHOHN (unt$nAME$c,$$MaxLit)		        # jb 9/15/88
+            CALL ECHOv   (' / ')                      # jb 9/15/88
+            CALL ECHOH  (Ctype,8)                      # jb 9/16/88
+###________________________________________________________________________
+            if (XSOB$ACTIVESONAR$I == $YES)      #    entry
+                BOY$TYPE$I = $ACTIVEBARRIER$CODE
+            else
+                boy$type$i = $passivebarrier$code
+ 
+            ACC$POINTER = Xunt$accPNTR$I  #set plane's char pointer 3/31/89
+            ACC$CRUISESPEED$I = XACC$CRUISESPEED$I  #get plane's cruise speed
+ 
+            BOY$OWNERindx$I = UNT$POINTER$index  #build
+            BOY$EQPNTR$I = SOB$POINTER           #  buoy table
+            BOY$TRUEDEPTH$I = 300                      #       1/18/84
+ 
+            boy$BirthTime$f = game$time + 2.
+ 
+            Boy2$Pointer =  iBoySlots[1]       #store BOY pointer 8/19/87
+            ORD$BOYINDX$I = Boy2$Pointer$Index #  in order,       8/19/87
+            PUTORD$BOYINDX$I                   # for future reference
+ 
+            boy$truelatitude$f    = xUNT$truelatitude$f  # (For single-
+            boy$truelongitude$f   = xUNT$truelongitude$f  # lines and for
+            boy$assumedlatitude$f = UNT$assumedlatitude$f  # CASE j=0,
+            boy$assumedlongitude$f= UNT$assumedlongitude$f  # below..
+ 
+            errlat = Boy$TrueLatitude$f - Boy$AssumedLatitude$f # 8/10/87
+            errlon =Boy$TrueLongitude$f -Boy$AssumedLongitude$f # 8/10/87
+            ## note:    assumedlxx =true_lxx - errlxx
+ 
+ 
+            #$% for EACH LINE of buoys:
+            for(j =0; j<= nFOUND -1; j = j +1)
+                {
+                BOY$Pointer = iBoySlots[j +1]
+ 
+                PUTBOY$OWNERindx$I
+                PUTBOY$EQPNTR$I
+                putboy$type$i
+                call assign_unique_boy_name (boy$pointer) # needs owner and type
+                PUTBOY$TRUEDEPTH$I
+ 
+                PUTboy$LINEseq$I  ( j +1 )               # jb    8/11/87
+                PUTboy$NBRlines$i ( LINESinBAR )         # jb    8/11/87
+                if( j < nFOUND -1)             # jb (-1 vice -2) 8/27/87
+                    {
+                    Boy2$Pointer =  iBoySlots[j +2] # jb 2 vice 1  8/31/87
+                    BOY$NEXTboy$I  = Boy2$Pointer$Index    # jb    8/27/87
+                    PUTBOY$NEXTboy$I                       # jb    8/27/87
+                    }
+                UNT$HEADINGERROR$F = XUNT$HEADINGERROR$F
+ 
+                If(LINESinBAR > 1)  # if FIVE65/CONTAIN/CHEVRON  8/11/87
+                    {
+                    if(numBARlines == $CHEVRON$code)
+                        {
+                        if (j < 1)   MoreBuoys = 0           # jb    9/3/87
+                        else
+                            {
+                            MoreBuoys = NTOLAY                 # jb    9/3/87
+                            NTOLAY = NTOLAY - 1                # jb    9/3/87
+                            }
+                        }
+                    else           # (FIVE65 or CONTAIN barrier)
+                        {
+                        MoreBuoys = iBUOYS[3*LINESinBAR + j]
+                        ntolay =    iBUOYS[3*LINESinBAR + j +1]
+                        }
+ 
+                    LTOLAY = (NTOLAY -1) * SPACNG  # jb    9/3/87
+                    FLTOLA = FLOAT(LTOLAY)
+                    # Time to lay barrier in minutes
+                    TIMLA =1.4 + 60.*FLTOLA/ACC$CRUISESPEED$I
+                    # special processing for 60 second time step to match resa59
+                    # since the right hand side of equationm for TIMLA
+                    # is the same in RESA59 but ITIMLA is integer so
+                    # resa59 converts to integer
+                    if (time$step == 1.0)    # JFR 3/22/94 - for VTS ( 1 minute test )
+                       {
+                        Itimla = int(timla)   # JFR 3/22/94 - for VTS
+                        TIMLA = float(ITIMLA) # JFR 3/22/94 - for VTS
+                       }
+ 
+                    boy$offset$i = ioffst + MoreBuoys
+                    ioffst = boy$offset$i
+ 
+                    SWITCH (j)             # jb                    8/10/87
+                        {
+                        Case 0:      # FIVE65/CONTAIN/CHEVRON ( 1st Line )
+                            {
+                            fCOS2 = COS(TESTlat)            # jb        8/17/88
+ 
+                            pim$PTS$index = 3
+                            pimLAT3 = Xpim$PTS$Latitude$F
+                            pimLON3 = Xpim$PTS$Longitude$F
+                            fCOS3   = COS(pimLAT3)            # jb        8/17/88
+ 
+                            call RLL2RB( _ #Rhumb Lat/Lon to Rng/Bearing
+                                        TESTlat,  #buoy-line start lat. (input)
+                                        TESTLON,  #buoy-line start lon. (input)
+                                        fCOS2,    #cos(buoy-line start lat) (input)
+                                        pimLAT3,  #buoy-line end lat. (input)
+                                        pimLON3,  #buoy-line end lon. (input)
+                                        fCOS3,      #cos(lat. )    (input)
+                                        RNG2,       #rng           (output)
+                                        TRUBRG)     #brg  to aircraft      (output)
+ 
+                            call ang2PI(TRUBRG)
+ 
+                            ENDLAT = pimLAT3
+ 
+                            wake = TIMLA/2.
+                            if (time$step == 1.0)    # JFR 3/22/94 - for VTS ( 1 minute test )
+                               {
+                                IWAKE= int((timla/2.)+ 0.5) # JFR 3/22/94 - for VTS
+                                WAKE = float(IWAKE) # JFR 3/22/94 - for VTS
+                               }
+ 
+                            if(wake < 2.) wake = 2.
+                            boy$BirthTime$f = game$time + wake #jb 9/10/87
+                            }      # End Case 0..
+                        Case 1:      # CHEVRON/FIVE65/CONTAIN ( 2nd Line )
+                            {
+                            pim$PTS$index = 4
+                            boy$truelatitude$f = Xpim$PTS$Latitude$F
+                            boy$truelongitude$f  = Xpim$PTS$Longitude$F
+                            fCOS4   = COS(boy$truelatitude$f)    # jb    8/17/88
+ 
+                            pim$PTS$index = 5
+                            pimLAT5 = Xpim$PTS$Latitude$F
+                            pimLON5 = Xpim$PTS$Longitude$F
+                            fCOS5   = COS(pimLAT5)                # jb    8/17/88
+ 
+                            boy$assumedlatitude$f =boy$truelatitude$f -errlat
+                            boy$assumedlongitude$f= boy$truelongitude$f -errlon
+ 
+                            call RLL2RB( _ #Rhumb Lat/Lon to Rng/Bearing
+                                boy$truelatitude$f,  #buoy-line start lat.(input)
+                                boy$truelongitude$f,  #buoy-line start lon. (input)
+                                fCOS4, #cos(buoy-line start lat)(input)
+                                pimLAT5,  #buoy-line end lat. (input)
+                                pimLON5,  #buoy-line end lon. (input)
+                                fCOS5,      #cos(lat.)     (input)
+                                RNG4,       #rng           (OUTPUT)
+                                TRUBRG)     # brg          (OUTPUT)
+                            call ang2PI(TRUBRG)
+ 
+                            ENDLAT = pimLAT5
+ 
+                            wake = 1.0 + 1.5*TIMLA
+                            if (time$step == 1.0)    # JFR 3/22/94 - for VTS ( 1 minute test )
+                               {
+                                IWAKE= int(1.0 + (1.5*timla)) # JFR 3/22/94 - for VTS
+                                WAKE = float(IWAKE) # JFR 3/22/94 - for VTS
+                               }
+ 
+                            if (wake < 5.) wake = 5.           #       9/18/87
+                            boy$BirthTime$f = game$time + wake
+                            }      # End Case 1
+                        Case 2:      # FIVE65 only...        ( 3rd Line )
+                            {
+                            pim$PTS$index = 6
+                            boy$truelatitude$f  = Xpim$PTS$Latitude$F
+                            boy$truelongitude$f = Xpim$PTS$Longitude$F
+                            fCOS6   = COS(boy$truelatitude$f)    # jb    8/17/88
+ 
+                            pim$PTS$index = 7
+                            pimLAT7 = Xpim$PTS$Latitude$F
+                            pimLON7 = Xpim$PTS$Longitude$F
+                            fCOS7   = COS(pimLAT7)                # jb    8/17/88
+ 
+                            boy$assumedlatitude$f = boy$truelatitude$f -errlat
+                            boy$assumedlongitude$f= boy$truelongitude$f -errlon
+ 
+                            call RLL2RB( _ #Rhumb Lat/Lon to Rng/Bearing
+                                boy$truelatitude$f,  #buoy-line start lat. (input)
+                                boy$truelongitude$f,  #buoy-line start lon. (input)
+                                fCOS6,    #cos(buoy-line start lat) (input)
+                                pimLAT7,  #buoy-line end lat. (input)
+                                pimLON7,  #buoy-line end lon. (input)
+                                fCOS7,      #cos(lat.)     (input)
+                                RNG6,       #rng           (OUTPUT)
+                                TRUBRG)     # brg          (OUTPUT)
+                            call ang2PI(TRUBRG)
+ 
+                            ENDLAT = pimLAT7
+ 
+                            wake =1.5 + 3.0*TIMLA
+                            if (time$step == 1.0)    # JFR 3/22/94 - for VTS ( 1 minute test )
+                               {
+                                IWAKE= int(1.5 + (3.0*timla)) # JFR 3/22/94 - for VTS
+                                WAKE = float(IWAKE) # JFR 3/22/94 - for VTS
+                               }
+ 
+                            if(wake < 8.) wake = 8.
+                            boy$BirthTime$f = game$time + wake
+                            }      # End Case 2..
+ 
+                        }     # End SWITCH
+ 
+                    FASBRG = TRUBRG + unt$HEADINGERROR$F   # jb    3/31/89
+                    call ang2PI(FASBRG)                    # jb    8/10/87
+                    }  # End for multiple lines of buoys
+                else     # else for single line of buoys..
+                    {
+                    boy$offset$i = ioffst
+ 
+                    FLTOLA = FLOAT(LTOLAY)
+                    TIMLA = 60.0*FLTOLA/ACC$CRUISESPEED$I
+ 
+                    FASBRG = XORD$w05$c *($PI/180.) # assumed brg
+                    TRUBRG = FASBRG - unt$HEADINGERROR$F # true bearing 3/31/89
+                    call ang2PI(TRUBRG)
+                    ENDLAT = FLTOLA*COS(TRUBRG)*($PI/(180.*60.))+
+                             BOY$TRUELATITUDE$F
+                                         #true lat of end of barrier
+ 
+                    UNT$ORDEREDCOURSE$F = FASBRG           #fly desired course
+                    PUTUNT$ORDEREDCOURSE$F
+ 
+                    UNT$ORDEREDSPEED$F = ACC$CRUISESPEED$I #/2 use CRS    2/2/84
+                    PUTUNT$ORDEREDSPEED$F
+                    }       # End else for SINGLE line of buoys..
+ 
+                if(boy$offset$i >60) boy$offset$i =1 # jb Field limit 8/29/91
+                putboy$offset$i  # (If > 59, lcl$sonobuoyNBR$i is flaky..)
+ 
+                boy$nbrtolay$i = ntolay  #save total # of buoys to lay
+                putboy$nbrtolay$i                # before barrier done
+ 
+                putboy$truelatitude$f
+                putboy$truelongitude$f
+                putboy$assumedlatitude$f
+                putboy$assumedlongitude$f
+ 
+                putboy$BirthTime$f
+                putboy$On$i ($YES)      #  Need to check birth time
+                # jb killtime to depend on birthtime vice game min.     8/10/87
+                if (time$step == 1.0)      # JFR 3/21/94 ( 1 minute test )
+                   {
+                    ikill = int(timla/2.0)  # JFR 3/21/94
+                    bkt = float(ikill)      # JFR 3/21/94
+                    boy$KillTime$f = boy$BirthTime$f + bkt + float(xsob$buoylife$i) # JFR 11/4/93
+                   }
+                else                        # JFR 3/21/94
+                   {
+                    boy$KillTime$f = boy$BirthTime$f + timla/2.0 + float(xsob$buoylife$i) # JFR 11/4/93
+                   }
+                putboy$KillTime$f                        # jb    /\      8/18/87
+ 
+                #$% compute true & assumed posits of each buoy in the barrier
+                boy$costruelat$f = .5 * (COS(endlat)+xunt$costruelat$f)
+                # Note: for the last 2 legs, UNT$costruelat$f approximates
+                ##                            cos(pimLAT5) and cos(pimLAT7)
+                putboy$costruelat$f
+                boy$truedeltalat$f = spacng*COS(trubrg)*($pi/(180.*60.))
+                boy$truedeltalon$f = spacng*SIN(trubrg)*($pi/(180.*60.)) /_
+                                     boy$costruelat$f
+                boy$assumeddeltalat$f = spacng*COS(fasbrg)*($pi/(180.*60.))
+                boy$assumeddeltalon$f = spacng*SIN(fasbrg)*($pi/(180.*60.)) /_
+                                        boy$costruelat$f
+                #$% save the computed buoy positions
+                putboy$truedeltalat$f
+                putboy$truedeltalon$f
+                putboy$assumeddeltalat$f
+                putboy$assumeddeltalon$f
+                                                 #while laying barrier:
+##              UNT$STATUS$I = $PROCEEDING$CODE  #status proceeding
+##              PUTUNT$STATUS$I                  # jb Moved down 9/29/87
+ 
+                unt$ORDEREDALTDEPTH$I = 1000           #fly at 1000 feet
+                PUTunt$ORDEREDALTDEPTH$I
+ 
+                if (!BOY$POINTER$OK)                # if added to table beyond
+                    {                               # last non-zero entry
+                    BOY$POINTER$NEXT               #increase pointer to
+                    BOY$LAST$TO BOY$POINTER - 1    #   end of non-zero entries
+                    }
+                }      # End of FOR(j = 0; j <= nFOUND -1; j = j +1)
+ 
+            UNT$STATUS$I = $LayingBarrier$CODE # jb moved down 8/31/87
+            PUTUNT$STATUS$I                    # jb Moved down 9/29/87
+            ORD$PHASE$I = 2    #
+            PUTORD$PHASE$I     #
+            }   #end else room for entry
+        }   #end else buoys not depleted
+    }   # end if a/c has arrived at barrier start point
+ 
+return
+end        # End  OBARR1
+ 
+
+ 
+ Subroutine OBARR2(ORD$POINTER,  #process Order to lay BARRier in phase 2
+                   UNT$POINTER)  #ORD$POINTER = order table pointer (in)
+                                 #UNT$POINTER = addressee's unit tbl pntr (in)
+ 
+ 
+######################################################
+ #$%
+ #$% Purpose:   OBARR2 executes barrier orders con-
+ #$%            cerning size of barrier and total
+ #$%            numbers of sonobuoys laid during
+ #$%            game minute.
+ #$%
+ #$% Called By: OBARR
+ #$%
+ #$% Calls:     RLL2RB     UPDBAR     DMS2RAD
+ #$%
+ #$% Tables:    ORD        BOY
+ #$%            UNT
+ #$%
+ #$% Date:      APRIL 80
+ #$%
+ #$% Author:    Dana Wills
+ #$%
+ #$% Modifed:  Susan Miller 6/18/99 (E2102)
+ #$%           Replaced all the "dm2rad(int(" with "dms2rad(" so
+ #$%           that barriers would be placed in the correct location
+ ######################################################
+ 
+BBcommon
+BBDeclare (ORD$Pointer,
+           ORD$Phase$I,
+           ORD$W02$C,
+           UNT$Pointer,
+           UNT$Pimindx$I,
+           UNT$Hasbarrier$I,
+           UNT$Status$I,
+           UNT$Orderedspeed$F)                  # MJC 6/22/2K (E2145 - Implicit None)
+BBDeclare (BOY$Nextboy$I,
+           BOY$Pointer,
+           BOY$Nbrtolay$I,
+           BOY$Nbrbuoys$I,
+           BOY$Lineseq$I,
+           PIM$Pointer,
+           PIM$Legnumber$I,
+           PIM$Nlegs$I,
+           PIM$PTS$Index,
+           DEQ$Pointer,
+           DEQ$Remaining$I,
+           ACC$Pointer)                         # MJC 6/21/2K (E2145 - Implicit None)
+literal CSTRIP8                                 # MJC 6/22/2K (E2145 - Implicit None)
+integer NUMBARLINES,
+        LINESINBAR,
+        ICRS1,
+        ICRS2,
+        LASTLINE,
+        INOWSEQ,
+        IADV,
+        KK,
+        IMLAST,
+        I_SWITCH_1,
+        NLAID,
+        NADDL                                   # MJC 6/21/2K (E2145 - Implicit None)
+real SPACNG,
+     STLAT,
+     STLON,
+     DMS2RAD,
+     DIST,
+     BRG                                        # MJC 6/21/2K (E2145 - Implicit None)
+ 
+logical NEWFLG                         #flag indicating new BAR entry
+ 
+if (game$time < order$minute)  return # game$time for VTS - JFR 3/15/94
+ORD$w02$c = xORD$w02$c                          # jb            8/18/87
+if (ORD$w02$c      == $LEX$FIVE65$)  numBARlines = 3 #vice w08  8/10/87
+else if (ORD$w02$c == $LEX$CONTAIN$) numBARlines = 2 #vice w08  8/10/87
+else if (ORD$w02$c == $LEX$CHEVRON$) numBARlines =-2 #vice w08  8/10/87
+else numBARlines = 1    #  default to single-line barrier
+LINESinBAR = ABS(numBARlines)                   # jb            8/17/87
+ 
+BOY$POINTER$TO XORD$BOYINDX$I                   # jb Moved up   8/11/87
+if (!boy$pointer$ok)            # If boy pointer invalid
+ {
+  ORD$PHASE$I = 0               #cancel barrier order
+  PUTORD$PHASE$I
+  return                        #exit
+ }
+ 
+ 
+icrs1 = XUNT$ORDEREDCOURSE$F *(180/$pi) + 0.5  # Ordered crs, deg.(jb 3/13/89)
+icrs2 = XORD$w05$c + 0.5        #course in barrier command, in deg.     4/5/82
+ 
+if (icrs1 != icrs2 & LINESinBAR < 2)    #if ordered off course<<<>>>??? 8/17/87
+ {
+  ORD$PHASE$I = 0               #cancel barrier order
+  PUTORD$PHASE$I
+  return                        #exit
+ }
+ 
+PIM$LegNumber$i = 0                             #jb     8/19/87
+LastLine = $YES  # jb initl'z flag to NOT MORE PIM      8/19/87
+UNT$PIMindx$i = xUNT$PIMindx$i  # jb                    8/13/87
+Boy$LineSEQ$i = xBoy$LineSEQ$i                  # jb    8/19/87
+ 
+if (numBARlines != 1 & UNT$PIMindx$i != $NO)    # jb    8/19/87
+ {
+  PIM$Pointer$TO (UNT$PIMindx$i)        #
+  if(!PIM$Pointer$VALID)                #       (precaution)
+       putUNT$PIMindx$i ($NO)
+  else
+   {
+    PIM$Nlegs$i = XPIM$Nlegs$i          # jb                    8/19/87
+    PIM$LegNumber$i = xPIM$LegNumber$i
+    if (PIM$LegNumber$i < PIM$Nlegs$i) LastLine = $NO   # jb    8/19/87
+   }
+ 
+  iNOWseq = 1                   # ( default for Legs 2, 3... )  8/20/87
+  if (PIM$LegNumber$i == 4 |
+      PIM$LegNumber$i == 5 )     iNOWseq =2 # Leg 4 -> 2nd Line 9/1/87
+  else if (PIM$LegNumber$i == 6) iNOWseq =3 # FIVE65 only
+ 
+  iadv = iNOWseq - Boy$LineSEQ$i  # jb Advance BOY$Pointer?     9/18/87
+  for (kk = 1; kk <= iadv; kk = kk +1)          # jb            9/17/87
+   {
+    Boy$NEXTboy$i = xBoy$NEXTboy$i              # jb            9/17/87
+    BOY$POINTER$TO (Boy$NEXTboy$i)              # jb            9/17/87
+   }
+ 
+## Recognize that the FIRST (and 565 SECOND) line of buoys is COMPLETE:
+  if (PIM$LegNumber$i > 2 & mod(PIM$LegNumber$i,2) != 0 ) #     9/18/87
+   {
+    BOY$NBRbuoys$I = XBOY$NBRTOLAY$I       #get desired size of barrier
+    putBOY$NBRbuoys$I                           #       jb      9/18/87
+ 
+    NEWFLG = (BOY$NBRBUOYS$I < 1)          #set flag (NOT new)  9/18/87
+    imLAST = $NO                                        #       9/18/87
+    call UPDBAR(BOY$POINTER,              #update BAR entry for this barrier
+                 NEWFLG,imLAST)                 # imLAST        9/18/87
+    RETURN      # 1, 3, & 5 are transition legs: no processing  9/16/87
+   }
+ 
+ } # End if (numBARlines != 1 & UNT$PIMindx$i != $NO)
+ 
+ 
+BOY$NBRBUOYS$I = XBOY$NBRBUOYS$I       #get current size of barrier
+BOY$NBRTOLAY$I = XBOY$NBRTOLAY$I       #get desired size of barrier
+#SPACNG = MAX0(int(XORD$w07$c),1)             #get spacing between buoys
+SPACNG = xORD$w07$c
+if (SPACNG < 0.1) SPACNG = 0.1
+ 
+IF( UNT$PIMindx$i != $NO &      # i.e, pim$POINTER is set--see above
+       numBARlines != $LINE$code ) # (precaution vs. unexpected..)
+ {
+    # Note:  Buoy LINE 1 is laid on Leg 2 in all three cases, with
+    #        Leg 3 a short transition before Buoy LINE 2 is laid,
+    #        on Leg 4.  For FIVE65, Buoy line 3 is laid on Leg 6,
+    #        after another short transition on Leg 5.
+ 
+    #  Now we find STLAT and STLON, defining STARTing position of
+    #   the line of buoys designated by iNOWseq:
+ 
+#  if(PIM$LegNumber$i < 3)
+  if ( iNOWseq == 1 )                           # jb            9/16/87
+   {
+    PIM$pts$index= 2
+    STLAT = Xpim$PTS$Latitude$F
+    STLON = Xpim$PTS$Longitude$F
+   }    #  end if PIM$LegNumber$i < 3
+ 
+  else          # else iNOWseq is 2 or 3...
+   {
+    SWITCH(numBARlines)
+     {
+      case $FIVE65$code:
+       {
+    ##  if(PIM$LegNumber$i < 5) PIM$pts$index= 4
+        if ( iNOWseq == 2 )     PIM$pts$index= 4        # jb    9/16/87
+        else                    PIM$pts$index= 6 # (iNOWseq is 3)
+        STLAT = Xpim$PTS$Latitude$F
+        STLON = Xpim$PTS$Longitude$F
+       }
+ 
+##      case $CONTAIN$code:     # (iNOWseq is 2, since never 3...)
+      default:          # for CONTAIN and CHEVRON:
+       {
+        PIM$pts$index= 4
+        STLAT = Xpim$PTS$Latitude$F
+        STLON = Xpim$PTS$Longitude$F
+       }
+ 
+     }  # End SWITCH
+   }       # End else iNOWseq 2 or 3 # vice PIM$LegNumber$i > 2
+ }  # End if NOT a LINE barrier
+ 
+ELSE            #  if(numBARlines == $LINE$code)
+ {
+  STLAT = DMS2RAD(XORD$w03$c) # Get start lat of LINE barrier
+  STLON = DMS2RAD(XORD$w04$C) # Get start lon of LINE barrier
+ }
+ 
+call RLL2RB(STLAT,                     #find assmd dist from plane to st pt
+             STLON,
+             XBOY$COSTRUELAT$F,         #cos of true lat close enuf
+             Xunt$ASSUMEDLATITUDE$F,
+             Xunt$ASSUMEDLONGITUDE$F,
+             Xunt$COSTRUELAT$F,         #cos of true lat close enuf
+             DIST,
+             BRG)
+  #ANG2PI (BRG)         # N.B.-Activate this line if you use BRG below!
+ 
+DEQ$pointer$TO (XORD$DEQINDX$I) # set equip index for sonobuoys 4/13/89
+ 
+DEQ$REMAINING$I = XDEQ$REMAINING$I
+ 
+NLAID = MIN0(BOY$NBRTOLAY$I,INT(DIST/SPACNG)+1)  #total # laid up to now
+ 
+NADDL = MIN0(NLAID-BOY$NBRBUOYS$I,DEQ$REMAINING$I)  # # laid this minute
+ 
+if (NADDL > 0)                         #if any buoys laid this minute
+   {
+    DEQ$REMAINING$I = DEQ$REMAINING$I - NADDL  #decrement buoy supply
+    PUTDEQ$REMAINING$I
+ 
+    BOY$NBRBUOYS$I = BOY$NBRBUOYS$I + NADDL    #update # of buoys in barrier
+    PUTBOY$NBRBUOYS$I
+ 
+    unt$HasBarrier$i = $yes
+    PUTunt$HasBarrier$i
+ 
+    ACC$POINTER = Xunt$accPNTR$I   #set plane's chrc pointer jb    3/31/89
+ 
+    IF ( UNT$PIMindx$i !=NO  & LASTline != $NO &
+         BOY$NBRBUOYS$I >= BOY$NBRTOLAY$I -1 )  imLAST = $YES   #       9/21/87
+    else                  imLAST = $NO                          #       9/18/87
+    NEWFLG = (BOY$NBRBUOYS$I < 1)          #set flag for new or old barrier
+    call UPDBAR(BOY$POINTER,              #update BAR entry for this barrier
+                 NEWFLG,imLAST)
+   }
+ 
+  if ( DEQ$REMAINING$I <= 0 |                # if barrier completed
+       BOY$NBRBUOYS$I >= BOY$NBRTOLAY$I )
+    {
+     UNT$STATUS$I = $ONSTATION$CODE     #put plane's status to "on station"
+     PUTUNT$STATUS$I
+ 
+     UNT$ORDEREDSPEED$F = 0.0           #order plane's speed to zero
+     PUTUNT$ORDEREDSPEED$F              # jb    UNT        3/31/89
+ 
+##     unt$ORDEREDALTDEPTH$I = 5000 # climb to 5000 feet    jb    7/2/90
+##     PUTunt$ORDEREDALTDEPTH$I        #                    jb    7/2/90
+ 
+     if(UNT$PIMindx$i != $NO)   # Incomplete Multi-line barrier??
+      {                                 #   is now completed..
+       PIM$ZERO                         #                       8/13/87
+       putUNT$PIMindx$i ($NO)       # nb: this line stays HERE..8/12/87
+      }
+ 
+     ORD$PHASE$I = 0                    #remove barrier order
+     PUTORD$PHASE$I
+    }   # End if barrier completed..(or interrupted for lack of buoys
+                ## --which might occur only from nuclear damage???)
+return
+end        # End  OBARR2
+#
+
+                                  # jb UPdate BARrier plot table entry
+ Subroutine UPDBAR(BOY$POINTER,       #BOY$POINTER = buoy table pointer (input)
+ 
+                 NEWFLG,imLAST)       #NEWFLG = new entry indicator (input)
+ 
+######################################################
+ #$%
+ #$% Purpose:   UPDBAR updates the barrier plot entry.
+ #$%
+ #$% Called By: OBARR2
+ #$%
+ #$% Calls:     None
+ #$%
+ #$% Tables:    UNT        BOY        BAR
+ #$%
+ #$% Date:      APRIL 80
+ #$%
+ #$% Author:    Dana Wills
+ #$%
+ ######################################################
+ 
+ BBcommon
+ BBDeclare (BAR$Pointer,
+            BAR$PT$Index,
+            BAR$PT$lat$F,
+            BAR$PT$lon$F,
+            BOY$Pointer,
+            BOY$Type$I,
+            BOY$Assumeddeltalat$F,
+            BOY$Assumeddeltalon$F,
+            BOY$Costruelat$F,
+            BOY$Nbrbuoys$I,
+            UNT$Pointer,
+            UNT$View$I)                             # MJC 6/21/2K (E2145 - Implicit None)
+ real U,
+      V,
+      FLAT1,
+      FLON1,
+      FLAT2,
+      FLON2,
+      S,
+      T                                             # MJC 6/21/2K (E2145 - Implicit None)
+ integer IMLAST                                     # MJC 6/21/2K (E2145 - Implicit None)
+ 
+ logical NEWFLG
+ 
+ 
+ BAR$POINTER$TO BOY$POINTER$INDEX       #set BAR pntr correspond to BOY pntr
+ 
+# if (NEWFLG)                            #if new entry
+ if (NEWFLG | Xbar$View$i == $NO)        # jb  if new entry     8/31/87
+    {
+     UNT$Pointer$To (xBOY$OwnerIndx$I)    #get view
+ 
+     UNT$View$I = xUNT$View$I
+     BOY$Type$I = xBOY$Type$I
+ 
+     putBAR$View$I (UNT$View$I)         #store view in BAR
+     putBAR$Type$I (BOY$Type$I)         #store Barrier type
+ 
+     BOY$ASSUMEDDELTALAT$F = XBOY$ASSUMEDDELTALAT$F
+     BOY$ASSUMEDDELTALON$F = XBOY$ASSUMEDDELTALON$F    #compute
+     BOY$COSTRUELAT$F = XBOY$COSTRUELAT$F
+ 
+     U = BOY$ASSUMEDDELTALON$F * BOY$COSTRUELAT$F      # lat/lon
+     V = BOY$ASSUMEDDELTALAT$F / BOY$COSTRUELAT$F
+ 
+     FLAT1 = XBOY$ASSUMEDLATITUDE$F -                  #  of corners
+             .5 * (BOY$ASSUMEDDELTALAT$F + U)
+     FLON1 = XBOY$ASSUMEDLONGITUDE$F -
+             .5 * (BOY$ASSUMEDDELTALON$F - V)          #   nearest
+ 
+     BAR$PT$INDEX = 1
+ 
+     BAR$PT$LAT$F = FLAT1                                 #    start
+     PUTBAR$PT$LAT$F
+ 
+     BAR$PT$LON$F = FLON1
+     PUTBAR$PT$LON$F                                      #     point
+ 
+     BAR$PT$INDEX = 2
+ 
+     BAR$PT$LAT$F = FLAT1 + U                             #      of barrier
+     PUTBAR$PT$LAT$F
+ 
+     BAR$PT$LON$F = FLON1 - V
+     PUTBAR$PT$LON$F
+ 
+     if (!BAR$POINTER$OK)                              #if beyond prev "last"
+ 
+         BAR$LAST$TO BAR$POINTER + BAR$ENTRY - 1       #calc new "last"
+ 
+    }                                   #end if new entry
+ 
+ if(imLAST != $NO)                      # jb                    9/18/87
+  {
+   BOY$NBRBUOYS$I = xBOY$NBRTOLAY$I     # jb                    9/18/87
+   putBOY$NBRBUOYS$I                    # jb                    9/18/87
+  }
+ ELSE                                   # jb ELSE               9/18/87
+ BOY$NBRBUOYS$I = XBOY$NBRBUOYS$I
+ 
+ 
+ S = BOY$NBRBUOYS$I * XBOY$ASSUMEDDELTALAT$F           #compute
+ 
+ T = BOY$NBRBUOYS$I * XBOY$ASSUMEDDELTALON$F
+ 
+ BAR$PT$INDEX = 1                                      # lat/lon
+ FLAT1 = XBAR$PT$LAT$F
+ FLON1 = XBAR$PT$LON$F                                    #  of corners
+ 
+ BAR$PT$INDEX = 2
+ FLAT2 = XBAR$PT$LAT$F                                    #   nearest
+ FLON2 = XBAR$PT$LON$F
+ 
+ BAR$PT$INDEX = 3                                      #    last buoy
+ BAR$PT$LAT$F = FLAT2 + S
+ PUTBAR$PT$LAT$F
+ BAR$PT$LON$F = FLON2 + T
+ PUTBAR$PT$LON$F
+ 
+ BAR$PT$INDEX = 4                                      #      so far
+ BAR$PT$LAT$F = FLAT1 + S
+ PUTBAR$PT$LAT$F
+ BAR$PT$LON$F = FLON1 + T
+ PUTBAR$PT$LON$F
+ 
+ return
+ end
+##              w02 w03 w04 w05 w06 w07 w08 w09 w022
+
+ 
+ Function DM2RAD(N)                   #Degrees/Minutes to RADians
+                                      #N = degrees*100 + minutes (input)
+ 
+######################################################
+ #$%
+ #$% Purpose:   DM2RAD converts degrees/minutes
+ #$%            to radians.
+ #$%
+ #$% Called By: OBARR0     OBARR1     OBARR2
+ #$%
+ #$% Calls:     None
+ #$%
+ #$% Tables:    None
+ #$%
+ #$% Date:      APRIL 80
+ #$%
+ #$% Author:    Dana Wills
+ #$%
+ ######################################################
+ 
+ logical NEGFLG
+ integer N,
+         K,
+         IDEG,
+         IMIN                           # MJC 6/21/2K (E2145 - Implicit None)
+ real DEG,
+      DM2RAD                            # MJC 6/21/2K (E2145 - Implicit None)
+ 
+ NEGFLG = (N < 0)
+ 
+ K = IABS(N)                            #easier to work with absolute value
+ 
+ IDEG = K/100                           #recover whole degrees
+ 
+ IMIN = K - IDEG*100                    #compute minutes
+ 
+ DEG = FLOAT(IDEG) + FLOAT(IMIN)/60.    #convert to fractional degrees
+ 
+ DM2RAD = DEG * ($PI/180.)              #convert to radians
+ 
+ if (NEGFLG) DM2RAD = -DM2RAD           #attach correct sign
+ 
+ return
+ end
+ 
+
+ 
+Subroutine ochaff(ord$pointer,unt$pointer)
+ 
+#######################################################
+#$%
+#$% Purpose:   OCHAFF selectively executes
+#$%            chaff barrier orders based
+#$%            on order validation.
+#$%
+#$% Called By: OBARR
+#$%
+#$% Calls:     OCHAF0     OCHAF1
+#$%
+#$% Tables:    ORD
+#$%
+#$% Date:      APRIL 80
+#$%
+#$% Author:    Dana Wills
+#$%
+#######################################################
+ 
+BBcommon
+ 
+BBDeclare (ORD$Pointer,
+           UNT$Pointer)                         # MJC 6/21/2K (E2145 - Implicit None)
+ 
+#$% if order phase is zero, call to validate chaff barrier orders
+if (xord$phase$i == 0)  call ochaf0(ord$pointer,unt$pointer)
+#$% else call to execute chaff barrier orders
+else                    call ochaf1(ord$pointer,unt$pointer)
+ 
+return
+end
+ 
+
+ 
+Subroutine ochaf0(ord$pointer,unt$pointer)
+ 
+#######################################################
+#$%
+#$% Purpose:   OCHAF0 validates orders for a chaff
+#$%            barrier and displays error messages
+#$%            to the user.
+#$%
+#$% Called By: OCHAFF
+#$%
+#$% Calls:     SEND
+#$%
+#$% Tables:    UNT        BOY
+#$%            ORD
+#$%
+#$% Date:      APRIL 80
+#$%
+#$% Author:    Dana Wills
+#$%
+#######################################################
+ 
+BBcommon
+BBDeclare (UNT$Pointer,
+           ORD$Pointer,
+           CHF$Pointer,
+           BOY$Pointer)                             # MJC 6/21/2K (E2145 - Implicit None)
+integer KKLEN, litcmp,
+        INDXCHF,
+        MARGS,
+        JJ,
+        INFO                                        # MJC 6/21/2K (E2145 - Implicit None)
+literal CSTRIP8                                     # MJC 6/22/2K (E2145 - Implicit None)
+Literal    ChaffNAME        # jb                    8/23/90
+Character msg[ARB]
+ 
+#String msg1 '      cannot lay a chaff barrier.  '
+#String msg2 '      cannot lay chaff - table full - sorry. '
+ 
+ 
+if (xunt$type$i != $air$code)
+   {
+    kklen = 0
+    Call SMOVHN(xunt$name$c,$$MaxLit,msg,kklen)
+    Call SMOVV(" cannot lay a chaff barrier.",msg,kklen)
+    call send_ (xunt$view$i,0,kklen,msg) # msg1
+    return
+   }
+ 
+#####    Added 8/8/90 to process SPECIFIED chaff...  jb ########
+indxCHF = $NO    # (Init. to an invalid index)
+mARGS = Xord$NbrArgs$i
+if (mARGS > 2) # E2231 joa UFL01                # & xord$w03$c == $LEX$USING$) # jb           8/29/90
+   {
+    ChaffNAME = xord$w04$c                # jb            8/27/90
+    for (CHF$Pointer$FIRST; CHF$Pointer$VALID; CHF$Pointer$NEXT)
+       {
+        if (litcmp(xCHF$TYPE$C, ChaffNAME) == 0)
+           {
+            if (xCHF$RBOCflag$i != $NO) # jb      8/31/90
+               {
+                ## Send RBOC-not-for-barriers message
+                jj = 0
+                call smovhn (ChaffNAME, $$MaxLit, msg, jj)
+                call smovv(" is not for barriers!",msg,jj)
+                call send_  (xunt$view$i, 0, jj, msg)
+                ##    CANCEL THIS ORDER
+                PUTord$phase$i (0) # remove order from ORD table
+                RETURN
+               }
+            IndxCHF = CHF$Pointer$INDEX
+            BREAK
+           }
+       }
+    if ( IndxCHF == $NO ) # jb Type of  8/23/90
+       {               # Chaff was specified, but NO MATCH was found
+        ## Send NO_Such_Chaff message
+        jj = 0
+        call smovhn (ChaffNAME, $$MaxLit, msg, jj)
+        call smovv(" is not a valid CHAFF Type.",info,jj)
+        call send_  (xunt$view$i, 0, jj, msg)
+        ##    CANCEL THIS ORDER
+        PUTord$phase$i (0) # remove the order from the ORD table
+        RETURN
+       }    # End if Chaff NAME was specified but NO MATCH
+   }    # End if Chaff NAME was specified
+    # Note:  If Chaff Type was NOT specified, IndxCHF is not set, and
+          #  the barrier can affect any radar's detections, as before.
+#####  End of addition 8/8/90 to process named chaff... ###############
+ 
+for (BOY$POINTER$FIRST;BOY$POINTER$VALID;BOY$POINTER$NEXT) #find empty slot
+   {
+    if (XBOY$TYPE$I == $NULL$CODE)
+     {
+      #$% if pointer out of OK range, reset table limits    jb - 9/22/88:
+      if (!boy$pointer$ok) boy$last$to (boy$pointer +boy$entry -1) #9/22/88
+      BREAK
+     }
+   }
+ 
+if (!BOY$POINTER$VALID)
+   {
+    kklen = 0
+    Call SMOVHN(xunt$name$c,$$MaxLit,msg,kklen)
+    Call SMOVV(" cannot lay chaff - table full - sorry.",msg,kklen)
+ 
+    call SEND_ (XUNT$VIEW$I,0,kklen,msg)
+    return
+   }
+ 
+putord$phase$i (1)
+ 
+PUTORD$BOYINDX$I   (BOY$POINTER$INDEX)  # store BOY pointer with order
+                                        # for future reference
+putBOY$OWNERindx$I    (UNT$POINTER$index)
+putBOY$TYPE$I         ($CHAFF$code)    # jb vice $RBOC$code 1/18/91
+putBOY$IndxCHF$I      (IndxCHF)    # jb Zero if not specified 8/8/90
+putboy$BirthTime$f    (GAME$TIME)
+putboy$KillTime$f     (GAME$TIME + min0(int(xord$w02$c),60))
+putBOY$TRUELATITUDE$F (Xunt$TRUELATITUDE$F)
+putBOY$TRUELONGITUDE$F(Xunt$TRUELONGITUDE$F)
+putBOY$costruelat$F   (Xunt$costruelat$F)
+putBOY$ChaffAlt$I     (xunt$truealtdepth$i)     # was TRUEDEPTH 6/1/83
+ 
+if (!BOY$POINTER$OK)
+   {
+    BOY$POINTER$NEXT
+    BOY$LAST$TO BOY$POINTER - 1
+   }
+ 
+return
+end        # End  OCHAF0
+ 
+
+ 
+ Subroutine ochaf1(ord$pointer,unt$pointer)
+ 
+######################################################
+ #$%
+ #$% Purpose:   OCHAF1 executes orders for a
+ #$%            chaff barrier.
+ #$%
+ #$% Called By: OCHAFF
+ #$%
+ #$% Calls:     ANGPI
+ #$%
+ #$% Tables:    BOY        ORD        UNT
+ #$%            BAR
+ #$%
+ #$% Date:      APRIL 80
+ #$%
+ #$% Author:    Dana Wills
+ #$%
+ ######################################################
+ 
+ BBcommon
+ 
+ BBDeclare (ORD$Boyindx$I,
+            ORD$Pointer,
+            ORD$Phase$I,
+            BOY$Pointer,
+            BOY$Truedeltalat$F,
+            BOY$Truedeltalon$F,
+            BAR$PT$Index,
+            BAR$PT$lat$F,
+            BAR$View$I,
+            BAR$Indxchf$I,
+            BAR$Pointer,
+            BAR$PT$lon$F,
+            UNT$Hasbarrier$I,
+            UNT$Pointer,
+            CHF$Pointer)                            # MJC 6/21/2K (E2145 - Implicit None)
+ real THETA,
+      WIDTH,
+      DIST                                          # MJC 6/21/2K (E2145 - Implicit None)
+ 
+ if (game$time < order$minute)  return # game$time for VTS - JFR 3/15/94
+ 
+ ORD$BOYINDX$I = XORD$BOYINDX$I          # jb                    4/16/90
+ BOY$POINTER$TO   ORD$BOYINDX$I          #recover saved buoy table pointer
+ bar$POINTER$TO   ORD$BOYINDX$I
+ 
+ if (xboy$KillTime$f <= game$time)    #if time to stop laying chaff
+    {
+     ord$phase$i = 0                    #flag order for deletion
+     putord$phase$i
+     putBAR$falling$i ($YES)       #jb Chaff to fall @ 400 ft/min 4/16/90
+     return
+    }
+ 
+unt$HasBarrier$i = $yes
+PUTunt$HasBarrier$i
+ 
+bar$view$i = xbar$view$i
+ 
+if (bar$view$i == 0)                            #if new entry
+    {
+     BAR$VIEW$I = $last$view + 1
+     PUTBAR$VIEW$I
+ 
+     BAR$IndxCHF$I = xBOY$IndxCHF$i    # jb            8/8/90
+     PUTBAR$IndxCHF$I  # jb Zero if type not specified 8/8/90
+ 
+     theta = Xunt$truecourse$f + $pi/2.
+ 
+    ##########------------(chaff characteristics)--------- 8/29/90
+     if ( bar$IndxCHF$i > 0 & bar$IndxCHF$i <= chf$SLOTS )
+        {
+         CHF$Pointer$TO (bar$IndxCHF$i)
+         width = xCHF$Width$F                             # jb 8/30/90
+         if (width < 1.0) width = 1.0                    # jb 8/30/90
+        }
+     else width = chaff$width                    # jb default 8/30/90
+ 
+     dist = width * (.5 * $pi/(180.*60.)) #half corridor width (radians)
+    ##########-------------------(end)----------------- 8/29/90
+ 
+     boy$truedeltalat$f = dist * COS(theta)
+     putboy$truedeltalat$f
+ 
+     boy$truedeltalon$f = dist * SIN(theta) / xboy$costruelat$f
+     putboy$truedeltalon$f
+ 
+     BAR$PT$INDEX = 1
+ 
+     BAR$PT$LAT$F = xboy$truelatitude$f + boy$truedeltalat$f
+     PUTBAR$PT$LAT$F
+ 
+     BAR$PT$LON$F = xboy$truelongitude$f + boy$truedeltalon$f
+     $angpi(bar$PT$lon$f)
+     PUTBAR$PT$LON$F
+ 
+     BAR$PT$INDEX = 2
+ 
+     BAR$PT$LAT$F = xboy$truelatitude$f - boy$truedeltalat$f
+     PUTBAR$PT$LAT$F
+ 
+     BAR$PT$LON$F = xboy$truelongitude$f - boy$truedeltalon$f
+     $angpi(bar$PT$lon$f)
+     PUTBAR$PT$LON$F
+ 
+     if (!BAR$POINTER$OK)                              #if beyond prev "last"
+ 
+         BAR$LAST$TO BAR$POINTER + BAR$ENTRY - 1       #calc new "last"
+ 
+    }                                   #end if new entry
+ 
+ 
+ BAR$PT$INDEX = 3
+ 
+ BAR$PT$LAT$F = xUNT$truelatitude$f - xboy$truedeltalat$f
+ PUTBAR$PT$LAT$F
+ 
+ BAR$PT$LON$F = xUNT$truelongitude$f - xboy$truedeltalon$f
+ $angpi(bar$PT$lon$f)
+ PUTBAR$PT$LON$F
+ 
+ BAR$PT$INDEX = 4
+ 
+ BAR$PT$LAT$F = xUNT$truelatitude$f + xboy$truedeltalat$f
+ PUTBAR$PT$LAT$F
+ 
+ BAR$PT$LON$F = xUNT$truelongitude$f + xboy$truedeltalon$f
+ $angpi(bar$PT$lon$f)
+ PUTBAR$PT$LON$F
+ 
+ 
+ 
+ return
+ end        # End  OCHAF1
+
+ 
+Subroutine Total_Buoys (UNT$Pointer, itype, itotal)
+ 
+######################################################
+ #$%
+ #$% Purpose:   TOTAL_BUOYS finds the total number of
+ #$%            buoys a unit has laid in all
+ #$%            (active or passive) barriers.
+ #$%
+ #$% Called By: OBARR1
+ #$%
+ #$% Calls:
+ #$%
+ #$% Tables:    BOY     UNT
+ #$%
+ #$% Date:      MAY 83
+ #$%
+ #$% Author:    ADAMOS T
+ #$%
+ ######################################################
+ 
+BBcommon
+BBDeclare (BOY$Pointer,
+           BOY$Ownerindx$I,
+           BOY$Type$I,
+           BOY$Nbrtolay$I,
+           IUNT_INDX,
+           UNT$Pointer)                         # MJC 6/21/2K (E2145 - Implicit None)
+integer ITYPE,
+        ITOTAL                                  # MJC 6/21/2K (E2145 - Implicit None)
+ 
+iunt_indx = UNT$Pointer$Index
+ 
+for (BOY$Pointer$First; BOY$Pointer$Valid; BOY$Pointer$Next)
+    {
+    BOY$OwnerIndx$I = xBOY$OwnerIndx$I          ## if the owner of barrier
+    if (BOY$OwnerIndx$I != iunt_indx)   next    ## not the same
+ 
+    BOY$Type$I = xBOY$Type$I                    ## if barrier type not
+    if (BOY$Type$I != itype)            next    ## the same
+ 
+    BOY$NbrToLay$I = xBOY$NbrToLay$I            ## get no. of buoys in barrier
+ 
+    itotal = itotal + BOY$NbrToLay$I            ## save total buoys used
+    }
+ 
+return
+end        # End  TOTAL_BUOYS
+ 
+
+ 
+Subroutine Clear_Oldest_BOY(UNT$Pointer,itype,itotal,ORD$POINTER)
+                                                        # 8/12/87
+######################################################
+ #$%
+ #$% Purpose:   CLEAR_OLDEST_BOY finds the oldest
+ #$%            barrier a unit has laid and removes it.
+ #$%
+ #$% Called By: OBARR1
+ #$%
+ #$% Calls:
+ #$%
+ #$% Tables:    BOY     UNT
+ #$%
+ #$% Date:      MAY 83
+ #$%
+ #$% Author:    ADAMOS T
+ #$%
+ ######################################################
+ 
+BBcommon
+ 
+BBDeclare (BOY$Pointer,
+           BOY$Ownerindx$I,
+           BOY$Type$I,
+           BOY$Birthtime$F,
+           BOY$Nbrlines$I,
+           BOY$Lineseq$I,
+           BOY2$Nextboy$I,
+           BOY2$Pointer,
+           BOY2$Nbrlines$I,
+           BOY2$Lineseq$I,
+           BAR$Pointer,
+           UNT$Pointer,
+           ORD$Pointer)                     # MJC 6/21/2K (E2145 - Implicit None)
+integer IUNT_INDX,
+        ITYPE,
+        IBOYPNTR,
+        NBRTOLAY,
+        I,
+        ITOTAL                              # MJC 6/21/2K (E2145 - Implicit None)
+ 
+real            lowest
+ 
+iunt_indx = UNT$Pointer$Index
+ 
+lowest = 1.E35                                  # High value
+ 
+for (BOY$Pointer$First; BOY$Pointer$OK; BOY$Pointer$Next) # jb    9/22/88
+    {
+    BOY$OwnerIndx$I = xBOY$OwnerIndx$I          ## if the owner of barrier
+    if (BOY$OwnerIndx$I != iunt_indx)   next    ## not the same
+ 
+    BOY$Type$I = xBOY$Type$I                    ## if barrier type not
+    if (BOY$Type$I != itype)            next    ## the same
+ 
+    boy$BirthTime$f = xboy$BirthTime$f          ## if no birth time
+    if (boy$BirthTime$f == 0)           next
+ 
+    if (boy$BirthTime$f >= lowest)      next
+ 
+    lowest = boy$BirthTime$f                    ## save birth time
+ 
+    iboypntr  = BOY$Pointer                     ## save pointer
+ 
+    NbrToLay  = xBOY$NbrToLay$I                 ## save no. of buoys in barrier
+    }
+ 
+if (lowest == 1.E35) return                     ## no birthtime
+ 
+BOY$Pointer = iboypntr                          ## set oldest BOY slot
+ 
+########  ------ FIVE65/CHEVRON/CONTAIN type barriers --jBryant 8/11/87
+BOY$NBRlines$i = xBOY$NBRlines$i
+BOY$LineSEQ$I  = xBOY$LineSEQ$I
+if(BOY$NBRlines$i > 1 & BOY$LineSEQ$I == 1)
+ {
+  BOY2$NEXTboy$I  = xBOY$NEXTboy$I
+  for(i =1; i <= BOY$NBRlines$I -1 & BOY2$NEXTboy$I != $NO; i =i +1)
+   {                                    # jb /\ 8/12/87
+    BOY2$Pointer$TO (BOY2$NEXTboy$I)
+    if( i == 1 ) # Update ORDER to refer to the next line of buoys
+      PUTORD$BOYINDX$I   (BOY2$NEXTboy$I) # jb                8/12/87
+ 
+    BOY2$NBRlines$i = xBOY2$NBRlines$i -1
+    putBOY2$NBRlines$i
+    BOY2$LineSEQ$I  = xBOY2$LineSEQ$I -1
+    putBOY2$LineSEQ$I
+ 
+    BOY2$NEXTboy$I  = xBOY2$NEXTboy$I
+   }                    #/\     8/12/87
+ }
+########  -- End FIVE65/CHEVRON/CONTAIN type barriers --------- 8/11/87
+ 
+BAR$Pointer$To BOY$Pointer$Index                ## set oldest BAR slot
+PUTbar$Modified$i ($YES)                        #               4/12/84
+ 
+PUTboy$KillTime$f (1.0)                         #               5/5/86
+ 
+itotal = itotal - NbrToLay                      ## save total buoys
+ 
+return
+end
+ 

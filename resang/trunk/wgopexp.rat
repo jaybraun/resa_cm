@@ -1,0 +1,1898 @@
+include "ascii.inc"
+include "bbctl.inc"
+include "bbcode.inc"
+include "bbunt.inc"
+include "bbacc.inc"
+include "bbshc.inc"
+include "bbdeq.inc"
+include "bbjew.inc"
+include "bbaml.inc"
+include "bbbml.inc"
+include "bbdac.inc"              # for resurrection of a/c via SET STATUS AIR
+include "wimain_eq.inc"          # for new CHANGE [AIRCRAFT | BOAT] commands - clk 1/97 (E1654)
+include "orders.inc"
+define (BBImplicit, Implicit None)
+ 
+subroutine oreplen (nord,unt$pointer,nargs,args)
+ 
+########################################################
+#$%
+#$% Purpose:   OREPLEN processes REPLENISH and EXPEND commands
+#$%            to modify expendables on any unit.
+#$%            And also DISABLE and ENABLE commands for allowing use.
+#$%
+#$% Called By: EXEORD
+#$%
+#$% Calls:
+#$%
+#$% Tables:    None
+#$%
+#$% Date:      MARCH 83
+#$%
+#$% Author:    Dana Wills
+#$%
+#$% Modified:  James Allen - 2/96 (E1467)
+#$%            Replaced FuelDamage with expanded
+#$%            Ship/Aviation Fuel Damage.  Also
+#$%            replace AcFuelRemaining with fuel tank
+#$%            subtable reference.  Added ships to the
+#$%            list of units that can be refueled.
+#$%
+#$%            Carol Kropp - 1/97 (E1654)
+#$%            Added for branching off if the command
+#$%            is a CHANGE ... order.
+#$%
+#$%             Dane Wills - 4/3/2000 (E2199)
+#$%             Added logic to restore Ships from Dead-in-water (DIW)
+#$%             status when replenishing FUEL.  Expanded message to
+#$%             user regarding what was or could be done.
+#$%
+########################################################
+ 
+BBcommon
+BBDeclare  (UNT$Pointer,
+            UNT$Type$I,
+            UNT$TNK$Index,
+            UNT$Name$C,
+            BML$Pointer,
+            SHC$Pointer,
+            SHC$Maxspeed$I,
+			SHC$TNK$Index,
+            DEQ$Type$C,
+            DEQ$Pointer,
+            DEQ$Ident$I)                    # MJC 6/26/2K (E2145 - Implicit None)
+integer     ILEN,
+            ISIGN,
+            INDX_UNT,
+            KLEN,
+            IPNT,
+            IADD,
+            IRESULT,
+            ISEXP,
+            INEW                            # MJC 6/26/2K (E2145 - Implicit None)
+real FNEW                                   # MJC 6/26/2K (E2145 - Implicit None)
+literal CSTRIP8                             # MJC 6/26/2K (E2145 - Implicit None)
+ 
+integer         nord, nargs, I_set
+literal         args[nargs], name
+#character       msg[100]    ##  jb AAI01 - logic may place up to
+character       msg[256]     ##  jb AAI01 ~ 247 characters into MSG 1/29/00
+ 
+if (args[1] == $lex$CHANGE$)   # clk 1/97 (E1654)
+    {
+     if (args[2] == $lex$AIRCRAFT$)
+       call process_change_cmd_air (UNT$Pointer, nargs, args)
+     else
+       call process_change_cmd_boat (UNT$Pointer, nargs, args)
+     return
+    }
+else if (args[1] == $lex$DISABLE$ |
+         args[1] == $lex$ENABLE$   )
+    {
+    call odisabl (nord,unt$pointer,nargs,args)
+    return
+    }
+else if (args[1] == $lex$REPAIR$)   # H1048
+    {
+     putunt$TimeSunk$f      (0.0)
+     putUNT$HullDamage$F    (0.0)
+     putUNT$TopSideDamage$F (0.0)
+     putUNT$StoreDamage$F   (0.0)
+     putUNT$SAMDamage$F     (0.0)
+     putUNT$ShipFuelDamage$F    (0.0)    # joa 2/96 (E1467)
+     putUNT$AviationFuelDamage$F(0.0)    # joa 2/96 (E1467)
+     putUNT$Status$I        ($Proceeding$Code)
+ 
+     SHC$Pointer = xUNT$SHCPntr$I
+     SHC$MaxSPEED$I = xSHC$MaxSPEED$I
+     putUNT$Speed$I  (SHC$MaxSPEED$I)
+ 
+     if (Xunt$Type$i == $surface$code  &        # E2290 JOA UFL02 - Clear system failure
+         Xunt$SubType$i == $SmallBoat$SubCode )
+     {
+        bml$pointer$to Xunt$BMLIndx$i
+        PUTbml$Status$i ($UNDERWAY$code)
+        PUTbml$DamageMultiplier$i (1)
+        PUTbml$SystemFail$f (0.0)
+     }
+ 
+     # Send a message to the units view
+     ilen = 0
+     call smovhn  (xUNT$Name$C, $$MaxLit, msg, ilen)
+     call smovv   (" has been repaired.", msg, ilen)
+     call send_ (xUNT$View$I, 0, ilen, msg)
+     return
+    }
+else if (args[1] == $lex$CLOSE$ |
+         args[1] == $lex$OPEN$   )              # jb    10/30/86
+#        args[1] == $lex$ENABLE$   )
+    {
+    call oclose (nord,unt$pointer,nargs,args)
+    return
+    }
+else if (args[1] == $lex$DAMAGE$ )
+    {
+    call oDAMAGE (nord,unt$pointer,nargs,args)
+    return
+    }
+else if (args[1] == $lex$SET$ )     # SET [ SPEED | STATUS ]
+    {
+    call oset_stuff (nord,unt$pointer,nargs,args)
+    return
+    }
+else if (args[1] == $lex$CHARGE$)
+    {
+    call ocharge (nord,UNT$Pointer,nargs,args)
+    return
+    }
+else if (args[1] == $lex$REPLENISH$ &    # REPLENISH TO INITIAL
+         args[2] == $lex$TO$        &    #      command
+         args[3] == $lex$INITIAL$)
+    {
+     call replenish_initial (unt$pointer)
+     return
+    }
+else if (args[1] == $lex$ADD$)              # Add Equipment/Systems
+    {                                       # per E1019
+     call oadd_equipment (nord,unt$pointer,nargs,args)
+     return
+    }                                           # per E1019
+else if (args[1] == $lex$REMOVE$)               # Expunge Equipment/Systems
+    {
+     call oremove_equipment (nord,unt$pointer,nargs,args)
+     return
+    }
+ 
+if (args[1] == $lex$Replenish$) isign = 1
+else                            isign = -1
+ 
+if (args[2] == $lex$to$       ) i_set = 0
+else                            i_set = 1
+ 
+ilen = 0
+ 
+indx_unt    = unt$pointer$index
+unt$name$c  = Xunt$name$c
+unt$type$i  = Xunt$type$i
+ 
+call smovhn (unt$name$c,$$MaxName,msg,ilen) # SMM 8/99 E2141
+call smovv  (" expendables: ",msg,ilen)
+klen = ilen
+ 
+for (ipnt=2 + (1 - i_set) ; ipnt < nargs; ipnt = ipnt + 2)
+    {
+    iadd = args[ipnt] * isign
+    name = args[ipnt+1]
+    iresult = 0
+ 
+    if (name == 'FUEL' | name == 'JP')
+        {			
+        if (unt$type$i == $air$code)
+            {
+            UNT$TNK$Index = AviationFuelTank$Index        # joa 2/96 (E1467)
+            fnew = max(0., i_set * xUNT$TNK$FuelRemaining$F + iadd)
+            fnew = min (fnew, float($Hi_UNT$TNK$FuelRemaining$F))
+            putUNT$TNK$FuelRemaining$F (fnew)
+ 
+            if (iadd > 0) PUTunt$FuelWarning$i (NO)
+ 
+            iresult = INT (xUNT$TNK$FuelRemaining$F)
+            }
+        else if (unt$type$i == $shorebase$code |
+                 unt$type$i == $Surface$code   )       # joa 2/96 (E1467)
+            {  # shore bases, ships and boats
+			if (args[ipnt] >= 1 & args[ipnt] <= 100)		# % fuel instead of quantity
+				{
+				shc$pointer = Xunt$ShcPntr$i
+           		if (name == 'FUEL')                        
+                	SHC$TNK$Index = ShipFuelTank$Index
+            	else
+               	    SHC$TNK$Index = AviationFuelTank$Index
+				iadd = args[ipnt] * 0.01 * xSHC$TNK$Capacity$F
+				i_set = 0
+				}
+			
+            if (name == 'FUEL')                        # joa 2/96 (E1467)
+                UNT$TNK$Index = ShipFuelTank$Index
+            else
+                UNT$TNK$Index = AviationFuelTank$Index
+ 
+            fnew = max(0., i_set * xUNT$TNK$FuelRemaining$F + iadd)
+            fnew = min (fnew, float($Hi_UNT$TNK$FuelRemaining$F))
+            putUNT$TNK$FuelRemaining$F (fnew)
+ 
+            iresult = INT (xUNT$TNK$FuelRemaining$F)
+            }
+        if (Xunt$status$i == $DeadInWater$Code &            # DEW 4/00 (E2199)
+            name == 'FUEL'                     )
+            {
+            if (Xunt$SuperType$i == $Surface$SuperCode)     # DEW 4/00 (E2199)
+                {
+                # If this is a surface SHIP (not small boat), then we can
+                # reset the DIW status to proceeding.
+                putUNT$Status$I ($Proceeding$Code)
+                call smovv   (' (Cleared DIW as well)',msg,ilen)
+                }
+            else                                            # DEW 4/00 (E2199)
+                {
+                # UNT is DIW, tell him how to fix it....
+                call smovv   (' (use REPAIR to clear DIW)',msg,ilen)
+                }
+            }
+        }
+    else
+        {
+        FOR_DEQ_CHAIN
+            {
+            deq$Type$c = Xdeq$Type$c
+            if (deq$Type$c != name) next
+ 
+            deq$ident$i = Xdeq$ident$i
+ 
+            if (deq$ident$i == $Aircraft$Code)
+                {
+                call orepAML (indx_unt, Xdeq$pntr$i, iadd, iresult)
+                break
+                }
+ 
+            call exptst (deq$ident$i, isexp)
+ 
+            if (isexp == NO) next   # next vs break, since a system name could
+                                    # be the same as an expendable (i.e. PHALX
+                                    # was a Radar & a CIWS) - clk 12/95 (E1532)
+ 
+            inew = max(0, i_set * Xdeq$Remaining$i + iadd)
+ 
+            inew = min (inew, $Hi_deq$Remaining$i)
+ 
+            PUTdeq$Remaining$i (inew)
+ 
+            iresult = Xdeq$Remaining$i
+            break
+            }
+        }
+ 
+    if (klen != ilen) call smovv (", ",msg,ilen)
+ 
+    if (iresult <= 0) call smovv ("No",msg,ilen)
+    else              call smovi (iresult,msg,ilen)
+ 
+    call smovv   (' ',msg,ilen)
+    call smovhn (name,$$MaxName,msg,ilen) # SMM 8/99 E2141
+    }
+ 
+call send_ (0,0,ilen,msg)
+ 
+return
+end
+
+ 
+subroutine odisabl (nord,unt$pointer,nargs,args)
+ 
+########################################################
+#$%
+#$% Purpose:   ODISABL processes DISABLE and ENABLE commands
+#$%            for allowing/disallowing their use.
+#$%
+#$% Called By: oREPLEN
+#$%
+#$% Calls:
+#$%
+#$% Tables:    None
+#$%
+#$% Date:      OCTOBER 83
+#$%
+#$% Author:    Dana Wills
+#$%
+#$% Modified:  Carol Kropp - 11/93 (Variable Time Step)
+#$%
+########################################################
+ 
+BBcommon
+BBDeclare  (UNT$Pointer,
+            UNT$Name$C,
+            DEQ$Type$C,
+            DEQ$Pointer)                    # MJC 6/26/2K (E2145 - Implicit None)
+integer ILEN,
+        IPNT,
+        KLEN,
+        IFLAG                               # MJC 6/26/2K (E2145 - Implicit None)
+literal CSTRIP8                             # MJC 6/26/2K (E2145 - Implicit None)
+integer         nord, nargs
+literal         args[nargs], name
+character       msg[500]
+integer         game_dtg, wildcard
+real            time         # time disabled/enabled in minutes
+ 
+unt$name$c = Xunt$name$c
+ 
+ilen = 0
+call smovhn (unt$name$c,$$MaxName,msg,ilen) # SMM 8/99 E2141
+ 
+if (args[1] == $lex$DISABLE$)
+    {
+    time = game$time + args[2]
+    ipnt = 3
+    }
+else # if (args[1] == $lex$ENABLE$)
+    {
+    time = game$time
+    ipnt = 2
+    }
+ 
+time = min(time, $Hi_deq$TimeWhenUse$f)
+ 
+if (time != game$time)
+    {
+    call smovv  (" disable till ",msg,ilen)
+    call smoviz (game_dtg(time),6,msg,ilen)
+    call smovv  (": ",msg,ilen)
+    }
+else
+    {
+    call smovv  (" enable: ",msg,ilen)
+    }
+ 
+klen = ilen
+ 
+if (args[ipnt] == 'ALL' & ipnt == nargs)                # dew 4-DEC-91
+    {
+    wildcard = $YES
+    }
+else
+    {
+    wildcard = $NO
+    }
+ 
+ 
+for (; ipnt <= nargs; ipnt = ipnt + 1)
+    {
+    name = args[ipnt]
+ 
+    iflag = NO
+ 
+    FOR_DEQ_CHAIN
+        {
+        deq$Type$c = Xdeq$Type$c
+ 
+        if (wildcard == $NO & deq$Type$c != name) next
+ 
+        PUTdeq$TimeWhenUse$f (time)
+        iflag = YES
+ 
+        if (wildcard == $NO) break                          # dew 4-DEC-91
+ 
+        if (klen != ilen) call smovv (", ",msg,ilen)
+        call smovv   (' ',msg,ilen)
+        call smovhn (deq$type$c,$$MaxName,msg,ilen) # SMM 8/99 E2141
+        }
+ 
+    if (wildcard == $NO)                                    # dew 4-DEC-91
+        {
+        if (klen != ilen) call smovv (", ",msg,ilen)
+ 
+        call smovv   (' ',msg,ilen)
+ 
+        if (iflag == NO) call smovv  ('?? ',msg,ilen)
+ 
+        call smovhn (name,8,msg,ilen)
+        }
+    }
+ 
+call send_ (0,0,ilen,msg)
+ 
+return
+end
+ 
+
+ 
+subroutine oclose (nord,unt$pointer,nargs,args)
+ 
+########################################################
+#$%
+#$% Purpose:   OCLOSE processes CLOSE (and future OPEN) commands
+#$%            for allowing/disallowing Flights Use.
+#$%
+#$% Called By: oREPLEN
+#$%
+#$% Calls:     Game_DTGS
+#$%
+#$% Tables:    None
+#$%
+#$% Date:      APRIL 84
+#$%
+#$% Author:    Dana Wills
+#$%
+#$% Modified:  Carol Kropp - 11/93 (Variable Time Step)
+#$%
+########################################################
+ 
+BBcommon
+integer ILEN                                # MJC 6/26/2K (E2145 - Implicit None)
+BBDeclare  (UNT$Pointer,
+            UNT$Name$C,
+            UNT$Type$I)                     # MJC 6/26/2K (E2145 - Implicit None)
+literal CSTRIP8                             # MJC 6/26/2K (E2145 - Implicit None)
+integer         nord, nargs
+literal         args[nargs]
+character       msg[100]
+integer         game_dtg
+real            time        # game time when opened for use (in seconds)
+ 
+unt$name$c = Xunt$name$c
+ 
+ilen = 0
+call smovhn (unt$name$c,$$MaxName,msg,ilen) # SMM 8/99 E2141
+ 
+unt$type$i = Xunt$type$i
+ 
+#if (unt$type$i != $ShoreBase$Code     &
+#    unt$type$i != $SurfaceWithac$Code &
+#    unt$type$i != $Airbase$Code        )
+if (Xunt$AirCapable$i != $YES)                      # DEW  6/6/89
+    {
+    call smovv  (" cannot be CLOSED (or OPENED).",msg,ilen)
+ 
+    call send_ (0,0,ilen,msg)
+    return
+    }
+ 
+if (args[1] == $lex$CLOSE$)
+    {
+    time = game$time + args[2]
+    }
+else # if (args[1] == $lex$OPEN$)
+    {
+    time = game$time
+    }
+ 
+if (time > game$time)
+    {
+    call smovv  (" closed till ",msg,ilen)
+    call smoviz (game_dtg(time),6,msg,ilen)
+    call smovv  (".",msg,ilen)
+ 
+    if(time > game$time + 3 & Xunt$Status$I == $Fltops$Code)
+        { PUTunt$Status$I ($Proceeding$Code) }
+    }
+else
+    {
+    call smovv  (" opened.",msg,ilen)
+    }
+ 
+PUTunt$FltsOkTime$f(time)
+PUTunt$TimeBingo$f (time)
+ 
+call send_ (0,0,ilen,msg)
+ 
+return
+end
+ 
+
+ 
+subroutine odamage (nord,unt$pointer,nargs,args)
+ 
+########################################################
+#$%
+#$% Purpose:
+#$%
+#$%
+#$% Called By: oREPLEN
+#$%
+#$% Calls:
+#$%
+#$% Tables:    None
+#$%
+#$% Date:      APRIL 84
+#$%
+#$% Author:    Dana Wills
+#$%
+########################################################
+ 
+BBcommon
+BBDeclare  (UNT$Pointer,
+            UNT$Name$C,
+            UNT$Type$I)                         # MJC 6/26/2K (E2145 - Implicit None)
+integer ILEN,
+        IHITS                                   # MJC 6/26/2K (E2145 - Implicit None)
+literal CSTRIP8                                 # MJC 6/26/2K (E2145 - Implicit None)
+integer         nord, nargs
+literal         args[nargs]
+character       msg[100]
+byte            damageable [ 32 ]
+data            damageable [ $ShoreBase$Code     ] / $YES /
+data            damageable [ $Surface$Code       ] / $YES /
+data            damageable [ $Sub$Code           ] / $YES /
+data            damageable [ $Air$Code           ] / $YES /
+data            damageable [ $CruiseMissile$Code ] / $YES /
+#data            damageable [ $SamSite$Code       ] / $YES /
+#data            damageable [ $Airbase$Code       ] / $YES /
+integer         idummy
+ 
+idummy = 1    # JHM 7/02
+unt$name$c = Xunt$name$c
+ 
+ilen = 0
+call smovhn (unt$name$c,$$MaxName,msg,ilen) # SMM 8/99 E2141
+ 
+unt$type$i = Xunt$type$i
+ 
+if (damageable[ unt$type$i ]  != $YES )
+    {
+    call smovv  (" cannot be DAMAGED.",msg,ilen)
+ 
+    call send_ (0,0,ilen,msg)
+    return
+    }
+ 
+if (args[1] == $lex$DAMAGE$)
+    {
+    ihits = args[2]
+    call smovv  (" damaged with ",msg,ilen)
+    call smovi  (ihits,msg,ilen)
+    call smovv  (" pounds of TNT.",msg,ilen)
+ 
+    PUTunt$Hits$i (Xunt$Hits$i + ihits)
+ 
+    if (log$engage != $no)              # if engagement log desired
+        {
+        call engdata(idummy, UNT$Pointer)    # JHM 7/02
+        call Generate_eng_rec ("GOD     ","FINGER  ",xUnt$Name$c)
+        }
+ 
+    call send_ (0,0,ilen,msg)
+    }
+ 
+return
+end
+ 
+
+ 
+subroutine oset_stuff (nord,unt$pointer,nargs,args)
+ 
+########################################################
+#$%
+#$% Purpose:   To allow CONTROL the capability to alter various
+#$%            flags and fields in the blackboard.
+#$%
+#$% Called By: oREPLEN
+#$%
+#$% Calls:
+#$%
+#$% Tables:    None
+#$%
+#$% Date:      FEB 91
+#$%
+#$% Author:    Dane Wills
+#$%
+########################################################
+ 
+BBcommon
+BBDeclare  (UNT$Pointer,
+            UNT$Type$I,
+            UNT$Speed$I,
+            UNT$Bmlindx$I,
+            UNT$Name$C,
+            BML$Pointer,
+            BML$Ownerindx$I,
+            BML2$Pointer,
+            BML2$Nextbml$I,
+            BML$Nextbml$I,
+            SHC$Pointer,
+            AML$Pointer,
+            DAC$Pointer)                            # MJC 6/26/2K (E2145 - Implicit None)
+integer ILEN                                        # MJC 6/26/2K (E2145 - Implicit None)
+literal CSTRIP8                                     # MJC 6/26/2K (E2145 - Implicit None)
+integer         nord, nargs
+literal         args[nargs], name
+character       msg[100]
+integer*4       old_status, new_status, found, old_speed, orig_speed, litcmp
+ 
+byte            dam_speed [ 32 ]
+data            dam_speed [ $Surface$Code       ] / $YES /
+data            dam_speed [ $Sub$Code           ] / $YES /
+ 
+ 
+if (args[2] == $lex$SPEED$)       # Alter max speed of a Ship
+    {
+    # FOR <addressee> SET SPEED (maximum) <knots>
+ 
+    unt$name$c = Xunt$name$c
+ 
+    ilen = 0
+    call smovv  ("Max speed of ",msg,ilen)
+    call smovhn (unt$name$c,$$MaxLit,msg,ilen)
+ 
+    unt$type$i = Xunt$type$i
+    shc$pointer = Xunt$ShcPntr$i
+ 
+    if (dam_speed [ unt$type$i ]  != $YES |
+        ! shc$pointer$valid)
+        {
+        call smovv (" cannot be changed.",msg,ilen)
+        }
+    else
+        {
+        old_speed = Xunt$Speed$i
+        orig_speed = Xshc$MaxSpeed$i
+ 
+        if (args[3] == $lex$ORIGINAL$)
+            {
+            unt$speed$i = orig_speed                # Characteristic Speed
+            }
+        else
+            {
+            unt$speed$i = args[3]                   # specified speed
+            }
+ 
+        unt$speed$i = max (unt$speed$i, $Lo_unt$speed$i)
+        unt$speed$i = min (unt$speed$i, $Hi_unt$speed$i)
+ 
+        PUTunt$speed$i
+ 
+        call smovv  (" set to ",msg,ilen)
+        call smovi  (unt$speed$i,msg,ilen)
+        call smovv  (" (it was ",msg,ilen)
+        call smovi  (old_speed,msg,ilen)
+        call smovv  ("/",msg,ilen)
+        call smovi  (orig_speed,msg,ilen)
+        call smovv  (")",msg,ilen)
+        }
+ 
+    call send_ (0,0,ilen,msg)
+    }
+else if (args[2] == $lex$STATUS$)       # Alter current status of AML/BML
+    {
+    # SET STATUS (of) AIRCRAFT <force-name> (to) DOWN
+    # SET STATUS (of) AIRCRAFT <force-name> (to) ACTIVE
+    # SET STATUS (of) BOAT <force-name> (to) DOWN
+    # SET STATUS (of) BOAT <force-name> (to) ACTIVE
+ 
+    name = args[4]
+ 
+    if (args[5] == $lex$down$)
+        {
+        old_status = $ondeck$code
+        new_status = $Destroyed$code
+        }
+    else
+        {
+        new_status = $ondeck$code
+        old_status = $Destroyed$code
+        }
+ 
+    ilen = 0
+    found = $NO
+ 
+    if (args[3] == $lex$BOAT$)
+        {
+        call smovv  ("Boat ",msg,ilen)
+ 
+        FOR_ALL_OK(BML)
+            {
+            if (Xbml$Name$c != name) next
+ 
+            found = $YES
+ 
+            if (xBML$Status$i == old_status)
+                {
+                putBML$Status$i (new_status)
+ 
+                if (args[5] == $LEX$Active$)  # clk 6/10/94 (E1099)
+                  {                           # Check to see if the boat is in the link
+                                              # list. If not, add the boat into the list
+                                              # similar to boat_recover <wgmdboat.rat>
+                   BML$OwnerIndx$I = xBML$OwnerIndx$I     # get the owner's UNT indx
+                   UNT$Pointer$To    (BML$OwnerIndx$I)    # get the owner's UNT pointer
+                   UNT$BMLIndx$I   = xUNT$BMLIndx$I       # find the start of the linked list
+ 
+                   for (BML2$Pointer$To  UNT$BMLIndx$I; BML2$Pointer$Valid;
+                                                        BML2$Pointer$To  BML2$NextBML$I)
+                     {
+                       if (BML$Pointer == BML2$Pointer)   # if the boat in question
+                         break                            # break out of the loop
+                       else
+                         BML2$NextBML$I = xBML2$NextBML$I
+                     }
+                   if (!BML2$Pointer$Valid)               # if the pointer is not valid,
+                     {                                    # then it wasn't found in the list
+                       BML$NextBML$I   = UNT$BMLIndx$I        # set the resurrected boat to
+                       UNT$BMLIndx$I   = BML$Pointer$Index    #   be the first in the linked list
+                       putBML$NextBML$I
+                       putUNT$BMLIndx$I
+                     }   # end of if boat was not in the owners list
+ 
+                   putBML$ResurrectedFlag$I  ($yes)   # clk 8/95 (E1446)
+                  }   # end of if ACTIVATE BOAT
+                }   # end of if the boats status needs to be changed
+            else if (xBML$Status$i == new_status)
+                {
+                call wgoerr (0,0,nord,nargs,args,"Already done.")
+                return
+                }
+            else
+                {
+                call wgoerr (0,0,nord,nargs,args,"Current state precluded.")
+                return
+                }
+ 
+            break
+            }
+        }
+    else if (args[3] == $lex$AIRCRAFT$)
+        {
+        call smovv  ("Aircraft ",msg,ilen)
+ 
+        FOR_ALL_OK(AML)
+            {
+            if (Xaml$SideNumber$c != name) next
+ 
+            found = $YES
+ 
+            if (xAML$Status$i == old_status)
+                {
+                 putAML$Status$i (new_status)
+ 
+                 if (new_status == $ondeck$code)    # flag a/c DAC entry as resurrected
+                   {                                # clk 11/94 (WPC C2 Interface)
+                    putAML$TimeFlown$F (0.0)        # joa 9/02 (E2305) Reset Maintenance
+                    putAML$TimeLaunch$F(game$time)
+                    putAML$TimeMaint$f (1.E35)
+                    putAML$SystemFail$f(0.0)
+ 
+                    for (DAC$Pointer$First; DAC$Pointer$OK; DAC$Pointer$Next)
+                      {
+                       if (litcmp(xDAC$SideNumber$C,name) ==0)  # if this is the correct a/c
+                         {
+                          if (xDAC$Resurrected$I == $no)   # if entry not already flagged as
+                            {                              # resurrected, do it.
+                             putDAC$Resurrected$I  ($yes)
+                             if (xDAC$C2Reported$I == $yes)  # if destruction was already
+                               putDAC$C2Reported$I ($no)     # reported, report resurrection
+                             else                            # else, don't ever report DAC
+                               putDAC$C2Reported$I ($yes)    # information
+                             break
+                            }  # end of if entry has not been resurrected
+                         }  # end of if name matches
+                      }  # end of loop through DAC entries
+                   }  # end of if resurrecting the a/c
+                }
+            else if (xAML$Status$i == new_status)
+                {
+                call wgoerr (0,0,nord,nargs,args,"Already done.")
+                return
+                }
+            else
+                {
+                call wgoerr (0,0,nord,nargs,args,"Current state precluded.")
+                return
+                }
+ 
+            break
+            }
+ 
+        }
+    else
+        {
+        call wgoerr (0,0,nord,nargs,args,"Unimplemented command.")
+        return
+        }
+ 
+    if (found == $no)
+        {
+        call wgoerr (0,0,nord,nargs,args,"Entry not found.")
+        }
+    else
+        {
+        call smovhn (name,$$MaxLit,msg,ilen)
+ 
+        call smovv (" status changed to ",msg,ilen)
+        if (new_status == $destroyed$code) call smovv ("destroyed.",msg,ilen)
+        else                               call smovv ("available.",msg,ilen)
+ 
+        call send_ (0,0,ilen,msg)
+        }
+ 
+    }
+else if (args[2] == $lex$NOSINK$)       # Alter current status of never sink flag
+{
+    if (args[3] == $lex$ON$) PUTunt$NeverSink$i(YES)
+    else                     PUTunt$NeverSink$i(NO)
+}
+else if (args[2] == $lex$NODETECT$)       # Alter current status of never detect flag
+{
+    if (args[3] == $lex$ON$) PUTunt$NeverDetect$i(YES)
+    else                     PUTunt$NeverDetect$i(NO)
+}
+else
+    {
+    call wgoerr (0,0,nord,nargs,args,"Unimplemented command.")
+    }
+ 
+ 
+return
+end
+ 
+
+ 
+subroutine orepAML (indx_unt, ipnt_acc, iadd, iresult)
+ 
+########################################################
+#$%
+#$% Purpose:   OREPAML processes EXPEND/REPLENISH of
+#$%            Aircraft (AML) entries
+#$%
+#$% Called By: OREPLEN
+#$%
+#$% Calls:
+#$%
+#$% Tables:    None
+#$%
+#$% Date:      MAY 84
+#$%
+#$% Author:    Dana Wills
+#$%
+########################################################
+ 
+BBcommon
+integer ICNT,
+        IADD,
+        INDX_UNT,
+        IPNT_ACC,
+        IRESULT                                     # MJC 6/26/2K (E2145 - Implicit None)
+BBDeclare  (AML$Pointer,
+            AML$Status$I)                           # MJC 6/26/2K (E2145 - Implicit None)
+integer         ondeck
+ 
+icnt      = iadd
+ondeck    = 0
+ 
+for (aml$pointer$first; aml$pointer$ok ;aml$pointer$next)
+   {
+    if (Xaml$OwnerIndx$i != indx_unt)           # if not same owner...
+        next                                    # ... get next entry
+ 
+    if (Xaml$ACCPntr$i != ipnt_acc)             # if not same aircraft...
+        next                                    # get next entry
+ 
+    aml$Status$i = Xaml$Status$i                # find out status
+ 
+    if (icnt < 0 &                              # ** EXPEND **
+        aml$Status$i == $OnDeck$code)           #  (& expendable)
+        {
+        icnt = icnt + 1
+        PUTaml$Status$i ($destroyed$code)
+        }
+    else if (icnt > 0 &                         # ** REPLENISH **
+        aml$Status$i == $destroyed$code)        #  (& recoverable)
+        {
+        icnt = icnt - 1
+        PUTaml$Status$i ($OnDeck$code)
+ 
+        ondeck = ondeck + 1                     # count available aircraft
+        }
+    else if (aml$Status$i == $OnDeck$code)
+        {
+        ondeck = ondeck + 1                     # count available aircraft
+        }
+    }
+ 
+iresult = ondeck
+ 
+return
+end
+
+ 
+subroutine ocharge (nord,UNT$Pointer,nargs,args)
+ 
+########################################################
+#$%
+#$% Purpose:   OCHARGE processes CHARGE command to allow
+#$%            control to recharge the battery on a
+#$%            diesel sub.
+#$%
+#$% Called By: OREPLEN
+#$%
+#$% Calls:     SMOVI    SMOVHN  SMOVV   SEND
+#$%
+#$% Tables:    None
+#$%
+#$% Date:      Dec. 23, 1991
+#$%
+#$% Author:    Susan Miller
+#$%
+########################################################
+ 
+ BBcommon
+ BBDeclare (UNT$Pointer,
+            UNT$Name$C,
+            SHC$Pointer)                    # MJC 6/26/2K (E2145 - Implicit None)
+ literal CSTRIP8                            # MJC 6/26/2K (E2145 - Implicit None)
+ integer         nord, nargs, msg_len
+ integer         UNT$View$I, charge
+ real*4          UNT$BatteryCharge$F
+ literal         args[nargs]
+ character       msg[100]
+ 
+ UNT$Name$C = xUNT$Name$C
+ UNT$View$I = xUNT$View$I
+ SHC$Pointer = xUNT$SHCPntr$I
+ 
+ if (xSHC$NuclearPowered$I == $yes)
+    {
+    msg_len = 0
+    call smovhn(UNT$Name$C, $$MaxLit, msg, msg_len)  # submarine unit name
+    call smovv(" is not a diesel submarine.", msg, msg_len)
+    call send_(UNT$View$I, 0, msg_len, msg)
+ 
+    return
+    } # end if a nuclear powered sub
+ 
+ #$% FOR <addressee> CHARGE (battery to) <percent>
+ UNT$BatteryCharge$F = args[2]
+ putUNT$BatteryCharge$F
+ charge = INT(UNT$BatteryCharge$F)
+ 
+ msg_len = 0
+ call smovhn(UNT$Name$C, $$MaxLit, msg, msg_len)  # submarine unit name
+ call smovv(" :  Battery is charged to ", msg, msg_len)
+ call smovi(charge, msg, msg_len)
+ call smovv("%.", msg, msg_len)
+ call send_(UNT$View$I, 0, msg_len, msg)
+ 
+ return
+ end
+
+ 
+subroutine replenish_initial (UNT$Pointer)
+########################################################
+#$%
+#$% Purpose:   Replenish_initial processes the command
+#$%            REPLENISH TO INITIAL command.
+#$%
+#$% Called By: OREPLEN
+#$%
+#$% Calls:     EXPTST     SMOVHN     SMOVV      SEND
+#$%
+#$% Tables:    SHC        UNT
+#$%
+#$% Date:      January 1992
+#$%
+#$% Author:    Carol L. Kropp
+#$%
+#$% Modified:  James Allen - 2/96 (E1467)
+#$%            In addition to boats, process ship fuel
+#$%            stores.  Replaced FuelRemaining references
+#$%            with new dual tank variables (no need to
+#$%            search equipment list).
+#$%
+########################################################
+BBcommon
+BBDeclare  (SHC$TNK$Index,
+            SHC$EQ$Index,
+            SHC$TNK$capacity$F,
+            SHC$EQ$remaining$I,
+            UNT$TNK$Index,
+            UNT$TNK$fuelremaining$F)                # MJC 6/26/2K (E2145 - Implicit None)
+literal CSTRIP8                                     # MJC 6/26/2K (E2145 - Implicit None)
+Real*4  AMT     # jb E2207  (srg for TNK_ADJUST...  9/6/00
+integer I, litcmp
+integer   UNT$Pointer
+integer   DEQ$Pointer, SHC$Pointer
+integer   UNT$Type$I, UNT$SubType$I, UNT$View$I, DEQ$Ident$I
+literal   SHC$EQ$Type$C, DEQ$Type$C, UNT$Name$C
+ 
+integer   isexp, msg_len
+character msg[100]
+ 
+  SHC$Pointer = xUNT$ShcPntr$I
+  UNT$Type$I = xUNT$Type$I
+  UNT$SubType$I = xUNT$SubType$I
+ 
+  #$% Replenish fuel amount for shore bases, ships and boats
+  if (UNT$Type$I == $ShoreBase$Code |
+      UNT$Type$I == $Surface$Code   |       # joa 2/96 (E1467)
+      UNT$Type$I == $SurfaceWithAC$Code)    # ships in addition to boats
+    {
+     # Restore tanks to capacity dual fuel tanks - joa 2/96 (E1467)
+     for (i=1; i <= unt$tnk$slots; i = i + 1)
+       {
+        shc$TNK$Index = i
+        unt$TNK$Index = i
+        shc$TNK$Capacity$f = Xshc$TNK$Capacity$f
+        unt$TNK$FuelRemaining$f = Xunt$TNK$FuelRemaining$f
+        amt = max(0.0, shc$TNK$Capacity$f - unt$TNK$FuelRemaining$f)
+        call TNK_adjust_fuel_remaining(unt$pointer,i,amt)
+      }
+    }          # end of resetting shore base fuel remaining
+ 
+   #$% replenish expendable equipment items
+   FOR_DEQ_CHAIN
+     {
+      DEQ$Ident$I = xDEQ$Ident$I
+      call exptst (DEQ$Ident$I, isexp)
+      if (isexp == $no)     # if not an expendable item - next
+        next
+ 
+      DEQ$Type$C = xDEQ$Type$C
+      #$% Find the equipment characteristic equipment entry
+      for (SHC$EQ$Index = 1; SHC$EQ$Index$OK; SHC$EQ$Index = SHC$EQ$Index + 1)
+        {
+         SHC$EQ$Type$C = xSHC$EQ$Type$C
+         if (litcmp(SHC$EQ$Type$C, DEQ$Type$C) == 0)
+           {
+            SHC$EQ$Remaining$I = xSHC$EQ$Remaining$I
+            putDEQ$Remaining$I  (SHC$EQ$Remaining$I)
+           }
+        }       # end of loop through SHC$EQ list
+     }          # end of loop through unit's DEQ chain
+ 
+  UNT$Name$C = xUNT$Name$C
+  UNT$View$I = xUNT$View$I
+  msg_len = 0
+  call smovhn (UNT$Name$C, $$MaxLit, msg, msg_len)
+  call smovv  (" has been replenished to initial equipment loadout.", msg, msg_len)
+  call send_   (UNT$View$I, 0, msg_len, msg)
+ 
+return
+end
+
+subroutine oadd_equipment (nord,unt$pointer,nargs,args)
+ 
+########################################################
+#$%
+#$% Purpose:   OAdd_Equipment processes ADD SYSTEM/ITEM commands
+#$%
+#$% Called By: OREPLEN
+#$%
+#$% Calls:     SMOV..              SEND
+#$%            FIND_EQ_BY_NAME     GET_DEQ_ENTRY <lbcommn>
+#$%
+#$% Tables:    DEQ  UNT
+#$%
+#$% Date:      APRIL 92
+#$%
+#$% Author:    Dane Wills (adapted by Kirk Chang)
+#$%
+#$% Modified:  Carol Kropp - 1/97 (E1740)
+#$%            Only assign DEQ$EmitterIndx$I values
+#$%            to systems which are ALSP emitters.
+#$%
+########################################################
+ 
+BBcommon
+BBDeclare  (UNT$Type$I,
+            UNT$Nbreq$I,
+            UNT$Name$C,
+            DEQ$Pointer,
+            DEQ$Pntr$I,
+            DEQ$Antheight$I)                        # MJC 6/26/2K (E2145 - Implicit None)
+integer MSG_LEN                                     # MJC 6/26/2K (E2145 - Implicit None)
+literal CSTRIP8                                     # MJC 6/26/2K (E2145 - Implicit None)
+integer         nord, UNT$Pointer, nargs
+literal         args[nargs]
+ 
+integer         add_system_flag, args_indx, args_indx_increment
+integer         msg_length, unit_UNT_index, quantity, eqtype
+character       msg[200]
+ 
+integer         empty_deq_pntr, duplicate_name_flag, eq_pntr, eq_ident
+literal         name
+integer         e_index  # jecewsi JFR 11/18/94
+ 
+# ADD SYSTEM (device) <name> <name> ...
+#ADD ITEM [ | CHAFF | COUNTERMEASURE | CRUISE | TORPEDOES | WEAPONS ] <number> <name>  <number> <name>  ...
+  if (args[2] == $lex$System$)
+    {
+     add_system_flag = $Yes
+     args_indx = 3               # index into ARGS for the first name
+     args_indx_increment = 1     # ARG increrment
+ 
+     # find max emitter index to get starting point for addition
+     call find_max_emitter (unt$pointer, e_index)          # JFR 11/18/94
+    }
+  else
+    {
+     add_system_flag = $No
+	 if (args[2] == $lex$chaff$          |
+	     args[2] == $lex$countermeasure$ |
+	     args[2] == $lex$cruise$         |
+	     args[2] == $lex$torpedoes$      |
+	     args[2] == $lex$weapons$)
+	 {
+		eqtype = args[2]
+     	args_indx = 5               # index into ARGS for the first name
+	 }
+	 else
+	 {
+	    eqtype = 0
+     	args_indx = 4               # index into ARGS for the first name
+	 }
+     args_indx_increment = 2     # ARG increrment
+    }
+ 
+  unit_UNT_index    = unt$pointer$index
+  UNT$Name$C  = xUNT$Name$C
+  UNT$Type$I  = xUNT$Type$I
+ 
+     call smovhn (UNT$Name$C, $$MaxLit, msg, msg_length)
+ 
+  for ( ; args_indx <= nargs; args_indx = args_indx + args_indx_increment)
+    {       # loop through the list of devices|expendables to be added
+     name = args[args_indx]
+     quantity = args[args_indx-1]
+ 
+     msg_length = 0
+     call smovhn (name, $$MaxLit, msg, msg_length)
+ 
+     #$% Will search the system device tables if add_system_flag is $yes
+     #$% and the expendable equipment tables if equal to $no
+     call find_EQ_by_name (name, add_system_flag, eqtype, EQ_Pntr, Eq_Ident)
+ 
+     if (eq_pntr == 0)
+       {
+        call smovv  (" was not added to ", msg, msg_length)
+        call smovhn (UNT$Name$C, $$MaxLit, msg, msg_length)
+        call smovv  (" - ", msg, msg_length)
+ 
+        if (add_system_flag == $yes)
+          call smovv ("system device ", msg, msg_length)
+        else
+          call smovv ("expendable item ", msg, msg_length)
+ 
+        call smovhn (name, $$MaxLit, msg, msg_length)
+        call smovv  (" not found in database.", msg, msg_length)
+       }
+     else # the specified system or expendable was located
+       {
+         duplicate_name_flag  = $no
+         empty_deq_pntr = $no
+         FOR_DEQ_CHAIN      # look through existing DEQ chain
+           {                # for a duplicate name (disallowed)
+            if (xDEQ$Ident$i == $null$code)
+              {
+               if (empty_deq_pntr == $NO)
+                 empty_deq_pntr = deq$pointer
+              }
+            else  # the DEQ entry in the chain is not empty
+              {
+               DEQ$Pntr$i = xDEQ$Pntr$I
+               if (DEQ$Pntr$i == EQ_Pntr)
+                 {
+                  duplicate_name_flag = $Yes
+                  break
+                 }
+              }
+           }   # end of loop through DEQ chain looking for duplicate names
+ 
+         if (duplicate_name_flag == $yes)
+            {
+              call smovv  (" was not added to ", msg, msg_length)
+              call smovhn (UNT$Name$C, $$MaxLit, msg, msg_length)
+              call smovv  (" - ", msg, msg_length)
+              call smovhn (name, $$MaxLit, msg, msg_length)
+              call smovv  (" already on platform.", msg, msg_length)
+            }
+         else     # the item to be added is not a duplicate
+           {
+            if (empty_deq_pntr == $NO)    # if no empty slots in chain
+              {
+               call get_DEQ_entry (UNT$Pointer, DEQ$Pointer)
+               If (DEQ$Pointer == 0)  # DEQ table is full, not enough space available
+                 {
+                  call smovv  (" was not added to ", msg, msg_length)
+                  call smovhn (UNT$Name$C, $$MaxLit, msg, msg_length)
+                  call smovv  (" - ", msg, msg_length)
+                  call smovv  (" DEQ table is full.", msg, msg_len)
+                  call send_ ($Neutral$View, 0, msg_length, msg)
+                  next
+                 }
+              }
+            else        # Use the empty slot in the units DEQ chain
+               DEQ$Pointer = empty_deq_pntr
+ 
+            putDEQ$Pntr$I  (eq_pntr)
+            putDEQ$Ident$I (eq_ident)
+ 
+            if (add_system_flag == $YES)
+              {
+               if (eq_ident == $Radar$Code |          # only assign the emitter
+                   eq_ident == $Jammer$Code |         # index if the system
+                   eq_ident == $RadarJammer$Code |    # needs it - clk 1/97 (E1740)
+                   eq_ident == $CommunicationJammer$Code |
+                   eq_ident == $RadComJammer$Code)
+                 {
+                  e_index = min(e_index + 1, jew$or$slots)  # increment emitter index - JFR 11/18/94
+                  putDEQ$EmitterIndx$I (e_index)  # store emitter index - JFR 11/18/94
+                 }   # end of if an ALSP emitter, needing an index
+ 
+               DEQ$AntHeight$I = xUNT$AntennaHeight$I
+               putDEQ$AntHeight$I
+ 
+               putDEQ$On$I  ($no)
+              }
+            else       # adding expendable equipment
+              {
+               putDEQ$Limit$I  (1)    # related to RBOC (qt/mn)
+               putDEQ$Remaining$I  (quantity)
+               putDEQ$Logistical$I ($yes)
+ 
+               if ((eq_ident == $SAM$Code) |   # clk 11/94 (E1094)
+                   (eq_ident == $CIWS$Code))   # SMM 7/94 (E1311)
+                 putUNT$SamCapable$I  ($yes)
+              }
+ 
+            call smovv  (" added to ", msg, msg_length)
+            call smovhn (UNT$Name$C, $$MaxLit, msg, msg_length)
+            call smovv   ('.', msg, msg_length)
+           }      # end of item to be added it not a duplicate
+       }            # end of requested item located in a table
+ 
+     call send_ ($Neutral$View, 0, msg_length, msg)
+    }               # end of loop through the command arguments
+ 
+ 
+return
+end
+ 
+
+subroutine oremove_equipment (nord,unt$pointer,nargs,args)
+ 
+########################################################
+#$%
+#$% Purpose:   ORemove_Equipment processes REMOVE SYSTEM command
+#$%
+#$% Called By: OREPLEN
+#$%
+#$% Calls:     SMOV..               SEND
+#$%            SHRINK_DEQ_CHAIN <lbcommn.rat>
+#$%
+#$% Tables:    UNT  DEQ
+#$%
+#$% Date:      APRIL 92
+#$%
+#$% Author:    Dane Wills
+#$%
+########################################################
+ 
+BBcommon
+BBDeclare  (UNT$Pointer,
+            UNT$Name$C,
+            DEQ$Type$C,
+            DEQ$Pointer,
+            DEQ$Nextdeq$I)                  # MJC 6/26/2K (E2145 - Implicit None)
+integer ILEN,
+        UNIT_UNT_INDEX                      # MJC 6/26/2K (E2145 - Implicit None)
+literal CSTRIP8                             # MJC 6/26/2K (E2145 - Implicit None)
+integer         nord, nargs, I_Match, count, iok
+integer         args_indx, args_indx_increment
+literal         args[nargs], name
+character       msg[200]
+ 
+# REMOVE SYSTEM (or item) <name> <name> ...
+ 
+args_indx = 3        # index into ARGS for the first name
+args_indx_increment = 1        # ARG increrment
+ 
+ilen = 0
+ 
+unit_UNT_index    = unt$pointer$index
+unt$name$c  = Xunt$name$c
+ 
+call smovhn (unt$name$c,$$MaxLit,msg,ilen)
+call smovv  (" removing:",msg,ilen)
+ 
+iok   = 0
+count = 0
+ 
+for ( ; args_indx <= nargs; args_indx = args_indx + args_indx_increment)
+    {
+    count = count + 1
+    name = args[args_indx]
+ 
+    if (count > 1) call smovv (", ",msg,ilen)
+    else           call smovv (" ",msg,ilen)
+ 
+    call smovhn (name,$$MaxLit,msg,ilen)
+ 
+    #----------------------------------------
+    # Now look through existing DEQ chain for a matching name
+ 
+    I_Match = $no
+ 
+    FOR_DEQ_CHAIN
+        {
+        if (xDEQ$Ident$i == $Null$code) next
+ 
+        DEQ$Type$C = xDEQ$Type$C
+        if (DEQ$Type$C != name) next
+ 
+        I_Match = deq$pointer
+        break
+        }
+ 
+    if (name == 'JP') I_Match = $No              # exclude FUEL & JP
+    if (name == 'FUEL') I_Match = $No
+ 
+    if (I_Match == $NO)
+        {
+        call smovv (" (Not Found)",msg,ilen)
+        next
+        }
+ 
+    #------------------------------------------------------------
+    # Clean up the item here
+ 
+    DEQ$Pointer = I_Match
+ 
+    DEQ$NextDEQ$I = xDEQ$NextDEQ$I  # save the next index, so chain can be restored
+    DEQ$zero                        # after the entire entry is cleared
+    putDEQ$NextDEQ$I
+ 
+    call smovv (" (Removed)",msg,ilen)
+    iok = iok + 1
+    }
+ 
+if (iok > 0)
+    {
+    call Shrink_DEQ_Chain ( UNT$POINTER )   # Remove NULL Ident DEQ entries
+ 
+    call smovib (iok,5,msg,ilen)
+    call smovv (" items.",msg,ilen)
+    }
+ 
+call send_ (0,0,ilen,msg)
+ 
+return
+end
+
+subroutine Find_EQ_By_Name (name,         # input:  Name of device or expendable
+                            device_flag,  # input:  $yes when a device
+							eqtype,       # input:  type of equipment to determine table search
+                            EQ_Pntr,      # output: Table pointer when found
+                            Eq_Ident)     # output: Equipment id code
+########################################################
+#$%
+#$% Purpose:    Find_Eq_By_Name searches the system device
+#$%             tables if add_system_flag is $yes and the
+#$%             expendable equipment tables if equal to $no
+#$%             for the NAMEd piece of equipment.
+#$%
+#$% Calls By:   OAdd_Equipment
+#$%
+#$% Calls:     EQ_Identify         (in LBcommn.rat)
+#$%
+#$% Tables:    None
+#$%
+#$% Date:      APRIL 92
+#$%
+#$% Author:    Dane Wills
+#$%
+#$% Modified:  Susan Miller 4/99 (E2078)
+#$%            Added CTM table to search list of expendables.
+########################################################
+ 
+BBcommon
+integer I,
+		J,
+        K,
+        $$TBL                           # MJC 6/26/2K (E2145 - Implicit None)
+literal   name
+integer   device_flag, eqtype, eq_pntr, eq_ident
+integer	  beg_tbl_index, end_tbl_index
+ 
+define (search_table_size, 12)
+ 
+#         The last entry of this array must be ZERO
+integer   device_tables [search_table_size] / $$RAD, $$ESM, $$JAM, $$CJC,
+                                              $$SUI, $$SON, $$IFF, 0,
+                                              0,     0,     0,     0     /
+#         The last entry of this array must be ZERO
+integer   expend_tables [search_table_size] / $$CMC, $$TRP, $$TOR, $$BOM,
+                                              $$MC,  $$COB, $$SOB, $$GND,
+                                              $$CTM, $$CHF,     0,     0 /
+integer   tables [search_table_size]
+ 
+eq_pntr  = 0
+eq_ident = 0
+ 
+if (device_flag == $yes)    # if a device vice an expendable
+{
+   for (i = 1; i <= search_table_size; i = i + 1)
+      tables [i] = device_tables [i]
+}
+else    # an expendable
+{
+	if (eqtype != 0)				# Specific equipment type
+	{
+		if (eqtype == $lex$cruise$)
+		{
+			beg_tbl_index = 1
+			end_tbl_index = 1
+		}
+		else if (eqtype == $lex$torpedoes$)
+		{
+			beg_tbl_index = 2
+			end_tbl_index = 2
+		}
+		else if (eqtype == $lex$weapons$)
+		{
+			beg_tbl_index = 3
+			end_tbl_index = 5
+		}
+		else if (eqtype == $lex$countermeasure$)
+		{
+			beg_tbl_index = 9
+			end_tbl_index = 9
+		}
+		else if (eqtype == $lex$chaff$)
+		{
+			beg_tbl_index = 10
+			end_tbl_index = 10
+		}
+		else									# All tables if table set not recognized
+		{
+			beg_tbl_index = 1
+			end_tbl_index = search_table_size
+		}
+	}
+	else										# No specific table set selected
+	{
+		beg_tbl_index = 1
+		end_tbl_index = search_table_size
+	}
+    i = 0
+    for (j = beg_tbl_index; j <= end_tbl_index; j = j + 1)
+	{
+		i = i + 1
+     	tables [i] = expend_tables [j]
+	}
+	if (tables[i] != 0) tables[i+1] = 0		# Must be terminated with 0
+}
+ 
+for (k = 1; tables[k] != 0; k = k + 1)
+    {
+    $$tbl = tables[k]
+ 
+    call EQ_Identify ($$tbl, name, eq_pntr, eq_ident)
+ 
+    if (eq_pntr != 0) break
+    }
+ 
+return
+end
+
+subroutine find_max_emitter(unt$pointer,maxidx)
+ 
+########################################################
+#$%
+#$% Purpose:   find_max_emitter trolls the deq table to find
+#$%            the max emitter indx used jecewsi emitters
+#$%
+#$% Called By: oadd_equipment
+#$%
+#$% Calls:     NONE
+#$%
+#$% Tables:    DEQ  UNT
+#$%
+#$% Date:      NOVEMBER 1994
+#$%
+#$% Author:    JOHN F. RICHARDSON
+#$%
+########################################################
+ 
+BBcommon
+BBDeclare  (DEQ$Pointer,
+            DEQ$Emitterindx$I)                   # MJC 6/26/2K (E2145 - Implicit None)
+integer         UNT$Pointer, maxidx
+ 
+maxidx = 0
+for_deq_chain
+  {
+   deq$emitterindx$i = xdeq$emitterindx$i # get jecewsi emitter index
+   if(deq$emitterindx$i > maxidx) maxidx = deq$emitterindx$i # if bigger then store
+  }
+ 
+return
+end
+
+ 
+subroutine Process_Change_Cmd_Air (_
+                UNT$Pointer,    # in: Unit given order
+                nargs,          # in: Number of command arguments
+                args)           # in: Command arguments
+##########################################################################
+#$%
+#$% Purpose:   Process_Change_Command carries out the CHANGE AIRCRAFT
+#$%            command.
+#$%
+#$%            CHANGE AIRCRAFT (callsign) <addressee> (to type) <name>
+#$%                            [ | (and change owner to) <addressee> ];
+#$%
+#$% Called By: oreplen
+#$%
+#$% Calls:     eqfind       <lbcommn.rat>
+#$%            smov..       <lbsmov.rat>
+#$%            send         <wgxsend.rat>
+#$%
+#$% Tables:    UNT     AML
+#$%
+#$% Date:      January 1997 (E1654)
+#$%
+#$% Author:    Carol Kropp
+#$%
+##########################################################################
+BBcommon
+EqErr$Common       # used by eqfind (variable cflg is variable set below)
+BBDeclare  (DEQ2$Pointer)                        # MJC 6/26/2K (E2145 - Implicit None)
+literal  CSTRIP8                                 # MJC 6/26/2K (E2145 - Implicit None)
+integer  UNT$Pointer, nargs
+literal  args[20]
+ 
+integer   msg_len, litcmp
+character msg[ARB]
+literal   desired_callsign
+integer   aircraft_can_be_changed
+integer   AML$Pointer, AML$OwnerIndx$I, AML$Status$I, AML$ACCPntr$I
+literal   new_characteristic_type
+integer   ACC$Pointer       # new type
+literal   new_owner_name
+integer   UNT2$Pointer      # new owner
+integer   UNT2$Type$I, UNT2$SubType$I
+integer   ac_on_new_platform
+ 
+  desired_callsign = args[3]
+  aircraft_can_be_changed = $no
+  for (AML$Pointer$First; AML$Pointer$Ok; AML$Pointer$Next)  # locate the
+    {                                                        # desired a/c
+     if (litcmp(xAML$SideNumber$C, desired_callsign) == 0)
+       {
+        AML$OwnerIndx$I = xAML$OwnerIndx$I
+        if (AML$OwnerIndx$I == UNT$Pointer$Index)
+          {
+           AML$Status$I = xAML$Status$I
+           if (AML$Status$I == $OnDeck$Code)
+             {
+              new_characteristic_type = args[4]
+              cflg = $no
+              call eqfind ($$ACC, 0, new_characteristic_type, ACC$Pointer)
+              if (ACC$Pointer$Ok)
+                {
+                 AML$ACCPntr$I = ACC$Pointer
+                 putAML$ACCPntr$I
+                 msg_len = 0
+                 call smovhn (desired_callsign, $$MaxLit, msg, msg_len)
+                 call smovv  (" has been changed to ", msg, msg_len)
+                 call smovhn (new_characteristic_type, $$MaxLit, msg, msg_len)
+                 call send_   ($Neutral$View, 0, msg_len, msg)
+ 
+                 if (nargs >= 4)  # Process same or new owner  E2220
+                   {
+                    if (nargs > 4)
+                        {
+                        new_owner_name = args[5]
+                        call eqfind ($$UNT, UNT$Entry, new_owner_name, UNT2$Pointer)
+                        }
+                    else
+                        {
+                        unt2$pointer = unt$pointer  # Same owner
+                        new_owner_name = Xunt$name$c
+                        }
+ 
+                    if (UNT2$Pointer$Valid)
+                      {
+                       UNT2$Type$I = xUNT2$Type$I
+                       UNT2$SubType$I = xUNT2$SubType$I
+                       if (UNT2$Type$I == $Shorebase$Code |        # the new owner can only be a
+                           (UNT2$Type$I == $Surface$Code &         # shore base or a ship
+                            UNT2$SubType$I == $Standard$SubCode))
+                         {
+                          AML$OwnerIndx$I = UNT2$Pointer$Index
+                          putAML$OwnerIndx$I
+ 
+                          ac_on_new_platform = $no
+                          for_DEQ2_chain
+                            {
+                             if (xDEQ2$Pntr$I == ACC$Pointer)
+                               {
+                                ac_on_new_platform = $yes
+                                break
+                               }   # end of if the type of aircraft
+                            }   # end of loop looking for aircraft type
+                          if (ac_on_new_platform == $no)
+                            {
+                             call get_DEQ_entry   (UNT2$Pointer, DEQ2$Pointer)
+                             putDEQ2$Ident$I      ($Aircraft$Code)
+                             putDEQ2$Pntr$I       (ACC$Pointer)
+                             putDEQ2$Remaining$I  (100)
+                             putUNT2$AirCapable$I ($yes)
+                            }   # end of if aircraft type not on the new owner
+ 
+                          msg_len = 0
+                          call smovhn (desired_callsign, $$MaxLit, msg, msg_len)
+                          call smovv  (" ", msg, msg_len)
+                          call smovhn (new_characteristic_type, $$MaxLit, msg, msg_len)
+                          call smovv  (" is now owned by ", msg, msg_len)
+                          call smovhn (new_owner_name, $$MaxLit, msg, msg_len)
+                          call send_   ($Neutral$View, 0, msg_len, msg)
+                         }   # end of if the new owner is a base or a ship
+                       else
+                         {
+                          msg_len = 0
+                          call smovhn (desired_callsign, $$MaxLit, msg, msg_len)
+                          call smovv  (" cannot be owned by ", msg, msg_len)
+                          call smovhn (new_owner_name, $$MaxLit, msg, msg_len)
+                          call smovv  (" - platform is not a ship or a base", msg, msg_len)
+                          call send_   ($Neutral$View, 0, msg_len, msg)
+                         }   # end of if the new owner is NOT a base or a ship
+                      }   # end of if the new owner was found
+                    else
+                      {
+                       msg_len = 0
+                       call smovhn (desired_callsign, $$MaxLit, msg, msg_len)
+                       call smovv  (" cannot be owned by ", msg, msg_len)
+                       call smovhn (new_owner_name, $$MaxLit, msg, msg_len)
+                       call smovv  (" - platform not found", msg, msg_len)
+                       call send_   ($Neutral$View, 0, msg_len, msg)
+                      }   # end of if the new owner was not found
+                   }   # end of if a new owner is specified
+                }   # end of if the new a/c type was located
+              else
+                {
+                 msg_len = 0
+                 call smovhn (desired_callsign, $$MaxLit, msg, msg_len)
+                 call smovv  (" cannot be changed to ", msg, msg_len)
+                 call smovhn (new_characteristic_type, $$MaxLit, msg, msg_len)
+                 call smovv  (" - type is not an AIRCRAFT class.", msg, msg_len)
+                 call send_   ($Neutral$View, 0, msg_len, msg)
+                }   # end of if the new a/c type was NOT located
+             }   # end of if the a/c is on deck
+           else
+             {
+              msg_len = 0
+              call smovhn (desired_callsign, $$MaxLit, msg, msg_len)
+              call smovv  (" is not currently on deck of ", msg, msg_len)
+              call smovhn (xUNT$Name$C, $$MaxLit, msg, msg_len)
+              call smovv  (" - CHANGE command rejected.", msg, msg_len)
+              call send_   ($Neutral$View, 0, msg_len, msg)
+             }   # end of if the a/c is NOT on deck
+          }   # end of if the a/c belongs to the command addressee
+        else
+          {
+           msg_len = 0
+           call smovhn (xUNT$Name$C, $$MaxLit, msg, msg_len)
+           call smovv  (" is not the owner of aircraft ", msg, msg_len)
+           call smovhn (desired_callsign, $$MaxLit, msg, msg_len)
+           call smovv  (" - CHANGE command rejected.", msg, msg_len)
+           call send_   ($Neutral$View, 0, msg_len, msg)
+          }
+        break
+       }   # end of if the name matches
+    }   # end of loop through the AML table looking for a/c
+ 
+  if (!AML$Pointer$Ok)
+    {
+     msg_len = 0
+     call smovhn (desired_callsign, $$MaxLit, msg, msg_len)
+     call smovv  (" was not located ", msg, msg_len)
+     call smovv  (" - CHANGE command rejected.", msg, msg_len)
+     call send_   ($Neutral$View, 0, msg_len, msg)
+    }   # end of if the desired callsign was not located
+ 
+return
+end
+
+ 
+subroutine Process_Change_Cmd_Boat (_
+                UNT$Pointer,    # in: Unit given order
+                nargs,          # in: Number of command arguments
+                args)           # in: Command arguments
+##########################################################################
+#$%
+#$% Purpose:   Process_Change_Command carries out the CHANGE BOAT
+#$%            command.
+#$%
+#$% Called By: oreplen
+#$%
+#$% Calls:     eqfind       <lbcommn.rat>
+#$%            smov..       <lbsmov.rat>
+#$%            send         <wgxsend.rat>
+#$% Tables:    UNT     BML
+#$%
+#$% Date:      January 1997 (E1654)
+#$%
+#$% Author:    Carol Kropp
+#$%
+##########################################################################
+BBcommon
+EqErr$Common       # used by eqfind
+BBDeclare  (BML2$Nextbml$I,
+            UNT$Bmlindx$I,
+            BML2$Pointer)                       # MJC 6/26/2K (E2145 - Implicit None)
+literal  CSTRIP8                                # MJC 6/26/2K (E2145 - Implicit None)
+integer  UNT$Pointer, nargs
+literal  args[20]
+ 
+integer   msg_len, litcmp
+character msg[ARB]
+literal   desired_boat_name
+integer   BML$Pointer, BML$OwnerIndx$I, BML$Status$I, BML$SHCPntr$I
+literal   new_characteristic_type
+integer   SHC$Pointer       # new type
+integer   SHC$Category$I
+literal   new_owner_name
+integer   UNT2$Pointer      # new owner
+integer   desired_boat_bml_indx
+integer   UNT2$Type$I, UNT2$SubType$I
+integer   next_bml
+ 
+  desired_boat_name = args[3]
+  for (BML$Pointer$First; BML$Pointer$Ok; BML$Pointer$Next)  # locate the
+    {                                                        # desired a/c
+     if (litcmp(xBML$Name$C, desired_boat_name) == 0)
+       {
+        BML$OwnerIndx$I = xBML$OwnerIndx$I
+        if (BML$OwnerIndx$I == UNT$Pointer$Index)
+          {
+           BML$Status$I = xBML$Status$I
+           if (BML$Status$I == $OnDeck$Code)
+             {
+              new_characteristic_type = args[4]
+              cflg = $no
+              call eqfind ($$SHC, 0, new_characteristic_type, SHC$Pointer)
+              if (SHC$Pointer$Ok)
+                {
+                 SHC$Category$I = xSHC$Category$I
+                 if (SHC$Category$I == $SmallBoat$Subcode)
+                   {
+                    BML$SHCPntr$I = SHC$Pointer
+                    putBML$SHCPntr$I
+                    msg_len = 0
+                    call smovhn (desired_boat_name, $$MaxLit, msg, msg_len)
+                    call smovv  (" has been changed to ", msg, msg_len)
+                    call smovhn (new_characteristic_type, $$MaxLit, msg, msg_len)
+                    call send_   ($Neutral$View, 0, msg_len, msg)
+ 
+                    if (nargs > 4)  # if a new owner was entered
+                      {
+                       new_owner_name = args[5]
+                       call eqfind ($$UNT, UNT$Entry, new_owner_name, UNT2$Pointer)
+                       if (UNT2$Pointer$Valid)
+                         {
+                          UNT2$Type$I = xUNT2$Type$I
+                          UNT2$SubType$I = xUNT2$SubType$I
+                          if (UNT2$Type$I == $Shorebase$Code |        # the new owner can only be a
+                              (UNT2$Type$I == $Surface$Code &         # shore base or a ship
+                               UNT2$SubType$I == $Standard$SubCode))
+                            {
+                             desired_boat_bml_indx = BML$Pointer$Index      # remove the boat from the
+                             next_bml = xBML$NextBML$I                      # original owner's list
+                             BML2$NextBML$I = xUNT$BMLIndx$I
+                             if (BML2$NextBML$I == desired_boat_bml_indx)
+                               {
+                                UNT$BMLIndx$I = next_bml
+                                putUNT$BMLIndx$I
+                               }
+                             else   # not the first boat on the original bases BML chain
+                               {
+                                for (BML2$Pointer$To  (BML2$NextBML$I);
+                                     BML2$Pointer >= BML$Base; BML2$Pointer$To  (BML2$NextBML$I))
+                                  {
+                                   BML2$NextBML$I = xBML2$NextBML$I
+                                   if (BML2$NextBML$I == desired_boat_bml_indx)
+                                     {
+                                      BML2$NextBML$I = next_bml
+                                      putBML2$NextBML$I
+                                      break
+                                     }
+                                  }   # end of loop through original bases BML chain
+                               }   # end of if not the first boat on the original bases list
+ 
+                             BML$OwnerIndx$I = UNT2$Pointer$Index           # reset the owner index
+                             putBML$OwnerIndx$I                             # in the boat's BML entry
+ 
+                             putBML$NextBML$I  (xUNT2$BMLIndx$I)            # Add the boat to the beginning
+                             putUNT2$BMLIndx$I (desired_boat_bml_indx)      # of the new owners list &
+                             putUNT2$BoatRestricted$I  ($no)                # make sure the new base can
+                                                                            # handle boats
+                             msg_len = 0
+                             call smovhn (desired_boat_name, $$MaxLit, msg, msg_len)
+                             call smovv  (" is now owned by ", msg, msg_len)
+                             call smovhn (new_owner_name, $$MaxLit, msg, msg_len)
+                             call send_   ($Neutral$View, 0, msg_len, msg)
+                            }   # end of if the new owner is a base or a ship
+                          else
+                            {
+                             msg_len = 0
+                             call smovhn (desired_boat_name, $$MaxLit, msg, msg_len)
+                             call smovv  (" cannot be owned by ", msg, msg_len)
+                             call smovhn (new_owner_name, $$MaxLit, msg, msg_len)
+                             call smovv  (" - platform is not a ship or a base", msg, msg_len)
+                             call send_   ($Neutral$View, 0, msg_len, msg)
+                            }   # end of if the new owner is NOT a base or a ship
+                         }   # end of if the new owner was found
+                       else
+                         {
+                          msg_len = 0
+                          call smovhn (desired_boat_name, $$MaxLit, msg, msg_len)
+                          call smovv  (" cannot be moved to ", msg, msg_len)
+                          call smovhn (new_owner_name, $$MaxLit, msg, msg_len)
+                          call smovv  (" - platform not found", msg, msg_len)
+                          call send_   ($Neutral$View, 0, msg_len, msg)
+                         }
+                      }   # end of if a new owner is specified
+                   }   # end of if the new class is a BOAT type
+                 else
+                   {
+                    msg_len = 0
+                    call smovhn (desired_boat_name, $$MaxLit, msg, msg_len)
+                    call smovv  (" cannot be changed to ", msg, msg_len)
+                    call smovhn (new_characteristic_type, $$MaxLit, msg, msg_len)
+                    call smovv  (" - type is not a BOAT class.", msg, msg_len)
+                    call send_   ($Neutral$View, 0, msg_len, msg)
+                   }   # end of if the new type is not a BOAT class
+                }   # end of if the new boat type was located
+              else
+                {
+                 msg_len = 0
+                 call smovhn (desired_boat_name, $$MaxLit, msg, msg_len)
+                 call smovv  (" cannot be changed to ", msg, msg_len)
+                 call smovhn (new_characteristic_type, $$MaxLit, msg, msg_len)
+                 call smovv  (" - type is not a BOAT class.", msg, msg_len)
+                 call send_   ($Neutral$View, 0, msg_len, msg)
+                }   # end of if the new boat type was NOT located
+             }   # end of if the boat is on deck
+           else
+             {
+              msg_len = 0
+              call smovhn (desired_boat_name, $$MaxLit, msg, msg_len)
+              call smovv  (" is not currently on deck of ", msg, msg_len)
+              call smovhn (xUNT$Name$C, $$MaxLit, msg, msg_len)
+              call smovv  (" - CHANGE command rejected.", msg, msg_len)
+              call send_   ($Neutral$View, 0, msg_len, msg)
+             }   # end of if the boat is NOT on deck
+          }   # end of if the boat belongs to the command addressee
+        else
+          {
+           msg_len = 0
+           call smovhn (xUNT$Name$C, $$MaxLit, msg, msg_len)
+           call smovv  (" is not the owner of boat ", msg, msg_len)
+           call smovhn (desired_boat_name, $$MaxLit, msg, msg_len)
+           call smovv  (" - CHANGE command rejected.", msg, msg_len)
+           call send_   ($Neutral$View, 0, msg_len, msg)
+          }
+        break
+       }   # end of if the name matches
+    }   # end of loop through the BML table looking for the boat
+ 
+  if (!BML$Pointer$Ok)
+    {
+     msg_len = 0
+     call smovhn (desired_boat_name, $$MaxLit, msg, msg_len)
+     call smovv  (" was not located ", msg, msg_len)
+     call smovv  (" - CHANGE command rejected.", msg, msg_len)
+     call send_   ($Neutral$View, 0, msg_len, msg)
+    }   # end of if the desired boat name was not located
+ 
+return
+end

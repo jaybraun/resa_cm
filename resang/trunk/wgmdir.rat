@@ -1,0 +1,945 @@
+            #        File wgmdIR.rat    (IR Sensor Model)
+ 
+define($IDENT,3)  # Used for iKNOW subscripts, e.g., iKNOW[$RECOG]
+define($RECOG,2)
+define($DETCT,1)
+define(nslots,1500) # number of slots in detection table
+ 
+include "bbcode.inc"
+include "bbctl.inc"
+include "bbacc.inc"
+include "bbdeq.inc"
+include "bbirc.inc"            # jms 8/18/92
+include "bbird.inc"
+include "bbshc.inc"
+include "bbunt.inc"
+include "bbuvp.inc"            # IR Ident/Recog/Detect prob's.
+include "bbvue.inc"
+include "bbwet.inc"
+include "macros.inc"
+define (BBImplicit, Implicit None)                  # MJC 7/13/2K (E2145)
+ 
+Subroutine IR_MOD
+########################################################
+#$%
+#$%  Purpose:  The InfraRed sensor model
+#$%  is called to determine whether any aircraft with
+#$%  activated IR sensors detect targets.
+#$%
+#$%  Called By: WARCYC
+#$%
+#$%  Calls:     Sun_Set_Rise  RCPA    REPIR   RLL2RB    RRB2LL
+#$%
+#$%  Tables:    ACC    UNT    IRC     DEQ
+#$%
+#$%  Date:      February 1990
+#$%
+#$%  Author:    Joe Bryant
+#$%
+#$%  Modified:  Susan Miller 5/6/92 for UVP ranges increased to 60
+#$%             Slant range has to be less than or equal to
+#$%             value stored in table, or use greatest (last)
+#$%             range entered for that target
+#$%
+#$%  Modified:  John Strauch/Charlie Farbstein 8/18/92 for SERCES IR.
+#$%             John Strauch 11/18/92 new IR model.
+#$%
+#$%  Note: UNT refers to the detecting a/c; unt2 to targets
+#$%
+########################################################
+BBcommon
+BBDeclare  (UNT$Pointer,
+            UNT$Truelatitude$F,
+            UNT$Truelongitude$F,
+            UNT$Truealtdepth$I,
+            UNT$Truecourse$F,
+            UNT$Truespeed$F,
+            UNT$View$I,
+            UNT$Assumedlatitude$F,
+            UNT$Assumedlongitude$F,
+            UNT$Status$I)                               # MJC 7/11/2K (E2145)
+BBDeclare  (DEQ$Pointer,
+            DEQ$Horizsect$I,
+            DEQ$Vertsect$I,
+            DEQ$Scan$I,
+            DEQ$Scanrateinterval$F,
+            IRD$Motion$I,
+            IRD$Latitude$F,
+            IRD$Longitude$F)                            # MJC 7/11/2K (E2145)
+BBDeclare  (UNT2$Status$I,
+            UNT2$Truealtdepth$I,
+            UNT2$Type$I,
+            UNT2$Truespeed$F,
+            UNT2$Truecourse$F,
+            UNT2$Truelatitude$F,
+            UNT2$Truelongitude$F,
+            UNT2$Pointer)                               # MJC 7/11/2K (E2145)
+BBDeclare  (IRC$Pointer,
+            IRC$FOV$Index,
+            IRC$FOV$elhfang$F,
+            IRC$FOV$azhfang$F,
+            IRC$Azimuth$F,
+            IRC$FOV$maxrelspd$I,
+            WET$Sunset$F,
+            WET$Sunrise$F,
+            SHC$Pointer,
+            DEQ2$Pointer,
+            ACC$Pointer)                                # MJC 7/11/2K (E2145)
+real UNITSPEED,
+     SHIPMAXSPEED,
+     RELBRG,
+     HGTNMI,
+     RMAXHORIZ,
+     SQVERT,
+     RMAXTRAVEL,
+     DLATMAX,
+     DLONMAX,
+     DLATMAX2,
+     DLONMAX2,
+     X,
+     RANDOM,
+     DISTNEAR,
+     DISTFAR,
+     SLRANGE,
+     PROBABILITY,
+     RDIST,
+     TRAVEL,
+     MINPLUS,
+     MINDET,
+     HEADNG
+integer INTRA_CODE,
+        ION,
+        J                                               # MJC 7/11/2K (E2145)
+literal CSTRIP8                                         # MJC 7/11/2K (E2145)
+REAL    nadir,swath,tstnum,rndnum,UNTCOS,BRG,RNG,SpeedRatio
+BYTE    iKNOW[3]                    # Flags for IDENT, RECOG, DETECT
+BYTE    IntraKNOW[3]                # Flags for intra-emi comparison
+Logical Intra_EMI_Impact
+Real*4  Intra_Degradation
+ 
+real    Azimuth, Elevation, DiffTempFact                  # jms 8/20/92
+integer ScanSectors, Sect, NewSect, RightSect, LeftSect   # jms 8/20/92
+integer LowSect, HighSect, i                              # jms 9/2/92
+integer TotSect, Contig                                   # jms 10/23/92
+character work[ARB]                                       # jms 9/15/92
+real    Ident, Recog, Detect, RelSpd, Rel_Speed           # jms 10/5/92
+real    SecondsInWindow
+ 
+real    nVtarget, nHtarget, ntarget, alph, beta           # jms 11/18/92
+real    wtarget, htarget, Hsensor, Mfactor                # jms 11/18/92
+real    Bfactwh, Bfact0, Bfact1, Afact, Bfact             # jms 11/18/92
+integer NVview, NHview                                    # jms 11/18/92
+real    qb,qc,qr1,qr2,qdet                                # jms 12/21/92
+ 
+integer*2   DetRec_detector
+integer*2   DetRec_detectee
+integer*2   DetRec_pct
+integer*2   DetRec_flag
+vmschar*8   DetRec
+equivalence (DetRec_detector, DetRec)
+common/detrec_common/_
+            DetRec_detector,
+            DetRec_detectee,
+            DetRec_pct,
+            DetRec_flag
+ 
+integer*2   DetTab_detector[nslots]
+integer*2   DetTab_detectee[nslots]
+integer*2   DetTab_pct[nslots]
+integer*2   DetTab_flag[nslots]
+common/dettab_common/_
+            DetTab_detector,
+            DetTab_detectee,
+            DetTab_pct,
+            DetTab_flag
+ 
+#DetTab(@1)=DetRec
+define (DetRec$Copy,
+   {DetTab_detector[@1] = DetRec_detector
+    DetTab_detectee[@1] = DetRec_detectee
+    DetTab_pct[@1]      = DetRec_pct
+    DetTab_flag[@1]     = DetRec_flag}
+)
+ 
+#DetTab(@1)=DetTab(@2)
+define (DetTab$Copy,
+   {DetTab_detector[@1] = DetTab_detector[@2]
+    DetTab_detectee[@1] = DetTab_detectee[@2]
+    DetTab_pct[@1]      = DetTab_pct[@2]
+    DetTab_flag[@1]     = DetTab_flag[@2]}
+)
+ 
+ 
+integer ndet
+data x/0.0/		# Get next random number in sequence
+ 
+ 
+DetRec_flag=1     # Detection Record flag indicates currently in range
+ 
+#$%-----------------------------------------------------------------
+#$% First, we find out whether this unit is really a flying air-
+#$% craft equipped for IR detections, with the sensor ON.
+#$% If these tests are passed, data is saved (course,speed,View,
+#$% Assumed position) and computed ( Square of alt. in n.miles, max.
+#$% horizontal range, max. travel, max. latitude difference, max.
+#$% longitude difference); for use when considering each target.
+ 
+For (UNT$Pointer$FIRST; UNT$Pointer$OK; UNT$Pointer$NEXT)
+   {
+    if(xUNT$Type$i != $AIR$Code)       NEXT
+ 
+    #$% if unit is a Hide Site, then get next because Hide Site cannot detected others
+    if (xUNT$Type$I == $Site$Code & xUNT$SubType$I == $HideSite$SubCode)
+       NEXT                                                    #khc 7/92
+ 
+    if (xUNT$GhostedUnit$I == $YES)    NEXT # if it's a ghosted unit, skip it
+                                            # SMM 5/18/92
+ 
+    UNT$Status$I = xUNT$Status$I
+    if (UNT$Status$I == $AwaitingLaunch$Code |  #$% if awaiting launch,
+        UNT$Status$I == $BeingDeleted$Code)  	#$% or being deleted,
+                                       NEXT
+ 
+    ACC$Pointer = Xunt$AccPntr$i
+    if(xACC$EOIRflag$i == $NO)         NEXT    # (Block 1)
+ 
+    iON = $NO
+    FOR_DEQ_CHAIN
+       {
+        if(xDEQ$Ident$I != $ir$code) NEXT
+        if(xDEQ$On$I == $YES) iON = $YES
+        BREAK
+       }
+    if (iON == $NO)              NEXT    # (Block 2)
+ 
+    UNT$TrueLatitude$F  = xUNT$TrueLatitude$F
+    UNT$TrueLongitude$F = xUNT$TrueLongitude$F
+    UNT$TrueAltDepth$I = xUNT$TrueAltDepth$I   # Altitude of 'reference' unit
+    UNTCOS = COS(UNT$TrueLatitude$F)           # jb        3/6/90
+    UNT$TrueCourse$F = xUNT$TrueCourse$F
+ 
+    IRC$Pointer = xDEQ$Pntr$I
+    IRC$FOV$index = xDEQ$FieldOfView$I
+    IRC$FOV$ElHfAng$F = xIRC$FOV$ElHfAng$F
+    IRC$FOV$AzHfAng$F = xIRC$FOV$AzHfAng$F
+    IRC$Azimuth$F = xIRC$Azimuth$F
+    NVview = xIRC$VertPixels$I
+    NHview = xIRC$HorizPixels$I
+    Mfactor = 1.3
+    alph = IRC$FOV$AzHfAng$F * 2.
+    beta = IRC$FOV$ElHfAng$F * 2.
+ 
+    if (xUNT$IRtrkIndx$I != $NO)
+        {
+        UNT2$Pointer$to (xUNT$IRtrkIndx$I)
+        Call RLL2RB(_              #Rhumb line Lat/Lon to Range/Bearing
+            UNT$TrueLatitude$F,        #latitude of 1st pt (input)
+            UNT$TrueLongitude$F,       #longitude of 1st pt (input)
+            UNTCOS,                    #cos of lat of 1st pt (input)
+            xUNT2$TrueLatitude$F,      #latitude of 2nd pt (input
+            xUNT2$TrueLongitude$F,     #longitude of 2nd pt (input)
+            COS(xUNT2$TrueLatitude$F), #cos of lat of 2nd pt (input)
+                   RNG, BRG )            #range, bearing (output)
+        RELbrg = BRG - UNT$TrueCourse$F
+        $angPI(RELbrg)
+        Elevation = ATAN((xUNT2$TrueAltDepth$I - UNT$TrueAltDepth$I)/$Feet$Per$Nmi/RNG)
+        if (RELbrg > xIRC$RightAng$F | RELbrg < xIRC$LeftAng$F |
+            Elevation > xIRC$UpAng$F | Elevation < xIRC$DownAng$F |
+            RNG > xIRC$FOV$MaxRange$F)
+          {
+          i = 0
+          call smovv  ("Requested track outside IR Field of View", work, i)
+          call send_   (xUNT$View$I, 0, i, work)
+          i = 0
+          call smovv  ("IR returned to Home position and Wide FOV", work, i)
+          call send_   (xUNT$View$I, 0, i, work)
+          putDEQ$HorizSect$I(0)
+          putDEQ$VertSect$I(0)
+          putDEQ$FieldOfView$I($FOV_Wide)
+          putUNT$IRtrkIndx$I($NO)
+          IRC$FOV$index = $FOV_Wide
+          IRC$FOV$ElHfAng$F = xIRC$FOV$ElHfAng$F
+          IRC$FOV$AzHfAng$F = xIRC$FOV$AzHfAng$F
+          }
+        else
+          {
+          DEQ$HorizSect$I = (RELbrg - IRC$Azimuth$F) / IRC$FOV$AzHfAng$F
+          DEQ$VertSect$I = (Elevation - xIRC$Elevation$F) / IRC$FOV$ElHfAng$F
+          putDEQ$HorizSect$I
+          putDEQ$VertSect$I
+          }
+        }
+ 
+    Sect = xDEQ$HorizSect$I
+    Azimuth = IRC$Azimuth$F + Sect * IRC$FOV$AzHfAng$F
+    Elevation = xIRC$Elevation$F + xDEQ$VertSect$I * IRC$FOV$ElHfAng$F
+ 
+    DEQ$Scan$I = xDEQ$Scan$I
+    if (DEQ$Scan$I == $YES)
+      {                         # Scan always to the right (snaps back to left)
+      DEQ$ScanRateInterval$F = xDEQ$ScanRateInterval$F
+      # scanrateInterval(deg/interval); fov$azHfang(rad)
+      ScanSectors = DEQ$ScanRateInterval$F/(IRC$FOV$AzHfAng$F * $rad2deg) + .5
+      if (ScanSectors < 1) ScanSectors = 1
+      Contig = $YES
+      RightSect = (xIRC$RightAng$F - IRC$Azimuth$F) / IRC$FOV$AzHfAng$F - .5
+      LeftSect = (xIRC$LeftAng$F - IRC$Azimuth$F) / IRC$FOV$AzHfAng$F + .5
+      TotSect = RightSect - LeftSect + 1
+      NewSect = Sect + MOD(ScanSectors, TotSect)
+      HighSect = RightSect
+      LowSect = LeftSect
+      if (NewSect > RightSect)    # Assumes scan to right always
+        {
+        NewSect = NewSect - TotSect
+        if (ScanSectors < TotSect)
+          {                     # noncontiguous sectors
+          Contig = $NO
+          HighSect = Sect       # will exclude area between high & low sectors
+          LowSect = NewSect
+          }
+        }
+      else
+        if (ScanSectors < TotSect)
+          {
+          HighSect = NewSect
+          LowSect = Sect
+          }
+ 
+      Azimuth = IRC$Azimuth$F + (HighSect + LowSect) * IRC$FOV$AzHfAng$F/2
+      if (Contig == $YES)
+        IRC$FOV$AzHfAng$F = (HighSect - LowSect + 2) * IRC$FOV$AzHfAng$F/2
+      else
+        IRC$FOV$AzHfAng$F = MAX(HighSect-LowSect-2,0) * IRC$FOV$AzHfAng$F/2
+      putDEQ$HorizSect$I(NewSect)
+      }
+ 
+    swath = $pi/2 + Elevation + IRC$FOV$ElHfAng$F
+    HGTnmi = UNT$TrueAltDepth$I / (3.0 * $Yds$Per$Mile)
+                                      # ft/(ft.per nMile) = nMiles 5/92
+    RmaxHORIZ = HGTnmi * TAN(swath)                #            5/22/92
+    if (RmaxHORIZ > 0)
+         RmaxHORIZ = MIN(xIRC$FOV$MaxRange$F*SIN(swath),RmaxHORIZ)
+    else RmaxHORIZ = xIRC$FOV$MaxRange$F   # target above detector  jms 9/25/92
+    SQVERT = HGTnmi * HGTnmi   # Square of: alititude in Nmi         5/22/92
+ 
+    UNT$TrueSpeed$F = xUNT$TrueSpeed$F
+    RmaxTRAVEL = UNT$TrueSpeed$F * model$interval * $Hours$Per$Minute # distance travel in seconds
+ 
+    RmaxTRAVEL = MAX(RmaxTRAVEL,RmaxHORIZ) # Speed could be ~ zero!
+ 
+    UNT$View$I = xUNT$View$I    # Save for comparison with targets'
+ 
+    UNT$AssumedLatitude$F  = xUNT$AssumedLatitude$F  # For computing
+    UNT$AssumedLongitude$F = xUNT$AssumedLongitude$F # reported position
+ 
+    dlatMAX = RMAXTRAVEL * $deg2rad / 60.     # maximum delta latitude
+    dlonMAX = dlatMAX / UNTCOS                # maximum delta longitude
+                                                       # of target
+    # Determine differential temperature factor for the area near
+    # the detector, based on the time of day.                   jms 9/2/92
+ 
+    call Sun_Set_Rise (UNT$TrueLatitude$F, UNT$TrueLongitude$F,
+                       wet$SunSet$f, wet$SunRise$f)
+ 
+    if (abs(Game$Time - wet$SunSet$f) < 30. |
+        abs(Game$Time - wet$SunRise$f) < 30.)
+       DiffTempFact = xIRC$DawnFactor$F
+ 
+    #$% I removed some bad logic, the variable in question (game$minute) is monotonically increasing, so
+    #$% the subsequent conditions will be false. At anyrate, this is better, the motion model calls daytst to
+    #$% set the indaylight flag. I hope not to forget to fix daytst in lbcommn for advanced cruise missiles.
+    #$% Alex V. 12/93
+ 
+    else if (xUNT$indaylight$i == $yes)
+       DiffTempFact = xIRC$DayFactor$f
+ 
+    else
+      DifftempFact = xIRC$NightFactor$f
+ 
+ 
+    if (trace$eoir != $no)
+      {
+      call echor
+      call echoh(xUNT$Name$C,5)
+      call echov("  FOV=")
+      call echoi(IRC$FOV$index,1)
+      call echov("  elev=")
+      call echof(Elevation/$deg2rad,0501)
+      call echov("  azim=")
+      call echof(Azimuth/$deg2rad,0501)
+      call echov("  scan=")
+      if (DEQ$Scan$I == $YES)
+        {
+        call echof(DEQ$ScanRateInterval$F,0301)
+        call echov("  sect=")
+        call echoi(Sect,2)
+        call echov("  width=")
+        call echof(2*IRC$FOV$AzHfAng$F*$rad2deg,0501)
+        if (Contig == $NO) call echov("**")
+        }
+      else call echov("OFF")
+      call echov("  ")
+      }
+ 
+    DetRec_detector = UNT$Pointer$Index   # for detection table  1/25/93 jms
+ 
+#$%-------------------------------------------------------------
+#$% The detector STATUS is ok; he has an IR sensor, which is ON.
+#$% Targets are screened as to Status; View; altitude below detector;
+#$% difference in altitude, eligible unit type; eligible IR target;
+#$% latitude difference, and longitude difference.
+#$% Only if screening is passed are calls made to
+#$% RRL2RB and RCPA as preliminary to detection/recognition/ident-
+#$% ification determinations.
+#$%-------------------------------------------------------------
+ 
+    For (UNT2$Pointer$FIRST; UNT2$Pointer$OK; UNT2$Pointer$NEXT)
+       {
+        if (xUNT2$View$I == UNT$View$I)            NEXT
+        UNT2$Status$I = xUNT2$Status$I
+        if (UNT2$Status$I == $AwaitingLaunch$Code |  #$% if awaiting launch,
+    	    UNT2$Status$I == $BeingDeleted$Code)     #$% or being deleted,
+                                                   NEXT
+ 
+        if (Xunt2$NeverDetect$i == YES) next        # joa 3/05 per_never
+ 
+        #$% if the unit is hiding, then get next one
+        if (unt2$Status$i == $Hiding$Code | xUNT2$HideStatus$i == $CurrentlyHiding)
+           NEXT                            #khc 7/92
+ 
+        #$% if the unit is a Hide Site, then get next one
+        if (xUNT2$type$i == $Site$Code & xUNT$SubType$I == $HideSite$SubCode)
+           NEXT                                                #khc 7/92
+ 
+       UNT2$TrueAltDepth$i = xUNT2$TrueAltDepth$i
+ 
+#$%        (a) Neither SUBS nor SHOREBASES are valid IR targets..
+#$%        (b) All valid Ship classes/Aircraft types have UVP pointers..
+#$%        (c) Valid IR targets are either MOBILE or STATIONARY..
+ 
+        UNT2$Type$I = xUNT2$Type$I    # No sub or shorebase targets..
+        if (UNT2$Type$I == $SURFACE$Code)
+           {
+#$%            Set UVP Pointer for Surface Craft:
+            SHC$Pointer = xUNT2$SHCpntr$I
+            UnitSpeed = FLOAT(xUNT2$Speed$I)         # jb    4/9/90
+            ShipMaxSpeed = FLOAT(xSHC$MaxSpeed$I)    # jb    4/9/90
+            SpeedRatio = UnitSpeed / ShipMaxSpeed    # jb    4/9/90
+           }
+        else if (UNT2$TYPE$I == $AIR$Code)
+           {
+#$%            Set UVP Pointer for Aircraft:
+            ACC$Pointer = XUNT2$AccPntr$I
+            if (xUNT2$Hits$I > 0)   SpeedRatio = 0.0    # jb    3/8/90
+            else                    SpeedRatio = 1.0    # jb    3/6/90
+           }
+        else                                           NEXT # Not Ship\a/c
+ 
+#-----------------------------                3/18/90
+ 
+        UNT2$TrueSpeed$F = xUNT2$TrueSpeed$F  # speed of target  4/11/90
+        UNT2$TrueCourse$F = xUNT2$TrueCourse$F
+      # dlatMAX2 = UNT2$TrueSpeed$F * $deg2rad / 3600. #Tgt delta latitude
+        dlatMAX2 = UNT2$TrueSpeed$F * model$interval * $Hours$Per$Minute *
+                     $deg2rad /60. #Tgt delta latitude
+        dlonMAX2 = dlatMAX2 / UNTCOS          # Target delta longitude
+ 
+#$%    Is target's latitude obviously out of range?
+        UNT2$TrueLatitude$F = xUNT2$TrueLatitude$F     # Block 3,a
+        if (ABS(UNT2$TrueLatitude$F - UNT$TrueLatitude$F) >
+                 dlatMAX + dlatMAX2 + RmaxHORIZ * $deg2rad /60.)
+          { NEXT }                                     # jb RmaxHORIZ 5/21/92
+ 
+#$%    Same for Longitude.. ?
+        UNT2$TrueLongitude$F = xUNT2$TrueLongitude$F   # Block 3,b
+        if (ABS(UNT2$TrueLongitude$F - UNT$TrueLongitude$F) >
+                 dlonMAX + dlonMAX2 + RmaxHORIZ * $deg2rad / 60.)
+          { NEXT }                                     # jb RmaxHORIZ 5/21/92
+ 
+        DetRec_detectee = UNT2$Pointer$Index # for detection table  1/25/93 jms
+ 
+        for (j=1; j<=ndet; j=j+1)     # look for match in detection table
+          {
+          if (DetRec_detector==DetTab_detector[j] &
+              DetRec_detectee==DetTab_detectee[j])
+            {
+            DetTab_flag[j]=1          # match found
+            break
+            }
+          }
+        if (j>nslots) NEXT          # detection table overflow
+        if (j>ndet)                 # first time in detection table
+          {
+          ndet=j
+          DetRec_pct=100*RANDOM(x)  # assign random percent
+          DetRec$Copy(j)
+          }
+        rndnum = .01*DetTab_pct[j]  # rndnum from detection table
+ 
+#------------------------------------3/19/90----------------------------
+        Call RLL2RB(_              #Rhumb line Lat/Lon to Range/Bearing
+            UNT$TrueLatitude$F,       #latitude of 1st pt (input)
+            UNT$TrueLongitude$F,      #longitude of 1st pt (input)
+            UNTCOS,                   #cos of lat of 1st pt (input)
+            UNT2$TrueLatitude$F,      #latitude of 2nd pt (input
+            UNT2$TrueLongitude$F,     #longitude of 2nd pt (input)
+            COS(UNT2$TrueLatitude$F), #cos of lat of 2nd pt (input)
+                   RNG, BRG )            #range, bearing (output)
+ 
+######################   Logic for IR  -------------------    8/14/92
+## CAUTION:  In this case the sensor looks AHEAD rather than straight DOWN.
+##   The user could easily set up a combination of sensor altitude, swath
+##   angle, EOIR$Range$Max and/or sensor probabilities versus ranges that
+##   would never allow detections...
+ 
+##        Is this target within the IR horizontal field-of-view/ahead?
+        RELbrg = BRG - UNT$TrueCourse$F - Azimuth
+        $angPI (RELbrg)
+        if (DEQ$Scan$I == $NO | Contig == $YES)
+          {
+          if (ABS(RELbrg) > IRC$FOV$AzHfAng$F) NEXT   # Not in horiz. FOV
+          }
+        else
+          {
+          if (ABS(RELbrg) < IRC$FOV$AzHfAng$F) NEXT   # Not in horiz. FOV
+          RELbrg = BRG - UNT$TrueCourse$F
+          $angPI (RELbrg)
+          if (RELbrg > xIRC$RightAng$F | RELbrg < xIRC$LeftAng$F) NEXT
+          }
+        Hsensor = (UNT$TrueAltDepth$I - UNT2$TrueAltDepth$I) / $Feet$Per$Nmi
+        SQVERT = Hsensor * Hsensor
+ 
+##        Is this target TOO CLOSE to be in the vertical field-of-view?
+        nadir = $pi/2 + Elevation - IRC$FOV$ElHfAng$F
+        swath = nadir + 2 * IRC$FOV$ElHfAng$F
+        if (Hsensor > 0)                  # target below
+          {
+          DISTnear = Hsensor * TAN(nadir) # Dist. from IR to start of Vert. FOV
+          DISTfar = Hsensor * abs(TAN(swath)) #           to end of Vert. FOV
+          }
+        else                             # target above
+          {
+          DISTnear = Hsensor * TAN(swath) # Dist. from IR to start of Vert. FOV
+          DISTfar = Hsensor * abs(TAN(nadir))   #         to end of Vert. FOV
+          }
+        DISTfar = MIN(DISTfar, RmaxHORIZ)
+ 
+        if (RNG < DISTnear)  NEXT                   # too close
+ 
+        if (trace$eoir != $no)
+          {
+          call echor
+          call echoh(xUNT2$Name$C,5)
+          call echov("  RNG=")
+          call echof(RNG,0401)
+#         call echov("  BRG=")
+#         call echof(BRG/$deg2rad,0500)
+#         call echov("  RELbrg=")
+#         call echof(RELbrg/$deg2rad,0601)
+          call echov("  near=")
+          call echof(DISTnear,0401)
+          call echov("  far=")
+          call echof(DISTfar,0401)
+          call echov("  random=")
+          call echof(rndnum,0402)
+          }
+ 
+        if (RNG > DISTfar)   NEXT                   # too far
+ 
+        SLRANGE = SQRT(SQVERT + RNG*RNG)   # Slant Range NOW
+ 
+###   ---- End of culling (and computing SLRANGE) for IR --------
+##---------------------------------------------------------------------------
+ 
+        tstnum = 1.0       # Initl'z test-number ("V")
+ 
+        # Calculate Ident, Recog, Detect probabilities   11/18/92 jms
+ 
+        if (UNT2$Type$I == $SURFACE$Code)
+          {
+          wtarget = xSHC$Width$I / $Feet$Per$Nmi
+          htarget = xSHC$Height$I / $Feet$Per$Nmi
+          }
+        else          # Aircraft
+          {
+          wtarget = xACC$Width$I / $Feet$Per$Nmi
+          htarget = xACC$Height$I / $Feet$Per$Nmi
+          }
+ 
+        Afact = Hsensor / tan(asin(Hsensor/SLRANGE))
+        Bfact0 = Hsensor * (wtarget**2 / htarget - Hsensor + htarget)
+        Bfact1 = -2 * Hsensor * wtarget / htarget
+        Bfactwh = (Afact**2 - Bfact0) / (Bfact1 - 2*Afact)
+        if (Afact + Bfactwh > 0)
+          {
+          Bfact = htarget / (wtarget/2 - Bfactwh) /2
+          nVtarget = Mfactor * atan(Bfact) * NVview / beta
+          }
+        else
+          {
+          qb = 2*Afact + Bfact1
+          qc = Afact*Afact + Bfact0
+          qdet = qb*qb - 4*2*qc
+          if (qdet < 0)
+            {
+            nVtarget = 0
+            i = 0
+            call smovv("Imaginary roots in nVtarget calculation", work, i)
+            call send_ (xUNT$View$I, 0, i, work)
+            }
+          else
+            {
+            qr1 = (-qb + sqrt(qdet))/4
+            qr2 = (-qb - sqrt(qdet))/4
+            if (trace$eoir != $no)
+              {
+              call echov("  quadratic roots=")
+              call echof(qr1,0502)
+              call echof(qr2,0502)
+              }
+            if (qr1 > 0) Bfact = qr1
+            else         Bfact = qr2
+            nVtarget = Mfactor * atan(Bfact) * NVview / beta
+            }
+          }
+ 
+        nHtarget = Mfactor * atan(wtarget / 2 / SLRANGE) * 2 * NHview / alph
+ 
+        ntarget = MIN(nVtarget,nHtarget)
+ 
+        Detect = Probability(ntarget)
+        Recog  = Probability(ntarget/4)
+        Ident  = Probability(ntarget/6.4)
+ 
+        # Calculate base probability (tstnum) from Field-of-View Factor,
+        # Relative Speed Factor, Scan Rate Factor, Operator Ability Factor
+        # and Time of Day Factor                 jms 9/2/92
+ 
+        tstnum = tstnum * xIRC$FOV$RelProb$F   # Field-of-View Factor
+        tstnum = tstnum * DiffTempFact         # Time of Day Factor
+ 
+        RelSpd = Rel_Speed(UNT$TrueSpeed$F, UNT$TrueCourse$F,
+                           UNT2$TrueSpeed$F, UNT2$TrueCourse$F)
+        IRC$FOV$MaxRelSpd$I = xIRC$FOV$MaxRelSpd$I
+        if (NINT(RelSpd) > IRC$FOV$MaxRelSpd$I) NEXT
+        if (RelSpd > .6 * IRC$FOV$MaxRelSpd$I)
+           {                                   # Relative Speed Factor
+           tstnum = tstnum * (xIRC$RelSpMinProb$F + (IRC$FOV$MaxRelSpd$I -
+              RelSpd) * (1.0 - xIRC$RelSpMinProb$F)/(.4 * IRC$FOV$MaxRelSpd$I))
+           }
+        SecondsInWindow = (DISTfar - DISTnear) / RelSpd * $Seconds$Per$Hour  # approx
+        if (xUNT$IRtrkIndx$I != DetRec_detectee)
+          {
+          if (SecondsInWindow < 15.) Detect = 0.
+          if (SecondsInWindow < 45.) Recog = 0.
+          if (SecondsInWindow < 90.) Ident = 0.
+          }
+        if (DEQ$Scan$I == $YES & XDEQ$ScanRate$F > xIRC$ScanRtBrk$F)
+           {                                   # Scan Rate Factor
+           tstnum = tstnum * (xIRC$ScanRtMinProb$F + (5.0 - XDEQ$ScanRate$F) *
+                      (1.0 - xIRC$ScanRtMinProb$F)/(5.0 - xIRC$ScanRtBrk$F))
+           }
+ 
+        for(i=1; i<=3; i=i+1)
+            iKNOW[i] = $NO         # Init'lz
+ 
+        if (rndnum < tstnum * xUNT$IROpIDFct$f * Ident)
+           {             #  3
+            for(i=1; i <= $IDENT; i=i+1)
+                iKNOW[i] = $YES    # (Block 12)
+           }
+        else if (rndnum < tstnum * xUNT$IROpClaFct$f * Recog)
+           {             #   2
+            for(i=1; i <= $RECOG; i=i+1)
+                iKNOW[i] = $YES    # (Block 13)
+           }
+        else if (rndnum < tstnum * xUNT$IROpDetFct$f * Detect)
+           {        # 1
+            iKNOW[$DETCT] = $YES   # (Block 14a)
+           }
+ 
+        if (trace$eoir != $no)
+          {
+          call echor
+          call echoh(xUNT2$Name$C,5)
+          call echov("  SL=")
+          call echof(SLRANGE,0501)
+          call echov("  pix=")
+          call echof(ntarget,0502)
+          call echov("  SecWin=")
+          call echof(SecondsInWindow,0501)
+          call echov("  Pd,c,i=")
+          call echof(Detect,0402)
+          call echof(Recog,0502)
+          call echof(Ident,0502)
+          call echov("  prob=")
+          call echof(tstnum,0402)
+          if      (iknow[$IDENT] == $YES) call echov(" ID ")
+          else if (iknow[$RECOG] == $YES) call echov(" Cla")
+          else if (iknow[$DETCT] == $YES) call echov(" Det")
+          }
+ 
+ 
+ 
+        if (iKNOW[$DETCT] == $YES) # Detection (at least) is made
+            {
+            if (abs(xUNT2$TRUEspeed$F)<.5) ird$Motion$i = $UAV$Fixed
+            else                           ird$Motion$i = $UAV$Mobile
+ 
+##  Answer to posit. accuracy question:  use TRUE data  2/27/90
+##  Answer to posit. accuracy question:  use RELATIVE data  3/6/90
+##-----------------------------------------------------------------
+            RDIST = DISTfar
+            TRAVEL = RNG * RNG - RDIST * RDIST   # Intermediate value
+            if (TRAVEL < 0.001) TRAVEL = 0       # Prevent SQRT(0)
+            else                TRAVEL = SQRT(TRAVEL)
+ 
+            if (TRAVEL > RmaxHORIZ) MINPLUS = time$step
+            else                    MINPLUS = 0
+            MINDET = GAME$TIME + MINPLUS
+ 
+            ird$Latitude$F  = UNT$AssumedLatitude$F
+            ird$Longitude$F = UNT$AssumedLongitude$F
+            HEADNG = 0.0
+            Call RRB2LL( _    #Rhumb line Range/Bearing to Lat/Lon
+               ird$Latitude$F,    #latitude (input & output)
+               ird$Longitude$F,   #longitude (input & output)
+                   RNG,           #range (input)
+                   BRG,           #relative bearing (input)
+                   HEADNG,        #course (input) WARN: MAY BE a CONSTANT!
+                   UNTCOS)        #cosine of latitude (input & output)
+ 
+#----------------------------------------------------------------------
+#$%            Send unit pointers and iKNOW to repIR
+            Call repIR2 (ird$Latitude$F, # Detectee latitude
+                        ird$Longitude$F,# Detectee longitude
+                        ird$Motion$i,   # $UAV$Fixed or $UAV$Mobile
+                        SpeedRatio,     # for Damage Assessment
+                        iKNOW,          # 3 Flags (DET/RECOG/IDENT)
+                        Unt$Pointer,       # jb for LDX entry      5/7/92
+                        Unt2$Pointer,      # jb for LDX entry      5/7/92
+                        SLRANGE,           # jb for LDX entry      5/8/92
+                        BRG      )         # jb for LDX entry      5/8/92
+            }
+       }    # End FOR (unt2$Pointer$FIRST.. (thru 'targets'
+ 
+   }    # End FOR (unt$Pointer$FIRST.. (thru 'detectors'
+ 
+   j=0                            # delete old entries from detection table
+   for (i=1; i<=ndet; i=i+1)
+     {
+     if (DetTab_flag[i]==1)
+       {
+       j=j+1
+       DetTab$Copy(j,i)
+       DetTab_flag[j]=0
+       }
+     }
+   ndet=j
+ 
+return
+END
+ 
+ 
+Real Function Rel_Speed(spd1,crs1,spd2,crs2)
+ 
+########################################################
+#$%
+#$% Purpose:   Rel_Speed calculates the relative speed between
+#$%   two objects.  Course angles are in radians.
+#$%
+#$% Called By: IR_MOD
+#$%
+#$% Date:      September 1992
+#$%
+#$% Author:    John Strauch
+#$%
+########################################################
+real RV1,
+     SPD2,
+     CRS2,
+     SPD1,
+     CRS1,
+     RV2                                    # MJC 7/11/2K (E2145)
+rv1 = spd2 * cos(crs2) - spd1 * cos(crs1)
+rv2 = spd2 * sin(crs2) - spd1 * sin(crs1)
+Rel_Speed = sqrt(rv1 * rv1 + rv2 * rv2)
+return
+end
+ 
+Real Function Probability(pixels)
+ 
+########################################################
+#$%
+#$% Purpose:   Probability converts number of pixels in
+#$%   the IR's field of view to a probability. For detection
+#$%   10% corresponds to 1 pixel, 30% to 1.5, 50% to 2,
+#$%   80% to 3, 95% to 4, and 100% to 6.  For Classification
+#$%   (Recognition) use pixels/4 and for Identification
+#$%   use pixels/6.4.
+#$%
+#$%   Probability is allowed to be greater than one since it
+#$%   may be adjusted downward later due to relative speed,
+#$%   scan rate, operator ability and time of day. (2/3/93)
+#$%
+#$% Called By: IR_MOD
+#$%
+#$% Date:      November 1992
+#$%
+#$% Author:    John Strauch
+#$%
+########################################################
+ 
+real PIXELS                                 # MJC 7/11/2K (E2145)
+if      (pixels <  .8) Probability = 0
+else if (pixels < 2.6) Probability = .4 * pixels - .3
+else if (pixels < 4.3) Probability = .15 * pixels + .35
+else                   Probability = .025 * pixels + .85
+ 
+return
+end
+ 
+ 
+ 
+Subroutine repIR2 (ird$Latitude$F, # Detectee latitude
+                  ird$Longitude$F,# Detectee longitude
+                  ird$Motion$i,   # $UAV$Fixed or $UAV$Mobile
+                  SpeedRatio,     # for Damage Assessment
+                  iKNOW,          # 3 Flags (DET/RECOG/IDENT)
+                  Unt$Pointer,        # jb Detector, for LDX 5/7/92
+                  Unt2$Pointer,       # jb Detectee, for LDX 5/7/92
+                  SLRANGE,            # jb for LDX entry      5/8/92
+                  BRG      )          # jb for LDX entry      5/8/92
+                                  #    iKNOW [1]  [2]   [3]
+########################################################
+#$%
+#$% Purpose:   repIR places IR detection/recognition/
+#$%   identification data in table bbIRD, for eventual
+#$%   display to a View controlling UAV('s)
+#$%
+#$% Called By: IR
+#$%
+#$% Calls:     Obtain_View_Track_Nbr   <wgxcorlt.rat>
+#$%            Zero_IRD_Entry          <wgmdrem.rat>
+#$%
+#$% Tables:    IRD    IRC
+#$%
+#$% Date:      February 1990
+#$%
+#$% Author:    Joe Bryant
+#$%
+#$% Modified:  Carol Kropp - Sept. 1994 (E1082)
+#$%            Added calls to Obtain_View_Track_Nbr and
+#$%            Zero_IRD_Entry.  The track number is
+#$%            flagged as available or assigned.
+#$%
+########################################################
+BBcommon
+BBDeclare  (UNT$Pointer,
+            UNT2$Pointer,
+            IRD$Pointer,
+            VUE$Pointer,
+            IRD$Trackseq$I,
+            IRD$Motion$I,
+            IRD$Damagelevel$I,
+            IRD$Latitude$F,
+            IRD$Longitude$F,
+            IRD$Course$I,
+            IRD$Speed$I)
+integer KCLASS,
+        IBASIC_RESULT,
+        IEMI_RESULT,
+        IPNTR,
+        IDTE_PHASE,
+        IDETECTION_TYPE                                 # MJC 7/11/2K (E2145)
+real SPEEDRATIO,
+     BASIC_PB_DETECT,
+     EMI_PB_DETECT,
+     SLRANGE,
+     BRG                                                # MJC 7/11/2K (E2145)
+literal CSTRIP8                                         # MJC 7/13/2K (E2145)
+BYTE iKNOW[3]    # repIR argument; $DTECT/$RECOG/$IDENT flags
+Integer    NEWptr, iUseOLD, UNT_Index, UNT2_Index
+ 
+NEWptr  = $NO
+iUseOLD = $NO
+ 
+UNT_Index = UNT$Pointer$Index
+UNT2_Index = UNT2$Pointer$Index
+ 
+For(ird$Pointer$First; ird$Pointer$OK; ird$Pointer$Next)
+   {
+    if(Xird$DETECTOR$I == UNT_Index &
+       Xird$TARGET$I   == UNT2_Index)
+       {
+        iUseOLD = $YES
+        NEWptr = $NO
+        BREAK
+       }
+    else if (NEWptr == $NO & Xird$InUse$I == $NO)
+       {
+        NEWptr = ird$Pointer
+       }
+   }
+ 
+If (NEWptr == $NO & iUseOLD == $NO) # Need to exceed high-water-
+   {                                #    mark in table    5/10/90
+    if(ird$Pointer$VALID)    # Avoid wandering out of table..
+       {
+        IRD$used = IRD$pointer$index * IRD$entry # Update $USED..
+        NEWptr = ird$pointer
+       }
+   }
+ 
+If (NEWptr != $NO)    # IF A NEW SLOT will be used.
+   {
+    ird$Pointer = NEWptr
+    call Zero_IRD_Entry (IRD$Pointer)
+ 
+    VUE$pointer$TO (xUNT$View$I)
+                                       #(none)
+    call Obtain_View_Track_Nbr (vue$pointer,$ir$code,kclass,ird$TrackSEQ$i)
+    PUTird$TrackSEQ$i
+ 
+    PUTird$Detector$i(UNT_Index)
+    PUTird$Target$i(UNT2_Index)
+    PUTird$Motion$i                    # (repIR argument)
+    PUTird$DetectorName$c(xUNT$Name$c)
+    PUTird$TargetName$c(xUNT2$Name$c)
+    PUTird$View$i(xUNT$View$i)
+   }    # End 'if a NEW slot ...'
+ 
+if (iUseOLD == $YES | NEWptr != $NO) # IRD tbl NOT overflowed
+   {
+    PUTird$Time$f (Game$Time)
+ 
+    if(SpeedRatio < EOIR$Damage$DESTROYED/100.)
+        ird$DAMAGElevel$i = $Destroyed$Code
+    else if(SpeedRatio < EOIR$Damage$SEVERE/100.)
+        ird$DAMAGElevel$i = $Severe$Code
+    else if(SpeedRatio < EOIR$Damage$MODERATE/100.)
+        ird$DAMAGElevel$i = $Moderate$Code
+    else if(SpeedRatio < EOIR$Damage$MINOR/100.)
+        ird$DAMAGElevel$i = $Minor$Code
+    else ird$DAMAGElevel$i = $NOdamage$Code
+    PUTird$DAMAGElevel$i
+ 
+    PUTird$Latitude$F    # (Lat. and Long. are REPIR inputs)
+    PUTird$Longitude$F
+    ird$Course$I = xUNT2$TrueCourse$F / $deg2rad
+    PUTird$Course$I
+    ird$Speed$I = xUNT2$TrueSpeed$F
+    PUTird$Speed$I
+    if (iUseOLD == $YES & iKNOW[$RECOG] == $YES)
+      {                           # delay one cycle for recog, ident
+       PUTird$Recognized$i ($YES)
+       if (iKNOW[$IDENT] == $YES) PUTird$Identified$i ($YES)
+      }
+   }    # End if IRD table NOT overflowed
+ELSE                        # Table overflow
+   {
+    call echor
+    call echov ("EOIR Detection Table overflow")
+   }
+Return
+END

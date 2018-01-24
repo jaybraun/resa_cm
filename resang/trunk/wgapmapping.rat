@@ -1,0 +1,1848 @@
+include "alsp.inc"
+include "alsp_resa.inc"
+ 
+define (BBImplicit, Implicit None) # SMM 3/00
+ 
+define (ERROR, -3)        # since alsp.inc undefines err which is -3
+define (READONLY, 1)      # since alsp.inc undefines read which is -3
+ 
+define ($not_mapped,  0)
+define ($debug1,# )		  # Incoming and outging mapping warnings
+
+subroutine  Initialize_ALSP_Mapping  ()
+#########################################################################
+#$%
+#$% Purpose:    Initialize_ALSP_Mapping calls all the various
+#$%             routines that set up the mapping arrays for ALSP
+#$%             enumeration-to-RESA names and vice versa.
+#$%
+#$% Called By:  WARCYC
+#$%
+#$% Calls:      Initialize_Aircraft_Mapping
+#$%
+#$% Tables:     None
+#$%
+#$% Date:       August 1993
+#$%
+#$% Author:     Carol L. Kropp
+#$%
+#########################################################################
+implicit none
+ALSP_Unit_Enum_Common
+ 
+integer i  # SMM 3/00
+ 
+  for (i = 1; i <= $number_of_unit_enumerations; i = i + 1)
+     incoming_ac_enum_map_array [i] = $not_mapped
+ 
+  call Initialize_Aircraft_Mapping ()
+  call Initialize_Sea_Mapping ()
+  call Initialize_Torpedo_Mapping  ()
+  call Initialize_Sonobuoy_Mapping  ()
+  call Initialize_Mine_Mapping  ()
+  call Initialize_CM_Mapping  ()
+ 
+  call Initialize_Missile_Unit_Mapping ()
+ 
+  call Set_Default_Weapon_Maps ()
+  call Set_Default_Emitter_Maps ()
+ 
+return
+end
+
+ 
+subroutine Initialize_Aircraft_Mapping  ()
+#########################################################################
+#$%
+#$% Purpose:    Initialize_Aircraft_Mapping initializes the mapping
+#$%             arrays for ALSP enumeration-to-RESA names and vice versa.
+#$%
+#$% Called By:
+#$%
+#$% Calls:      None
+#$%
+#$% Tables:     None
+#$%
+#$% Date:       May 1993
+#$%
+#$% Author:     Carol L. Kropp
+#$%
+#########################################################################
+BBCommon
+ALSP_Unit_Enum_Common
+ALSP$Aircraft_Common
+ 
+integer  loop_index, mapping_index, enumeration_index, in_database_flag,
+    ACC$Pointer, i, acc$AlspMapIndx$i
+ 
+literal  literal_class_name, cstrip8  # SMM 3/00
+ 
+     default_incoming_ac_type = $not_mapped
+     for (ACC$Pointer$First; ACC$Pointer$OK; ACC$Pointer$Next)
+       {
+        if (xACC$Category$I != $Helo$Code)
+          {
+           default_incoming_ac_type = ACC$Pointer
+           break
+          }
+       }
+ 
+     default_incoming_helo_type = $not_mapped
+     for (ACC$Pointer$First; ACC$Pointer$OK; ACC$Pointer$Next)
+       {
+        if (xACC$Category$I == $Helo$Code)
+          {
+           default_incoming_helo_type = ACC$Pointer
+           break
+          }
+       }
+ 
+ 
+  # Loop through the mapping data file and set up the incoming map array
+  for (mapping_index = 1; mapping_index <= number_of_aircraft_maps; mapping_index = mapping_index + 1)
+    {
+     enumeration_index = aircraft_unit_type [1, mapping_index]
+     if (incoming_ac_enum_map_array [enumeration_index]  ==  $not_mapped)
+       {
+        in_database_flag = $no
+ 
+        literal_class_name = aircraft_unit_type [2, mapping_index]
+        call ALSP_Get_ACCPointer (ACC$Pointer, literal_class_name, in_database_flag)
+        if (in_database_flag == $no)
+          {
+           $debug1   call echov  ("ALSP MAPPING WARNING:  ")
+           $debug1   call echohn (literal_class_name, $$MaxLit)
+           $debug1   call echov  (" was not found in the game database.")
+           $debug1   call echor
+          }
+        else    # in_database_flag == $yes, so set up mapping array
+           incoming_ac_enum_map_array [enumeration_index] = ACC$Pointer
+       }    # end of processing for a non-mapped enumerations
+    }       # end of loop through the mapping list
+ 
+     if (default_incoming_ac_type == $not_mapped)
+     {
+       call echov  ("No aircraft classes in Database")
+       call echor
+     }
+ 
+     if (default_incoming_helo_type == $not_mapped)
+     {
+       call echov  ("No helicopter classes in Database")
+       call echor
+     }
+ 
+  # Now loop through the ACC tables and determine what the ALSP
+  # enumeration is for each type of aircraft in the game database.
+  for (ACC$Pointer$First; ACC$Pointer$OK; ACC$Pointer$Next)
+    {
+     literal_class_name = xACC$Type$C
+     acc$AlspMapIndx$i = $not_mapped
+     for (mapping_index = 1; mapping_index <= number_of_aircraft_maps; mapping_index = mapping_index + 1)
+       {
+        if (literal_class_name == aircraft_unit_type [2, mapping_index])
+          {
+           acc$AlspMapIndx$i = idnint (aircraft_unit_type [1, mapping_index])
+           break    # loop through map data
+          }     # end of mapping found
+       }    # end of loop through enumeration map data file
+
+	 if (acc$AlspMapIndx$i == $not_mapped)
+	   {
+        # Default outgoing ac mapping is first mapping in rin file
+        acc$AlspMapIndx$i = idnint (aircraft_unit_type [1, 1])
+		$debug1 call echov("Aircraft Type ")
+		$debug1 call echohn(xACC$Type$c, $$MaxLit)
+		$debug1 call echov(" not mapped.  Using mapping of ")
+		$debug1 call echohn(aircraft_unit_type[2, 1], $$MaxLit)
+		$debug1 call echor
+	    }
+      PUTacc$AlspMapIndx$i		 
+    }   # end of loop through ACC table
+ 
+return
+end
+
+ 
+subroutine Initialize_Sea_Mapping  ()
+#########################################################################
+#$%
+#$% Purpose:    Initialize_Sea_Mapping searchs the SHC table for the
+#$%             default mappings for ship (NMSHP), submarine (NMSUB),
+#$%             and boat (NMBOT).
+#$%
+#$% Called By:  Initialize_ALSP_Mapping
+#$%
+#$% Calls:      Initialize_Default_Sea_Mappings
+#$%
+#$% Tables:     SHC
+#$%
+#$% Date:       December 1993
+#$%
+#$% Author:     Carol L. Kropp
+#$%
+#$% Modified:   Susan Miller 1/97 (E1694)
+#$%             Put sea_unit_mappings in a common block located in ALSP.INC
+#########################################################################
+BBCommon
+ALSP_Unit_Enum_Common
+ 
+integer  i             # loop control variable
+integer  enum_index    # alsp common enumeration index
+integer  SHC$Pointer, shc$AlspMapIndx$i
+literal  class_name    # the RESA recognized name
+literal  cstrip8       # SMM 3/00
+ 
+ALSP$Sea_Common
+ 
+  call Initialize_Default_Sea_Mappings
+ 
+  for (SHC$Pointer$First; SHC$Pointer$OK; SHC$Pointer$Next)
+  {
+     SHC$ALSPMapIndx$I = $not_mapped
+     putSHC$ALSPMapIndx$I
+  }
+ 
+  for (i = 1; i <= number_of_sea_maps; i = i + 1)
+    {
+     enum_index = sea_unit_mappings [1, i]
+     class_name = sea_unit_mappings [2, i]
+ 
+     for (SHC$Pointer$First; SHC$Pointer$OK; SHC$Pointer$Next)
+       {
+        if (xSHC$Type$C == class_name)
+          break
+       }
+ 
+     if (SHC$Pointer$OK)
+       {
+        if (incoming_sea_enum_map_array [enum_index] == $not_mapped)
+           incoming_sea_enum_map_array [enum_index] = SHC$Pointer
+ 
+        putSHC$ALSPMapIndx$I  (enum_index)
+       }      # end of if SHC$Pointer good
+    }         # end of loop through the mapping array
+
+  for (SHC$Pointer$First; SHC$Pointer$OK; SHC$Pointer$Next)
+  {
+	 if (xSHC$Category$i == $Shorebase$code) next
+
+     if (xSHC$ALSPMapIndx$I == $not_mapped)
+	 {
+		# Default outgoing sea mapping is first in rin file
+		SHC$ALSPMapIndx$I = sea_unit_mappings[1, 1]
+     	putSHC$ALSPMapIndx$I
+		$debug1 call echov("Ship Class ")
+		$debug1 call echohn(xSHC$Type$c, $$MaxLit)
+		$debug1 call echov(" not mapped.  Using mapping of ")
+		$debug1 call echohn(sea_unit_mappings[2, 1], $$MaxLit)
+		$debug1 call echor
+	 }
+  } 
+ 
+return
+end
+
+ 
+subroutine Initialize_Torpedo_Mapping  ()
+#########################################################################
+#$%
+#$% Purpose:    Initialize_Torpedo_Mapping searches the TRP table for the
+#$%             mappings
+#$%
+#$%
+#$% Called By:  Initialize_ALSP_Mapping
+#$%
+#$% Calls:
+#$%
+#$% Tables:     TRP
+#$%
+#$% Date:       June 22, 1006
+#$%
+#$% Author:     James O. Allen
+#$%
+#########################################################################
+BBCommon
+ALSP_Unit_Enum_Common
+ALSP$Torpedo_Common
+ 
+integer  i             # loop control variable
+integer  enum_index    # alsp common enumeration index
+integer  TRP$Pointer, indx
+literal  class_name    # the RESA recognized name
+literal  cstrip8
+integer  default_torpedo_enum_index
+integer  default_torpedo_index 
+
+  default_torpedo_enum_index = 0
+ 
+  for (i = 1; i <= TRP$SLOTS; i = i + 1)
+     outgoing_torpedo_enum_map_array [i] = $not_mapped
+ 
+  for (i = 1; i <= number_of_torpedo_maps; i = i + 1)
+    {
+     enum_index = torpedo_unit_mappings [1, i]
+     class_name = torpedo_unit_mappings [2, i]
+ 
+     for (TRP$Pointer$First; TRP$Pointer$OK; TRP$Pointer$Next)
+       {
+        if (xTRP$Name$C == class_name)
+          break
+       }
+ 
+     if (TRP$Pointer$OK)
+       {
+        indx = trp$pointer$index
+        if (incoming_unit_enum_map_array [enum_index] == $not_mapped)
+           incoming_unit_enum_map_array [enum_index] = TRP$Pointer
+ 
+        if (outgoing_torpedo_enum_map_array [indx] == $not_mapped)
+           outgoing_torpedo_enum_map_array [indx] = enum_index
+
+		if (default_torpedo_enum_index == 0)
+		{
+			default_torpedo_enum_index = enum_index
+			default_torpedo_index = indx
+		}
+
+       }      # end of if TRP$Pointer good
+    }         # end of loop through the mapping array
+ 
+    TRP$Pointer$First
+    default_incoming_torpedo_type = trp$pointer
+
+	# Assign default torpedo type to unmapped torpedo types
+	for (trp$pointer$first; trp$pointer$ok; trp$pointer$next)
+	{
+		indx = trp$pointer$index
+		if (outgoing_torpedo_enum_map_array[indx] == $not_mapped)
+		{
+			outgoing_torpedo_enum_map_array[indx] = default_torpedo_enum_index
+			$debug1 call echov("Torpedo ")
+			$debug1 call echohn(xTRP$Name$c, $$MaxLit)
+			$debug1 call echov(" not mapped.  Using mapping of ")
+			$debug1 call echohn(torpedo_unit_mappings[2, default_torpedo_index], $$MaxLit)
+			$debug1 call echor
+		}
+	}			
+ 
+return
+end
+
+ 
+subroutine Initialize_Sonobuoy_Mapping  ()
+#########################################################################
+#$%
+#$% Purpose:    Initialize_Sonobuoy_Mapping searches the SOB table for the
+#$%             mappings
+#$%
+#$%
+#$% Called By:  Initialize_ALSP_Mapping
+#$%
+#$% Calls:
+#$%
+#$% Tables:     SOB
+#$%
+#$% Date:       July 11, 1006
+#$%
+#$% Author:     James O. Allen
+#$%
+#########################################################################
+BBCommon
+ALSP_Unit_Enum_Common
+ALSP$Sonobuoy_Common
+ 
+integer  i             # loop control variable
+integer  enum_index    # alsp common enumeration index
+integer  SOB$Pointer, indx
+literal  class_name    # the RESA recognized name
+literal  cstrip8
+integer  default_sonobuoy_enum_index
+integer  default_sonobuoy_index 
+
+  default_sonobuoy_enum_index = 0 
+ 
+  for (i = 1; i <= SOB$SLOTS; i = i + 1)
+     outgoing_sonobuoy_enum_map_array [i] = $not_mapped
+ 
+  for (i = 1; i <= number_of_sonobuoy_maps; i = i + 1)
+    {
+     enum_index = sonobuoy_unit_mappings [1, i]
+     class_name = sonobuoy_unit_mappings [2, i]
+ 
+     for (SOB$Pointer$First; SOB$Pointer$OK; SOB$Pointer$Next)
+       {
+        if (xSOB$Type$C == class_name)
+          break
+       }
+ 
+     if (SOB$Pointer$OK)
+       {
+        indx = sob$pointer$index
+        if (incoming_unit_enum_map_array [enum_index] == $not_mapped)
+           incoming_unit_enum_map_array [enum_index] = SOB$Pointer
+ 
+        if (outgoing_sonobuoy_enum_map_array [indx] == $not_mapped)
+            outgoing_sonobuoy_enum_map_array [indx] = enum_index
+
+		if (default_sonobuoy_enum_index == 0)
+		{
+			default_sonobuoy_enum_index = enum_index
+			default_sonobuoy_index = indx
+		}
+
+       }      # end of if SOB$Pointer good
+    }         # end of loop through the mapping array
+ 
+    SOB$Pointer$First
+    default_incoming_sonobuoy_type = sob$pointer
+
+	# Assign default sonobuoy type to unmapped sonobuoy types
+	for (sob$pointer$first; sob$pointer$ok; sob$pointer$next)
+	{
+		indx = sob$pointer$index
+		if (outgoing_sonobuoy_enum_map_array[indx] == $not_mapped)
+		{
+			outgoing_sonobuoy_enum_map_array[indx] = default_sonobuoy_enum_index
+			$debug1 call echov("Sonobuoy ")
+			$debug1 call echohn(xSOB$Type$c, $$MaxLit)
+			$debug1 call echov(" not mapped.  Using mapping of ")
+			$debug1 call echohn(sonobuoy_unit_mappings[2, default_sonobuoy_index], $$MaxLit)
+			$debug1 call echor
+		}
+	}			 
+return
+end
+
+ 
+subroutine Initialize_Mine_Mapping  ()
+#########################################################################
+#$%
+#$% Purpose:    Initialize_Mine_Mapping searches the BOM table for the
+#$%             mappings
+#$%
+#$%
+#$% Called By:  Initialize_ALSP_Mapping
+#$%
+#$% Calls:
+#$%
+#$% Tables:     BOM
+#$%
+#$% Date:       Nov. 29, 1006
+#$%
+#$% Author:     James O. Allen
+#$%
+#########################################################################
+BBCommon
+ALSP_Unit_Enum_Common
+ALSP$Mine_Common
+ 
+integer  i             # loop control variable
+integer  enum_index    # alsp common enumeration index
+integer  BOM$Pointer, indx
+literal  class_name    # the RESA recognized name
+literal  cstrip8
+integer  default_mine_enum_index
+integer  default_mine_index 
+
+  default_mine_enum_index = 0  
+  default_incoming_mine_type = 0
+ 
+  for (i = 1; i <= BOM$SLOTS; i = i + 1)
+     outgoing_mine_enum_map_array [i] = $not_mapped
+ 
+  for (i = 1; i <= number_of_mine_maps; i = i + 1)
+    {
+     enum_index = mine_unit_mappings [1, i]
+     class_name = mine_unit_mappings [2, i]
+ 
+     for (BOM$Pointer$First; BOM$Pointer$OK; BOM$Pointer$Next)
+       {
+        if (Xbom$Type$i != $Mine$Code) next
+ 
+        if (xBOM$Name$C == class_name)
+          break
+       }
+ 
+     if (BOM$Pointer$OK)
+       {
+        indx = bom$pointer$index
+        if (incoming_unit_enum_map_array [enum_index] == $not_mapped)
+           incoming_unit_enum_map_array [enum_index] = BOM$Pointer
+ 
+        if (outgoing_mine_enum_map_array [indx] == $not_mapped)
+            outgoing_mine_enum_map_array [indx] = enum_index
+ 
+        if (default_incoming_mine_type == 0)
+            default_incoming_mine_type = BOM$pointer
+
+		if (default_mine_enum_index == 0)
+		{
+			default_mine_enum_index = enum_index
+			default_mine_index = indx
+		}
+
+       }      # end of if BOM$Pointer good
+    }         # end of loop through the mapping array
+ 
+     for (BOM$Pointer$First; BOM$Pointer$OK; BOM$Pointer$Next)
+     {
+        if (Xbom$Type$i != $Mine$Code) next 
+		indx = bom$pointer$index
+		if (outgoing_mine_enum_map_array[indx] == $not_mapped)
+		{
+			outgoing_mine_enum_map_array[indx] = default_mine_enum_index
+			$debug1 call echov("Mine ")
+			$debug1 call echohn(xBOM$Name$c, $$MaxLit)
+			$debug1 call echov(" not mapped.  Using mapping of ")
+			$debug1 call echohn(mine_unit_mappings[2, default_mine_index], $$MaxLit)
+			$debug1 call echor
+		}
+	 }
+
+return
+end
+
+ 
+subroutine Initialize_CM_Mapping  ()
+#########################################################################
+#$%
+#$% Purpose:    Initialize_CM_Mapping searches the CTM table for the
+#$%             mappings
+#$%
+#$%
+#$% Called By:  Initialize_ALSP_Mapping
+#$%
+#$% Calls:
+#$%
+#$% Tables:     CTM
+#$%
+#$% Date:       June 22, 1006
+#$%
+#$% Author:     James O. Allen
+#$%
+#########################################################################
+BBCommon
+ALSP_Unit_Enum_Common
+ALSP$Countermeasure_Common
+ 
+integer  i             # loop control variable
+integer  enum_index    # alsp common enumeration index
+integer  CTM$Pointer, indx
+literal  class_name    # the RESA recognized name
+literal  cstrip8
+integer  default_countermeasure_enum_index
+integer  default_countermeasure_index 
+
+  default_countermeasure_enum_index = 0   
+ 
+  for (i = 1; i <= CTM$SLOTS; i = i + 1)
+     outgoing_countermeasure_enum_map_array [i] = $not_mapped
+ 
+  for (i = 1; i <= number_of_countermeasure_maps; i = i + 1)
+    {
+     enum_index = countermeasure_unit_mappings [1, i]
+     class_name = countermeasure_unit_mappings [2, i]
+ 
+     for (CTM$Pointer$First; CTM$Pointer$OK; CTM$Pointer$Next)
+       {
+        if (xCTM$Name$C == class_name)
+          break
+       }
+ 
+     if (CTM$Pointer$OK)
+       {
+        indx = ctm$pointer$index
+        if (incoming_unit_enum_map_array [enum_index] == $not_mapped)
+           incoming_unit_enum_map_array [enum_index] = CTM$Pointer
+ 
+        if (outgoing_countermeasure_enum_map_array [indx] == $not_mapped)
+           outgoing_countermeasure_enum_map_array [indx] = enum_index
+
+		if (default_countermeasure_enum_index == 0)
+		{
+			default_countermeasure_enum_index = enum_index
+			default_countermeasure_index = indx
+		}
+
+       }      # end of if CTM$Pointer good
+    }         # end of loop through the mapping array
+ 
+    CTM$Pointer$First
+    default_incoming_countermeasure_type = ctm$pointer
+
+     for (CTM$Pointer$First; CTM$Pointer$OK; CTM$Pointer$Next)
+     {
+		indx = ctm$pointer$index
+		if (outgoing_countermeasure_enum_map_array[indx] == $not_mapped)
+		{
+			outgoing_countermeasure_enum_map_array[indx] = default_countermeasure_enum_index
+			$debug1 call echov("Countermeasure ")
+			$debug1 call echohn(xCTM$Name$c, $$MaxLit)
+			$debug1 call echov(" not mapped.  Using mapping of ")
+			$debug1 call echohn(countermeasure_unit_mappings[2, default_countermeasure_index], $$MaxLit)
+			$debug1 call echor
+		}
+	 }
+
+ 
+return
+end
+
+ 
+subroutine Initialize_Default_Sea_Mappings  ()
+#########################################################################
+#$%
+#$% Purpose:    Initialize_Default_Sea_Mappings searchs the SHC table for the
+#$%             default mappings for ship (NMSHP), submarine (NMSUB),
+#$%             and boat (NMBOT).
+#$%
+#$% Called By:  Initialize_Sea_Mapping
+#$%
+#$% Calls:      Echo..
+#$%
+#$% Tables:     SHC
+#$%
+#$% Date:       December 1993
+#$%
+#$% Author:     Carol L. Kropp
+#$%
+#########################################################################
+BBCommon
+ALSP_Unit_Enum_Common
+ 
+literal  ship_name, sub_name, boat_name
+literal  cstrip8, SHC$Type$C          # SMM 3/00
+integer  SHC$Pointer, SHC$Category$I  # SMM 3/00
+ 
+ 
+  default_incoming_ship_type = 0
+  default_incoming_boat_type = 0
+  default_incoming_submarine_type = 0
+ 
+  for (SHC$Pointer$First; SHC$Pointer$Ok; SHC$Pointer$Next)
+  {
+     SHC$Type$C = xSHC$Type$C
+     SHC$Category$I = xSHC$Category$I
+ 
+    if (default_incoming_ship_type == 0)
+    {
+        if (SHC$Category$I == $Surface$Code)
+             default_incoming_ship_type = SHC$Pointer
+    }
+    if (default_incoming_boat_type == 0)
+    {
+        if (SHC$Category$I == $SmallBoat$Subcode)
+            default_incoming_boat_type = SHC$Pointer
+    }
+    if (default_incoming_submarine_type == 0)
+    {
+        if (SHC$Category$I == $SubSurface$Code)
+            default_incoming_submarine_type = SHC$Pointer
+    }
+  }     # end of loop through the SHC characteristic entries
+ 
+  # If there was no NMSHP ship characteristics, find a ship to use
+  if (default_incoming_ship_type == $no)
+    {
+       call echov  ("No ship classes in Database")
+       call echor
+    }
+ 
+  # If there was no NOMAP boat characteristics, find a boat to use
+  if (default_incoming_boat_type == $no)
+    {
+       call echov  ("No boat classes in Database")
+       call echor
+    }
+ 
+  # If there was no NOMAP submarine characteristics, find a sub to use
+  if (default_incoming_submarine_type == $no)
+    {
+       call echov  ("No submnarine classes in Database")
+       call echor
+    }
+ 
+return
+end
+
+ 
+subroutine  Set_Default_Weapon_Maps  ()
+#########################################################################
+#$%
+#$% Purpose:    Set_Default_Weapon_Maps searches the weapon characteristic
+#$%             tables and sets the default incoming ALSP mapping for AAMs,
+#$%             ASMs, Ballistic Missiles, BOMBs, Cruise Missiles, GUNS, and
+#$%             SAMs.
+#$%
+#$% Called By:  Initialize_ALSP_Mapping
+#$%
+#$% Calls:      ALSP_Map_Incoming_Weapon  <alsp_receive_interact.rat>
+#$%
+#$% Tables:     BOM     MC     TOR
+#$%
+#$% Date:       August 1993
+#$%
+#$% Author:     Carol L. Kropp
+#$%
+#$% Modified:   Carol Kropp - 12/93
+#$%             Added Ballistic and Cruise Missiles.
+#$%
+#########################################################################
+BBCommon
+ALSP_Unit_Enum_Common    # clk 12/93 - for ballistic/cruise missiles
+ 
+ALSP$Weapon_Common
+ 
+integer  MC$Pointer
+integer  dummy, weapon_ident_code, weapon_found
+integer  BOM$Pointer, MC$Type$I, TOR$Pointer  # SMM 3/00
+ 
+  default_aam_mc_ptr = 0
+  default_asm_mc_ptr = 0
+  default_bomb_bom_ptr = 0
+  default_mine_bom_ptr = 0
+  default_cm_cmc_ptr = default_incoming_cm_type
+  default_gun_tor_ptr = 0
+  default_sam_mc_ptr = 0
+  default_tbm_cmc_ptr = default_incoming_tbm_type
+ 
+  for (BOM$Pointer$First; BOM$Pointer$OK; BOM$Pointer$Next)
+    {
+     if (xBOM$Type$I == $Bomb$Code)
+       {
+        default_bomb_bom_ptr = BOM$Pointer
+        break
+       }
+    }
+ 
+  for (BOM$Pointer$First; BOM$Pointer$OK; BOM$Pointer$Next)
+    {
+     if (xBOM$Type$I == $Mine$Code)
+       {
+        default_mine_bom_ptr = BOM$Pointer
+        break
+       }
+    }
+ 
+  for (MC$Pointer$First; MC$Pointer$OK; MC$Pointer$Next)
+    {
+     MC$Type$I = xMC$Type$I
+     if (MC$Type$I == $AAM$Code)
+       {
+        if (default_aam_mc_ptr == 0)
+          default_aam_mc_ptr = MC$Pointer
+       }
+     else if (MC$Type$I == $ASM$Code)
+       {
+        if (default_asm_mc_ptr == 0)
+          default_asm_mc_ptr = MC$Pointer
+       }
+     else if (MC$Type$I == $SAM$Code)
+       {
+        if (default_sam_mc_ptr == 0)
+          default_sam_mc_ptr = MC$Pointer
+       }
+    }
+ 
+  for (TOR$Pointer$First; TOR$Pointer$OK; TOR$Pointer$Next)
+    {
+     if (xTOR$Ident$I == $Gun$Code)
+       {
+        default_gun_tor_ptr = TOR$Pointer
+        break
+       }
+    }
+ 
+return
+end
+
+ 
+subroutine  Set_Default_Emitter_Maps  ()
+#########################################################################
+#$%
+#$% Purpose:    Set_Default_Emitter_Maps searches the emitter characteristic
+ 
+#$%             tables and sets the default mapping data for Radars, IFFs,
+#$%             and Jammers.
+#$%
+#$% Called By:  Initialize_ALSP_Mapping
+#$%
+#$% Calls:      None
+#$%
+#$% Tables:     IFF     JAM     RAD
+#$%
+#$% Date:       August 1993
+#$%
+#$% Author:     Carol L. Kropp
+#$%
+#########################################################################
+BBCommon
+ 
+ALSP$Emitter_Common
+ALSP$Sonar_Common
+ 
+BBDeclare (IFF$Pointer, JAM$Pointer, RAD$Pointer, SON$Pointer, RAD$RadarType$i)
+integer  mapping_index, index
+integer  litcmp
+literal  literal_emitter_name, literal_sonar_name
+literal  cstrip8   # SMM 3/00
+ 
+alsp_default_iff = -1
+alsp_default_jammer = 0
+alsp_default_radar = -1
+alsp_default_surface_radar = 0
+alsp_default_air_radar = 0
+alsp_default_nav_radar = 0
+ 
+for (JAM$Pointer$First; JAM$Pointer$OK; JAM$Pointer$Next)
+{
+	for (index = 1; index <= Number_of_Emitter_Maps; index = index + 1)
+	{
+		if (alsp_emitter_list[3, index] == $Jammer$code)
+		{
+    		alsp_default_jammer = JAM$Pointer
+    		break 2
+		}
+	}
+}
+ 
+for (RAD$Pointer$First; RAD$Pointer$OK; RAD$Pointer$Next)
+{
+	RAD$RadarType$I = xRAD$RadarType$I
+	for (index = 1; index <= Number_of_Emitter_Maps; index = index + 1)
+	{
+		if (alsp_emitter_list[3, index] == $Radar$code)
+		{
+			if (litcmp(alsp_emitter_list[2,index], xRAD$Type$C) == 0)
+			{
+			    if (RAD$RadarType$I == $Surface$Code)
+   				{
+					if (alsp_default_surface_radar == 0)
+       					alsp_default_surface_radar = RAD$Pointer
+				}
+			    else if (RAD$RadarType$I == $Air$Code | RAD$RadarType$i == $FireControl$Code)
+   				{
+					if (alsp_default_air_radar == 0)
+       					alsp_default_air_radar = RAD$Pointer
+				}
+			    else if (RAD$RadarType$I == $NavSensor$Code)
+   				{
+					if (alsp_default_nav_radar == 0)
+       					alsp_default_nav_radar = RAD$Pointer
+				}
+			}
+		}
+    }
+}
+ 
+
+default_iff_transponder = -1
+for (IFF$Pointer$First; IFF$Pointer$OK; IFF$Pointer$Next)
+{
+    if (xIFF$Function$I == $Transponder$Code)
+    {
+        default_iff_transponder = IFF$Pointer
+        break
+    }
+}
+ 
+alsp_default_sonar = -1
+for (SON$Pointer$First; SON$Pointer$OK; SON$Pointer$Next)
+{
+    alsp_default_sonar = SON$Pointer
+    break
+}
+ 
+return
+end
+
+ 
+Subroutine ALSP_Get_ACCPointer (_
+        ACC$Pointer,             # out - ACC characteristics pointer
+        literal_class_name,      # in -  Class name in literal form
+        class_match)             # out - Flag for in match made
+#########################################################################
+#$%
+#$% Purpose:    Attempts to find the ACC Pointer for the name of the
+#$%             class given in lit_class_name.
+#$%
+#$% Called By:  Initialize_Aircraft_Mapping
+#$%
+#$% Calls:      none
+#$%
+#$% Tables:     ACC
+#$%
+#$% Date:       April 1992
+#$%
+#$% Author:     Carol L. Kropp
+#$%
+#########################################################################
+BBcommon
+ 
+literal  literal_class_name, cstrip8  # SMM 3/00
+integer  class_match, ACC$Pointer     # SMM 3/00
+ 
+  class_match = $No
+  for(ACC$Pointer$First; ACC$Pointer$Ok; ACC$Pointer$Next)
+    {
+     if (xACC$Type$C == literal_class_name)
+       {
+        class_match = $yes
+        break
+       }
+    }
+ 
+return
+end
+
+ 
+subroutine Map_Incoming_Aircraft_Type (_
+        alsp_class,              # in - the alsp class of the unit
+        unit_enum,               # in - enumeration of Common ALSP name
+        lit_class_name,          # out - class name as a literal
+        ACC$Pointer,             # out - the ACC pointer
+        aircraft_class_match)    # out - flag for if a match is made
+#########################################################################
+#$%
+#$% Purpose:    Used to extract the incoming Aircraft ALSP Protocal Map.
+#$%             Will return a valid ACC$Pointer unless the generic unit
+#$%             type was not mapped - which causes an error msg at swar
+#$%             startup.
+#$%
+#$% Called By:  ALSP_Handle_Air_Type
+#$%
+#$% Calls:      none
+#$%
+#$% Tables:     Echo..
+#$%
+#$% Date:       April 1992
+#$%
+#$% Author:     Carol L. Kropp
+#$%
+#########################################################################
+BBCommon
+ALSP_Unit_Enum_Common
+ 
+integer  alsp_class, unit_enum, ACC$Pointer, aircraft_class_match
+literal  lit_class_name, cstrip8 # SMM 3/00
+ 
+  aircraft_class_match = $no
+  ACC$Pointer = incoming_ac_enum_map_array [unit_enum]
+  if (ACC$Pointer$ok)
+    {
+     lit_class_name = xACC$Type$C
+     aircraft_class_match = $yes
+    }
+  else
+    {
+     if (alsp_class == $air_helicopter | alsp_class == $air_helicopter_airlift)
+       ACC$Pointer = default_incoming_helo_type
+     else
+       ACC$Pointer = default_incoming_ac_type
+ 
+     if (ACC$Pointer$OK)
+       {
+        lit_class_name = xACC$Type$C
+        aircraft_class_match = $yes
+       }
+    }
+ 
+return
+end
+
+ 
+subroutine Map_Outgoing_Aircraft_Type (ACCPntr,      # Pointer to characteristics
+                              unit_type)        # ALSP common type enumeration
+#########################################################################
+#$%
+#$% Purpose:    Map_Outgoing_Aircraft_Type translates the RESA aircraft type
+#$%             into a common ALSP aircraft type.  If the aircraft type
+#$%             was not mapped in the data file - generic will be returned.
+#$%
+#$% Called By:  ALSP_Update_Air    <alsp_send_updates.rat>
+#$%
+#$% Calls:      None
+#$%
+#$% Tables:     None
+#$%
+#$% Date:       May 13, 1992
+#$%
+#$% Author:     Carol L. Kropp
+#$%
+#$% Modified:   Carol L. Kropp - August 1993
+#$%             removed the status for no map - send back default
+#########################################################################
+BBCommon
+ 
+integer  ACC$Pointer, ACCPntr, unit_type
+ 
+acc$pointer = accpntr
+ 
+unit_type = xACC$ALSPMapIndx$I
+ 
+return
+end
+
+ 
+subroutine Map_Outgoing_Ship_Type (SHCPntr,      # Pointer to characteristics
+                                   unit_type)        # ALSP common type enumeration
+#########################################################################
+#$%
+#$% Purpose:    Map_Outgoing_Ship_Type translates the RESA ship class
+#$%             into a common ALSP unit type.  If the unit type was not
+#$%             mapped in the data file - generic will be returned.
+#$%
+#$% Called By:  ALSP_Send_Full_SS_Update
+#$%             ALSP_Send_Partial_SS_Update
+#$%
+#$% Calls:      None
+#$%
+#$% Tables:     SHC
+#$%
+#$% Date:       December 1993
+#$%
+#$% Author:     Carol L. Kropp
+#$%             Reused from ALSP_Map_Air_Type
+#########################################################################
+BBCommon
+ 
+integer  SHC$Pointer, SHCPntr, unit_type
+ 
+integer array_index
+ 
+SHC$Pointer = SHCPntr
+ 
+unit_type = xSHC$ALSPMapIndx$I
+ 
+return
+end
+
+ 
+subroutine Map_Outgoing_Torpedo_Type (TRPPntr,          # Pointer to characteristics
+                                      unit_type)        # ALSP common type enumeration
+#########################################################################
+#$%
+#$% Purpose:    Map_Outgoing_Torpedo_Type translates the RESA torpedo class
+#$%             into a common ALSP unit type.  If the unit type was not
+#$%             mapped in the data file - generic will be returned.
+#$%
+#$% Called By:  ALSP_Send_Full_SS_Update
+#$%             ALSP_Send_Partial_SS_Update
+#$%
+#$% Calls:      None
+#$%
+#$% Tables:     TRP
+#$%
+#$% Date:       June 22, 2006
+#$%
+#$% Author:     James O. Allen
+#$%
+#########################################################################
+BBCommon
+ALSP_Unit_Enum_Common
+ 
+integer  TRP$Pointer, TRPPntr, unit_type
+ 
+integer array_index
+ 
+trp$pointer = trppntr
+ 
+array_index = TRP$Pointer$Index
+
+unit_type = outgoing_torpedo_enum_map_array [array_index]
+ 
+return
+end
+
+subroutine Map_Outgoing_Sonobuoy_Type (SOBPntr,     # Pointer to characteristics
+                                      unit_type)    # ALSP common type enumeration
+#########################################################################
+#$%
+#$% Purpose:    Map_Outgoing_Sonobuoy_Type translates the RESA sonobuoy type
+#$%             into a common ALSP unit type.  If the unit type was not
+#$%             mapped in the data file - generic will be returned.
+#$%
+#$% Called By:  ALSP_Update_sonobuoy_barrier
+#$%
+#$% Calls:      None
+#$%
+#$% Tables:     SOB
+#$%
+#$% Date:       July 11, 2006
+#$%
+#$% Author:     James O. Allen
+#$%
+#########################################################################
+BBCommon
+ALSP_Unit_Enum_Common
+ 
+integer  SOB$Pointer, sobpntr, unit_type
+ 
+integer array_index
+ 
+sob$pointer = sobpntr
+array_index = SOB$Pointer$Index
+ 
+if (array_index <= 0)    # if less then or equal to zero - then not mapped
+{
+    sob$pointer = default_incoming_sonobuoy_type
+    array_index = SOB$Pointer$Index
+}
+ 
+unit_type = outgoing_sonobuoy_enum_map_array [array_index]
+ 
+return
+end
+
+subroutine Map_Outgoing_Mine_Type (BOMPntr,      # Pointer to characteristics
+                                   unit_type)    # ALSP common type enumeration
+#########################################################################
+#$%
+#$% Purpose:    Map_Outgoing_Mine_Type translates the RESA mine type
+#$%             into a common ALSP unit type.  If the unit type was not
+#$%             mapped in the data file - generic will be returned.
+#$%
+#$% Called By:  ALSP_Update_minefield_barrier
+#$%
+#$% Calls:      None
+#$%
+#$% Tables:     BOM
+#$%
+#$% Date:       Nov. 29, 2006
+#$%
+#$% Author:     James O. Allen
+#$%
+#########################################################################
+BBCommon
+ALSP_Unit_Enum_Common
+ 
+integer  BOM$Pointer, bompntr, unit_type
+ 
+integer array_index
+ 
+bom$pointer = bompntr
+array_index = BOM$Pointer$Index
+if (array_index <= 0)    # if less then or equal to zero - then not mapped
+{
+    bom$pointer = default_incoming_mine_type
+    array_index = BOM$Pointer$Index
+}
+ 
+unit_type = outgoing_mine_enum_map_array [array_index]
+ 
+return
+end
+
+ 
+subroutine Map_Outgoing_CTM_Type (CTMPntr,          # Pointer to characteristics
+                                  unit_type)        # ALSP common type enumeration
+#########################################################################
+#$%
+#$% Purpose:    Map_Outgoing_CTM_Type translates the RESA countermeasure class
+#$%             into a common ALSP unit type.  If the unit type was not
+#$%             mapped in the data file - generic will be returned.
+#$%
+#$% Called By:  ALSP_Send_Full_SS_Update
+#$%             ALSP_Send_Partial_SS_Update
+#$%
+#$% Calls:      None
+#$%
+#$% Tables:     CTM
+#$%
+#$% Date:       June 22, 2006
+#$%
+#$% Author:     James O. Allen
+#$%
+#########################################################################
+BBCommon
+ALSP_Unit_Enum_Common
+ 
+integer  CTM$Pointer, ctmpntr, unit_type
+ 
+integer array_index
+ 
+ctm$pointer = ctmpntr
+array_index = CTM$Pointer$Index
+ 
+if (array_index <= 0)    # if less then or equal to zero - then not mapped
+{
+    ctm$pointer = default_incoming_countermeasure_type
+    array_index = CTM$Pointer$Index
+}
+ 
+unit_type = outgoing_countermeasure_enum_map_array [array_index]
+ 
+return
+end
+
+ 
+subroutine Map_Incoming_Ship_Type (_
+        alsp_class_enum,         # in - the enumerated value of the class
+        unit_enum,               # in - enumeration of Common ALSP name
+        SHC$Pointer,             # out - the SHC pointer
+        class_match)             # out - flag for if a match is made
+#########################################################################
+#$%
+#$% Purpose:    Used to extract the incoming Unit Type ALSP Protocal Map.
+#$%             Will return a valid SHC$Pointer unless the generic unit
+#$%             type was not mapped - which causes an error msg at swar
+#$%             startup.
+#$%
+#$% Called By:  ALSP_Handle_Vessel_Type    <alsp_receive_create.rat>
+#$%
+#$% Calls:      none
+#$%
+#$% Tables:     SHC
+#$%
+#$% Date:       Sept. 1993
+#$%
+#$% Author:     Carol L. Kropp
+#$%
+#########################################################################
+BBCommon
+ALSP_Unit_Enum_Common
+ 
+integer  alsp_class_enum, unit_enum, SHC$Pointer, class_match
+ 
+  class_match = $no
+  SHC$Pointer = incoming_sea_enum_map_array [unit_enum]
+  if (SHC$Pointer$OK)
+    class_match = $yes
+  else
+    {
+     if (alsp_class_enum == $sea_subsurface)
+       SHC$Pointer = default_incoming_submarine_type
+     else if (alsp_class_enum == $sea_surface_ship)
+       SHC$Pointer = default_incoming_ship_type
+     else if (alsp_class_enum == $sea_surface_boat)
+       SHC$Pointer = default_incoming_boat_type
+ 
+     if (SHC$Pointer$OK)
+       class_match = $yes
+    }
+ 
+return
+end
+
+ 
+subroutine Map_Incoming_Torpedo_Type (_
+        alsp_class_enum,         # in - the enumerated value of the class
+        unit_enum,               # in - enumeration of Common ALSP name
+        TRP$Pointer,             # out - the TRP pointer
+        class_match)             # out - flag for if a match is made
+#########################################################################
+#$%
+#$% Purpose:    Used to extract the incoming Unit Type ALSP Protocal Map.
+#$%             Will return a valid TRP$Pointer unless the generic unit
+#$%             type was not mapped - which causes an error msg at swar
+#$%             startup.
+#$%
+#$% Called By:  ALSP_Handle_Torpedo_Type    <alsp_receive_create.rat>
+#$%
+#$% Calls:      none
+#$%
+#$% Tables:     TRP
+#$%
+#$% Date:       June 29, 2006
+#$%
+#$% Author:     James O. Allen
+#$%
+#########################################################################
+BBCommon
+ALSP_Unit_Enum_Common
+ 
+integer  alsp_class_enum, unit_enum, TRP$Pointer, class_match
+ 
+  class_match = $no
+  TRP$Pointer = incoming_torpedo_enum_map_array [unit_enum]
+  if (TRP$Pointer$OK)
+    class_match = $yes
+  else
+    {
+     TRP$Pointer = default_incoming_torpedo_type
+ 
+     if (TRP$Pointer$OK)
+       class_match = $yes
+    }
+ 
+return
+end
+
+ 
+subroutine Map_Incoming_Sonobuoy_Type (_
+        alsp_class_enum,         # in - the enumerated value of the class
+        unit_enum,               # in - enumeration of Common ALSP name
+        SOB$Pointer,             # out - the TRP pointer
+        class_match)             # out - flag for if a match is made
+#########################################################################
+#$%
+#$% Purpose:    Used to extract the incoming Unit Type ALSP Protocal Map.
+#$%             Will return a valid SOB$Pointer unless the generic unit
+#$%             type was not mapped - which causes an error msg at swar
+#$%             startup.
+#$%
+#$% Called By:  ALSP_Handle_Sonobuoy_Type    <alsp_receive_create.rat>
+#$%
+#$% Calls:      none
+#$%
+#$% Tables:     SOB
+#$%
+#$% Date:       July 11, 2006
+#$%
+#$% Author:     James O. Allen
+#$%
+#########################################################################
+BBCommon
+ALSP_Unit_Enum_Common
+ 
+integer  alsp_class_enum, unit_enum, SOB$Pointer, class_match
+ 
+  class_match = $no
+  SOB$Pointer = incoming_sonobuoy_enum_map_array [unit_enum]
+  if (SOB$Pointer$OK)
+    class_match = $yes
+  else
+    {
+     SOB$Pointer = default_incoming_sonobuoy_type
+ 
+     if (SOB$Pointer$OK)
+       class_match = $yes
+    }
+ 
+return
+end
+
+ 
+subroutine ALSP_Map_Incoming_Mine_Type (_
+        alsp_class_enum,         # in - the enumerated value of the class
+        unit_enum,               # in - enumeration of Common ALSP name
+        BOM$Pointer,             # out - the BOM pointer
+        class_match)             # out - flag for if a match is made
+#########################################################################
+#$%
+#$% Purpose:    Used to extract the incoming Unit Type ALSP Protocal Map.
+#$%             Will return a valid BOM$Pointer unless the generic unit
+#$%             type was not mapped - which causes an error msg at swar
+#$%             startup.
+#$%
+#$% Called By:  ALSP_Handle_Mine_Type    <alsp_receive_create.rat>
+#$%
+#$% Calls:      none
+#$%
+#$% Tables:     BOM
+#$%
+#$% Date:       Nov. 29, 2006
+#$%
+#$% Author:     James O. Allen
+#$%
+#########################################################################
+BBCommon
+ALSP_Unit_Enum_Common
+ 
+integer  alsp_class_enum, unit_enum, BOM$Pointer, class_match
+ 
+  class_match = $no
+  BOM$Pointer = incoming_mine_enum_map_array [unit_enum]
+  if (BOM$Pointer$OK)
+    class_match = $yes
+  else
+    {
+     BOM$Pointer = default_incoming_mine_type
+ 
+     if (BOM$Pointer$OK)
+       class_match = $yes
+    }
+ 
+return
+end
+
+ 
+subroutine Map_Incoming_CTM_Type (_
+        alsp_class_enum,         # in - the enumerated value of the class
+        unit_enum,               # in - enumeration of Common ALSP name
+        CTM$Pointer,             # out - the CTM pointer
+        class_match)             # out - flag for if a match is made
+#########################################################################
+#$%
+#$% Purpose:    Used to extract the incoming Unit Type ALSP Protocal Map.
+#$%             Will return a valid CTM$Pointer unless the generic unit
+#$%             type was not mapped - which causes an error msg at swar
+#$%             startup.
+#$%
+#$% Called By:  ALSP_Handle_Countermeasure_Type    <alsp_receive_create.rat>
+#$%
+#$% Calls:      none
+#$%
+#$% Tables:     CTM
+#$%
+#$% Date:       June 29, 2006
+#$%
+#$% Author:     James O. Allen
+#$%
+#########################################################################
+BBCommon
+ALSP_Unit_Enum_Common
+ 
+integer  alsp_class_enum, unit_enum, CTM$Pointer, class_match
+ 
+  class_match = $no
+  CTM$Pointer = incoming_countermeasure_enum_map_array [unit_enum]
+  if (CTM$Pointer$OK)
+    class_match = $yes
+  else
+    {
+     CTM$Pointer = default_incoming_countermeasure_type
+ 
+     if (CTM$Pointer$OK)
+       class_match = $yes
+    }
+ 
+return
+end
+
+ 
+subroutine Initialize_Missile_Unit_Mapping  ()
+#########################################################################
+#$%
+#$% Purpose:    Initialize_Missile_Unit_Mapping searchs the CMC table
+#$%             for a cruise and ballistic missile to use as the default.
+#$%
+#$% Called By:  Initialize_ALSP_Mapping
+#$%
+#$% Calls:      Echo..
+#$%
+#$% Tables:     CMC
+#$%
+#$% Date:       Dec. 1993
+#$%
+#$% Author:     Carol L. Kropp
+#$%
+#$% Modified:   Susan Miller 1/97 (E1694)
+#$%             Put missile_unit_mappings in a common block located in ALSP.INC
+#########################################################################
+BBCommon
+ALSP_Unit_Enum_Common
+ 
+integer  i             # loop control variable
+integer  enum_index    # alsp common enumeration index
+literal  missile_name  # the RESA recognized missile type name
+integer  MC$Pointer, indx  # SMM 3/00
+integer  cmc$pointer, cmc$AlspMapIndx$i
+literal  cstrip8	    # SMM 3/00
+ 
+ALSP$Missile_Common
+ 
+ 
+  for (CMC$Pointer$First; CMC$Pointer$OK; CMC$Pointer$Next)
+    {
+        cmc$AlspMapIndx$i = $not_mapped
+        PUTcmc$AlspMapIndx$i
+    }
+  for (i = 1; i <= number_of_missile_maps ; i = i + 1)
+    {
+     enum_index = missile_unit_mappings [1, i]
+     missile_name = missile_unit_mappings [2, i]
+ 
+     for (CMC$Pointer$First; CMC$Pointer$OK; CMC$Pointer$Next)
+       {
+        if (xCMC$Type$C == missile_name)
+          break
+       }
+ 
+     if (CMC$Pointer$OK)
+       {
+        if (incoming_cm_enum_map_array [enum_index] == $not_mapped)
+           incoming_cm_enum_map_array [enum_index] = CMC$Pointer
+ 
+        PUTcmc$AlspMapIndx$i (enum_index)
+       }
+    }
+
+  for (CMC$Pointer$First; CMC$Pointer$OK; CMC$Pointer$Next)
+    {
+        if (Xcmc$AlspMapIndx$i == $not_mapped)
+		  {
+		   # Default outgoing missile is first mapping in rin file
+           cmc$AlspMapIndx$i = missile_unit_mappings[1, 1]
+           PUTcmc$AlspMapIndx$i
+		   $debug1 call echov("Missile ")
+		   $debug1 call echohn(xCMC$Type$c, $$MaxLit)
+		   $debug1 call echov(" not mapped.  Using mapping of ")
+		   $debug1 call echohn(missile_unit_mappings[2, 1], $$MaxLit)
+		   $debug1 call echor
+          }
+    }
+ 
+  # search for a cruise missile to use as the default mapping
+     for (CMC$Pointer$First; CMC$Pointer$Ok; CMC$Pointer$Next)
+       {
+        if (xCMC$Cat$I == $Cruz$Code)
+          {
+           default_incoming_cm_type = CMC$Pointer
+           break
+          }
+       }
+ 
+     if (!CMC$Pointer$Ok)
+       {
+        call echov  ("No cruise missiles in ")
+        call echov  ("in Database.")
+        call echor
+       }
+ 
+  # search for a ballistic missile to use as the default mapping
+     for (CMC$Pointer$First; CMC$Pointer$Ok; CMC$Pointer$Next)
+       {
+        if (xCMC$Cat$I == $Ball$Code)
+          {
+           default_incoming_tbm_type = CMC$Pointer
+           break
+          }
+       }
+ 
+     if (!CMC$Pointer$Ok)
+     {
+        call echov  ("No ballistic missiles ")
+        call echov  ("in Database.")
+        call echor
+     }
+ 
+return
+end
+
+ 
+subroutine Map_Incoming_Missile_Type (_
+        alsp_class_enum,         # in - the enumerated value of the missile class
+        unit_type_enum,          # in - enumeration of Common ALSP unit type name
+        CMC$Pointer,             # out - the mapped CMC pointer
+        class_match)             # out - flag for if a match is made
+#########################################################################
+#$%
+#$% Purpose:    Used to determine the incoming Unit Type ALSP Protocal Map.
+#$%             Will return a valid CMC$Pointer for the missile.
+#$%
+#$% Called By:  ALSP_Handle_Missile_Type    <alsp_receive_create.rat>
+#$%
+#$% Calls:
+#$%             Echo..
+#$%
+#$% Tables:     CMC
+#$%
+#$% Date:       Dec. 1993
+#$%
+#$% Author:     Carol L. Kropp
+#$%
+#########################################################################
+BBCommon
+ALSP_Unit_Enum_Common
+ 
+integer   alsp_class_enum, unit_type_enum, CMC$Pointer, class_match
+ 
+  class_match = $no
+  CMC$Pointer = incoming_cm_enum_map_array [unit_type_enum]
+  if (CMC$Pointer$OK)
+    class_match = $yes
+  else
+    {
+     if (alsp_class_enum == $air_cruise_missile)
+       CMC$Pointer = default_incoming_cm_type
+     else if (alsp_class_enum == $air_ballistic_missile)
+       CMC$Pointer = default_incoming_tbm_type
+ 
+     if (CMC$Pointer$OK)
+       class_match = $yes
+    }
+ 
+return
+end
+
+ 
+subroutine ALSP_Map_Outgoing_Missile_Unit (CMC$Pointer,        # Pointer to characteristics
+                                           enumeration_index)  # ALSP common type enumeration
+#########################################################################
+#$%
+#$% Purpose:    Translates the RESA ballistic/cruise missile type to a
+#$%             common ALSP unit enumeration.  If the missile type was
+#$%             not mapped in the data file, the generic enumeration
+#$%             will be returned.
+#$%
+#$% Called By:  ALSP_Update_Missile_Unit
+#$%
+#$% Calls:      None
+#$%
+#$% Tables:     CMC
+#$%
+#$% Date:       Dec. 1993
+#$%
+#$% Author:     Carol L. Kropp
+#$%
+#########################################################################
+BBCommon
+ 
+integer  CMC$Pointer, enumeration_index
+ 
+  enumeration_index = Xcmc$AlspMapIndx$i
+ 
+return
+end
+
+ 
+#$%  Note:  Make a routine (or something) to verify that the weapon located
+#$%         matchs the type of interaction msg.
+subroutine ALSP_Map_Incoming_Weapon (_
+                from_unit_id,       # in  - alsp id of "from" unit (could be 0)
+                to_unit_id,         # in  - alsp id of "to" unit (could be 0)
+                alsp_weapon_code,   # in  - enumeration code for weapon
+                interaction_kind,   # in  - $int_kind value
+                TBL$Pointer,        # out - weapon characteristic pointer
+                weapon_category,    # out - type of weapon (RESA code)
+                weapon_mapped)      # out - flag for if weapon found
+#########################################################################
+#$%
+#$% Purpose:    ALSP_Map_Incoming_Weapon maps the alsp weapon type
+#$%             enumeration to a RESA recognized weapon name.  Then
+#$%             calls the routine to locate the characteristics pointer.
+#$%
+#$% Called By:  ALSP_Receive_Interact
+#$%
+#$% Calls:      ALSP_Interaction_Error
+#$%             ALSP_Get_Weapon_Pointer
+#$%
+#$% Tables:     None
+#$%
+#$% Date:       May 19, 1992
+#$%
+#$% Author:     Carol L. Kropp
+#$%
+#$% Modified:   Carol Kropp - Sept. 1993
+#$%             Combined the calls to this routine and
+#$%             ALSP_Get_Weapon_Pointer, also made this routine
+#$%             setup and call the interaction error routine.
+#$%
+#$%             Carol Kropp - 2/94
+#$%             Added defaulting weapon based on interaction type.
+#$%
+#########################################################################
+BBCommon
+ 
+ALSP$Weapon_Common
+ 
+integer  from_unit_id, to_unit_id, alsp_weapon_code, interaction_kind
+integer  TBL$Pointer, weapon_category, weapon_mapped
+ 
+integer  index, weapon_in_db
+literal  weapon_name
+BBDeclare (mfd$pointer)
+ 
+ 
+  weapon_mapped = $no     # initialize the found flag
+  TBL$Pointer = 0         # initialize the pointer to a null value
+ 
+  if (alsp_weapon_code <= 0)       # if no weapon specified in message
+    {
+     call ALSP_Interaction_Error (from_unit_id, to_unit_id, $no_weapon_specified)
+    }
+  else        # try and map the alsp weapon enumeration to a RESA weapon
+    {
+     for (index = 1; index <= number_of_weapon_maps; index = index + 1)
+       {
+        if (weapon_type [1, index] == alsp_weapon_code)  # if the alsp enumeration code
+          {                                              # matches this entry, try to locate
+           weapon_in_db = $no                            # the weapon in RESA's database.
+           weapon_name = weapon_type [2, index]
+           weapon_category = weapon_type [3, index]
+           if (weapon_category == $Posit$GunCode |        # clk 3/94 - correct weapon_category
+               weapon_category == $Ship$GunCode  )        # for any mappings annotated as $Posit$GunCode
+             weapon_category = $Gun$Code                  # or $Ship$GunCode (clk 11/95)
+ 
+           call ALSP_Get_Weapon_Pointer (TBL$Pointer, weapon_name,
+                                         weapon_category, weapon_in_db)
+           if (weapon_in_db == $yes)
+             {
+              weapon_mapped = $yes
+              break
+             }
+          }    # end of enumeration code matched entry weapon code
+       }    # end of loop through the weapon mapping array
+ 
+      if (weapon_mapped == $no)
+        {
+         call ALSP_Interaction_Error (from_unit_id, to_unit_id, $no_weapon_match)
+ 
+         # default the weapon type, based on the kind of interaction msg.
+         TBL$Pointer = 0
+         if (interaction_kind == $air_to_air)
+           {
+            TBL$Pointer = default_aam_mc_ptr
+            weapon_category = $AAM$Code
+           }
+         else if (interaction_kind == $air_to_ground |
+                  interaction_kind == $air_to_ship   )
+           {
+            TBL$Pointer = default_asm_mc_ptr
+            weapon_category = $ASM$Code
+           }
+         else if (interaction_kind == $ship_to_ground |
+                  interaction_kind == $ship_to_ship   |
+                  interaction_kind == $ground_to_ship )
+           {
+            TBL$Pointer = default_gun_tor_ptr
+            weapon_category = $GUN$Code
+           }
+         else if (interaction_kind == $ground_to_air |
+                  interaction_kind == $ship_to_air   )
+           {
+            TBL$Pointer = default_sam_mc_ptr
+            weapon_category = $SAM$Code
+           }
+ 
+         if (TBL$Pointer == 0)
+         {
+            call ALSP_Locate_Minefield (from_unit_id, mfd$pointer)
+            if (mfd$pointer != 0)
+            {
+                TBL$Pointer = default_mine_bom_ptr
+                weapon_category = $Mine$Code
+            }
+         }
+         if (TBL$Pointer != 0)
+            weapon_mapped = $yes
+         else
+           {
+            weapon_mapped = $no
+            weapon_category = $no
+            call ALSP_Interaction_Error (from_unit_id, to_unit_id, $weapon_not_in_database)
+           }
+        }
+    }       # end of valid alsp weapon enumeration
+ 
+return
+end
+
+ 
+subroutine ALSP_Map_Outgoing_Weapon (_
+                        resa_weapon_name,  # in: weapon name
+                        resa_weapon_code,  # in: DEQ$Ident code
+                        alsp_weapon_type)  # out: alsp enumeration
+#########################################################################
+#$%
+#$% Purpose:    ALSP_Map_Outgoing_Weapon takes the RESA weapon type name
+#$%             and maps it to the common ALSP weapon.
+#$%
+#$% Called By:  ALSP_Handle_AAM_Engage
+#$%
+#$% Calls:      None
+#$%
+#$% Tables:     MC
+#$%
+#$% Date:       May 18, 1992
+#$%
+#$% Author:     Carol L. Kropp
+#$%
+#$% Modifed:    Susan Miller - 5/96 (E1588)
+#$%             Added case statement to default alsp_weapon_type to a
+#$%             specific generic weapon type in case resa_weapon_name
+#$%             is not enumerated (vice using $weap_generic_weapon).
+#$%
+#########################################################################
+BBCommon
+ 
+ALSP$Weapon_Common
+ 
+literal  resa_weapon_name
+integer  resa_weapon_code, alsp_weapon_type
+ 
+integer  index
+integer  i_switch_1
+ 
+alsp_weapon_type = 0
+ 
+  for (index = 1; index <= number_of_weapon_maps; index = index + 1)
+    {
+     if (weapon_type [2, index] == resa_weapon_name)    # if the name matches,
+       {                                                # check the weapon type
+        if (weapon_type [3, index] == resa_weapon_code) # if DEQ$Ident codes match,
+          {                                             # a proper match has been found!
+           alsp_weapon_type = weapon_type [1, index]
+           break
+          }
+       }
+    }        # end of loop through weapon mappings
+ 
+return
+end
+
+ 
+subroutine ALSP_Ground_Type_Translation (_
+                   class_enum,            # in:  general type of unit
+                   unit_type_enum,        # in:  unit type enumeration code
+                   weapon_or_radar_enum)  # out: weapon code or radar code
+                                          #      depending upon the unit type
+#########################################################################
+#$%
+#$% Purpose:    ALSP_Ground_Type_Translation will translate an ALSP
+#$%             enumeration code value to a ALSP weapon or radar enumeration
+#$%             which can then be used to call the routine to determine
+#$%             the RESA mapping.  This is done to avoid another ALSP-RESA
+#$%             mapping table (which would just duplicate the data anyway).
+#$%
+#$% Called By:
+#$%
+#$% Calls:      None
+#$%
+#$% Tables:     None
+#$%
+#$% Date:       Sept. 1995
+#$%
+#$% Author:     Carol L. Kropp
+#$%             Had to use if/elses - switch would not work.
+#$%
+#$% Modified:   Carol Kropp - 1/96 (E1730)
+#$%             Removed else if for $alsp_unit_nlos_ada, not a 1997
+#$%             enumeration and added $alsp_unit_jtags_van (radar) &
+#$%             $alsp_unit_sa_13_mod (himad/allrad).
+#$%
+#$%             John McCormick - 2/98 (E1931)
+#$%             Added mapping for MEADS_FC_RADAR and MEADS.
+#$%
+#########################################################################
+implicit none
+integer  class_enum, unit_type_enum, weapon_or_radar_enum
+ 
+integer  temp
+ 
+##########################################################
+
+include "alsp_gndmap_jlcctc.rin"
+ 
+##########################################################
+ 
+weapon_or_radar_enum = unit2equip[unit_type_enum]
+ 
+return
+end
+ 
+
+Block Data ALSP_Enumerations
+ 
+#
+#   This module actually include the ALSP Enumeration data file (RIN)
+#   and allows the 9 common blocks to be populated.
+#
+#   # E2151 - DEW 9/30/99
+ 
+alsp$aircraft_common
+alsp$emitter_common
+alsp$missile_common
+alsp$sea_common
+alsp$weapon_common
+alsp$sonar_common
+alsp$torpedo_common
+alsp$sonobuoy_common
+alsp$mine_common
+alsp$countermeasure_common
+ 
+include "alsp_enumeration_data_jlcctc.rin"
+ 
+end

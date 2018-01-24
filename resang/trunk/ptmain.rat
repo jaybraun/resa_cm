@@ -1,0 +1,214 @@
+## PTMAIN.RAT
+
+include "bbctl.inc"        
+include "bbcode.inc" 
+include "bbsta.inc"         
+include "ptmain.inc"         
+include "bbwet.inc"         
+include "elevation.inc"         # joa 11/95 (E1422) - Terrain
+include "plplay.inc"         
+
+define $STA$EF$PlotWakeUp        101    # request to cycle PLOT 
+define (bbimplicit, implicit none)
+
+
+Program Plot
+
+##########################################################
+ #$%
+ #$% Purpose:  Split off from Plot, or ptmain, to serve a
+ #$% modern GUI running on a remote machine
+ ##########################################################
+
+use ifport
+BBcommon
+
+character       buf[FILENAMESIZE],
+                name[ARB], 
+                megname[10], 
+                my_window_name[ARB]
+ 
+integer         ok_to_write                  # 0 means read only for dted
+data ok_to_write/1/
+
+integer ISTA,
+        I,
+        IVIEW,
+        JJ,
+        MYEVENTFLAG,
+        KK,
+        ISIDE,
+        ITIM,
+        X,
+        NEWTIM,
+	RC,
+	trnlog_v,
+		c_munmap,
+	j
+
+BBDeclare  (STA$Pointer,
+            STA$Inputtype$I,
+            STA$Megmenudisable$I,
+            STA$Side$I,
+            STA$View$I,
+	    STA$GeoPid$i,
+            STA$Geomap$C)                   # MJC 5/31/2K (E2145)
+
+literal CSTRIP8                             # MJC 5/31/2K (E2145)
+
+define ($blanki2, '2020'x)
+define ($blanki4, '20202020'x)
+
+PLOTcommon
+ElevationCommon
+
+data  using_newgui / NO /
+data  current_geo_symbology / -99 /
+data      radialadd/-0.5585024,-0.4188768,-0.2792512,-0.1396256,0.0,
+                     0.1396256,0.2792512,0.4188768,0.5585024/
+DATA  KOBJCT/$maxOBJ/,idetch/$no/
+#EXTERNAL ERROR_HANDLER
+
+#$% initialize all standard files & common variables
+call initr4                     # initialize all standard files and variables
+
+
+BBmap                                          #map the blackboard
+DTED_map                                       # map the terrain db - joa 11/95 (E1422)
+
+ista = -1                               # init station index 
+i    = 0   
+
+#$% turn echo off
+#call echoff
+
+#$% get the view station 
+call Getsta (ista,sta$pointer,iview,megname,ifd)
+
+sta$Side$i = Xsta$Side$i
+
+#call Assoc_STA_Event_Flags (ista)
+
+istation = ista                 ## actual station index
+
+kstation = ista                 ## volatile station index
+
+#______________________________________________________________________
+# do initial housekeeping
+
+kk = trnlog_v ("CSF_KNOWN_NAME",buf)
+kk=0 #SMM 4/16/14
+call smovhn (buf,ARB, my_window_name, kk)
+call smovv ("  ", my_window_name, kk)
+call smovv ("STA_", my_window_name, kk)
+call smovi (ista, my_window_name, kk)
+call smovv ("_GEO", my_window_name, kk)
+call smovv (" -- ", my_window_name, kk)
+if (iview == $Neutral$view)
+    {
+    if (xSTA$TechControlFlag$I == $yes)            # joa - 12/97 (E1825)
+        call smovv ("Tech Control", my_window_name, kk)
+    else if (sta$Side$i == $Control$code)
+	    call smovv ("Control", my_window_name, kk)
+    else
+	    call smovv ("Neutral", my_window_name, kk)        
+    }
+else if (iview > $lastblue$view)
+    {
+    call smovv ("Orange ", my_window_name, kk)
+    call smovi (iview - $lastblue$view, my_window_name, kk)
+    }
+else 
+    {
+    call smovv ("Blue ", my_window_name, kk)
+    call smovi (iview - $Neutral$view, my_window_name, kk)
+    }
+
+call smovv (" View of ", my_window_name, kk)
+call smovhn(Scenario$Name,8, my_window_name, kk)
+call smov(EOS,my_window_name,kk)  #SMM 4/16/14
+STA$GeoMap$C = xSTA$GeoMap$C 
+call draw_new_map (STA$GeoMap$C)
+
+call Draw_Init_c (megname,ista,my_window_name,ista)
+
+KMIN = STATUS$MINUTE - 1
+Kmap = $yes                                     # force plot map
+putSTA$PlotMap$I (YES)
+
+putSTA$PlotWakeup$i ($YES)						# Cycle Plot
+#_________________________________________________________________
+# Now we are ready
+
+sta$GeoPid$i = getpid()				# Get geo process id and store in BB
+PUTsta$GeoPid$i
+
+call upper  (buf)
+call remark_v ("Plot process ready.")
+
+#_________________________________________________________________
+# Go for it
+
+sta$view$i = Xsta$view$i 
+if (sta$view$i < $FirstBlue$View) iside = YES
+else                              iside = NO
+
+repeat                                          #establish control loop
+    {
+	while(xSTA$PlotWakeup$i == 0)
+		{
+		call delay($WakeupDelay)
+    	call check_for_user_input_c  # cdwmmi.c SMM 6/2014
+		}
+	putSTA$PlotWakeup$i ($NO)					# Clear polling flag to wakeup plot
+
+    PLOT$STATUS = $BUSY                         #flag plot busy
+
+    call GEN_Updates (ista)
+
+    ITIM = NEWTIM(X)                            #get the time
+
+    IMIN = GAME$MINUTE                          #get game minute
+    KMIN = STATUS$MINUTE                        #get status minute
+
+    kmap     = xSTA$PlotMap$I
+    kstation = xSTA$PlotCopy$I                  ## check for plot other station
+    
+    if (kstation == 0) kstation = ista
+    else               kmap     = $YES
+
+    putSTA$PlotMap$I($NO)                       ## reset new map flag
+
+    if (STA$GeoMap$C != xSTA$GeoMap$C)
+        {
+        STA$GeoMap$C = xSTA$GeoMap$C
+        call draw_new_map (STA$GeoMap$C)
+        kmap = $yes
+        }
+
+    #$% CLK 12/92 - Added conditional statement so that the Plot_Up
+    #$% subroutine would know whether or not another station's geo was
+    #$% to be plotted.      (E1036)
+    if (kstation == ista)   # if plotting own station vs.
+      call Plot_Up (kstation,kmap,iside)           # execute the plot program
+    else                    # control plotting some other station
+      call Plot_Up_Copy_Entry (kstation, kmap, iside, ista)
+
+    PLOT$STATUS = $IDLE                         #clear plot busy flag
+
+    PLOT$TIME = NEWTIM(X) - ITIM                #save execution time
+    
+
+ 
+   } until (HALT$REQUEST == $YES)               #until game is halted
+
+if (idetch      == $yes |               # if plot is running in detached mode
+    auto$logout == $yes  ) call logout  # or logout is envoked, LOGOUT 
+
+BBunmap
+
+call endr4                              # close files and terminate program
+
+call exit
+
+end

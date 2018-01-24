@@ -1,0 +1,2031 @@
+include "bbcode.inc"         
+include "bbctl.inc"         
+include "ascii.inc"         
+include "bbunt.inc"         
+include "bbwet.inc"         
+include "bbshc.inc"                 # added 1/99 SMM
+include "elevation.inc"         
+include "orders.inc"         
+include "plplay.inc"         
+include "macros.inc"         
+
+#include "secdef.inc"         
+#include "ssdef.inc"         
+
+include "user_msg_arrays.inc"         
+
+define ($MaxNatWidth,72)		# Number of 5 degree regions
+define ($MaxNatHeight,18)		# Number of 5 degree regions
+define ($NatResolution,5)		# Each region is 5 degrees
+
+define(bit_record_length,4096)    
+define(fixed_record_size,512)
+define(descriptor_width,4)
+
+define ($lfc$elv, 71)			# Elevation cell in library
+undefine read
+undefine write
+undefine err
+
+define (BBImplicit, implicit none)
+
+
+
+
+
+Subroutine odefine_terrain_masking_state(_ # Set terrain masking on/off
+                             nargs,	# Number of arguments
+                             args,	# Command arguments
+    			     ierror)
+
+BBcommon
+ElevationCommon
+literal args[$stk$lastarg]	# arguments entered in the define command
+integer nargs, ierror
+
+#   1       2      3                          4
+# DEFINE TERRAIN MASKING (for detections) [ON | OFF];
+
+if (args[4] == $lex$ON$)
+   terrain_masking_flag = $ON
+else
+   terrain_masking_flag = $OFF
+
+return
+end
+
+
+Subroutine odefine_terrain_worldwide(_ # Use RESA Worldwide elevation?
+                             nargs,     # Number of arguments
+                             args,      # Command arguments
+                             ierror)
+
+BBcommon
+ElevationCommon
+literal args[$stk$lastarg]      # arguments entered in the define command
+integer nargs, ierror
+
+#   1       2      3                          4
+# DEFINE TERRAIN WORLDWIDE (for elevation) [ON | OFF];
+
+if (args[4] == $lex$ON$)
+   RESA$Worldwide$Elevation = $ON
+else
+   RESA$Worldwide$Elevation = $OFF
+
+return
+end
+
+Subroutine odefine_shoreline_crossing( _ # Set terrain crossing check on/off
+                             nargs,	# Number of arguments
+                             args,	# Command arguments
+    			     ierror)
+
+BBcommon
+ElevationCommon
+literal args[$stk$lastarg]	# arguments entered in the define command
+integer nargs, ierror
+
+#   1       2      3                          4
+# DEFINE SHORELINE CROSSING (check) [ON | OFF];
+
+if (args[4] == $lex$ON$)
+   shoreline_crossing_flag = $ON
+else
+   shoreline_crossing_flag = $OFF
+
+return
+end
+
+
+Subroutine odefine_terrain(_		# Process define terrain command
+                             nargs,	# Number of arguments
+                             args,	# Command arguments
+    			     ierror)
+BBcommon
+ElevationCommon
+MessageCommon
+literal args[$stk$lastarg]	# arguments entered in the define command
+integer nargs, ierror
+integer selected_points
+integer ok_to_write
+integer irc, c_msync_dted
+integer ifirst
+data ok_to_write/1/                     # Can write to global section
+data ifirst/1/
+integer iview, mis_lib_msglen, lat_points, lon_points
+real    DMS2RAD
+
+#   1       2                               3
+# DEFINE TERRAIN (data at resolution) <hundredsofmeters>
+#                                               4        5
+#                  (with southwest corner) <latitude> <longitude>
+#                                                6
+#                  (number of degrees across) <number>
+#                                            7
+#                  (number of degrees up) <number>;
+#
+
+ierror = 0
+iview = 0
+
+
+# Validate resolution
+
+if (args[3] < 1 | args[3] > 10)
+{
+    # (ERROR,$MSG$RESOLUTN) Data resolution must be between 1 and 10
+    
+    mis_lib_msglen=0
+
+    call smovv ("Data resolution must be between 1 and 10",msg_lib_msg,
+                 msg_lib_msglen)
+
+    UserOrdId = -1              # Not order user message
+    ierror = 15
+    call send_(iview, 0, msg_lib_msglen, msg_lib_msg)
+}
+
+
+# selected_points = width*height*1200*1200/(resolution*resolution)/2
+#
+
+selected_points = args[6]*args[7]*$DTEDCellDim*$DtedCellDim/(args[3]*args[3])/2 
+
+if(selected_points > $points_word_count | args[6] < 1 | args[6] > 17 |
+   args[7] < 1 | args[7] > 17)
+{
+
+    #(ERROR,$MSG$DTEDPNTS)Selected DTED area exceeds number of points
+    #                     in 17 by 17 degree area with
+    #                     500 meter resolution. Neither dimension may exceed 17
+
+    msg_lib_msglen = 0
+
+    call smovv ("Selected DTED area exceeds number of points",msg_lib_msg,msg_lib_msglen)
+    call smovv (" in 17 by 17 degree area with 500 meter",msg_lib_msg,msg_lib_msglen)
+    call smovv (" resolution. Neither dimension may exceed 17.",msg_lib_msg,msg_lib_msglen)
+
+    UserOrdId = -1              # Not order user message
+    ierror = 15
+    call send_(iview, 0, msg_lib_msglen, msg_lib_msg)
+}
+
+lat_points = $DTEDCellDim / args[3] * args[7]
+
+if (lat_points > $DTEDArrayDim)
+{
+    msg_lib_msglen = 0
+
+    call smovv ("Selected DTED latitude height and",msg_lib_msg,msg_lib_msglen)
+    call smovv (" resolution combination exeeds",msg_lib_msg,msg_lib_msglen)
+    call smovv (" array dimension.  Reduce height and/or resolution.",msg_lib_msg,msg_lib_msglen)
+
+    UserOrdId = -1              # Not order user message
+    ierror = 15
+    call send_(iview, 0, msg_lib_msglen, msg_lib_msg)
+}
+
+lon_points = $DTEDCellDim / args[3] * args[6]
+
+if (lon_points > $DTEDArrayDim | lat_points > $DTEDArrayDim)
+{
+    msg_lib_msglen = 0
+
+    call smovv ("Selected DTED longitude width and",msg_lib_msg,msg_lib_msglen)
+    call smovv (" resolution combination exeeds",msg_lib_msg,msg_lib_msglen)
+    call smovv (" array dimension.  Reduce width and/or resolution.",msg_lib_msg,msg_lib_msglen)
+
+
+    UserOrdId = -1              # Not order user message
+    ierror = 15
+    call send_(iview, 0, msg_lib_msglen, msg_lib_msg)
+}
+
+if (ierror > 0) return
+
+
+if (ifirst == 1)
+{
+    ifirst = 0
+    call map_dted (ok_to_write)
+    N_elev_regions = 1
+    terrain_masking_flag = $ON
+    shoreline_crossing_flag = $ON
+}
+
+# test to see if this Dted area already exists
+
+if(elevation_region_resolution[N_elev_regions] == args[3] &
+   elevation_region_swlat[N_elev_regions] == DMS2RAD(aint(args[4])) &
+   elevation_region_swlon[N_elev_regions] == DMS2RAD(aint(args[5])) &
+   elevation_region_height[N_elev_regions] == args[7] &
+   elevation_region_width[N_elev_regions] == args[6])
+{
+    RETURN
+}
+
+elevation_region_resolution[N_elev_regions] = args[3]
+elevation_region_swlat[N_elev_regions] = DMS2RAD(aint(args[4]))
+elevation_region_swlon[N_elev_regions] = DMS2RAD(aint(args[5]))
+elevation_region_height[N_elev_regions] = args[7]
+elevation_region_width[N_elev_regions] = args[6]
+
+elevation_region_elevation_sub1[N_elev_regions] = 0
+elevation_region_elevation_sub2[N_elev_regions] = 0
+
+#(INFO,$DTEDTIME) DTED load time can take over 1 hour.
+
+#msg_lib_msglen = 0
+
+#call smovv ("DTED load time over 1 hour.",msg_lib_msg,msg_lib_msglen)
+
+#UserOrdId = -1              # Not order user message
+#call send_(iview, 0, msg_lib_msglen, msg_lib_msg)
+
+call load_elevation_structure
+
+
+irc = c_msync_dted(DTED_pages*512)
+
+return
+end
+
+
+Subroutine load_elevation_structure
+
+BBcommon
+ElevationCommon
+MessageCommon
+
+real flon,flat     # radian longitude , latitude 
+
+integer*2 cell_area[16]
+integer*2 rcdfill[$DTEDCellDim]
+integer sw_lat,sw_lon, deg_lat,deg_lon
+integer*2 slat_deg,wlon_deg,first_elevation,maximum_elevation
+integer start_lat_index,start_lon_index
+integer kk,kkk
+integer iview
+data iview/0/
+integer j, k, m, n, ios, length, lat_sign, lon_sign
+
+# Get max altitude of each cell in all regions
+for (n=1; n<=N_elev_regions; n=n+1)
+{
+    elevation_region_max_region_elevation[n] = 0 
+    sw_lon = nint(elevation_region_swlon[n] * $rad2deg)
+	    
+    for (j = 0; j < elevation_region_width[n]; j=j+1)
+    {
+		deg_lon = sw_lon + j
+		if (deg_lon > 180) deg_lon = deg_lon - 360
+		if (deg_lon >= 0) lon_sign = 1
+		else              lon_sign = 0
+	    deg_lon = abs(deg_lon)
+
+		flon = elevation_region_swlon[n] + j * $deg2rad 
+        $angpi (flon)
+
+		sw_lat = nint(elevation_region_swlat[n] * $rad2deg)
+
+		for (k=0; k < elevation_region_height[n]; k=k+1)
+		{
+		    deg_lat = sw_lat + k
+		    if (deg_lat >= 0) lat_sign = 1
+		    else              lat_sign = 0
+            deg_lat = abs(deg_lat)
+
+		    Flat = elevation_region_swlat[n] + k * $deg2rad 
+
+            start_lat_index = elevation_region_elevation_sub1[n]
+            start_lon_index = elevation_region_elevation_sub2[n]
+
+		    # Open elv file
+		    call open_elev_cell(_       # Open elevation cell for read
+			                    deg_lat,  # South Lat for cell: integer: in: degrees
+			                    deg_lon,  # West Lon for cell: integer :in: degrees
+	                            lat_sign, # latitude hemisphere(1-N): integer:in
+	                            lon_sign, # longitude hemisphere(1-E): integer: in
+ 	                           ios)	  # Open status: integer: out
+
+	        # (ERROR,$MSG$MSINGDEG) Missing Dted Cell <deg_lat> <Deg_lon>
+	        # (INFO,$MSG$LOADDEG)  Loading Dted Cell <deg_lat> <Deg_lon>
+
+	    	msg_lib_msglen = 0
+
+		    if (ios != 0)
+		    {	
+	            call smovv ("Missing DTED ",msg_lib_msg, msg_lib_msglen)
+	        }
+		    else
+		    {	
+	            call smovv ("Loading DTED ",msg_lib_msg, msg_lib_msglen)
+	        }
+            call smovv ("Cell ",msg_lib_msg, msg_lib_msglen)
+            call smovi (deg_lat, msg_lib_msg, msg_lib_msglen)
+            if (lat_sign == 1)
+                call smovv ("N",msg_lib_msg, msg_lib_msglen)
+            else
+                call smovv ("S",msg_lib_msg, msg_lib_msglen)
+            call smovv (" ",msg_lib_msg, msg_lib_msglen)
+            call smovi (deg_lon, msg_lib_msg, msg_lib_msglen)
+            if (lon_sign == 1)
+                call smovv ("E",msg_lib_msg, msg_lib_msglen)
+            else
+                call smovv ("W",msg_lib_msg, msg_lib_msglen)
+            call smov  (EOS, msg_lib_msg, msg_lib_msglen)
+    
+            UserOrdId = -1              # Not order user message
+    	    call send_(iview, 0, msg_lib_msglen, msg_lib_msg)
+
+            if (ios != 0)
+            {
+                elevation_region_max_elevation_cell[k,j,n] = 0
+        		call zero_elevation_cell (_
+		                              deg_lat,
+		                              deg_lon,
+    	                              elevation_points[start_lat_index,start_lon_index],
+		                              sw_lat,
+		                              sw_lon,
+		                              elevation_region_resolution[n])
+		        next
+            }
+			
+		    # Read header
+		    read($LFC$ELV) slat_deg,wlon_deg,first_elevation,maximum_elevation,_
+                           (cell_area[kk],kk=1,16),(rcdfill[kkk],kkk=1,1180)
+
+		    elevation_region_max_elevation_cell[k,j,n] = maximum_elevation *
+                                                          $METERS2FT
+            if(elevation_region_max_elevation_cell[k,j,n] >
+    	       elevation_region_max_region_elevation[n])
+            {
+               elevation_region_max_region_elevation[n] = 
+               elevation_region_max_elevation_cell[k,j,n] 
+    	    }	
+		    for (m=1; m<=16; m=m+1)
+		    {
+				elevation_region_max_elevation_area[m,k,j,n] =
+		    	cell_area[m] * $METERS2FT
+		    }
+		    if (elevation_region_max_elevation_cell[k,j,n] == 0)
+	        {
+	        	call zero_elevation_cell (_
+		                              deg_lat,
+		                              deg_lon,
+	    	                          elevation_points[start_lat_index,start_lon_index],
+		                              sw_lat,
+		                              sw_lon,
+		                              elevation_region_resolution[n])
+	            next
+	        }
+
+		    call load_elevation_cell (_
+		                          deg_lat,
+		                          deg_lon,
+	    	                      elevation_points[start_lat_index,start_lon_index],
+		                          sw_lat,
+		                          sw_lon,
+                                  first_elevation,
+                                  cell_area,
+		                          elevation_region_resolution[n])
+                
+		    # Close elv file
+		    close (unit=$LFC$ELV)
+		} # End each region height
+
+    } # End each region width
+} # End each region
+
+return 
+end
+
+
+
+
+Subroutine load_elevation_cell (cell_lat,	# Latitude of cell: in: deg
+    				            cell_lon,	# Longitude of cell: in: deg
+                                elev_grid,	# 2d elevation array: out: ft
+                                swlat,		# sw lat of elevation region: in: deg
+                                swlon,		# sw lon of elevation region: in: deg
+                                first_elevation,
+                                cell_area,
+    	                        resolution)	# Distance between elevations 
+
+# Read Header
+
+# For each latitude band
+# Get expanded latitude band, in ft
+
+# Copy every resolution point to elev_grid
+
+IMPLICIT NONE
+
+integer first_empty
+
+real cellpnts			# Number of points in 1x1 deg elevation cell 
+integer cell_lat, cell_lon
+real r_cell_lon_offset
+integer swlat, swlon
+integer deg_swlat, deg_swlon
+real tmp_resolution
+integer*4 resolution,i_lon,i_lat
+Integer*4 cell_lon_offset,cell_lat_offset
+integer*4 tmp_lon_index,tmp_lat_index
+integer*4 k_area,offset,point_counter,i_lat_count,i_lon_count
+integer*2 elev_grid[0:$DTEDArrayDim,0:$DTEDArrayDim]
+Integer*2 first_elevation
+Integer*2  actual_elevation
+integer*2 cell_area[16]
+integer*2 inbuf[$DTEDCellDim]
+integer inbuf_index
+
+data cellpnts/$DTEDCellDim/
+
+cell_lat_offset = (cell_lat - swlat) * cellpnts / resolution
+
+cell_lon_offset = (cell_lon - swlon)
+if (cell_lon_offset < 0) cell_lon_offset = 360 - cell_lon_offset
+cell_lon_offset = cell_lon_offset * cellpnts / resolution
+
+# For each longitude                        
+# Get expanded latitude band, in ft
+point_counter = 0
+tmp_lat_index = 0
+
+for(i_lon=0; i_lon<$DTEDCellDim; i_lon=i_lon+1)
+{
+    call read_elv_record(inbuf)	
+
+	if (mod(i_lon,resolution) != 0) next		# process longitude every resolution increment
+
+    tmp_lon_index = cell_lon_offset+(i_lon/resolution)
+
+	for (i_lat=0; i_lat < $DTEDCEllDim; i_lat = i_lat + resolution)
+	{
+    	actual_elevation = inbuf[i_lat+1]*$METERS2FT+.5 
+
+        elev_grid[(cell_lat_offset+(i_lat/resolution)),tmp_lon_index] = actual_elevation
+    }  # end lat band
+
+} #end for i_lon
+return
+end
+
+
+
+Subroutine zero_elevation_cell (cell_lat,	# Latitude of cell: in: deg
+    				            cell_lon,	# Longitude of cell: in: deg
+                                elev_grid,	# 2d elevation array: out: ft
+                                swlat,		# sw lat of elevation region: in: deg
+                                swlon,		# sw lon of elevation region: in: deg
+    	                        resolution)	# Distance between elevations 
+
+IMPLICIT NONE
+
+integer cell_lat, cell_lon
+real r_cell_lon_offset
+integer swlat, swlon
+integer deg_swlat, deg_swlon
+real tmp_resolution
+integer resolution,i_lon,i_lat
+integer*2 elev_grid[0:$DTEDArrayDim,0:$DTEDArrayDim]
+Integer*4 cell_lon_offset,cell_lat_offset
+integer*4 lat_points, lon_points
+integer*4 tmp_lon_index
+
+
+cell_lat_offset = (cell_lat - swlat) * $DTEDCellDim / resolution
+
+
+cell_lon_offset = (cell_lon - swlon)
+if (cell_lon_offset < 0) cell_lon_offset = 360 - cell_lon_offset
+cell_lon_offset = cell_lon_offset * $DTEDCellDim / resolution
+
+tmp_resolution = 1.0/(FLOAT(resolution))
+lat_points = $DTEDCellDim * tmp_resolution
+lon_points = $DTEDCellDim * tmp_resolution
+
+for(i_lon=0; i_lon<lon_points; i_lon=i_lon+1)
+{
+    tmp_lon_index = cell_lon_offset+i_lon
+    for (i_lat = 0; i_lat < lat_points; i_lat = i_lat + 1)
+    {
+           elev_grid[cell_lat_offset+i_lat,tmp_lon_index]= 0
+    }  # end i_lat
+} #end for i_lon
+return
+end
+
+
+
+Subroutine read_elv_record(_		# Read one record without implied do
+                           inbuf)	# buffer array: out
+implicit none
+integer*2 inbuf[$DTEDCellDim]
+
+read ($lfc$elv) inbuf
+
+return
+end
+
+
+real function nat2lat(_		# Given nat indx return lat of sw corner of reg
+                      natindx)	# NAT index
+BBcommon
+integer iv, natindx
+real    rlat
+
+iv = (natindx-1) / $MaxNatWidth
+
+rlat = Weather$BaseLatitude + iv * 5 * $deg2rad
+
+return[ rlat ]
+end
+
+
+
+real function nat2lon(_		# Given nat indx return lon of sw corner of reg
+                      natindx)	# NAT index
+BBcommon
+integer ih, natindx
+real    rlon
+
+ih = mod (natindx-1, $MaxNatWidth)
+
+rlon = Weather$BaseLongitude + ih * 5 * $deg2rad
+$angpi (rlon)
+
+return[ rlon ]
+end
+
+
+
+subroutine open_elev_cell(_       # Open elevation cell for read
+		        deg_lat,  # South Lat for cell: integer: in: degrees
+		        deg_lon,  # West Lon for cell: integer :in: degrees
+                        lat_sign, # latitude hemisphere(1-N): integer:in
+                        lon_sign, # longitude hemisphere(1-E): integer: in
+                        ios)	  # Open status: integer: out
+IMPLICIT NONE
+integer ios
+integer deg_lon,deg_lat,lat_sign,lon_sign
+integer len
+integer lenbuf, trnlog_v, kk
+character tbuf[ARB]
+
+#                        1         2         3         4
+#               1234567890123456789012345678901234567890
+vmschar*ARB v_outfile 
+character outfile[ARB] 
+equivalence (v_outfile, outfile)
+
+#ELV_PATH/DTED_HDDHDDD_1.ELV
+lenbuf = trnlog_v("ELV_PATH",tbuf)        # Translate dted directory
+v_outfile = " "
+kk = 0
+call smovh  (tbuf,lenbuf,outfile,kk) #   name for sonar env base directory
+call smovvn ("DTED_",outfile,kk)
+
+if(lat_sign == 1) call smovvn("N",outfile,kk)
+else              call smovvn("S",outfile,kk)
+call smoviz (DEG_lat, 2, outfile, kk)
+
+if(lon_sign == 1) call smovvn("E",outfile,kk)
+else              call smovvn("W",outfile,kk)
+call smoviz (DEG_lon, 3, outfile, kk)
+
+call smovvn ("_1.ELV",outfile,kk)
+
+ios=0
+open (unit=$LFC$ELV, file=v_Outfile,form='unformatted',recl=$DTEDCellDim*2/4,status='old',_
+    access = 'sequential',IOSTAT=ios)
+
+return
+end
+
+
+
+#@1 - current x (input)
+#@2 - current y (input)
+#@3 - boundary x (Output)
+#@4 - boundary y (output)
+
+define (cell_boundary$macro,	# Extend ground line to next cell boundary
+    cx = int(@1/degx) * degx + degx # Northeast boundary of current cell
+    if(endy < srty)
+    {
+    	cy = int(@2/degy) * degy 
+        if (cy == @2) cy = cy - degy
+    }
+    else
+    {
+    	cy = int(@2/degy) * degy + degy 
+    
+    }
+    ty = slopegnd * cx + bgnd
+    if (ty > cy)
+    {
+	if (slopegnd != 0 & slopegnd != 999999.)
+	{		
+	    @3 = cx
+	    @4 = slopegnd * cx + bgnd
+	}
+	else if(slopegnd == 0)	# Horizontal line
+	{
+	    @3 = cx
+	    @4 = @2
+	}
+	else			# Vertical line
+	{
+	    @3 = @1
+	    @4 = cy
+	}						
+    }
+    else
+    {
+	if (slopegnd != 0 & slopegnd != 999999.)
+	{		
+	    @3 = (cy - bgnd) / slopegnd
+	    @4 = cy
+	}
+	else if(slopegnd == 0)	# Horizontal line
+	{
+	    @3 = cx
+	    @4 = @2
+	}
+	else			# Vertical line
+	{
+	    @3 = @1
+	    @4 = cy
+	}						
+    }	    
+)
+#@1 - current x (input)
+#@2 - current y (input)
+#@3 - boundary x (Output)
+#@4 - boundary y (output)
+
+define (area_boundary$macro,	# Extend ground line to next area boundary
+    ax = int(@1/areax) * areax + areax # Northeast boundary of current area
+
+    if(endy < srty)
+    {
+        ay = int(@2/areay) * areay 
+	if (ay == @2)
+	{
+	    ay = ay - areay
+	}
+    }
+    else
+        ay = int(@2/areay) * areay + areay 
+
+    ty = slopegnd * ax + bgnd
+    if (ty < ay)    
+    {
+	if (slopegnd != 0 & slopegnd != 999999.)
+	{		
+	    @3 = ax
+	    @4 = ty
+	}
+	else if(slopegnd == 0)	# Horizontal line
+	{
+	    @3 = ax
+	    @4 = @2
+	}
+	else			# Vertical line
+	{
+	    @3 = @1
+	    @4 = ay
+	}						
+    }
+    else
+    {
+	if (slopegnd != 0 & slopegnd != 999999.)
+	{		
+	    @3 = (ay - bgnd) / slopegnd
+	    @4 = ay
+	}
+	else if(slopegnd == 0)	# Horizontal line
+	{
+	    @3 = ax
+	    @4 = @2
+	}
+	else			# Vertical line
+	{
+	    @3 = @1
+	    @4 = ay
+	}						
+    }	    
+)
+
+
+
+Integer function above_terrain (_   # Uses GP terrain grid to determine LOS :
+                                    # Returns $YES if line connecting detector
+    				    # and target are above terrain
+                         detlat,    # Detector latitude: real: in: rad
+                         detlon,    # Detector longitude: real: in: rad
+                         cosdetlat, # Cosine of detector latitude: real: in:rad
+                         sqrtdetalt,# Sqrt Detector altitude: real: in: ft
+                         tgtlat,    # Target latitude: real: in: rad
+                         tgtlon,    # Target longitude: real: in: rad
+                         costgtlat, # Cosine of target latitude: real: in: rad
+                         sqrttgtalt)# Sqrt Target altitude: real: in: ft
+
+# Modifed:  Susan Miller based upon info from Joe Bryant 5/99 (E1954)
+#           float subscripts causing incorrect line of sight detections
+
+BBcommon
+ElevationCommon
+
+real detlat, detlon, tgtlat, tgtlon, cosdetlat, sqrtdetalt, costgtlat,
+     sqrttgtalt
+
+real horizon			# Distance to Flat earth horizon (nm)
+real range			# Distance between detector and target (nm)
+real detalt			# Detector altitude (ft)
+real tgtalt			# Target altitude (ft)
+real terrain_res		# Distance between elevation points (meters*100)
+real cellpnts			# Number of points in 1x1 deg elevation cell 
+    				#  along lat or lon boundary
+real detx			# Detector elevation grid x index
+real dety			# Detector elevation grid y index
+real tgtx			# Target elevation grid x index
+real tgty			# Target elevation grid y index
+real swlat			# Southwest latitude of elevation grid (rad)
+real swlon			# Sourthwest longitude of elevation grid (rad)
+real tanalt			# Tan of elevation difference between det and tgt
+real singnd			# Sin of ground path between det and tgt
+real cosgnd			# Cos of ground path between det and tgt
+real begx			# Beginning x value within area
+real begy			# Beginning y value within area
+integer area_index		# Area index (1-16)
+integer X_area_index		# X part of area index (0-3)
+integer Y_area_index		# Y part of area index (1-4)
+integer iydegy, ixdegx  # SMM/JB 6/98 (E1954) truncate y/degy & x/degx for subscripts 
+real    elvtn           # SMM/JB 6/98 (E1954) for comparison to pthalt...
+integer indxelev, i_tminusd, ir, degx, degy
+real*4  srtx, srty, endx, endy, srtalt, endalt
+real*4  dx, dy, r, slopegnd, bgnd
+real*4  bndx, bndy, elevation, x, y, xp, yp
+real*4  pdy, pthalt, pthalt1, pthalt2, ty
+real*8  areax, areay, cx, cy, ax, ay
+
+
+data cellpnts/$DTEDCellDim/
+
+above_terrain = $YES			# Assume los above terrain
+
+# Currently user can select one contiguous region so code is not necessary
+#call fndwet (detlat,
+#	     detlon,
+#	     wet$pointer)
+#
+#indxelev = nat2elev[wet$pointer$index]
+#
+
+if(RESA$Worldwide$Elevation==$NO & N_elev_regions ==0)
+{
+    above_terrain = $YES
+    return
+}
+
+if (terrain_masking_flag == $OFF)      # All detections not constrained by DTED
+{
+    above_terrain = $YES
+    return
+}
+
+indxelev = 1
+
+detalt = sqrtdetalt * sqrtdetalt
+tgtalt = sqrttgtalt * sqrttgtalt
+
+# If detector and target both above highest peak in area report visible.
+if (RESA$Worldwide$Elevation==$NO &
+    detalt > elevation_region_max_region_elevation[indxelev] &
+    tgtalt > elevation_region_max_region_elevation[indxelev])
+{
+    above_terrain = $YES
+    return
+}
+
+swlat= elevation_region_swlat[indxelev]
+swlon= elevation_region_swlon[indxelev]
+
+if (RESA$Worldwide$Elevation==$NO &
+     ( detlat < swlat | detlat >= swlat + elevation_region_height[indxelev] *
+                              $deg2rad))		# Off terrain grid
+{
+    above_terrain = $YES
+    return
+}	
+
+if (RESA$Worldwide$Elevation==$NO &
+     ( detlon < swlon | detlon >= swlon + elevation_region_width[indxelev] *
+                              $deg2rad))		# Off terrain grid
+{
+    above_terrain = $YES
+    return
+}	
+
+if (RESA$Worldwide$Elevation==$NO &
+     ( tgtlat < swlat | tgtlat >= swlat + elevation_region_height[indxelev] *
+                              $deg2rad))		# Off terrain grid
+{
+    above_terrain = $YES
+    return
+}	
+
+if (RESA$Worldwide$Elevation==$NO &
+     ( tgtlon < swlon | tgtlon >= swlon + elevation_region_width[indxelev] *
+                              $deg2rad))		# Off terrain grid
+{
+    above_terrain = $YES
+    return
+}	
+
+terrain_res = elevation_region_resolution[indxelev] 
+
+# Convert detector and target position to x,y position on terrain grid.
+# Terrain grid has southwest corner.
+
+dety = (detlat - swlat) * $rad2deg * cellpnts / terrain_res
+
+detx = (detlon - swlon)
+if (detx < 0.) detx = $TWOPI - detx
+detx = detx *  $rad2deg * cellpnts / terrain_res
+
+tgty = (tgtlat - swlat) * $rad2deg * cellpnts / terrain_res
+
+tgtx = (tgtlon - swlon)
+if (tgtx < 0.) tgtx = $TWOPI - tgtx
+tgtx = tgtx *  $rad2deg * cellpnts / terrain_res
+
+# Make sure traveling from left to right
+if (detx <= tgtx)
+{
+    srtx = detx
+    srty = dety
+    endx = tgtx
+    endy = tgty
+    srtalt = detalt
+    endalt = tgtalt
+    i_tminusd=$yes 
+
+}
+else
+{
+    srtx = tgtx
+    srty = tgty
+    endx = detx
+    endy = dety
+    srtalt = tgtalt
+    endalt = detalt
+    i_tminusd=$no 
+
+}
+
+
+# Calculate sin of ground path between detector and target
+
+dx = endx - srtx
+dy = endy - srty
+r = sqrt(dx*dx + dy*dy)
+
+if(r == 0)
+{    
+    above_terrain = $yes
+    return
+}
+
+range = r * terrain_res / cellpnts * $deg2rad * $rad2nmi *
+      .5 * (cosdetlat + costgtlat)
+
+# Convert altitude in ft to grid units, then calculate tan of los line
+if(i_tminusd == $yes)
+    tanalt = (tgtalt - detalt) * $FT2METERS / (100. * terrain_res) / r
+else
+    tanalt = (detalt - tgtalt) * $FT2METERS / (100. * terrain_res) / r
+
+# Calculate distance to horizon from detector. Use altitude above sea level.
+horizon = 1.25 * (sqrtdetalt + sqrttgtalt)
+
+# If target over horizon report not visible.
+if (range > horizon)
+{
+    above_terrain = $NO
+    return
+}
+
+
+singnd = dy/r
+cosgnd = dx/r
+
+if (endx != srtx)
+{
+    slopegnd = (endy - srty) / (endx - srtx)
+    bgnd = srty - slopegnd * srtx	# Where line intercepts y axis
+}
+else
+{
+    slopegnd = 999999.		# Vertical line	
+    bgnd = 999999.		# No intercept
+}
+
+x = srtx		# Current position in elevation grid
+y = srty
+
+degx = cellpnts / terrain_res	# Number of points in 1 degree cell along x
+degy = degx
+areax = degx * .25		# Number of points in 1/4 degree area
+areay = areax
+
+# Cell loop
+while (x <= endx)
+{
+    # Calculate xy values at cell boundary
+    cell_boundary$macro(x,y,bndx, bndy)
+    pthalt1 = srtalt
+    pthalt2 = srtalt + tanalt * sqrt ((bndx-x)*(bndx-x) + (bndy-y)*(bndy-y)) *
+              terrain_res * 100 * $METERS2FT
+    pthalt = min(pthalt1, pthalt2)	# Min altitude in cell
+
+    Iydegy = NINT(y/degy)   # SMM/JB 6/98 (E1954) To use these two as
+    Ixdegx = NINT(x/degx)   # SMM/JB 6/98 (E1954) subscripts in next line
+
+    Elvtn = elevation_region_max_elevation_cell[Iydegy,Ixdegx,indxelev] # SMM/JB 6/98 (E1954)
+    if (pthalt > Elvtn)   # SMM/JB 6/98 (E1954)
+    {
+	x = bndx		# Skip to next cell boundary
+	y = bndy
+	srtalt = pthalt2
+	pdy = srty - y		# Y distance traveled on path
+	if (abs(pdy) > abs(dy)) break
+	next
+    }
+    if (slopegnd == 999999.)		# Vertical line	
+    {
+	pdy = srty - y		# Y distance traveled on path
+	if (abs(pdy) > abs(dy)) break	# Finished path
+    }
+	
+    cx = int(x/degx) * degx		# Southwest boundary of current cell
+    cy = int(y/degy) * degy
+	    
+    # Area within cell loop
+    repeat
+    {
+    	If(x > endx) RETURN
+
+	if (slopegnd == 999999.)		# Vertical line	
+	{
+	    pdy = srty - y		# Y distance traveled on path
+	    if (abs(pdy) > abs(dy)) break 2	# Finished path
+	}
+	    
+	X_area_index = INT((x - cx) / ((cellpnts/4.)/terrain_res))   
+	Y_area_index = (y - cy) / ((cellpnts/4.)/terrain_res) + 1
+	area_index = 4 * X_area_index + Y_area_index	# area index
+	if (X_area_index < 0 | X_area_index > 3) break
+	if (Y_area_index < 1 | Y_area_index > 4) break
+	     
+	# Calculate xy values at area boundary
+	area_boundary$macro(x,y,bndx, bndy)
+	if (bndx > endx)
+	{    
+	    xp = endx - x
+	    yp = endy - y
+	}
+	else
+	{    
+	    xp = bndx - x
+	    yp = bndy - y
+	}
+    yp = min(abs(dy), abs(yp))    # Do not exceed endy # joa 9/98 (E2016)
+	r = sqrt(xp * xp + yp * yp)   # r is distance from current position to 
+	pthalt1 = srtalt              # area boundary
+	pthalt2 = srtalt + tanalt * r *	# Min path altitude in area
+                  terrain_res * 100. * $METERS2FT
+	pthalt = min(pthalt1, pthalt2)
+	if (pthalt >
+        elevation_region_max_elevation_area[area_index,y/degy,x/degx,area_index])
+	{
+	    x = bndx		# Skip to next area boundary
+	    y = bndy
+	    srtalt = pthalt2
+	    next
+	}
+	begx = x
+	begy = y
+	# Elevation points within area loop
+	for (ir = 0; ir <= r; ir = ir + 1)
+	{
+	    x = begx + cosgnd * ir		# Grid x within area
+            y = begy + singnd * ir
+	    elevation = elevation_points[y,x]
+	    pthalt = srtalt + tanalt * ir *
+                  terrain_res * 100. * $METERS2FT
+	    if (elevation > pthalt)	
+	    {
+		above_terrain = $no
+		return
+	    }
+	}
+	x = bndx		# next area boundary
+	y = bndy
+	srtalt = pthalt2
+    }
+}
+return
+end
+
+
+
+Integer function los_test (_   # Uses GP terrain grid to determine LOS :
+                                    # Returns $YES if line connecting detector
+    				    # and target are above terrain
+                         detlat,    # Detector latitude: real: in: rad
+                         detlon,    # Detector longitude: real: in: rad
+                         cosdetlat, # Cosine of detector latitude: real: in:rad
+                         sqrtdetalt,# Sqrt Detector altitude: real: in: ft
+                         tgtlat,    # Target latitude: real: in: rad
+                         tgtlon,    # Target longigude: real: in: rad
+                         costgtlat, # Cosine of target latitude: real: in: rad
+                         sqrttgtalt)# Sqrt Target altitude: real: in: ft
+
+implicit none
+integer above_terrain
+real    detlat, detlon, cosdetlat, sqrtdetalt
+real    tgtlat, tgtlon, costgtlat, sqrttgtalt
+
+# ******************* Add Avalon interface here ******************************
+
+los_test = above_terrain (_   # Uses GP terrain grid to determine LOS :
+                                    # Returns $YES if line connecting detector
+    				    # and target are above terrain
+                         detlat,    # Detector latitude: real: in: rad
+                         detlon,    # Detector longitude: real: in: rad
+                         cosdetlat, # Cosine of detector latitude: real: in:rad
+                         sqrtdetalt,# Sqrt Detector altitude: real: in: ft
+                         tgtlat,    # Target latitude: real: in: rad
+                         tgtlon,    # Target longigude: real: in: rad
+                         costgtlat, # Cosine of target latitude: real: in: rad
+                         sqrttgtalt)# Sqrt Target altitude: real: in: ft
+return
+end
+
+
+integer function the_elevation(lat,lon)
+
+BBCommon
+
+real lat, lon
+integer elevation, earth_elevation
+
+if (RESA$Worldwide$Elevation==$NO) 
+{
+   elevation = earth_elevation(lat*$deg2rad, lon*$deg2rad)
+} 
+else 
+{
+   call resa_worldwide_elevation(lat,lon,elevation)
+}
+return elevation
+
+end
+
+Integer function earth_elevation(_	# Elevation at point on earth
+                                 lat,	# Latitude: in: real: radians
+                                 lon)   # Longitude: in: real: radians
+#+
+# Returns elevation in feet
+#-
+
+BBcommon
+ElevationCommon
+
+real lat, lon,swlat,swlon
+real cellpnts
+real terrain_res
+data cellpnts/$DTEDCellDim/
+integer indxelev
+real    x, y
+
+# Currently user can select one contiguous region so code is not necessary
+#call fndwet (lat,
+#	     lon,
+#	     wet$pointer)
+#
+#indxelev = nat2elev[wet$pointer$index]
+#
+if(N_elev_regions ==0 )
+{
+    return[ 0 ]
+}
+
+indxelev = 1
+
+swlat= elevation_region_swlat[indxelev]
+swlon= elevation_region_swlon[indxelev]
+
+if (lat < swlat | lat >= swlat + elevation_region_height[indxelev] *
+                              $deg2rad)		# Off terrain grid
+{
+    return[ 0 ]
+}	
+
+if (lon < swlon | lon >= swlon + elevation_region_width[indxelev] *
+                              $deg2rad)		# Off terrain grid
+{
+    return[ 0 ]
+}	
+
+terrain_res = elevation_region_resolution[indxelev]
+
+x = (lon - elevation_region_swlon[indxelev]) 
+if (x < 0) x = $TWOPI - x
+x = x * $rad2deg * cellpnts / terrain_res
+
+y = (lat - elevation_region_swlat[indxelev]) *
+     $rad2deg * cellpnts / terrain_res
+
+earth_elevation = elevation_points[nint(y),nint(x)]
+
+return
+end
+
+
+subroutine zero_grid(elev_grid)
+implicit none
+integer*2 elev_grid[0:$DTEDArrayDim,0:$DTEDArrayDim]
+integer*2 i_lon,i_lat
+
+for(i_lon=0;i_lon<$DTEDArrayDim;i_lon=i_lon+1)
+{
+    for(i_lat=0;i_lat<$DTEDArrayDim;i_lat=i_lat+1)
+    {
+    	elev_grid[i_lat,i_lon] = 0
+
+    } 
+}
+return
+end
+
+subroutine Map_dted(ok_to_write)
+implicit none
+ElevationCommon
+
+character  fname[ARB], sname[ARB], section_name[60]
+integer    npages, pages_mapped,fopenm, fpmap_dted
+integer ok_to_write
+vaxcharacter*ARB file_name
+equivalence (fname, file_name)
+
+Logical*4           File_Present
+integer             seg_jfn
+integer	   ilen, i, ierr
+
+npages = DTED_pages
+
+ilen = 0
+call smovVN ("DTED.AA",fname,ilen)
+call smov ($null,fname,ilen)
+
+
+ilen = 0
+call smov ($null,section_name,ilen)     # Section name not needed for mmap
+
+if (ok_to_write == $no)                         # Do not create file ifread_only
+{
+    inquire (file = file_name, Exist = File_Present)
+    if (!file_present) return
+}
+
+
+ierr = FOPENM (SEG_JFN,fname,npages,ierr)
+
+pages_mapped = FPMAP_dted (SEG_JFN,section_name,npages,elevation_common_overlay,0,ierr) 
+
+return
+end
+
+
+
+Integer Function DTED_max_elevation(_	# Max DTED elevation in given region
+                                        # with 15" resolution
+                         user_swlat,	# Southwest latitude: in: rad
+                         user_swlon,	# Southwest longitude: in: rad
+                         user_nelat,	# Northeast latitude: in: rad
+                         user_nelon)	# Northeast longitude: in: rad
+#+
+# returns maximum elevation of given area in integer feet with 1/4 degree res
+#-
+implicit none
+ElevationCommon
+integer cw, ch, saw, sah, eah,eaw, aw, ah
+integer start_area_width, end_area_width
+integer start_area_height, end_area_height
+real start_cell_height, end_cell_height
+real start_cell_width, end_cell_width
+integer indx_elev, max_elev, indx_area
+real    user_swlon, user_nelon, user_swlat, user_nelat
+real    work_nelon
+    
+if(N_elev_regions ==0 )
+{
+    return[ 0 ]
+}
+
+
+
+indx_elev = 1
+
+max_elev = 0
+
+# Handle date line boundary by treating west longitude as extended east lon
+if (user_swlon > user_nelon)
+    work_nelon = user_nelon * $TWOPI
+else
+    work_nelon = user_nelon
+
+# Determine starting and ending indices for cell height and width
+
+if (elevation_region_swlat[indx_elev] > user_swlat)
+    start_cell_height = 0
+else
+    start_cell_height = (user_swlat - elevation_region_swlat[indx_elev]) *
+                        $rad2deg
+if (start_cell_height > elevation_region_height[indx_elev]) return[ max_elev ]
+
+
+if (elevation_region_swlon[indx_elev] > user_swlon)
+    start_cell_width= 0
+else
+    start_cell_width= (user_swlon - elevation_region_swlon[indx_elev]) *
+                        $rad2deg
+if (start_cell_width > elevation_region_width[indx_elev]) return[ max_elev ]
+
+
+if (elevation_region_swlat[indx_elev] + elevation_region_height[indx_elev] *
+    $rad2deg < user_nelat)
+    end_cell_height = elevation_region_height[indx_elev]
+else
+    end_cell_height = (user_nelat - elevation_region_swlat[indx_elev]) *
+                        $rad2deg
+
+
+if (elevation_region_swlon[indx_elev] + elevation_region_width[indx_elev]*
+    $rad2deg < work_nelon)
+    end_cell_width = elevation_region_width[indx_elev]
+else
+    end_cell_width = (work_nelon - elevation_region_swlon[indx_elev]) *
+                        $rad2deg
+
+# Determine starting and ending indices for area height and width
+start_area_height = (start_cell_height - int(start_cell_height)) * 4. + 1
+end_area_height = (end_cell_height - int(end_cell_height)) * 4. + 1
+
+start_area_width= (start_cell_width - int(start_cell_width)) * 4. + 1
+end_area_width= (end_cell_width - int(end_cell_width)) * 4. + 1
+
+for (cw = start_cell_width; cw <= end_cell_width; cw = cw + 1)
+{
+    if (cw == int(start_cell_width))  saw = start_area_width
+    else                              saw = 1
+
+    if (cw == int(end_cell_width))    eaw = end_area_width
+    else                              eaw = 4
+
+
+    for (ch = start_cell_height; ch <= end_cell_height; ch = ch + 1)
+    {
+	if (ch == int(start_cell_height)) sah = start_area_height
+	else                              sah = 1
+	
+	if (ch == int(end_cell_height)) eah = end_area_height
+	else                            eah = 4
+	
+	# Entire cell
+	if (saw == 1 & eaw == 4 & sah == 1 & eaw == 4)
+	{
+	    max_elev = max(max_elev, elevation_region_ _
+			   max_elevation_cell[ch,cw,indx_elev])
+	}
+	else # Areas within cell
+	{    
+	    for (aw = saw; aw <= eaw; aw = aw + 1)
+	    {
+		for (ah = sah; ah <= eah; ah = ah + 1)
+		{
+		    indx_area = (aw-1) * 4 + ah
+		    max_elev = max(max_elev, elevation_region_ _
+				   max_elevation_area[indx_area,ch,cw,indx_elev])
+		}
+	    }
+	}
+    }
+}
+
+return[max_elev]
+end
+
+
+Integer function land_between_points (_
+                         detlat,    # in: Detector latitude - radians
+                         detlon,    # in: Detector longitude - radians
+                         cosdetlat, # in: Cosine of detector latitude
+                         tgtlat,    # in: Target latitude - radians
+                         tgtlon,    # in: Target longitude - radians
+                         costgtlat) # in: Cosine of target latitude
+#########################################################################
+#$%
+#$% Purpose:   Land_Between_Points determines is there is a land mass
+#$%            along the staight line between the two points.  This is
+#$%            used by the sonar models to preclude detections when
+#$%            there is a land mass in the way.  If the terrain masking
+#$%            is turned off then the function will return $no.  If
+#$%            either of the two positions is off of the terrain grid
+#$%            then the function will return $no.
+#$%
+#$% Called By: 
+#$%
+#$% Calls:     None
+#$%
+#$% Tables:    None
+#$%
+#$% Date:      August 1996 (E1651)
+#$%
+#$% Author:    James Allen
+#$%
+#########################################################################
+BBcommon
+ElevationCommon
+
+real detlat, detlon, tgtlat, tgtlon, cosdetlat, costgtlat
+     
+
+real range            # Distance between detector and target (nm)
+real terrain_res      # Distance between elevation points (meters*100)
+real cellpnts         # Number of points in 1x1 deg elevation cell 
+                      #  along lat or lon boundary
+real detx             # Detector elevation grid x index
+real dety             # Detector elevation grid y index
+real tgtx             # Target elevation grid x index
+real tgty             # Target elevation grid y index
+real swlat            # Southwest latitude of elevation grid (rad)
+real swlon            # Sourthwest longitude of elevation grid (rad)
+real singnd           # Sin of ground path between det and tgt
+real cosgnd           # Cos of ground path between det and tgt
+real begx             # Beginning x value within area
+real begy             # Beginning y value within area
+integer area_index    # Area index (1-16)
+integer X_area_index  # X part of area index (0-3)
+integer Y_area_index  # Y part of area index (1-4)
+integer indxelev
+real*4  srtx, srty, endx, endy, dx, dy, r, x, y
+real*4  slopegnd, bgnd, bndx, bndy
+real*4  ty, pdy, xp, yp, elevation
+integer i_tminusd, ir, degx, degy
+real*8  areax, areay, cx, cy, ax, ay
+
+data cellpnts/$DTEDCellDim/
+
+  land_between_points = $no            # Assume no land between points
+
+  if (N_elev_regions > 0)
+    {
+     if (terrain_masking_flag != $OFF)      # If detections constrained by DTED
+       {
+        indxelev = 1
+        swlat = elevation_region_swlat[indxelev]
+        swlon = elevation_region_swlon[indxelev]
+        if (((detlat >= swlat &               # is the 1st location on the terrain grid
+              detlat <= swlat + elevation_region_height[indxelev] * $deg2rad) &
+             (detlon >= swlon &
+              detlon <= swlon + elevation_region_width[indxelev] * $deg2rad)  ) &
+            ((tgtlat >= swlat &
+              tgtlat <= swlat + elevation_region_height[indxelev] * $deg2rad) &
+             (tgtlon >= swlon &
+              tgtlon <= swlon + elevation_region_width[indxelev] * $deg2rad)  ) )
+          {
+           terrain_res = elevation_region_resolution[indxelev] 
+
+           # Convert detector and target position to x,y position on terrain grid.
+           # Terrain grid has southwest corner.
+           dety = (detlat - swlat) * $rad2deg * cellpnts / terrain_res
+           detx = (detlon - swlon)
+           if (detx < 0.)
+             detx = $TWOPI - detx
+           detx = detx *  $rad2deg * cellpnts / terrain_res
+
+           tgty = (tgtlat - swlat) * $rad2deg * cellpnts / terrain_res
+           tgtx = (tgtlon - swlon)
+           if (tgtx < 0.)
+             tgtx = $TWOPI - tgtx
+           tgtx = tgtx *  $rad2deg * cellpnts / terrain_res
+
+           # Make sure traveling from left to right
+           if (detx <= tgtx)
+             {
+              srtx = detx
+              srty = dety
+              endx = tgtx
+              endy = tgty
+              i_tminusd=$yes 
+             }
+           else
+             {
+              srtx = tgtx
+              srty = tgty
+              endx = detx
+              endy = dety
+              i_tminusd=$no 
+             }
+           
+           # Calculate sin of ground path between detector and target
+           dx = endx - srtx
+           dy = endy - srty
+           r = sqrt(dx*dx + dy*dy)
+           if(r == 0)
+             {    
+              land_between_points = $no
+              return
+             }
+
+           range = r * terrain_res / cellpnts * $deg2rad * $rad2nmi *
+                   0.5 * (cosdetlat + costgtlat)
+
+           singnd = dy/r
+           cosgnd = dx/r
+
+           if (endx != srtx)
+             {
+              slopegnd = (endy - srty) / (endx - srtx)
+              bgnd = srty - slopegnd * srtx    # Where line intercepts y axis
+             }
+           else
+             {
+              slopegnd = 999999.        # Vertical line    
+              bgnd = 999999.        # No intercept
+             }
+
+           x = srtx        # Current position in elevation grid
+           y = srty
+           degx = cellpnts / terrain_res    # Number of points in 1 degree cell along x
+           degy = degx
+           areax = degx * .25        # Number of points in 1/4 degree area
+           areay = areax
+
+           # Cell loop
+           while (x <= endx)
+             {
+              # Calculate xy values at cell boundary
+              cell_boundary$macro(x,y,bndx, bndy)
+              if (elevation_region_max_elevation_cell[y/degy,x/degx,indxelev] == 0)
+                {
+                 x = bndx        # Skip to next cell boundary
+                 y = bndy
+                 pdy = srty - y        # Y distance traveled on path
+                 if (abs(pdy) > abs(dy))
+                   break
+                 next
+                }
+              if (slopegnd == 999999.)        # Vertical line    
+                {
+                 pdy = srty - y        # Y distance traveled on path
+                 if (abs(pdy) > abs(dy))
+                   break    # Finished path
+                }
+    
+              cx = int(x/degx) * degx        # Southwest boundary of current cell
+              cy = int(y/degy) * degy
+        
+              # Area within cell loop
+              repeat
+                {
+                 if (x > endx)
+                   return
+                 if (slopegnd == 999999.)        # Vertical line    
+                   {
+                    pdy = srty - y        # Y distance traveled on path
+                    if (abs(pdy) > abs(dy))
+                      break 2    # Finished path
+                   }
+        
+                 X_area_index = INT((x - cx) / ((cellpnts/4.)/terrain_res))   
+                 Y_area_index = (y - cy) / ((cellpnts/4.)/terrain_res) + 1
+                 area_index = 4 * X_area_index + Y_area_index    # area index
+                 if (X_area_index < 0 | X_area_index > 3)
+                   break
+                 if (Y_area_index < 1 | Y_area_index > 4)
+                   break
+         
+                 # Calculate xy values at area boundary
+                 area_boundary$macro(x,y,bndx, bndy)
+                 if (bndx > endx)
+                   {    
+                    xp = endx - x
+                    yp = endy - y
+                   }
+                 else
+                   {    
+                    xp = bndx - x
+                    yp = bndy - y
+                   }
+                 yp = min(abs(dy), abs(yp))    # Do not exceed endy # joa 9/98 (E2016)
+                 r = sqrt(xp * xp + yp * yp)   # r is distance from current position to 
+                 if (elevation_region_max_elevation_area[area_index,y/degy,x/degx,indxelev] == 0)
+                   {
+                    x = bndx        # Skip to next area boundary
+                    y = bndy
+                    next
+                   }
+
+                 begx = x
+                 begy = y
+                 # Elevation points within area loop
+                 for (ir = 0; ir <= r; ir = ir + 1)
+                   {
+                    x = begx + cosgnd * ir        # Grid x within area
+                    y = begy + singnd * ir
+                    elevation = elevation_points[y,x]
+                    if (elevation > 0)    
+                      {
+                       land_between_points = $yes
+                       return
+                      }
+                   }
+                 x = bndx        # next area boundary
+                 y = bndy
+                }   # end of repeat throught cell area
+             }   # end of loop through the terrain cells
+          }   # end of if on the terrain grid
+       }   # end of if terrain is a factor
+    }   # end of if there are elevation regions to be checked
+
+return
+end
+
+
+integer function land_in_circle(_
+                        clat,
+                        clon,
+                        radius)
+#########################################################################
+#$%
+#$% Purpose:   Land_in_circle determines is there is a land mass
+#$%            within a given circle.
+#$%
+#$% Called By: 
+#$%
+#$% Calls:     Land_between_points
+#$%
+#$% Tables:    None
+#$%
+#$% Date:      February 1998 (E1864)
+#$%
+#$% Author:    James Allen
+#$%
+#########################################################################
+BBcommon
+ElevationCommon
+
+real clat, clon, radius
+real deg
+real cosCircleLat
+real flat1, flon1, coslat1
+integer land_between_points, any_land
+real    relbrg
+
+cosCircleLat = cos(clat)
+RELBRG = 0.0
+any_land = $NO
+
+for (deg = 0; deg < 360; deg = deg + 1)
+{
+    flat1 = clat
+    flon1 = clon
+    coslat1 = cosCirclelat
+    Call RRB2LL( _                  #Rhumb line Range/Bearing to Lat/Lon
+                   FLAT1,           #latitude (input & output)
+                   FLON1,           #longitude (input & output)
+                   radius,          # set range (input) to focal distance
+                   RELBRG,          #relative bearing (input)
+                   deg*$Deg2Rad,    #course (input)
+                   COSLAT1)         #cosine of latitude (input & output)
+
+    any_land = land_between_points (_
+                         clat,         # in: Detector latitude - radians
+                         clon,         # in: Detector longitude - radians
+                         cosCircleLat, # in: Cosine of detector latitude
+                         flat1,        # in: Target latitude - radians
+                         flon1,        # in: Target longitude - radians
+                         coslat1)      # in: Cosine of target latitude
+    if (any_land == $YES) BREAK
+}
+
+return(any_land)
+end
+
+
+subroutine load_shore_alt
+##############################################################
+#$%
+#$% Purpose:   Computes the initial elevation of the units in
+#$%            the unt table.
+#$%
+#$% Called By: start0, odefine_terrain_elevation
+#$%
+#$% Calls:     the_elevation
+#$%            echo..
+#$%
+#$% Tables:    UNT     SHC
+#$%
+#$% Date:      November 1995
+#$%
+#$% Author:    James Allen
+#$%
+#$% Modified:  Jim Allen 9/98 (E2016)
+#$%            Moved from wimain.rat.
+#$%            Explicit unt$type$i check added.
+#$%
+##############################################################
+BBcommon
+ElevationCommon
+
+integer  the_elevation
+BBDeclare(UNT$Pointer, UNT$TrueAltDepth$I, 
+	  UNT$Type$I, SHC$Pointer)
+literal  cstrip8
+
+  if (N_elev_regions > 0)
+    {
+     for (UNT$Pointer$First; UNT$Pointer$Ok; UNT$Pointer$Next)
+       {
+        if (xUNT$GhostedUnit$I == $yes) next   # Skip ghosted units
+
+        UNT$TrueAltDepth$I = the_elevation (xUNT$TrueLatitude$F*$rad2deg,
+                                              xUNT$TrueLongitude$F*$rad2deg)
+        # Horizon formula does not handle bases below sea level
+        UNT$TrueAltDepth$I = max (0, UNT$TrueAltDepth$I)
+
+        UNT$Type$I = xUNT$Type$I
+        if (UNT$Type$I == $Sub$code)
+          {
+           if (UNT$TrueAltDepth$I > 0)
+             {
+              call echov  ("Warning: Submarine ")
+              call echohn (xUNT$Name$C, $$MaxLit)
+              call echov  (" on land. Speed set to zero.")
+              call echor
+              putUNT$TrueSpeed$F (0)
+              putUNT$OrderedSpeed$F (0)
+              putUNT$AssumedSpeed$F (0)
+             }
+           else
+              UNT$TrueAltDepth$I = xUNT$TrueAltDepth$I
+          }   # end of if unit is a submarine
+        else if (UNT$Type$I == $Surface$code |
+                 UNT$Type$I == $SurfaceWithAC$code)
+          {
+           SHC$Pointer = xUNT$SHCPntr$I
+           if (xSHC$Domain$I == $LandOp$code &
+               UNT$TrueAltDepth$I == 0)
+             {
+              call echov  ("Warning: Land only ship/boat ")
+              call echohn (xUNT$Name$C, $$MaxLit)
+              call echov  (" on water. Speed set to zero.")
+              call echor
+              putUNT$TrueSpeed$F (0)
+              putUNT$OrderedSpeed$F (0)
+              putUNT$AssumedSpeed$F (0)
+             }
+           else if (xSHC$Domain$I == $WaterOp$code &
+               UNT$TrueAltDepth$I > 0)
+             {
+              call echov  ("Warning: Ocean only ship/boat ")
+              call echohn (xUNT$Name$C, $$MaxLit)
+              call echov  (" on land. Speed set to zero.")
+              call echor
+              putUNT$TrueSpeed$F (0)
+              putUNT$OrderedSpeed$F (0)
+              putUNT$AssumedSpeed$F (0)
+              UNT$TrueAltDepth$i = 0        # Ocean ship should not have elevation.  
+             }
+
+          }   # end of if a ship
+
+        if (unt$type$i == $Sub$Code           |
+            UNT$Type$I == $Surface$code       |
+            UNT$Type$I == $SurfaceWithAC$code |
+            unt$type$i == $SamSite$Code       |
+            UNT$Type$I == $Shorebase$code)
+            {    
+            putUNT$TrueAltDepth$I
+            }
+       }   # end of loop through the unit table
+    }   # end of if there are terrain regions
+
+return
+end
+
+
+
+subroutine reload_shore_alt
+##############################################################
+#$%
+#$% Purpose:   reload elevation of the shorebases in
+#$%            the unt table.
+#$%
+#$% Called By: odefine_terrain_elevation
+#$%
+#$% Calls:     the_elevation
+#$%            echo..
+#$%
+#$% Tables:    UNT     SHC
+#$%
+#$% Date:      November 1995
+#$%
+#$% Author:    James Allen
+#$%
+#$% Modified:  Jim Allen 9/98 (E2016)
+#$%            Moved from wimain.rat.
+#$%            Explicit unt$type$i check added.
+#$%
+##############################################################
+BBcommon
+ElevationCommon
+
+integer  the_elevation
+BBDeclare(UNT$Pointer, UNT$TrueAltDepth$I, 
+	  UNT$Type$I, SHC$Pointer)
+literal  cstrip8
+
+  if (N_elev_regions > 0)
+    {
+     for (UNT$Pointer$First; UNT$Pointer$Ok; UNT$Pointer$Next)
+       {
+        if (xUNT$GhostedUnit$I == $yes) next   # Skip ghosted units
+
+        UNT$TrueAltDepth$I = the_elevation (xUNT$TrueLatitude$F*$rad2deg,
+                                              xUNT$TrueLongitude$F*$rad2deg)
+        # Horizon formula does not handle bases below sea level
+        UNT$TrueAltDepth$I = max (0, UNT$TrueAltDepth$I)
+
+        UNT$Type$I = xUNT$Type$I
+        if (UNT$Type$I == $Shorebase$code)
+          {    
+            putUNT$TrueAltDepth$I
+          }
+       }   # end of loop through the unit table
+    }   # end of if there are terrain regions
+
+return
+end
+
+
+Subroutine odefine_terrain_elevation(_      # Process define terrain elevation command
+                  nargs,  # Number of arguments
+                  args,   # Command arguments
+                  ierror)
+##############################################################
+#$%
+#$% Purpose:   Allows a controller to alter the terrain elevation
+#$%            values stored in the terrain database.
+#$%
+#$% Called By: 
+#$%
+#$% Calls:     
+#$%
+#$% Tables:    terrain database
+#$%
+#$% Date:      August 1998 (E2016)
+#$%
+#$% Author:    James Allen
+#$%
+##############################################################
+
+BBcommon
+ElevationCommon
+MessageCommon
+literal args[$stk$lastarg]          # arguments entered in the define command
+integer nargs, ierror
+real deglatargs[10],deglonargs[10]
+integer elevation_in_feet
+integer indxelev
+real lat, lon, swlat, swlon
+real xp[8], yp[8]
+integer ix, iy, iarg, np, i, inside, feet
+real cellpnts           # Number of points in 1x1 deg elevation cell 
+                        #  along lat or lon boundary
+integer iview, iareax, iareay, area_index
+integer x_area_index, y_area_index, degx, degy
+real*4  xw, xe, ys, yn, terrain_res
+real*4  DMS2RAD, DMS2ll, x, y 
+real*8  areax, areay, cx, cy
+
+data cellpnts/$DTEDCellDim/
+
+
+
+#   1      2       3
+# DEFINE TERRAIN ELEVATION 
+#                            4
+#                  (to be) <feet>
+#                                          5          6
+#                  (in polygon point 1) <latitude> <longitude>
+#                  (point 2) <latitude> <longitude>
+#                  (point 3)
+#                   [ | <latitude> <longitude> (point 4)
+#                    [ | <latitude> <longitude> (point 5)
+#                     [ | <latitude> <longitude> (point 6)
+#                      [ | <latitude> <longitude> (point 7)
+#                       [ | <latitude> <longitude> (point 8)
+#                        [ | <latitude> <longitude> ]]]]]];
+
+ierror = 0
+iview = 0
+
+#############################################################################
+# Validate arguments
+
+if(N_elev_regions == 0 )
+{
+    msg_lib_msglen=0
+
+    call smovv ("No terrain region defined.",msg_lib_msg,
+                 msg_lib_msglen)
+
+    UserOrdId = -1              # Not order user message
+    ierror = 15
+    call send_(iview, 0, msg_lib_msglen, msg_lib_msg)
+    return
+}
+
+if (args[4] < 0 | args[4] > 32000)      # elevation array is integer*2
+{
+    msg_lib_msglen=0
+
+    call smovv ("Elevation must be in range 0 thru 32000.",msg_lib_msg,
+                 msg_lib_msglen)
+
+    UserOrdId = -1              # Not order user message
+    ierror = 15
+    call send_(iview, 0, msg_lib_msglen, msg_lib_msg)
+}
+
+indxelev = 1                            # Only one region for now
+
+swlat= elevation_region_swlat[indxelev]
+swlon= elevation_region_swlon[indxelev]
+
+np = 0                                  # Number of points in polygon
+                                        # First point completes polygon
+
+#If we are using RESA Worlwide Elevation, we will update the .hgt library.
+#We will also updated the DTED file if there is one, just as we load it
+#even if we are uing the .hgt approach
+
+if (RESA$Worldwide$Elevation==$YES) 
+{
+
+   for (iarg = 5; iarg < nargs; iarg = iarg + 2)   # Loop thru points in order
+   {
+      np = np+1
+      lat = DMS2ll(args[iarg])
+      lon = DMS2ll(args[iarg+1])
+      deglatargs[np]=lat
+      deglonargs[np]=lon
+   }
+   feet=nint(args[4])
+   call modify_resa_worldwide_elevation(feet,np,deglatargs,deglonargs)
+   np=0 #restore for DTED processing
+}
+
+for (iarg = 5; iarg < nargs; iarg = iarg + 2)   # Loop thru points in order
+{
+    np = np + 1
+
+    lat = DMS2RAD(args[iarg])
+    lon = DMS2RAD(args[iarg+1])
+
+    xp[np] = lon                                # Save point
+    yp[np] = lat
+
+    if ((lat < swlat | lat >= swlat + elevation_region_height[indxelev] *
+                              $deg2rad) |      # Off terrain grid
+        (lon < swlon | lon >= swlon + elevation_region_width[indxelev] *
+                              $deg2rad))       # Off terrain grid
+    {
+        msg_lib_msglen=0
+
+        call smovv ("Polygon point ",msg_lib_msg,
+                     msg_lib_msglen)
+        call smovi (np, msg_lib_msg, msg_lib_msglen)
+        call smovv (" outside terrain grid.",msg_lib_msg,
+                     msg_lib_msglen)
+
+        UserOrdId = -1              # Not order user message
+        ierror = 15
+        call send_(iview, 0, msg_lib_msglen, msg_lib_msg)
+    }
+}
+
+if (ierror != 0)
+{
+    return
+}
+
+#############################################################################
+# convert polygon points to terrain coordinates
+
+for (i = 1; i <= np; i = i + 1)         # Polygon points
+{
+    xp[i] = (xp[i] - elevation_region_swlon[indxelev]) 
+    if (xp[i] < 0) xp[i] = $TWOPI - xp[i]
+    xp[i] = xp[i] * $rad2deg * cellpnts / elevation_region_resolution[indxelev]
+
+    yp[i] = (yp[i] - elevation_region_swlat[indxelev]) *
+     $rad2deg * cellpnts / elevation_region_resolution[indxelev]
+}
+
+############################################################################
+# Enclose polygon with rectangle
+xw = xp[1]; xe = xp[1]; ys = yp[1]; yn = yp[1] 
+for (i = 2; i <= np; i = i + 1)         # Get Polygon limits
+{
+    xw = min(xw, xp[i])
+    xe = max(xe, xp[i])
+    ys = min(ys, yp[i])
+    yn = max(yn, yp[i])
+}
+
+############################################################################
+# Set constant elevation for area inside polygon
+
+elevation_in_feet = args[4]
+
+np = np + 1                             # Last point is first point
+xp[np] = xp[1]
+yp[np] = yp[1]
+
+for (ix = nint(xw); ix <= nint(xe); ix = ix + 1)
+{
+    for (iy = nint(ys); iy <= nint(yn); iy = iy + 1)
+    {
+        call inoutxy(float(ix),float(iy),           #point being tested
+                     np,                            #number of vertices of polygon
+                     xp ,yp,                        #arrays of vertices of polygon
+                     inside)                        #yes/no flag for inside
+
+        if (inside == $YES)
+            elevation_points[iy,ix] = elevation_in_feet
+    }
+}
+
+############################################################################
+# Adjust maximum elevation structure
+
+# Maximum elevation in terrain grid
+elevation_region_max_region_elevation[indxelev]  = max(elevation_in_feet,
+                             elevation_region_max_region_elevation[indxelev]) 
+
+degx = cellpnts / elevation_region_resolution[indxelev] # Number of points in 1 degree cell along x
+degy = degx
+areax = degx * .25                  # Number of points in 1/4 degree area
+areay = areax
+iareax = areax
+iareay = areay
+
+terrain_res = elevation_region_resolution[indxelev]
+ 
+for (ix = nint(xw); ix <= nint(xe); ix = ix + iareax)
+{
+    for (iy = nint(ys); iy <= nint(yn); iy = iy + iareay)
+    {
+        x = ix; y = iy
+        elevation_region_max_elevation_cell[y/degy,x/degx,indxelev] = 
+        max (elevation_in_feet,
+             elevation_region_max_elevation_cell[y/degy,x/degx,indxelev])
+
+        cx = int(x/degx) * degx        # Southwest boundary of current cell
+        cy = int(y/degy) * degy
+        
+        X_area_index = INT((x - cx) / ((cellpnts/4.)/terrain_res))   
+        Y_area_index = (y - cy) / ((cellpnts/4.)/terrain_res) + 1
+        area_index = 4 * X_area_index + Y_area_index    # area index
+        elevation_region_max_elevation_area[area_index,y/degy,x/degx,indxelev] =
+          max (elevation_in_feet,
+          elevation_region_max_elevation_area[area_index,y/degy,x/degx,indxelev])
+    }
+}
+
+call reload_shore_alt
+
+############################################################################
+return
+end
+

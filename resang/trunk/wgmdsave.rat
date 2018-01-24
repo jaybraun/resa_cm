@@ -1,0 +1,721 @@
+#####   WES version 3.1 converted to the VAX11/780   dated-22jan82
+ 
+#####   version 3.1  dated-  7apr81
+ 
+ 
+#####   version 3.0  dated- 22dec80
+ 
+ 
+# 
+ 
+ 
+### mod a to version 3.0 (prelim) dated- 11dec80
+###
+### module          smn#    prog init   comments
+### ======          ====    =========   ===========================
+### savfor          001     dew         make common (user db) saves
+###
+ 
+#####   version 3.0 (prelim) dated- 24nov80
+ 
+#$%      MODULE                       UTILITY                    DATA
+#$%    SUBROUTINES                  SUBROUTINES                 TABLES
+#$%    ===========                  ===========                 ======
+#$%
+#$%      SAVFOR                       ECHO                       NONE
+#$%      OSAVE1                       ECHOH
+#$%      OCUDB                        ECHOI
+#$%      OSAVE                        ECHOR
+#$%      NAMEBB                       ECHOHN
+#$%      RESTBB                       FGTJFN
+#$%      SAVEBB                       TYPERR
+#$%      COPYM                        FPMAP
+#$%      BBSAVR <BBRDRQ>              FCLOSF
+#$%                                   SMOV
+#$%                                   SMOVH
+#$%                                   SMOVI
+#$%                                   SMOVHN
+#$%                                   ERASEK
+#$%                                   EXPUNG
+#$%                                   SEND
+#$%                                   MONTYP
+#$%                                   FOPENF
+#$%
+#$%
+#$%
+#$%    NOTES
+#$%    =====
+#$%
+#$%    1.  <FILENAME> INDICATES WHERE SUBROUTINE IS LOCATED.
+#$%
+#$%
+#$%
+#$%    FLOWCHART FOR FILE WGMDSAVE CAN BE FOUND IN WGMAIN.HIR
+#$%    ======================================================
+#$%
+#$%
+ 
+undefine read
+undefine write
+undefine err
+ 
+define ($DEBUG,# $$Debug$Control)
+ 
+define(Save$Common,
+    integer     work[1024]
+    common      /scratch$pad/ work
+ 
+    integer     n_saves
+    VMSchar*64  sfile,          # save file name
+                rfile,          # restore file name
+                xfile,          # eXtra File name
+                fnames[12]
+    common      /save_common/ n_saves, sfile, rfile, xfile, fnames
+    )
+ 
+include "bbctl.inc"
+include "bbcode.inc"
+include "ascii.inc"
+ 
+define(BBimplicit,IMPLICIT NONE)    # jb E2145  7/11/00
+define ($SAVE_Record_Size,128)  # this must be a factor of 1024     dew 11/99
+
+ 
+subroutine savfor
+ 
+########################################################
+#$%
+#$% Purpose:   SAVFOR processes a blackboard save.
+#$%
+#$% Called By: WARCYC
+#$%
+#$% Calls:     BBSAVR     OSAVE      OCUDB
+#$%
+#$% Tables:    None
+#$%
+#$% Date:      NOV 80
+#$%
+#$% Author:    Dana Wills
+#$%
+#$% Modified:   Dane Wills, 8-Dec-1999,  E2160 Expanded UNT, faster saves
+#$%             Attempt to increase execution speed of SAVES
+#$%             Trimmed out old code, commented out CUDB
+#$%
+#$%
+########################################################
+BBcommon
+ 
+Integer ISPAN        # jb E2145  7/11/00
+ 
+#$% get time span since last save
+ispan = game$minute - save$last
+ 
+#$% if interval of save desired within time since last save and
+#$% a save is requested
+if (save$Interval <= ispan |
+    save$request  == $yes   )
+   {
+    call BBSavR                         # lockout PLAYER
+ 
+    #$% process save of neutral view
+    call osave ($neutral$view)
+   }
+ 
+####  #$% get time span since last common user data base save
+####  ispan = game$minute - CUDB$last 				    # SMN-001
+####
+####  #$% if the interval desired is of some time increment,
+####  #$% less than two hours, and within the time span since
+####  #$% the last save
+####  if (CUDB$Interval >  0   &                                          # SMN-001
+####      CUDB$Interval <  121 &                                          # SMN-001
+####      CUDB$Interval <= ispan)                                         # SMN-001
+####     {                                                                # SMN-001
+####      #$% process the save
+####      call ocudb                                                      # SMN-001
+####
+####      #$% reset last save time to current game time
+####      CUDB$Last = Game$minute                                         # SMN-001
+####     }                                                                # SMN-001
+ 
+return
+end
+ 
+ 
+ 
+subroutine osave1 (iview)
+ 
+########################################################
+#$%
+#$% Purpose:   OSAVE1 processes a beginning save.
+#$%
+#$% Called By: START0
+#$%
+#$% Calls:     SAVEBB     ECHOH      ECHOR
+#$%
+#$% Tables:    None
+#$%
+#$% Date:      NOV 80
+#$%
+#$% Author:    Dana Wills
+#$%
+########################################################
+BBcommon
+ 
+literal		iname
+Integer JSTAT,                    # jb E2145  7/11/00
+        IVIEW    # jb E2145 (Unused ARGUMENT) 7/11/00
+integer     find_result
+vmschar*4   itype_v
+integer     itype
+equivalence (itype_v, itype)
+ 
+itype_v = "beg"
+find_result = 0
+ 
+#$% get scenerio name
+iname = scenario$name
+ 
+#$% process a blackboard save
+call saveBB (iname,itype,1,jstat,find_result)
+ 
+#$% if jstat returned as yes, display successful save
+if (jstat == $yes)  call echov ("Successful save ")
+#$% else if not successful, so indicate to the user
+else                call echov ("Un-successful save ")
+ 
+call echor
+ 
+return
+end
+ 
+ 
+subroutine osave (iview)                        # process SAVE
+ 
+########################################################
+#$%
+#$% Purpose:   OSAVE processes a save at a specified
+#$%            game minute.
+#$%
+#$% Called By: SAVFOR
+#$%
+#$% Calls:     SAVEBB     SEND       ECHOH
+#$%            ECHOI      ECHO
+#$%
+#$% Tables:    None
+#$%
+#$% Date:      NOV 80
+#$%
+#$% Author:    Dana Wills
+#$%
+########################################################
+BBcommon
+ 
+literal     iname
+Integer KK,IGAME,IVIEW,JSTAT        # jb E2145  7/11/00
+integer     higher_version, warnlen
+integer     version_to_save, find_result
+character   report[80]
+character   warn[ARB]
+vmschar*4   itype_v
+integer     itype
+equivalence (itype_v, itype)
+ 
+itype_v = "sve"
+ 
+find_result = 0
+ 
+#$% get game minute and scenario name
+igame = game$minute
+iname = scenario$name
+save$time = igame
+ 
+version_to_save = save$versions
+higher_version = -1     # initialize to ensure a save if no saves exist
+# check for a higher version number
+#call check_for_higher_version(iname,igame,higher_version)
+ 
+call saveBB (iname,itype,igame,jstat,find_result)
+ 
+#$% if save successful
+if ((jstat == $yes) & (find_result == 0))
+   {
+    #$% send message to user
+    kk = 0
+    call smovv ("Successful SAVE at game minute ",report,kk)
+    call smovi (igame,                               report,kk)
+    call smov  ($space,                              report,kk)
+ 
+    call send_ (iview,0,kk,report)
+    call echoh (report,kk)
+    call echor
+    save$dmd = $yes           # Save RAINFORM Delayed Msg Database
+ 
+   }
+#$% else if save unsuccessful
+else
+   {
+    #$% send warning message to user
+    kk = 0
+    call smovv ("Un-successful SAVE at game cycle ",report,kk)
+    call smovi (igame,                                  report,kk)
+    call smov  ($space,                                 report,kk)
+ 
+    call send_ (iview,0,kk,report)
+    call echoh (report,kk)
+    call echor
+ 
+   }
+ 
+ 
+  if (ALSP$Active == $yes)       # if ALSP is active, then close    # clk 1/94
+    call close_alsp_log_file     # close out the msg log file.
+ 
+return
+end
+ 
+ 
+ 
+subroutine nameBB (iname,itype,iversn,afile)
+ 
+########################################################
+#$%
+#$% Purpose:   NAMEBB builds a file name string.
+#$%
+#$% Called By: OCUDB      RESTBB
+#$%
+#$% Calls:     SMOVHN     SMOVH      MONTYP
+#$%            SMOV       SMOVI
+#$%
+#$% Tables:    None
+#$%
+#$% Date:      NOV 80
+#$%
+#$% Author:    Dana Wills
+#$%
+########################################################
+bbcommon
+ 
+literal 	iname
+Integer ILEN,KLEN,LENGTH     # jb E2145  7/11/00
+integer 	iversn,itype
+VMSchar     afile*(*)
+ 
+#$% move scenerio name and other data into array
+ilen = 0
+call vmovhn (iname,$$MaxLit,afile,ilen) # SMM 10/99 E2141
+ 
+call vmovv ("_",afile,ilen)
+call vmovi (iversn,afile,ilen)
+call vmovv  ("h",afile,ilen)
+call vmovv (".",afile,ilen)
+call vmovhn (itype,3,afile,ilen)
+ 
+#$% fill in rest of string with nulls
+klen = ilen
+repeat
+    {
+    call vmov ($null,afile,ilen)
+    } until (ilen >= length(afile))
+ 
+return
+end
+ 
+ 
+ 
+subroutine restBB (iname,itype,iversn,jstat)
+ 
+########################################################
+#$%
+#$% Purpose:   RESTBB restores the blackboard from
+#$%            a specified file (or save).
+#$%
+#$% Called By: START2     START3
+#$%
+#$% Calls:     NAMEBB     FGTJFN     FOPENF
+#$%            ECHOR      ECHOH      ECHOHN
+#$%            TYPERR     FCLOSF     COPYM
+#$%            FPMAP
+#$%
+#$% Tables:    None
+#$%
+#$% Date:      NOV 80
+#$%
+#$% Author:    Dana Wills
+#$%
+########################################################
+BBcommon
+Save$Common
+ 
+literal		iname
+Integer JSTAT,ITYPE,IVERSN,IOS   # jb E2145  7/11/00
+character	errmsg[ARB]
+ 
+#$% initialize status
+jstat = $no
+ 
+#$% get file name string
+call namebb (iname,itype,iversn,rfile)
+ 
+open (unit    = $LFC$Save,
+      file    =  rfile,
+      access  = 'direct',
+      form    = "unformatted",
+      status  = 'old',
+#      readonly,
+      recl    =  $SAVE_Record_Size, #longwords
+#      dispose = 'save',
+      iostat  =  ios,
+      err     =  9100)
+ 
+#$% if file is in error
+REPEAT          # jb E2143 (BRNCHINTOBLK)   7/11/00
+    {
+     BREAK      # jb E2143 (BRNCHINTOBLK)   7/11/00
+     #$% send warning message
+     9100
+     call echor
+     call echov  ("Cannot restore blackboard from ")
+     call echovn (rfile)
+     call echov  (" (")
+     call geterr_fort (ios,errmsg)		# get FORTRAN Error Messages
+     call echoh (errmsg,ARB)
+     call echov  (")")
+     call echor
+ 
+     #$% close file
+     close(unit=$lfc$save)
+ 
+     return
+    }        # jb E2143 (BRNCHINTOBLK)   7/11/00
+ 
+#$% restore the blackboard from the file
+call restrM(iname,jstat)
+ 
+#$% close the file
+close(unit=$lfc$save)
+ 
+#$% initialize count
+write$count = 0
+write$request = -1                      # allow PLAYER access to write orders
+ 
+if (iversn == 0) restore$dmd = $no    # if restart, do not restore RF DMD
+else             restore$dmd = $yes
+ 
+return
+end
+ 
+ 
+ 
+ 
+subroutine saveBB (iname,itype,iversn,jstat,find_result)
+ 
+########################################################
+#$%
+#$% Purpose:   SAVEBB saves the blackboard.
+#$%
+#$% Called By: OSAVE1     OSAVE
+#$%
+#$% Calls:     NAMEBB     FGTJFN     ECHOR
+#$%            TYPERR     ECHOH      ECHOHN
+#$%            COPYM      FPMAP      FCLOSF
+#$%            SMOVHN     SMOVH      ERASEK
+#$%            EXPUNG
+#$%
+#$% Tables:    None
+#$%
+#$% Date:      NOV 80
+#$%
+#$% Author:    Dana Wills
+#$%
+########################################################
+BBcommon
+Save$Common
+ 
+literal     iname
+real        dtime
+INTEGER*4   X       # jb E2145 (as NOW argument) 7/11/00
+Integer  JSTAT,ITYPE,IVERSN,INIT_SIZE,IOS,NVER  # jb E2145  7/11/00
+integer     find_result, itime, now, mtime
+character   errmsg[ARB]
+integer     find_file
+ 
+#$% initialize status
+jstat = $no
+ 
+#$% get file name string
+call nameBB (iname,itype,iversn,sfile)
+ 
+if ( last$bb$page$save == 0 |
+     Max$BB$Words$save == 0  )
+    {
+    last$bb$page$save = last$bb$page
+    Max$BB$Words$save = Max$BB$Words
+    }
+ 
+mtime = now(X)
+itime = mtime / 1000                            # current time (in seconds)
+ 
+init_size = last$bb$page$save + ($SAVE_Record_Size / 128)
+ 
+#$% open file
+open (unit    = $LFC$Save,
+      file    =  sfile,
+      access  = 'direct',
+      form    = "unformatted",
+      status  = 'unknown',
+      recl    =  $SAVE_Record_Size, #longwords
+#      dispose = 'save',
+      iostat  =  ios,
+#      initialsize = init_size,
+      err     =  9100)
+ 
+#$% if in error
+REPEAT          # jb E2143 (BRNCHINTOBLK)   7/11/00
+   {
+    BREAK      # jb E2143 (BRNCHINTOBLK)   7/11/00
+    #$% send warning message to user
+    9100
+    call echor
+    call typerr (ios)
+    call echor
+    call echov ("Cannot save blackboard to ")
+    call echovn (sfile)
+    call echov  (" (")
+    call geterr_fort (ios,errmsg)		# get FORTRAN Error Messages
+    call echoh (errmsg,ARB)
+    call echov  (")")
+    call echor
+ 
+    return
+   }      # jb E2143 (BRNCHINTOBLK)   7/11/00
+ 
+ 
+#$% set time last saved to current game minute
+save$last = game$minute
+ 
+#$% indicate requested save no longer in progress
+save$request = $no
+ 
+call writeM                                     #write the BB to a file
+ 
+dtime = (now(0) - mtime) / 1000.0               # compute delta-time (in seconds)
+ 
+#$% reset status
+jstat = $yes
+write$count = 0
+write$request = -1			# allow PLAYER access to write orders
+ 
+ 
+close(unit=$lfc$save)			# close file
+ 
+#$% move scenerio name and other data into array and finish wih spaces
+ 
+#call nameBB (iname,itype,0,xfile)
+ 
+#nver = save$versions
+#call erasek_v (xfile,nver)                  # delete all but last n vers.
+ 
+# check to see whether latest save got purged or still exists
+find_result = find_file (sfile)
+ 
+save$time$used = dtime                          # seconds used
+ 
+call echov (" (")
+call echof (dtime,2)
+call echov (" second SAVE) ")
+call echor
+ 
+return
+end
+ 
+ 
+
+ 
+#########################################################################
+#  This routine restores the BB from a file.
+#  First it saves the first 1024 words of the BB in the temporary array
+#  work.  It then reads 1024 words (8 pages of 128 words) from the file
+#  to the BB.  It checks to see if the information in the file is valid.
+#  If valid, it reads in the entire file.  If not valid, it restores the
+#  BB to its original state and prints an error message.
+#
+#$% Called by:   RESTBB
+#
+#  Modified:  Carol Kropp - 4/94
+#             When restoring the BlackBoard, the PID table needs to be
+#             cleared.
+#
+#########################################################################
+ 
+subroutine restrM(iname,jstat)                     #restore BB from file
+BBcommon
+BBcommon_Map
+Save$Common
+ 
+literal		iname                        #scenario name
+Integer K,IOS,IWORD,IREC,       # jb E2145  7/11/00
+    IFRST,ILAST,JSTAT          # jb E2145  7/11/00
+character	errmsg[ARB]
+ 
+irec  = 1
+ifrst = 1
+ilast = $SAVE_Record_Size
+jstat = $no
+iword = ifrst  # SMM 2/98 (E1930)
+ 
+for (k = 1; k <= 1024; k=k+1) work[k] = ibb[k]  # save first 8 pages of BB
+ 
+sync$a = 0
+ 
+repeat                                          #read in 8 pages
+    {
+     read($lfc$save,REC=irec,iostat=ios,err=9101) (IBB[iword], iword=ifrst,ilast)
+ 
+     ifrst = ifrst + $SAVE_Record_Size
+     ilast = ilast + $SAVE_Record_Size
+     irec  = irec  +  1
+ 
+    } until (iword > 1024)
+ 
+ 
+if (scenario$name == iname           &          # same name....
+    ios           == 0               &          # I/O was OK....
+    Last$bb$page  <  IBB_Pages_Mapped )         # Will fit in this BB...
+   {                                            # OK to complete restore
+    if ( last$bb$page$save == 0 |
+         Max$BB$Words$save == 0  )
+        {
+        last$bb$page$save = last$bb$page
+        Max$BB$Words$save = Max$BB$Words
+        }
+ 
+    repeat
+        {
+         read($lfc$save,REC=irec,iostat=ios,err=9200) (IBB[iword], iword=ifrst,ilast)
+ 
+         ifrst = ifrst + $SAVE_Record_Size
+         ilast = ilast + $SAVE_Record_Size
+         irec  = irec  +  1
+ 
+        } until (iword > max$BB$words$save |
+                 irec - 1 > last$BB$page$save | ios != 0)
+ 
+    REPEAT          # jb E2143 (BRNCHINTOBLK)   7/11/00
+        {
+        BREAK      # jb E2143 (BRNCHINTOBLK)   7/11/00
+        9200
+        call echor
+        call echov ("Error restoring from ")
+        call echovn (rfile)
+        call echov  (" (")
+    	call geterr_fort (ios,errmsg)		# get FORTRAN Error Messages
+        call echoh (errmsg,ARB)
+        call echov  (")")
+        call echor
+        }          # jb E2143 (BRNCHINTOBLK)   7/11/00
+#    else   # else if(ios <= 0)
+    if (ios <= 0)   # jb Alternative to: if(ios > 0), which used to
+        {           # appear instead of preceding REPEAT)..  7/11/00
+        jstat = $yes
+ 
+        }
+    RETURN      # jb    E2143 (BRNCHINTOBLK)   7/11/00
+    }
+#else     #   if (scenario$name != iname &  etc.,etc
+#   {  # jb ELSE removed to avoid BRNCHINTOBLK complaint 7/11/00
+    REPEAT             # jb E2143 (BRNCHINTOBLK)   7/11/00
+        {
+        BREAK          # jb E2143 (BRNCHINTOBLK)   7/11/00
+        9101
+        call echor
+        call echov ("Cannot restore from ")
+        call echovn (rfile)
+        call echov  (" (")
+        if (Last$bb$page  <  IBB_Pages_Mapped )
+            {
+            call geterr_fort (ios,errmsg)		# get FORTRAN Error Messages
+            call echoh (errmsg,ARB)
+            }
+        else
+            {
+            call echoi (Last$BB$Page+1)
+            call echov (" page save w/")
+            call echoi (IBB_Pages_Mapped)
+            call echov (" page blackboard.")
+            }
+        call echov  (")")
+        call echor
+ 
+        for (k = 1; k <= 1024; k=k+1) ibb[k] = work[k]
+                                     # otherwise restore first 2 pages of BB
+        jstat = $no
+        }          # jb E2143 (BRNCHINTOBLK)   7/11/00
+#   }       # jb Brace removed; was for commented-out ELSE... 7/11/00
+ 
+return
+end
+ 
+ 
+ 
+ 
+subroutine get_saveBB_name (saved_name)
+ 
+########################################################
+#$%
+#$% Purpose:   GET_SAVEBB_NAME returns the file name of the
+#$%            most recent save
+#$%
+#$% Tables:    None
+#$%
+#$% Date:      JAN 2000
+#$%
+#$% Author:    Dane Wills
+#$%
+########################################################
+BBimplicit       # jb E2145  7/11/00
+Save$Common
+ 
+VMSchar*(*)     saved_name
+ 
+saved_name = sfile
+ 
+return
+end
+
+subroutine rename_saveBB_name (old_name, new_name, RC)
+ 
+########################################################
+#$%
+#$% Purpose:   RENAME_SAVEBB_NAME will rename the save file
+#$%            to the given name.
+#$%
+#$% Tables:    None
+#$%
+#$% Date:      JAN 2000
+#$%
+#$% Author:    Dane Wills
+#$%
+########################################################
+BBimplicit       # jb E2145  7/11/00
+Save$Common
+ 
+VMSchar*(*)     old_name, new_name
+integer         rc
+character		command[200]
+integer         kk
+ 
+kk = 0
+call smovv  ("mv ", command, kk)
+call smovvt (old_name, command, kk)
+call smovv  (" ", command, kk)
+call smovvt (new_name, command, kk)
+call smov   (EOS, command, kk)
+ 
+call do_sys_command (command, rc)
+ 
+# We might want to add some bookkeeping here of the SAVE names.
+ 
+return
+end
+ 

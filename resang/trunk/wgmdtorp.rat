@@ -1,0 +1,3148 @@
+#####   FILE:WGMDTORP.rat
+#$% written by R. Hundt, MAY 1990
+#$% torpedos handled within this module are referred to as "Smart Torpedos"
+#
+#$%#############################################################
+#$%
+#$%   For subroutine listing and hierarchy, see WGMAIN.HIR
+#$%
+#$%##############################################################
+ 
+include "bbctl.inc"
+include "bbcode.inc"
+include "bbunt.inc"
+include "bbdeq.inc"
+include "bbord.inc"
+include "bbtrp.inc"
+include "bbctm.inc"
+include "bbrmt.inc"
+include "bbshc.inc"
+include "bblcl.inc"
+include "orders.inc"
+include "ascii.inc"
+include "macros.inc"
+include "cenglog.inc"            ## Common Block for Engagement
+                                 # log data collection.  "ENcommon"
+include "plplay.inc"             ## Common Block for Engagement
+ 
+include "wgmdeng.inc"            # common block for nuclear engagements
+include "hseng.inc"
+ 
+ 
+define(BBImplicit,Implicit None)
+#define ($debug,  $$Debug$Control)
+define ($debug,)
+ 
+define($SOW_YardsAway,3000)
+ 
+#$% msg codes
+define($InWater$Code,1)
+define($AcquiredTarget$Code,2)
+define($Exploded$Code,3)
+define($ShutDown$Code,4)
+define($ExplosionAt$Code,5)
+ 
+define($Name_Indx,3)
+define($MinTORP_Indx,4)       # index that lex$torpedo$ will be if not NUCLEAR
+define($MinAT_Indx,5)         # index that lex$At$ will be if not NUCLEAR
+define($MinTrack_Indx,6)      # index that lex$track$ will be if not NUCLEAR
+define($MinBearing_Indx,5)    # index that lex$bearing$ will be if not NUCLEAR
+define($MinDegrees_Indx,6)    # index that degrees will be if not NUCLEAR
+define($MinEnable_Indx,7)     # index that lex$Enable$ will be if not NUCLEAR
+define($MinDepth_Indx,8)      # index that depth will be if not NUCLEAR
+define($MinYardsEntry,100)    # minimum distance to SOW entry
+ 
+define($TorpedoTargetType$Code,4)       # SMM 4/99 (E2079)
+ 
+ 
+define (TRPCommon,
+        INTEGER*4 nord
+        INTEGER*4 Nargs
+        INTEGER*4 nuc_offset  # ilex offset if NUCLEAR torpedo
+        INTEGER*4 Name_Indx
+        INTEGER*4 AT_Indx
+        INTEGER*4 Track_Indx
+        INTEGER*4 Bearing_Indx
+        INTEGER*4 Degrees_Indx
+        INTEGER*4 Enable_Indx
+        INTEGER*4 Depth_Indx
+        INTEGER*4 go_after_torp        # to determine when target is a torpedo
+        LITERAL TRPnames[10]      # Names of IMP. torpedos launched
+        Real*4  Target_Range
+        Real*4  Target_Bearing
+        common/TRP_common/nord, Nargs, TRPnames, nuc_offset, Name_Indx,
+            AT_Indx, Track_Indx, Bearing_Indx, Degrees_Indx, Enable_Indx,
+            Depth_Indx, go_after_torp, Target_Range, Target_Bearing
+       )
+ 
+ 
+
+Subroutine fire_smart_torpedo (OrderNumber,Ord_ID,UNT$Pointer,Num_args,ILEX)
+#######################################################
+#$%
+#$% Purpose:   fire_smart_torpedo processes improved torpedo "fire"
+#$%            commands
+#$%
+#$% Called By: EXEORD
+#$%
+#$% Calls:     FNDORD     OShootTorp
+#$%
+#$% Tables:    ORD
+#$%
+#$% Date:      APR 1990
+#$% Author:    R. Hundt
+#$%
+#######################################################
+ 
+BBcommon
+TRPCommon
+ 
+integer*4   OrderNumber
+integer*4   Ord_ID
+integer*4   Num_Args
+integer*4   ORD$Pointer
+integer*4   UNT$Pointer
+ 
+literal ILEX[Num_args]
+ 
+#$% call to find order
+call FNDORD(Ord_ID,ORD$Pointer)
+ 
+#$% if table is full, return
+if (ORD$Pointer == 0) return
+ 
+nord    = OrderNumber                   # load into common block
+Nargs   = num_args                      # load into common block
+ 
+call OShootTorp (ORD$Pointer,UNT$Pointer,ilex)
+ 
+return
+end
+ 
+
+Subroutine OShootTorp(ORD$Pointer,UNT$Pointer,ilex)
+#######################################################
+#$%
+#$% Purpose:   OShootTorp selectively executes fire
+#$%            orders for torpedos based
+#$%            on order validation.
+#$%
+#$% Called By: OSHOOT
+#$%
+#$% Calls:     VALIDATE_TORP     Shoot_Torp
+#$%
+#$% Tables:    ORD
+#$%
+#$% Date:
+#$%
+#$% Author:
+#$%
+#######################################################
+ 
+BBcommon
+ 
+integer*4   ORD$Pointer
+integer*4   UNT$Pointer
+ 
+literal ILEX[$max$args]
+ 
+integer*4   LCL$Pointer
+ 
+#$% if order phase is zero, call to validate torpedo orders
+if (xORD$Phase$i == 0)
+    {
+    call VALIDATE_TORP(ORD$Pointer,
+                       UNT$Pointer,
+                       ilex,
+                       LCL$Pointer)         # out, non-zero if passive trk &
+                                            #  no TMA avail
+    }
+ 
+#$% if order validated, call to execute torpedo orders
+if (xORD$Phase$i >  0)
+    {
+    call Shoot_Torp(ORD$Pointer,            # out
+                    UNT$Pointer,            # out
+                    ilex,                   # out
+                    LCL$Pointer)            # out
+    }
+ 
+return
+end     # End Subroutine OShootTorp
+ 
+
+Subroutine VALIDATE_TORP(ORD$Pointer,       # in
+                         UNT$Pointer,       # in, platform firing torpedo
+                         ilex,              # in
+                         LCL$Pointer)       # out, non-zero if (passive trk, no TMA)
+#######################################################
+#$%
+#$% Purpose:   VALIDATE_TORP validates torpedo
+#$%            orders and displays error mes-
+#$%            sages to the user.
+#$%
+#$% Called By: OShootTorp
+#$%
+#$% Calls:     GTUNT      SEND       WHSIDE
+#$%            DEQGET
+#$%
+#$% Tables:    UNT        ORD
+#$%
+#$% Date:      MAY 90
+#$%
+#$% Author:    R. Hundt
+#$%
+#######################################################
+ 
+BBcommon
+TRPCommon
+#                       **
+literal    ILEX[$max$args]
+ 
+real*4      bearing
+integer*4   bearing_only
+literal     cstrip8
+integer*4   eqlist[5,ARB]
+integer*4   iFind
+integer*4   ilen
+integer*4   itargindx
+integer*4   LCL$Pointer
+real*4      MaxRange
+integer*4   N
+integer*4   nfound
+integer*4   ORD$deqindx$i
+integer*4   ORD$Phase$i
+integer*4   ORD$Pointer
+real*4      range
+real*4      rlat
+real*4      rlon
+integer*4   RMT$Pointer
+integer*4   TRP$Pointer
+integer*4   TRP$SOWRange$i
+real*4      UNT$AssumedLatitude$F
+literal     UNT$Name$c
+integer*4   UNT$Pointer
+integer*4   UNT$View$i
+Integer     LCOMP       # jb AAI01/LCOMP    E2145   2/14/01
+character   msg[ARB]
+ 
+#                     1         2         3         4         5         6
+##            1234567890123456789012345678901234567890123456789012345678901234567
+#String msga "         has no      smart torpedos."
+#String msgb "         cannot shoot          at invalid track number      ."
+#String msgc "         cannot shoot          at old track        ."
+#String msgd "         cannot shoot          at track     ,  beyond range."
+#String msge "         cannot shoot          at track     , NO Local track."
+#String msgf "         is not a nuclear torpedo."
+#String msgg "         is not a conventional torpedo."
+ 
+LCL$Pointer = 0
+ 
+#$% get unit name and view
+UNT$Name$c = xUNT$Name$c
+UNT$view$i = xUNT$View$i
+ 
+Name_Indx = $Name_Indx
+ 
+nfound = 0
+ 
+call DEQGET(UNT$Pointer,
+            $SmartTorpedo$Code,            # send ident code
+            nfound,                        # send/receive nbr items fnd
+            eqlist)                        # send/receive list of EQ
+#----------------------------------------------------------------------
+#          lines from DEQGET:
+#    eqlist[1,nfound] = DEQ$Pointer$index       # save index of equipment
+#    eqlist[2,nfound] = Xdeq$pntr$i             #   equipment Pointer
+#    eqlist[3,nfound] = deq$remaining$i         #   equipment count
+#    eqlist[4,nfound] = 0                       #
+#    eqlist[5,nfound] = 0                       #
+#---------------------------------------------------------------------
+# if Improved torpedo NOT found on platform
+if (eqlist[1,1] == $No)
+    {
+    #$% move unit name to msg array
+    ilen = 0
+    Call SMOVHN(UNT$name$c,$$MaxLit,msg,ilen)
+    Call SMOVV(" has no ",msg,ilen)
+    Call SMOVHN(ilex[ Name_Indx ],$$MaxLit,msg,ilen)
+    Call SMOVV(" smart torpedos. ",msg,ilen)
+    #$% display message
+    call send_(UNT$view$i,0,ilen,msg)    #             1/10/91
+    return
+    }
+ 
+iFind = $No
+For (N=1; N <= nfound; N =N +1)
+    {
+    TRP$Pointer = eqlist[2,N]
+    if (LCOMP(xTRP$Name$C,ilex[Name_Indx]) == 0 ) # jb AAI01/LCOMP 2/14/01
+        {
+        iFind = $Yes
+        ORD$DeqIndx$i = eqlist[1,N]   # index into deq table
+        putORD$DeqIndx$i              # for reference in Shoot_Torp
+        BREAK
+        }
+    }
+ 
+#$% if equipment not found in torpedo characteristics
+if( iFind != $Yes )
+    {
+    #$% move unit name to msg array
+    ilen = 0
+    Call SMOVHN(UNT$name$c,$$MaxLit,msg,ilen)
+    Call SMOVV(" has no ",msg,ilen)
+    Call SMOVHN(ilex[ Name_Indx ],$$MaxLit,msg,ilen)
+    Call SMOVV(" smart torpedos. ",msg,ilen)
+    #$% display message
+    call send_(UNT$view$i,0,ilen,msg)    #             1/10/91
+    return
+    }
+ 
+#$% if nuclear torpedo
+IF ( ilex [ 4 ] == $LEX$Nuclear$ )
+    {
+    nuc_offset = 1                  # use to index ilex
+ 
+    if (Nuclear$Capable == $NO)
+        {
+        call wgoerr (unt$View$i,UNT$Name$c,nord,Nargs,ilex,"Scenario not nuclear.")
+        return
+        }
+    }
+else
+    {
+    nuc_offset = 0
+    }
+ 
+#$% if nuclear ORDER and torpedo NOT nuclear
+if (nuc_offset == 1 & xTRP$Yield$I == 0)
+    {
+    ilen = 0
+    Call SMOVHN(ILEX[ Name_indx ],$$MaxLit,msg,ilen)
+    Call SMOVV(" is not a nuclear torpedo.",msg,ilen)
+    call send_(UNT$View$I,0,ilen,MSG)    #             1/10/91
+    ORD$Phase$i = 0             # clear the order phase to cancel.
+    putORD$Phase$i
+    return
+    }
+ 
+#$% if ORDER is NOT nuclear but torpedo lacks CONVENTIONAL capability..
+if (nuc_offset == 0 & xTRP$EPU$I == 0)
+    {
+    ilen = 0
+    Call SMOVHN(ILEX[ Name_indx ],$$MaxLit,msg,ilen)
+    Call SMOVV(" is not a conventional torpedo.",msg,ilen)
+    call send_(UNT$View$I,0,ilen,Msg)    #             1/10/91
+    ORD$Phase$i = 0
+    putORD$Phase$i
+    return
+    }
+ 
+#$% set up ilex indexes
+AT_Indx      = $MinAT_Indx + nuc_offset
+Track_Indx   = $MinTrack_Indx + nuc_offset
+Bearing_Indx = $MinBearing_Indx + nuc_offset
+Degrees_Indx = $MinDegrees_Indx + nuc_offset
+Enable_Indx  = $MinEnable_Indx + nuc_offset
+Depth_Indx   = $MinDepth_Indx + nuc_offset
+ 
+#$% if firing at track
+if (ilex[ AT_Indx ] == $Lex$At$)
+    {
+    RMT$Pointer = 0
+    bearing_only = $No
+ 
+    #$% get track
+    call GtAct (UNT$View$I,
+                ilex[ Track_Indx ],  # track number, from order
+                RMT$Pointer,
+                bearing_only)
+ 
+    #$%% if no track
+    if (RMT$Pointer == 0)
+        {
+        ilen = 0
+        call SMOVHN(UNT$name$c,$$MaxLit,msg,ilen)
+        Call SMOVV(" cannot shoot ",msg,ilen)
+        Call SMOVHN(ilex[ Name_Indx ],$$MaxLit,msg,ilen)
+        Call SMOVV(" at invalid track number ",msg,ilen)
+        call SMOVHN(ilex[ Track_Indx ],$$MaxName,msg,ilen) # SMM 9/99 e2141
+        call send_(UNT$view$i,0,ilen,msg)    #             1/10/91
+        return
+        }
+    else if (xRMT$DetectionAge$I == $Old$Code)     ## active track old
+        {
+        ilen = 0
+        call SMOVHN(UNT$name$c,$$MaxLit,msg,ilen)
+        Call SMOVV(" cannot shoot ",msg,ilen)
+        Call SMOVHN(ilex[ Name_Indx ],$$MaxLit,msg,ilen)
+        Call SMOVV(" at old track ",msg,ilen)
+        call SMOVHN(ilex[ Track_Indx ],$$MaxName,msg,ilen) # SMM 9/99 E2141
+        call send_(UNT$view$i,0,ilen,msg)    #             1/10/91
+        return
+        }
+    #$% else if active track (with range) or
+    #$%  passive track with target motion analysis
+    else if ( bearing_only != $yes |
+              xRMT$TMAflag$i == $yes )                    # 1/14/91,reh
+        {
+        #$% range thru water, for non-SOW type torps.
+        MaxRange = xTRP$Speed$i * xTRP$RunTime$i * $Hours$Per$Minute   # in nm
+ 
+        #$% non-zero, if this is stand-off weapon torpedo
+        TRP$SOWRange$i = xTRP$SOWRange$i
+ 
+        #$% if stand off torp
+        IF ( TRP$SOWRange$i > 0.0 )
+            {
+            #$% range thru air plus water
+            MaxRange = TRP$SOWRange$i /2000.0 + MaxRange         # in nm
+            }
+ 
+        #$% if passive track and target motion analysis avalailable
+        IF ( xRMT$TMAflag$i == $yes )               # 1/14/91
+            {
+            RLat = xRMT$TmaLat$F                    # 1/14/91
+            RLon = xRMT$TmaLon$F                    # 1/14/91
+            }
+        ELSE
+            {
+            RLat = xRMT$ApparentLat$F
+            RLon = xRMT$ApparentLon$F
+            }
+ 
+        UNT$AssumedLatitude$F = xUNT$AssumedLatitude$F
+ 
+        #$% get range and bearing from firing platform to target
+        call RLL2RB( UNT$AssumedLatitude$F,
+                     xUNT$AssumedLongitude$F ,
+                     COS(UNT$AssumedLatitude$F),
+                     RLat,
+                     RLon,
+                     cos(RLat),
+                     Range,                    # out, nm
+                     Bearing)                  # out, radians
+ 
+        if ( Range > MaxRange)
+            {
+            ilen = 0
+            call SMOVHN(UNT$name$c,$$MaxLit,msg,ilen)
+            Call SMOVV(" cannot shoot ",msg,ilen)
+            Call SMOVHN(ilex[ Name_Indx ],$$MaxLit,msg,ilen)
+            Call SMOVV(" at track ",msg,ilen)
+            call SMOVHN(ilex[ Track_Indx ],$$MaxName,msg,ilen) # SMM 9/99 e2141
+            Call SMOVV(" , beyond range.",msg,ilen)
+            call send_(UNT$view$i,0,ilen,msg)    #             1/10/91
+            return
+            }
+        } # end, if active track
+    #$% else if passive track
+    else if ( bearing_only == $yes )
+        {
+        #$% if remote TMA solution not available
+        if ( xRMT$TMAflag$i != $yes )
+            {
+            #$% check local track table for TMA
+            call getlcl_TMA ( UNT$Pointer,          # in, detector pointer
+                              xRMT$detectee$i,      # in, target index
+                              LCL$Pointer)          # out
+ 
+            #$% if no TMA local track held
+            IF ( LCL$Pointer == 0 )
+                {
+                itargindx = xRMT$detectee$i
+ 
+                #$% try to find any local track detection
+                call getlcl_ANY ( UNT$Pointer,          # in, detector pointer
+                                  itargindx,            # in, target index
+                                  LCL$Pointer)          # out
+ 
+                #$% if no local track found
+                IF ( LCL$Pointer == 0 )
+                    {
+                    ilen = 0
+                    call SMOVHN(UNT$name$c,$$MaxLit,msg,ilen)
+                    call SMOVV(" cannot shoot ",msg,ilen)
+                    Call SMOVHN(ilex[ Name_Indx ],$$MaxLit,msg,ilen)
+                    call SMOVV(" at track ",msg,ilen)
+                    call SMOVHN(ilex[ Track_Indx ],$$MaxName,msg,ilen) # SMM 9/99 E2141
+                    call SMOVV(" , NO Local track.",msg,ilen)
+                    call send_(UNT$view$i,0,ilen,msg)   #           1/10/91
+                    return
+                    }
+                }
+            } # if remote TMA solution NOT available
+        } # end if passive track
+ 
+    }# end if shot at track
+ 
+#$% set order phase to one and store
+ORD$Phase$i = 1
+putORD$Phase$i
+ 
+return
+end # End VALIDATE_TORP
+ 
+
+Subroutine Shoot_Torp(ORD$Pointer,UNT$Pointer,ilex,LCL$Pointer)
+#######################################################
+#$%
+#$% Purpose:   Shoot_Torp fires torpedos or
+#$%            displays error messages to the user..
+#$%
+#$% Called By: OShootTorp
+#$%
+#$% Calls:     SEND       UNTGET
+#$%            GTUNT      Build_Torp
+#$%
+#$% Tables:    UNT        ORD
+#$%            TRP
+#$%
+#$% Date:
+#$% Author:
+#$%
+#######################################################
+ 
+BBcommon
+TRPCommon
+ENcommon
+integer*4   ORD$Pointer, shc$pointer
+literal     ILEX[$max$args]
+integer*4   LCL$Pointer
+Integer LCOMP   # jb AAI01/LCOMP   E2145 2/14/01
+integer*4   bearing_only
+literal     cstrip8
+integer*4   DEQ$Pointer
+integer*4   DEQ$Remaining$i
+integer*4   DEQ2$Pointer
+integer*4   I
+integer*4   ilen
+integer*4   ineed
+Real*4      Intra_Degradation
+integer*4   itargindx
+integer*4   j
+integer*4   nfind [ 11 ]
+integer*4   num_shot
+integer*4   ORD$deqindx$i
+integer*4   ORD$Phase$i
+real*4      PbLaunch_Intra
+real*4      random
+real*4      Random_Number
+integer*4   RMT$Pointer
+integer*4   TRP$Pointer
+real*4      TRP$PbLaunch$F
+literal     UNT$Name$c
+integer*4   UNT$View$i
+integer*4   UNT2$Type$i
+integer*4   UNT$Pointer
+integer*4   UNT2$Pointer
+real*4      x
+data x/0.0/		# Get next random number in sequence
+ 
+Integer*4 Hold_Deq
+Character Msg[ARB]
+integer     failed_torpedo_launch    # (E1118)
+ 
+#            1234567890123456789012345678901234567890123456789012345678901
+#String msg1 "Unit array full -- cannot launch torpedos."
+#String msg2 "         too high to shoot torpedos."
+#String msg3 "   torpedos successfully shot by         .    failed."
+#String msg4 "         lost track      , did not shoot torpedos."
+#String msg5 "         has no          torpedos."
+#String msg7 "         did not fire at      , type mismatch with missile type."
+ 
+ 
+character msg8[80]
+ 
+#$% if order minutes is not game minutes, return
+if (order$minute != game$minute) return
+ 
+#$% get unit name and view
+UNT$Name$c = xUNT$Name$c
+UNT$view$i = xUNT$View$i
+ 
+#$% get torp DEQ entry
+ORD$deqindx$i = xORD$deqindx$i
+DEQ$Pointer$TO  (ORD$deqindx$i)
+ 
+deq$Remaining$i = Xdeq$Remaining$i
+if (deq$Remaining$i < 1)
+    {
+    #$% clear order phase and save, return
+    ORD$Phase$i = 0
+    putORD$Phase$i
+ 
+    #$% Notify Player that Unit has no Improved Torpedos..
+    ilen = 0
+    Call SMOVHN(UNT$name$c,$$MaxLit,msg,ilen)
+    Call SMOVV(" has no ",msg,ilen)
+    Call SMOVHN(ilex[ Name_Indx ],$$MaxLit,msg,ilen)
+    Call SMOVV(" torpedos",msg,ilen)
+    #$% display message
+    call send_(UNT$view$i,0,ilen,msg)    #             1/10/91
+ 
+    return
+    }
+ 
+TRP$Pointer = Xdeq$Pntr$i        # Is this the REQUESTED 'new' torpedo?
+if (LCOMP(XTRP$Name$C,ilex[ Name_Indx ]) != 0 ) # jb AAI01/LCOMP 2/14/01
+    {
+    #$% .. after clearing order phase to cancel..
+    ORD$Phase$i = 0
+    putORD$Phase$i
+ 
+    #$% move unit name to message
+    ilen = 0
+    Call SMOVHN(UNT$name$c,$$MaxLit,msg,ilen)
+    Call SMOVV(" has no ",msg,ilen)
+    Call SMOVHN(ilex[ Name_Indx ],$$MaxLit,msg,ilen)
+    Call SMOVV(" torpedos.",msg,ilen)
+    #$% Notify Player the REQUESTED "new" torpedo isn't aboard..
+    call send_(UNT$view$i,0,ilen,msg)    #             1/10/91
+ 
+    return
+    }
+ 
+#$% if type is aircraft and true altitude depth is greater than launch alt
+if (xUNT$Type$i == $Air$Code &
+    xUNT$TrueAltDepth$i > xTRP$MaxAlt$i)
+    {
+    #$% enter unit name and call to display message
+    ilen = 0
+    Call SMOVHN(UNT$name$c,$$MaxLit,msg,ilen)
+    Call SMOVV(" too high to shoot torpedos.",msg,ilen)
+    call send_(UNT$View$I,0,ilen,msg)    #             1/10/91
+    ORD$Phase$i = 0
+    putORD$Phase$i
+    return
+    }
+ 
+#$% get number of torpedos to fire, with some maximum limit
+ineed = min0(int(ilex[ 2 ]),deq$remaining$i,10)
+ 
+# If suicide sub, fire remaining torpedoes and delete self
+if (xUNT$Type$i == $sub$Code)
+{
+    shc$pointer = Xunt$ShcPntr$i
+    if (Xshc$SuicideSubFlag$i == $yes)
+    {
+        ineed = min0(deq$remaining$i,10)
+        putunt$Status$i( $beingDeleted$code )
+        ilen = 0
+        Call SMOVHN(UNT$name$c,$$MaxLit,msg,ilen)
+        Call SMOVV(" suicide sub being deleted.",msg,ilen)
+        call send_(UNT$View$I,0,ilen,msg)    #             1/10/91
+    }
+}
+ 
+#$% find empty UNT slots for (ineed) torpedos
+call UNTGET(ineed,NFIND)
+ 
+#$% if not enough slots found, ABORT:
+if (NFIND[1] < ineed)
+    {
+    #$% call to display unit array full message
+    ilen = 0
+    Call SMOVV("Unit array full -- cannot launch torpedos.",msg,ilen)
+    call send_(UNT$View$I,0,ilen,msg)    #             1/10/91
+    ORD$phase$i = 0
+    putORD$phase$i
+    return
+    }
+ 
+#$% clear order phase and store
+ORD$Phase$i = 0
+putORD$Phase$i
+ 
+itargindx = 0
+ 
+#$% initialize for intra-platform EMI
+UNT2$Pointer = 0
+ 
+#$% if firing at track
+if (ilex[ AT_Indx ] == $Lex$At$)
+    {
+    RMT$Pointer = 0  # get active track
+    bearing_only = $no
+ 
+    call GtAct (UNT$View$I,
+                ilex[ Track_Indx ],
+                RMT$Pointer,
+                bearing_only)
+ 
+    # if track not there anymore...
+    if (rmt$Pointer == 0)
+        {
+        ilen = 0
+        call SMOVHN(UNT$name$c,$$MaxLit,msg,ilen)
+        call SMOVV(" lost track ",msg,ilen)
+        call SMOVHN(ilex[ Track_Indx ],$$MaxName,msg,ilen) # SMM 9/99 E2141
+        call SMOVV(", did not shoot torpedos.",msg,ilen)
+        call send_(UNT$view$i,0,ilen,msg)    #             1/10/91
+        ORD$phase$i = 0
+        putORD$phase$i
+        return
+        }
+    else # we found the track in remote table
+        {
+        itargindx = xrmt$detectee$i
+        UNT2$Pointer$to itargindx
+        UNT2$Type$i = xUNT2$Type$i
+ 
+        #$% torpedos can't target aircraft or cruise miss.
+        if (UNT2$Type$i == $air$Code |
+            UNT2$Type$i == $CruiseMissile$Code )
+            {
+            ilen = 0
+            call SMOVHN(UNT$name$c,$$MaxLit,msg,ilen) # type mismatch with target &
+            call SMOVV(" did not fire at ",msg,ilen)
+            call SMOVHN (ilex[ Track_Indx ],$$MaxName,msg,ilen) # SMM 9/99 E2141
+            call SMOVV(", type mismatch with missile type.",msg,ilen)
+            call send_(UNT$view$i,0,ilen,msg)    #             1/10/91
+            ORD$phase$i = 0
+            putORD$phase$i
+            return
+            }
+        } # End If we found the track
+    } # end if firing at track
+ 
+num_shot = 0                               # initlz. no 'new' torpedos shot
+ 
+TRP$PbLaunch$F = xTRP$PbLaunch$F           #get launch probability
+ 
+#$% for each torpedo to fire
+for (j=1; j <= ineed; j=j+1)
+    {
+    Random_number = RANDOM(X)
+    failed_torpedo_launch = $no
+ 
+    #$% if number is greater than launch probability, get next
+    if (RANDOM_Number > TRP$PbLaunch$F)
+        failed_torpedo_launch = $yes
+ 
+    if (failed_torpedo_launch == $yes)       # JFR 4/22/93 (E1118)
+       {        # launch failed so collect info for engagement log
+        if (log$engage != $no)
+          {
+           call engdata (unt$pointer, unt2$pointer)
+           PUTeng$Track$c( "TORP    " )
+           PUTeng$Weapon$c( xTRP$Name$C )
+           PUTeng$Result$i( eng$UnSuccessful$code )
+           PUTeng$Resultph$f( TRP$PbLaunch$F )
+ 
+           call write_eng_rec
+          }
+ 
+        next                     # launch failure continue to next launch
+       }  # END if Engagement Log desired for failed smart torpedo launches
+ 
+    num_shot = num_shot + 1               #increment number shot
+ 
+    UNT2$Pointer = NFIND[J+1]             #get empty slot Pointer
+ 
+    #$% call to build torpedo characteristics
+    call Build_Torp( UNT$Pointer,         # unit firing the torp
+                     UNT2$Pointer,        # empty unit slot pointer
+                     TRP$Pointer,         # character. pointer
+                     RMT$Pointer,         # remote track
+                     LCL$Pointer,         # local trk, non-zero if passive &
+                                          # no TMA available
+                     itargindx,
+                     bearing_only,        # flag, in
+                     ilex,
+                     J )     # J is the nth improved torpedo in this order
+ 
+    if ( log$engage != $no &              # if engagement log desired
+         UNT2$Pointer$Valid )             #
+        {
+        call engdata (unt$pointer, unt2$pointer)
+        PUTeng$Track$c( xUNT2$Name$C )             # Smart Torpedo Unit Name
+        PUTeng$Weapon$c( xTRP$Name$C )             # Smart Torpedo Type
+        PUTeng$Result$i( eng$Launch$code )
+ 
+        CALL write_eng_rec
+        }  # END if Engagement Log desired
+ 
+    } # end for each torpedo to fire
+ 
+# decrement improved torpedos
+deq$remaining$i = deq$remaining$i - ineed
+putdeq$remaining$i
+ 
+ilen = 0
+Call SMOVIB(num_shot,        2,msg,ilen) # insert nbr successful
+Call SMOVV(" torpedo successfully shot by ",msg,ilen)
+Call SMOVHn (UNT$name$c,    $$MaxLit,msg,ilen)    # insert platform name
+Call SMOVV(". ",msg,ilen)
+Call SMOVIB((ineed-num_shot),2,msg,ilen)  # insert num of failures
+Call SMOVV(" failed.",msg,ilen)
+call send_(UNT$View$I,0,ilen,MSG)    #             1/10/91
+ 
+ilen = 0
+ 
+#$% load the new torpedo platform names
+for ( i=1; i <= num_shot; i = i +1 )       # num_shot vice nameN
+    {
+    Call SMOVHN(TRPNames[i],$$MaxLit,msg8,ilen)   # 8 char name
+    Call SMOVV (" ",msg8,ilen)               #  blank <<<>>>
+ 
+    if (ilen > 72)
+        {
+        call send_(UNT$View$I,0,ilen,MSG8)
+        ilen = 0
+        }
+    }
+ 
+#$% send remaining info
+if (ilen > 0)
+    {
+    call send_(UNT$View$I,0,ilen,MSG8)
+    }
+ 
+return
+end        # End  Shoot_Torp
+ 
+
+Subroutine Build_Torp(UNT$Pointer,            # unit firing torpedos
+                      UNT2$Pointer,           # free unit slot
+                      TRP$Pointer,            # improved torpedo characteristics
+                      RMT$Pointer,            # Pointer to remote track
+                      LCL$Pointer,            # Pointer to Local track
+                      itargindx,              # unit target index
+                      bearing_only,           # flag, remote track
+                      ilex,                   # lex values
+                      J ) # (The Jth improved torpedo in this order)
+ 
+#######################################################
+#$% index
+#$% Purpose:   Build_Torp builds torpedo charac-
+#$%            teristics into the UNT tables to be
+#$%            identified after launch.
+#$%
+#$% Called By: Shoot_Torp
+#$%
+#$% Calls:     NAVERR     GETRB_M
+#$%
+#$% Tables:    UNT        TRP
+#$%
+#$% Date:
+#$%
+#$% Author:
+#$%
+#######################################################
+ 
+BBcommon
+TRPCommon
+integer*4   UNT$Pointer
+integer*4   UNT2$Pointer
+integer*4   RMT$Pointer
+integer*4   LCL$Pointer
+integer*4   itargindx
+integer*4   bearing_only
+literal     ilex[$max$args]
+integer*4   j
+ 
+literal     cstrip8
+real*4      delta_lat                    # difference (radians) true/assum
+real*4      delta_lon                    # difference (radians) true/assum
+integer*4   TRP$Pointer
+integer*4   TRP$RunTime$I
+integer*4   TRP$Speed$I
+real*4      UNT$AssumedLatitude$F
+real*4      UNT$AssumedLongitude$F
+real*4      UNT$TrueLatitude$F
+real*4      UNT$TrueLongitude$F
+real*4      UNT2$CosTrueLat$F
+integer*4   UNT2$Stratum$i
+integer*4   UNT2$AssignedTarget$I
+real*4      UNT2$AssumedLatitude$F
+real*4      UNT2$AssumedLongitude$F
+real*4      UNT2$AssumedSpeed$F
+real*4      UNT2$AttackBearing$F
+real*4      UNT2$AttackRange$F
+integer*4   UNT2$Enabled$i
+integer*4   UNT2$HierarchyId$i
+integer*4   UNT2$LaunchIndx$i
+integer*4   UNT2$Nuclear$i
+integer*4   UNT2$OrderedAltDepth$I
+real*4      UNT2$OrderedLatitude$F
+real*4      UNT2$OrderedSpeed$F
+real*4      UNT2$RangeToNext$F
+integer*4   UNT2$Speed$i
+integer*4   UNT2$Status$I
+integer*4   UNT2$Subtype$i
+real*4      unt2$TimeSeek$f
+real*4      unt2$TimeTerm$f
+integer*4   UNT2$TRPPntr$I
+integer*4   UNT2$TrueAltDepth$I
+real*4      UNT2$TrueLatitude$F
+real*4      UNT2$TrueLongitude$F
+real*4      UNT2$TrueSpeed$F
+integer*4   UNT2$Type$I
+integer*4   UNT2$View$I
+integer*4   UNT2$WireGuide$i
+real*4      wcoslat
+real*4      wlat                         # water entry, true pos
+real*4      wlon                         # water entry, true pos
+ 
+UNT2$Type$I = $Sub$Code
+putUNT2$Type$I
+ 
+UNT2$Subtype$i = $Torpedo$SubCode       #sub type is new torpedo
+putUNT2$Subtype$i
+ 
+UNT2$Status$I = $Proceeding$Code        #status is proceeding
+putUNT2$Status$I
+ 
+UNT2$View$I = xUNT$View$I               #view of launch platform
+putUNT2$View$I
+ 
+UNT2$HierarchyId$i = xUNT$HierarchyId$i #same heirarchy as unit doing the fire
+putUNT2$HierarchyId$i
+ 
+#$% if launching platform is a submarine
+IF ( xUNT$SuperType$i == $Submarine$SuperCode )
+    {
+    UNT2$WireGuide$i = $yes             # torp may be steered as a game unit
+    putUNT2$WireGuide$i
+    }
+#$% else if launching platform is aircraft
+ELSE IF ( xUNT$Type$i == $Air$Code )
+    {
+    putUNT2$RadialSearchFlag$i ($yes)        # torp has capability to search radially
+    putUNT2$CircleSearchFlag$i ($yes)        # torp in circle search, 12/90
+    }
+ 
+UNT2$TRPPntr$I = TRP$Pointer                 # enter characteristics ptr
+putUNT2$TRPPntr$I
+ 
+#$% torpedo run time
+TRP$RunTime$I = xTRP$RunTime$I
+ 
+# enter termination time
+unt2$TimeTerm$f = TRP$Runtime$i + ORDER$MINUTE
+putunt2$TimeTerm$f
+ 
+call assign_unique_unit_name (unt2$pointer)  # common naming routine  DEW 5/90
+ 
+#$% index of platform firing the torpedo
+UNT2$LaunchIndx$i = UNT$Pointer$Index
+putUNT2$LaunchIndx$i
+ 
+TRPNames[J] = xUNT2$Name$C # Name to common array for SEND in Shoot_Torp
+ 
+#$% if fired with nuclear capability
+if ( nuc_offset != 0 )
+    {
+    UNT2$Nuclear$i = $yes
+    putUNT2$Nuclear$i
+    }
+ 
+if ( ilex [ Depth_Indx ] == $Lex$Deep$ )
+    {
+    UNT2$Stratum$i = $Below$AcousticLayer
+    }
+else if ( ilex [ Depth_Indx ] == $Lex$Shallow$ )
+    {
+    UNT2$Stratum$i = $Above$AcousticLayer
+    }
+ 
+putUNT2$Stratum$i
+ 
+# negate position order, no ordered position
+UNT2$OrderedLatitude$F = $PI
+putUNT2$OrderedLatitude$F
+ 
+#$% put depth to some non-zero value
+#$% later logic will use the DEEP/SHALLOW definition
+UNT2$TrueAltDepth$I = 10
+putUNT2$TrueAltDepth$I
+ 
+UNT2$OrderedAltDepth$I = UNT2$TrueAltDepth$I
+putUNT2$OrderedAltDepth$I
+ 
+#$% no attack guide
+UNT2$AttackBearing$F = 0.0
+putUNT2$AttackBearing$F
+ 
+UNT2$AttackRange$F = 0.0
+putUNT2$AttackRange$F
+ 
+UNT2$AssignedTarget$I = itargindx
+putUNT2$AssignedTarget$I
+ 
+TRP$Speed$I = xTRP$Speed$I
+ 
+#$% set maximum speed for unit
+UNT2$Speed$i = TRP$Speed$i
+putUNT2$Speed$i
+ 
+UNT$AssumedLatitude$F = xUNT$AssumedLatitude$F
+UNT$AssumedLongitude$F = xUNT$AssumedLongitude$F
+ 
+UNT$TrueLatitude$F = xUNT$TrueLatitude$F
+UNT$TrueLongitude$F = xUNT$TrueLongitude$F
+ 
+#$% use later to adjust assumed position of torpedo
+delta_lat = UNT$TrueLatitude$F - UNT$AssumedLatitude$F
+delta_lon = UNT$TrueLongitude$F - UNT$AssumedLongitude$F
+ 
+#$% if stand-off weapon
+IF ( xTRP$SOWRange$i > 0.0 )
+    {
+    #$% determine LL where torpedo will enter water
+    call water_entry ( UNT$Pointer,
+                       TRP$Pointer,
+                       RMT$Pointer,
+                       LCL$Pointer,
+                       bearing_only,
+                       ilex,
+                       wlat,
+                       wlon,
+                       wcoslat)
+ 
+    #$% SOWs are enabled at launch
+    unt2$TimeSeek$f = Order$Minute
+ 
+    # torpedo can acquire a target as soon as it splashes
+    UNT2$Enabled$i = $yes
+    }
+ELSE # else if not SOW
+    {
+    #$% torpedo enters at firing platform location
+    wlat = UNT$TrueLatitude$F        # latitude platform firing torp.
+    wlon = UNT$TrueLongitude$F       # longitude platform firing torp.
+    wcoslat = cos ( wlat )
+ 
+    #$% set seek time here
+    unt2$TimeSeek$f = (ilex[ enable_indx ] * 60.)/_
+                float(TRP$Speed$i) + ORDER$MINUTE #set seeker delay
+    unt2$TimeSeek$f = max(0.,unt2$TimeSeek$f)
+ 
+    UNT2$Enabled$i = $no
+    }
+ 
+putunt2$TimeSeek$f
+ 
+putUNT2$Enabled$i
+ 
+#$% set torpedo unit to initial water entry location
+UNT2$TrueLatitude$F = wlat
+putUNT2$TrueLatitude$F
+ 
+UNT2$TrueLongitude$F = wlon
+putUNT2$TrueLongitude$F
+ 
+UNT2$CosTrueLat$F = wcoslat
+putUNT2$CosTrueLat$F
+ 
+UNT2$AssumedLatitude$F = UNT2$TrueLatitude$F - delta_lat
+putUNT2$AssumedLatitude$F
+ 
+UNT2$AssumedLongitude$F = UNT2$TrueLongitude$F - delta_lon
+putUNT2$AssumedLongitude$F
+ 
+#$% set torpedo course, after water entry
+call set_course ( UNT2$Pointer,        # in torpedo unit
+                  TRP$Pointer,         # in
+                  RMT$Pointer,         # in
+                  LCL$Pointer,         # in
+                  bearing_only,        # in, flag
+                  ilex)                # in
+ 
+#$% get torpedo moving full speed
+UNT2$TrueSpeed$F = TRP$Speed$i
+ 
+#$% September 24, 1991 clk
+#$% Per Dan Bacon, air launched torpedos will perform circle
+#$% search (approx.) at the speed entered in BUILD
+ 
+putUNT2$TrueSpeed$F
+ 
+UNT2$AssumedSpeed$F = UNT2$TrueSpeed$F # enter assumed Speed
+putUNT2$AssumedSpeed$F
+ 
+#$% force the torpedo to hang around for a game cycle
+UNT2$OrderedSpeed$F = UNT2$TrueSpeed$F        # enter ordered Speed
+putUNT2$OrderedSpeed$F
+ 
+UNT2$RangeToNext$F = FLOAT(TRP$Speed$I * TRP$RunTime$I) * $Hours$Per$Minute
+putUNT2$RangeToNext$F
+ 
+putunt2$InterceptTime$f (0)
+ 
+#$% if SOW type and enabled (at launch)
+if (xUNT2$Enabled$i == $yes)
+    {
+    UNT2$AssignedTarget$i = xUNT2$AssignedTarget$i
+ 
+    #$% if launched at a track
+    if (UNT2$AssignedTarget$i != $no)
+        {
+        #$% send a message to target
+        call send_msg(UNT2$AssignedTarget$i, UNT2$Pointer$Index, $InWater$Code)
+        }
+    }
+ 
+return
+end        # End  Build_Torp
+ 
+
+#$% determine where a SOW torpedo will enter the water
+subroutine SOW_splash ( lat1,                 # in
+                        lon1,                 # in
+                        cosLat1,              # in
+                        lat2,                 # in
+                        lon2,                 # in
+                        coslat2,              # in
+                        range,                # out
+                        bearing)              # out
+ 
+implicit none
+ 
+Real*4  lat1
+Real*4  lon1
+Real*4  cosLat1
+Real*4  lat2
+Real*4  lon2
+Real*4  coslat2
+real*4  bearing
+real*4  range
+ 
+#$% get range and bearing from point to point
+call RLL2RB( lat1,
+             lon1,
+             coslat1,
+             lat2,
+             lon2,
+             coslat2,
+             Range,                    # out, nm
+             Bearing)                  # out, radians
+ 
+#$% if target range greater than distance SOW torp. lands short of target
+if ( Range - ($SOW_YardsAway/2000.0) > 0 )
+    {
+    #$% adjust range to splash
+    range = Range - ($SOW_YardsAway/2000.0)     # in nm
+    }
+else
+    {
+    range = range / 2.0                         # in nm
+    }
+ 
+return
+end
+ 
+
+#$% determine LL where torpedo will enter water
+subroutine water_entry ( UNT$Pointer,       # in, unit firing torpedo
+                         TRP$Pointer,       # in
+                         RMT$Pointer,       # in, non-zero if active track
+                         LCL$Pointer,       # in
+                         bearing_only,      # in, active/passive track flag
+                         ilex,              # in
+                         wlat,              # out
+                         wlon,              # out
+                         wcoslat )          # out
+ 
+BBCommon
+TRPCommon
+ 
+integer*4   UNT$Pointer
+integer*4   RMT$Pointer
+integer*4   TRP$Pointer
+integer*4   LCL$Pointer
+integer*4   bearing_only
+literal     ilex[$max$args]
+real*4      wcoslat
+real*4      wlat                            # water entry
+real*4      wlon                            # water entry
+ 
+real*4      CosTarget_Lat
+real*4      entry_range
+real*4      entry_bearing
+real*4      TGTLat
+real*4      TGTLon
+integer*4   TRP$SOWRange$i
+integer*4   UNT2$Pointer
+real*4      xcoslat
+real*4      xlat                            # firing platform
+real*4      xlon                            # firing platform
+ 
+entry_bearing = 0.0        # bearing from launcher, torpedo will make water entry
+entry_range   = 0.0        # distance from launcher, torpedo will make water entry
+ 
+#$% this field is also used as a stand-off weapon flag
+TRP$SOWRange$i = xTRP$SOWRange$i
+ 
+#$% if stand-off weapon
+IF ( TRP$SOWRange$i > 0.0 )
+    {
+    xlat = xUNT$TrueLatitude$F    # latitude platform firing torp.
+    xlon = xUNT$TrueLongitude$F   # longitude platform firing torp.
+    xcoslat = cos (xlat)
+ 
+    IF (ilex[ Bearing_Indx ] == $Lex$Bearing$)
+        {
+        entry_bearing = $PI * FLOAT(int(ILEX[ Degrees_Indx ]))/180.   # degrees to radians
+ 
+        #$% make sure less than 2PI radians
+        $ang2pi (entry_bearing)
+ 
+        entry_range = ilex [ Enable_Indx ]
+ 
+        #$% set entry to some minimum distance
+        entry_range = MAX( $MinYardsEntry / 2000.0,entry_range) # 1/10/91
+ 
+        #$% distance to water entry
+        entry_range = MIN ( entry_range, TRP$SOWRange$i/2000.0) # in nm
+        }
+    #$% shot at track
+    ELSE IF (ilex [ At_Indx ] == $LEX$At$ )
+        {
+        #$% if passive track
+        if ( bearing_only == $yes )
+            {
+            #$% if target motion analysis available
+            if ( xRMT$TMAflag$i == $yes )
+                {
+                #$% get target motion analysis lat/long for target (remote track)
+                TgtLat = xRMT$TMALat$F
+                TgtLon = xRMT$TMALon$F
+ 
+                CosTarget_Lat = cos ( TgtLat )
+ 
+                #$% get the lat/lon where torp. will start
+                call SOW_splash ( xlat,                # unit firing, in
+                                  xlon,                # unit firing, in
+                                  xcosLat,             # unit firing, in
+                                  TgtLat,              # target, in
+                                  TgtLon,              # target, in
+                                  CosTarget_Lat,       # target, in
+                                  entry_range,         # out, nm
+                                  entry_bearing)       # out, radians
+ 
+                TRP$SOWRange$i = xTRP$SOWRange$i
+ 
+                #$% verify distance does not exceed maximum distance thru air
+                entry_range = MIN (entry_range,TRP$SOWRange$i/2000.)
+                } # end if target motion analysis available
+            else #$% else if TMA Not available
+                {
+                #$% if error condition, will be handled later
+                IF ( LCL$Pointer == 0 )
+                    {
+                    return
+                    }
+ 
+                entry_range = MIN(ilex [ Enable_Indx ],
+                                  dfloat( $SOW_YardsAway/2000))
+ 
+                #$% set entry to some minimum distance
+                entry_range = MAX( $MinYardsEntry / 2000.0,entry_range) # 1/10/91
+ 
+                #$% get bearing from local track table
+                entry_bearing = $Pi * xLCL$Bearing$i / 180.0 # degrees to radians
+                } # end if TMA not available
+            }#$% end else if active track
+        #$% else if active track
+        else
+            {
+            #$% if launching platform is covering the target, 8/3/90, reh
+            if (xUNT$Status$i == $OnGuide$Code &
+                xUNT$AttackIndx$i == xRMT$Detectee$i)
+                {
+                #$% unit being covered
+                UNT2$Pointer$To (xUNT$AttackIndx$i)
+ 
+                #$% assume that unit covering the track has true position
+                TgtLat = xUNT2$TrueLatitude$F
+                TgtLon = xUNT2$TrueLongitude$F
+                }
+            else
+                {
+                #$% get apparent lat/long for target (remote track)
+                TgtLat = xRMT$ApparentLat$F
+                TgtLon = xRMT$ApparentLon$F
+                }
+ 
+            cosTarget_Lat = cos ( TgtLat )
+ 
+            #$% get the lat/lon where torp. will start
+            call SOW_splash ( xlat,                # unit firing, in
+                              xlon,                # unit firing, in
+                              xcosLat,             # unit firing, in
+                              TgtLat,              # target, in
+                              TgtLon,              # target, in
+                              CosTarget_Lat,       # target, in
+                              entry_range,         # out
+                              entry_bearing)       # out, radians
+ 
+            TRP$SOWRange$i = xTRP$SOWRange$i
+ 
+            #$% verify distance does not exceed maximum distance thru air
+            entry_range = MIN (entry_range,TRP$SOWRange$i/2000.)
+ 
+            }#$% end else if active track
+        } #$% end if shot at track
+ 
+    #$% Find Lat/Long where torpedo will splash
+    call RRB2LL( xlat,            # platform lat, in/ splash lat, out
+                 xlon,            # platform long, in/ splash long, out
+                 entry_range,     # range (input) to Splash
+                 entry_bearing,   # relative bearing (input)
+                 0.0,             # heading (in)
+                 xcoslat)         # cosine of splash latitude (in/out)
+ 
+    wlat = xlat
+    wlon = xlon
+    wcoslat = xcoslat
+    } # end if SOW type
+ELSE # else if not a SOW
+    {
+    wlat = xUNT$TrueLatitude$F    # where torp enters water
+    wlon = xUNT$TrueLongitude$F   # where torp enters water
+    wcoslat = cos ( wlat )
+    }
+ 
+return
+end
+ 
+
+#$% set torpedo course, after water entry
+subroutine set_course ( UNT2$Pointer,        # in torpedo unit
+                        TRP$Pointer,         # in
+                        RMT$Pointer,         # in
+                        LCL$Pointer,         # in, non-zero if passive trk &
+                                             #  no TMA available
+                        bearing_only,        # in, flag
+                        ilex)                # in
+BBCommon
+TRPCommon
+ 
+integer*4   UNT2$Pointer
+integer*4   TRP$Pointer
+integer*4   RMT$Pointer
+integer*4   LCL$Pointer
+integer*4   bearing_only
+literal     ilex[$max$args]
+ 
+##integer*4   ican
+REAL        ican   # jb E2208  VECTOR now expects a REAL, and    9/27/00
+######             hopefully ican will still work as a flag?
+real*4      run_bearing
+ 
+real*4      UNT2$AssumedCourse$F
+real*4      UNT2$OrderedCourse$F
+real*4      UNT2$TrueCourse$F
+ 
+IF ( ilex [ Bearing_Indx ] == $LEX$Bearing$ )
+    {
+    #$% bearing torp will run after water entry
+    run_bearing = $PI * ilex [ Degrees_Indx ] /180.0 # degrees to radians
+ 
+    $ang2pi (run_bearing)
+ 
+    UNT2$OrderedCourse$F = run_bearing
+    putUNT2$OrderedCourse$F
+    }
+#$% shot at track
+ELSE IF (ilex [ At_Indx ] == $LEX$At$ )
+    {
+    #$% if passive track
+    if ( bearing_only == $yes )
+        {
+        #$% if target motion analysis available
+        if ( xRMT$TMAflag$i == $yes )
+            {
+            ican = $no
+            call vector(UNT2$Pointer,
+                        RMT$Pointer,
+                        ican)
+ 
+            IF ( ican == $no )
+                {
+#                type*,"Can't Intercept"
+#                call no_intercept_msg(Track_number)
+                }
+ 
+            } # end if target motion analysis available
+        else # if TMA NOT available
+            {
+            #$% if TMA solution not available in local track table,
+            #$%  shouldn't get here
+            IF ( LCL$Pointer == 0 )
+                {
+                UNT2$ZERO                       # don't fire this torpedo
+                return
+                }
+ 
+            run_bearing = $Pi * xLCL$Bearing$i / 180.0 # degrees to radians
+            $ang2pi (run_bearing)
+ 
+            UNT2$OrderedCourse$F = run_bearing
+            putUNT2$OrderedCourse$F
+            }
+        } # end if passive track
+    else # else, active track
+        {
+        ican = $no
+        call vector(UNT2$Pointer,
+                    RMT$Pointer,
+                    ican)
+ 
+        IF ( ican == $no )
+            {
+#            type*,"Can't Intercept"
+#            call no_intercept_msg(Track_number)
+            }
+        } # end if active track
+    } # end if shot at track
+ 
+#$% OderedCourse is set in subroutine VECTOR
+UNT2$TrueCourse$F = xUNT2$OrderedCourse$F
+putUNT2$TrueCourse$F
+ 
+UNT2$AssumedCourse$F = xUNT2$OrderedCourse$F        # enter assumed course
+putUNT2$AssumedCourse$F
+ 
+return
+end
+ 
+
+#$% find the first occurance of detection in local track table
+subroutine getlcl_any(unt$pointer,              # in,detector pointer
+                      detectee,                 # in, detectee index
+                      LCL$pointer)              # out, detection pointer or 0
+ 
+########################################################
+#$%
+#$% Purpose:  GETLCL_TMA searches the LCL table for ANY detections
+#$%           of DETECTEE.  Returns the pointer for the first track,
+#$%           if any.
+#$%
+#$% Called By:
+#$%
+#$% Calls:     None
+#$%
+#$% Tables:    LCL        UNT
+#$%
+#$% Date:      MAY 90
+#$%
+#$% Author:    R. Hundt
+#$%
+########################################################
+ 
+BBcommon
+integer*4   UNT$Pointer
+integer*4   detectee
+integer*4   LCL$Pointer
+ 
+integer*4   LCL$NextIndx$i
+ 
+#$% for each LCL entry (for Unit)
+for(LCL$NextIndx$i = Xunt$FirstLCLIndx$i; LCL$NextIndx$i != 0; )
+    {
+    LCL$pointer$TO LCL$NextIndx$i               # set up for next LCL index
+    LCL$NextIndx$i = xLCL$NextIndx$i
+ 
+    if (xLCL$DetectionType$i != $PassiveSonar$code)
+        {
+        #$% if at end of chain and No detectee match was found
+        if ( LCL$NextIndx$i == 0 )
+            {
+            LCL$Pointer = 0      # Nothing at was found
+            }
+        next
+        }
+ 
+    #$% if detectee found
+    if (xLCL$Detectee$i == detectee) break
+ 
+    #$% if at end of chain and No detectee match was found
+    if ( LCL$NextIndx$i == 0 )
+        {
+        LCL$Pointer = 0      # Nothing at was found
+        }
+ 
+   } # End FOR all local tracks
+ 
+return
+end    # End getlcl_any
+ 
+
+subroutine torp_engage ( UNT$Pointer )
+BBCommon
+ENCommon
+ 
+integer*4   UNT$Pointer
+ 
+ 
+integer*4   idummy
+real*4      acquisition_range
+integer*4   TRP$Pointer
+integer*4   UNT$AssignedTarget$i
+REAL*4      UNT$AssumedSpeed$F
+integer*4   UNT$Enabled$i
+real*4      UNT$OrderedCourse$F
+REAL*4      UNT$OrderedSpeed$F
+REAL*4      UNT$TrueSpeed$F
+integer*4   the_elevation
+integer*4   ran_aground
+ 
+literal     cstrip8
+ 
+ran_aground = $NO
+ 
+#$% if this is first game cycle for this torp
+if (xUNT$OrderedSpeed$F == 0.0)
+    {
+    TRP$Pointer = xUNT$TRPPntr$i
+ 
+    #$% if torp is searching in a circle, added 12/90
+    if (xUNT$CircleSearchFlag$i == $yes)
+        {
+        call torp_acquisition_range ( TRP$Pointer,          # in
+                                      xUNT$Truelatitude$F,  # in
+                                      xUNT$Truelongitude$F, # in
+                                      idummy,               # out
+                                      acquisition_range)    # out, nm
+ 
+#$% September 24, 1991 clk
+#$% Per Dan Bacon, air launched torpedos will perform circle
+#$% search (approx.) at the speed entered in BUILD
+ 
+#        #$% make sure torpedo can cover acquisition range during "circles"
+#        UNT$TrueSpeed$F  = acquisition_range / 2.0
+        }
+#    else
+#        {
+#        #$% get torpedo moving full speed
+#        UNT$TrueSpeed$F = xTRP$Speed$i
+#        }
+ 
+    UNT$TrueSpeed$F = xTRP$Speed$I
+    putUNT$TrueSpeed$F
+    UNT$OrderedSpeed$F = UNT$TrueSpeed$F
+    putUNT$OrderedSpeed$F
+    UNT$AssumedSpeed$F = UNT$TrueSpeed$F
+    putUNT$AssumedSpeed$F
+    }
+ 
+#$% if torp not capable of acquiring a target
+If (xUNT$Enabled$i != $yes)
+    {
+    #$% if time to enable seeker
+    If (xunt$TimeSeek$f <= game$time )
+        {
+        UNT$Enabled$i = $yes
+        putUNT$Enabled$i
+ 
+        UNT$AssignedTarget$i = xUNT$AssignedTarget$i
+ 
+        #$% if launched at a track
+        if (UNT$AssignedTarget$i != $no)
+            {
+            #$% send a message to target
+            call send_msg(UNT$AssignedTarget$i, UNT$Pointer$Index,
+                          $InWater$Code )
+            }
+        }
+    }
+ 
+#$% clk 1/94 - Rearranged Enabled check so that even
+#$%            if the torpedo isn't enabled yet, the
+#$%            termination time will be checked. (E1083)
+#$% if torp capable of acquiring a target
+If (xUNT$Enabled$i == $yes)
+    {
+      #$% if torp is searching in a circle, added 12/90
+      if (xUNT$CircleSearchFlag$i == $yes)
+          {
+          #$% turn torpedo 90 degrees
+          UNT$OrderedCourse$F = xUNT$OrderedCourse$F + $PI/2
+          $ang2pi (UNT$OrderedCourse$F)
+          putUNT$OrderedCourse$F
+          putUNT$TrueCourse$F ( UNT$OrderedCourse$F)
+          putUNT$AssumedCourse$F ( UNT$OrderedCourse$F )
+          }
+ 
+      #$% attempt to acquire target this game cycle
+      call acquire_target ( UNT$Pointer )
+ 
+      #$% process assigned target
+      if ( xUNT$AssignedTarget$i != $no )
+          {
+          call check_hit ( UNT$Pointer )
+          }
+    }
+ 
+#$% if torpedo life is exceeded
+if (xunt$TimeTerm$f <= Game$Time)
+    {
+    #$% send a message to launching platform
+    call send_msg( xUNT$LaunchIndx$i, UNT$Pointer$Index, $ShutDown$Code )
+ 
+    #$% if an engagment log is being kept, log the termination
+    if (log$engage != $no)                  # clk 2/94 (E1124)
+      {
+        if (shoreline_crossing_flag == $ON &    # joa 9/98 (E2016)
+            the_elevation (xUNT$TrueLatitude$F*$rad2deg, xUNT$TrueLongitude$F*$rad2deg) > 0)
+           {
+            ran_aground = $YES
+            call engdata (unt$pointer, 0)
+            putENG$Track$C ("LAND")
+            TRP$Pointer = xUNT$TRPPntr$i
+            putENG$Weapon$C (xTRP$Name$C)
+            putENG$Result$I (ENG$Miss$Code)
+            call write_eng_rec
+           }
+        else
+           {
+            TRP$Pointer = xUNT$TRPPntr$I
+            call Log_Run_Time_Termination (UNT$Pointer, TRP$Pointer)
+           }
+      }
+ 
+    if ( trace$SmartTorp != $no & ran_aground == $YES)
+       {
+        call echor
+        call echov ("Torp ")
+        call echohn (xUNT$name$c,$$MaxLit)
+        call echov (" ran aground.")
+       }
+ 
+    PUTunt$status$i ($beingdeleted$code)       # remove torpedo from system
+    return
+    }
+ 
+return
+end
+ 
+
+#$% determine if a target is acquired
+subroutine acquire_target ( UNT$Pointer )      # pointer to smart torpedo
+ 
+#$% Modified:  Susan Miller 6/98 (E1883)
+#$%            Make sure acquired target is not being deleted.
+#$%
+#$%            Susan Miller 4/99 (E2079)
+#$%            Allow a torpedo to target another torpedo.
+BBCommon
+TRPCommon
+ 
+real*4      acquisition_range
+literal     cstrip8
+real*4      Layer_Pb
+real*4      Type_Pb     # Pd adjustment factor for type of target  9/24/91 clk
+real*4      MAXRange
+real*4      random
+real*4      random_number
+real*4      save_bearing
+integer*4   SER_Indx
+real*4      shortest_range
+real*4      torp_shortest_range
+real*4      Speed
+logical*1   tgt_stratum
+integer*4   target_indx
+integer*4   TargetCode
+integer*4   TimeRemaining
+real*4      Torp_Heading
+integer*4   TRP$Pointer
+integer*4   UNT$AssignedTarget$i
+real*4      UNT$COSTrueLat$F
+real*4      UNT$OrderedCourse$F
+integer*4   UNT$Pointer
+integer*4   UNT$Stratum$i
+real*4      UNT$TrueLatitude$F
+real*4      UNT$TrueLongitude$F
+real*4      UNT$TrueSpeed$F
+integer*4   UNT2$Pointer
+integer*4   UNT2$Type$i
+integer*4   within_envelop
+real*4      TRP$PbDetection$F
+real*4      x
+integer*4   same_layer
+integer*4   torp_tgt
+data x/0.0/		# Get next random number in sequence
+ 
+#$% distance to closest target
+shortest_range = 9999.0
+torp_shortest_range = 9999.0
+target_indx    = $no                            # flag/index indicating tgt found
+save_bearing   = 0.0
+torp_tgt       = $no         #indicates if target is a torpedo  AV      (E1143)
+same_layer     = $no         #indicates if torpedo is in same layer AV  (E1143)
+go_after_torp  = 0
+ 
+#$% set flag indicating no target
+UNT$AssignedTarget$i = 0
+putUNT$AssignedTarget$i
+ 
+UNT$Truelatitude$F = xUNT$Truelatitude$F        # torpedo latitude
+UNT$TrueLongitude$F = xUNT$TrueLongitude$F      # torpedo longitude
+ 
+TRP$Pointer = xUNT$TRPPntr$i
+ 
+call torp_acquisition_range ( TRP$Pointer,          # in
+                              UNT$Truelatitude$F,   # in
+                              UNT$Truelongitude$F,  # in
+                              SER_Indx,             # out
+                              acquisition_range)    # out
+ 
+putUNT$SerIndx$i ( SER_Indx )
+ 
+TargetCode = xTRP$TargetCode$i
+ 
+torp_heading = xUNT$TrueCourse$f
+ 
+Speed = xTRP$Speed$i * $Hours$Per$Minute                           # speed per minute
+ 
+TimeRemaining = xunt$TimeTerm$f - Game$Time      # get torp. life remaining
+ 
+MAXRange = TimeRemaining * Speed                    # max range for life
+ 
+#$% initialize proximity parameters for torpedo
+UNT$COSTrueLat$F    = xUNT$COSTrueLat$F
+ 
+#$% initialize proximity routine
+call preprx_M(UNT$Pointer$Index,
+              UNT$TrueLatitude$F,
+              UNT$TrueLongitude$F,
+              UNT$COSTrueLat$F,
+              MAXrange)
+ 
+if ( trace$SmartTorp != $no )
+    {
+    call echor
+    call echov ("Torpedo ")
+    call echohn (xUNT$name$c,$$MaxLit)
+    call echov (" : ")
+    }
+ 
+#$% for all potential targets
+for ( UNT2$Pointer$First; UNT2$Pointer$OK; UNT2$Pointer$Next )
+    {
+    #$% if target is self
+    if ( UNT$Pointer == UNT2$Pointer ) next
+ 
+    UNT2$Type$i = xUNT2$Type$i
+ 
+    # SMM 6/98 (E1883) check status not type
+    if (xUNT2$Status$i == $BeingDeleted$code ) next
+ 
+    #$% asume target is not a torpedo
+     torp_tgt = $no
+ 
+    #$% torpedos can detect other torpedos of the same type (E1143)
+     if (xUNT2$SuperType$i == $Torpedo$SuperCode)      # 4/1/93  AV
+       {
+# Let's try and hit a torpedo if this one can... SMM 4/99 (E2079)
+        if (TargetCode != $TorpedoTargetType$Code )
+           {
+            if (xUNT$TRPPntr$I != xUNT2$TRPPntr$I)  # if not the same type
+              next
+           }
+ 
+        if (trace$smartTorp != $no)
+          {
+            call echor
+            call echov  (" POTENTIAL TORPEDO TGT ")
+            call echohn (xUNT2$Name$C, $$MaxLit)
+            call echor
+          }
+        torp_tgt = $yes
+       }
+ 
+    #$% torp may acquire only units living in water
+    if ( UNT2$Type$i != $Surface$Code &
+         UNT2$Type$i != $Sub$Code ) next
+ 
+    #$% if target type is appropriate for this torpedo
+    if (( UNT2$Type$i == TargetCode |
+          TargetCode == $ShipAndSub$Code) |
+        ((xUNT2$SuperType$i == $Torpedo$SuperCode) &  # SMM 4/99 (E2079)
+         (targetcode == $TorpedoTargetType$Code)))
+        {
+        #$% if target within acquisition envelop
+        if ( within_envelop ( UNT$Pointer,             # in
+                              Torp_Heading,            # in
+                              acquisition_range,       # in, torp.acq range, nm
+                              Speed,                   # in, n.mi per minute
+                              UNT2$Pointer) == $yes)           # in, pointer to target
+            {
+            if ( Target_Range < 0 ) next               # set in prev. function
+ 
+            #$% if this target is closer than any processed so far
+            if ((Target_Range < shortest_Range) & (go_after_torp == 0))
+                {
+                shortest_range = Target_Range   # range of closest target
+                target_indx = UNT2$Pointer$Index
+                save_bearing = Target_Bearing
+ 
+                if(trace$smartTorp != $no)
+                   {
+ 
+                    UNT2$Pointer$To target_indx
+ 
+                    call echor
+                    call echov(" S_TARGET WHITHIN_AREA ")
+                    call echohn(xUNT2$Name$c, $$MaxLit)
+                    call echor
+                   }
+                }
+ 
+            #$% if this target happens to be a torp than keep the closer one
+            if ((Target_Range < torp_shortest_Range) & (torp_tgt == 1))
+                {
+                 torp_shortest_range = Target_Range   # range of closest target
+                 target_indx = UNT2$Pointer$Index
+                 save_bearing = Target_Bearing
+                 go_after_torp = 1          # torp is within envelop  AV 4/6/93
+ 
+                 if(trace$smartTorp != $no)
+                   {
+ 
+                    UNT2$Pointer$To target_indx
+ 
+                    call echor
+                    call echov(" T_TARGET WHITHIN_AREA ")
+                    call echohn(xUNT2$Name$c, $$MaxLit)
+                    call echor
+                   }
+                }
+ 
+            } # end if within acquisition envelop
+        } #end if target type is appropriate for this torpedo
+    } # end  for all potential targets
+ 
+#$% if closest target found
+if ( target_indx != $no )
+    {
+    #$% torpedo above or below layer
+    UNT$Stratum$i = xUNT$Stratum$i
+ 
+    UNT2$Pointer$To target_indx
+ 
+    # Set torpedo depth to depth of target
+    UNT2$Type$i = xUNT2$Type$i
+    if (unt2$type$i == $Surface$Code)
+        PUTunt$TrueAltDepth$i (10)
+    else
+        PUTunt$TrueAltDepth$i (Xunt2$TrueAltDepth$i)
+ 
+    if(go_after_torp == 1)
+     {
+        Target_Range = torp_Shortest_Range
+     }
+    else
+     {
+       Target_Range = Shortest_Range               # set common data area
+     }
+ 
+    #$% if target is below acoustic layer
+    IF ( xUNT2$TrueAltDepth$i > layer$depth )
+        {
+        tgt_stratum = $Below$AcousticLayer
+        }
+    ELSE
+        {
+        tgt_stratum = $Above$AcousticLayer
+        }
+ 
+    #$% if torpedo and target are on same side of acoustic layer
+    if ( UNT$Stratum$i == tgt_stratum )
+        {
+          Layer_Pb = 1.0
+          if(go_after_torp == 1)      # if target is a torpedo also
+            {
+              same_layer = 1     # 4/1/93    AV
+            }
+ 
+         }
+    else #$% else if torpedo and target are on opposite sides of acoustic layer
+        {
+        Layer_Pb = 0.5
+        same_layer = 0          # 4/1/93      AV
+        }
+ 
+    if (xUNT2$SuperType$I == $CtrMeasure$SuperCode)     # 9/24/91 clk
+      Type_Pb = CounterMeasure$Factor
+    else   # the possible target is not a counter measure
+      Type_Pb = 1.0
+ 
+    #$% if both torpedoes are on different layers
+    if ( go_after_torp == 1 & same_layer != 1)
+      {
+        Type_pb = 0.0   # do not allow any detection  4/1/93  AV
+      }
+ 
+       random_number = RANDOM(x)
+ 
+    # If already acquired target, boost pd
+    TRP$PbDetection$F = xTRP$PbDetection$F
+    if (Xunt$AcquiredTarget$i == $yes &
+        Xunt$AssignedTarget$i == unt2$pointer$index)
+        TRP$PbDetection$F = 1.0
+ 
+    #$% if target detected
+#   if (random_number <= TRP$PbDetection$F * Layer_Pb * Type_Pb)  # 9/24/91 clk
+    if (random_number <= TRP$PbDetection$F * Type_Pb) # Eliminate layer_pd
+        {
+        if ( trace$SmartTorp != $no )
+            {
+            call echov ("*** ")
+            call echohn (xUNT$name$c,$$MaxLit)
+            call echov (" detected ")
+            call echohn (xUNT2$name$c,$$MaxLit)
+            call echov (" *** .. ")
+            call echov ("rand = ")
+            call echof (random_number,2)
+            }
+ 
+        #$% bearing to closest target within acq. envelop
+        Target_Bearing = save_bearing
+ 
+        #$% set course to target
+        UNT$OrderedCourse$F = Target_Bearing
+        putUNT$OrderedCourse$F
+ 
+        UNT$AssignedTarget$i = UNT2$Pointer$Index
+        putUNT$AssignedTarget$i
+ 
+        putUNT$AcquiredTarget$i ( $yes )            # 12/90
+ 
+        #$% if currently circle searching, 12/90
+        if (xUNT$CircleSearchFlag$i == $yes)
+            {
+            putUNT$CircleSearchFlag$i ($no)
+ 
+            #$% get torpedo moving full speed
+            UNT$TrueSpeed$F = xTRP$Speed$i
+ 
+            putUNT$TrueSpeed$F
+            putUNT$OrderedSpeed$F ( UNT$TrueSpeed$F )
+            putUNT$AssumedSpeed$F ( UNT$TrueSpeed$F )
+ 
+            if ( trace$SmartTorp != $no )
+                {
+                call echor
+                call echov ("Torp ")
+                call echohn (xUNT$name$c,$$MaxLit)
+                call echov (" quits circle search, TGT detected.")
+                }
+            }
+ 
+        } # end if target detected
+    else # end else target not detected
+        {
+        if ( trace$SmartTorp != $no )
+            {
+            call echov ("*** ")
+            call echohn (xUNT$name$c,$$MaxLit)
+            call echov (" Not detect ")
+            call echohn (xUNT2$name$c,$$MaxLit)
+            call echov (" *** .. ")
+            call echov ("rand = ")
+            call echof (random_number,2)
+            }
+ 
+        #$% if target is detected previous game cycle but is lost, 12/90
+        if (xUNT$AcquiredTarget$i == $yes )
+           {
+            putUNT$AcquiredTarget$i ($no)
+ 
+            if(go_after_torp == 1)
+             {
+              putUNT$CircleSearchFlag$i ($no)       # AV 4/6/93
+             }
+ 
+            if ( trace$SmartTorp != $no )
+                {
+                call echor
+                call echov ("Torp ")
+                call echohn (xUNT$name$c,$$MaxLit)
+                call echov (" TGT Lost.")
+                }
+ 
+#$% September 24, 1991 clk
+#$% Per Dan Bacon, air launched torpedos will perform circle
+#$% search (approx.) at the speed entered in BUILD
+#            #$% make sure torpedo can cover acquisition range during "circles"
+#            UNT$TrueSpeed$F  = acquisition_range / 2.0
+ 
+#            putUNT$TrueSpeed$F
+#            putUNT$OrderedSpeed$F (UNT$TrueSpeed$F)
+#            putUNT$AssumedSpeed$F (UNT$TrueSpeed$F)
+            }
+ 
+        } # end else target not detected
+    } # end if target found
+ 
+return
+end
+ 
+
+#$% target is already assigned, test for engagement
+subroutine check_hit ( UNT$Pointer )     # pointer to smart torpedo
+ 
+#$% Modified:  Susan Miller 4/99 (E2079)
+#$%            Allow a torpedo hit another torpedo.
+ 
+BBCommon
+TRPCommon
+ENCommon
+ 
+integer*4   UNT$Pointer
+ 
+real*4      acquisition_range
+Real*4      Bearing
+literal     cstrip8
+integer*4   idummy
+integer*4   ilen
+real*4      Intercept_Minutes
+Real*4      Radius
+Real*4      Random
+Real*4      Target_Course
+Real*4      Target_Speed
+Real*4      Torp_Speed
+real*4      TRP$PbHit$F
+real*4      random_number
+integer*4   TRP$Pointer
+integer*4   UNT2$Pointer
+ 
+BBDeclare   (unt$TimeSeek$f)
+Real*4      x
+real        mburange
+integer*4   TRP$TargetCode$I # SMM 4/99 (E2079)
+data x/0.0/		# Get next random number in sequence
+ 
+#$% if closest target is very far
+if ( Target_Range == -1 ) return
+ 
+#$% set target pointer
+UNT2$Pointer$To xUNT$AssignedTarget$i
+ 
+TRP$Pointer = xUNT$TRPPntr$i    # SMM 4/99 (E2079)
+TRP$TargetCode$i = xTRP$TargetCode$i
+ 
+Target_Course = xUNT2$TrueCourse$F
+Target_Speed = xUNT2$TrueSpeed$F
+ 
+Torp_Speed = xUNT$TrueSpeed$F
+ 
+#$% radius around target
+Radius = 0.0        # (aim at collision rather than weapons-range intercept)
+ 
+#$% get true bearing from target to torpedo
+Bearing = Target_Bearing + $Pi
+ 
+$ang2PI (Bearing)
+ 
+call RMIN_TO_TARGET( Radius,              # in, Desig. intercept distance ( often, 0.)
+                    Target_Course,        # in, (radians) course of TARGET
+                    Target_Speed,         # in, (knots) speed  of TARGET
+                    Torp_Speed,           # in, (knots) speed  of Torpedo
+                    Target_Range,         # in, (n.mi.) rng between units
+                    Bearing,              # in, (radians) brg FROM tgt TO INTERCEPTOR
+                    Intercept_Minutes )   # out, value (min.) elapsed time to reach RADIUS
+ 
+TRP$Pointer = 0
+ 
+#$% if torpedo and target coincide
+if ( Intercept_Minutes == -3 )
+    {
+    TRP$Pointer = xUNT$TRPPntr$i
+    }
+#$% else if intercept time is very large
+else if ( Intercept_Minutes < 0 )
+    {
+    # do nothing
+    }
+#$% else if torpedo will intercept target within this game minute
+else if (Intercept_Minutes <= 1)
+    {
+    TRP$Pointer = xUNT$TRPPntr$i
+    }
+ 
+#$% if target within range this game minute
+if ( TRP$Pointer != 0 )
+{
+    if (xUNT2$GhostedUnit$I == $yes &
+        ALSP$Active == $yes)
+    {
+        call ALSP_Send_Torpedo_Engage (UNT$Pointer, UNT2$Pointer)
+ 
+        call Log_ALSP_Engagement_Engdata (UNT$Pointer,UNT2$Pointer,
+                                          xTRP$Name$C, 0, 1)
+ 
+        # Do not allow further engagements for two time steps
+        # Should get hit/miss report from target model next cycle.
+        unt$TimeSeek$f = Xunt$TimeSeek$f
+        unt$TimeSeek$f = unt$TimeSeek$f + 2.0 * Time$Step
+        PUTunt$TimeSeek$f
+ 
+        return
+    }
+ 
+    # if engagement log desired
+    if (log$engage != $no)
+        {
+        #$% load data in ENCommon
+        call engdata (unt$pointer, unt2$pointer)
+        PUTeng$Weapon$c( xTRP$Name$C )                  # Torpedo Type
+        PUTeng$MBURange$f( MBURange(UNT2$Pointer) )           # get range to MBU
+        }
+ 
+         call get_torpedo_ph(unt2$pointer, trp$pointer, trp$PbHit$F)
+ 
+         random_number = random(x)
+ 
+    #$% if hit occurs
+    if ( random_number <= TRP$PbHit$F )
+        {
+        if ( trace$SmartTorp != $no )
+            {
+            call echor
+            call echov ("Torpedo ")
+            call echohn (xUNT$name$c,$$MaxLit)
+            call echov (" hits ")
+            call echohn (xUNT2$name$c,$$MaxLit)
+            }
+ 
+        call torp_hit ( UNT$Pointer,                # torpedo
+                        UNT2$Pointer,               # target
+                        TRP$Pointer)                # torp. characteristics
+ 
+        #$% send a message to target unit
+        call send_msg( xUNT$AssignedTarget$i, $no, $ExplosionAt$Code )
+ 
+        #$% send a message to launching unit
+        call send_msg( xUNT$LaunchIndx$i, UNT$Pointer$Index, $Exploded$Code )
+ 
+        putUNT$Hits$i (100)
+ 
+        } # end if hit occurs
+    else # else if a miss occurs
+        {
+        # SMM 4/99 (E2079) if this is a torp that can kill torps, let it circle
+        # search.
+        if ( (go_after_torp == 0) |    #if torp don't do circle search AV
+             ((go_after_torp == 1) & (TRP$TargetCode$i == $TorpedoTargetType$Code)))
+         {
+          putUNT$CircleSearchFlag$i ($yes)            # search in a circle, 12/90
+         }
+ 
+        if ( trace$SmartTorp != $no )
+            {
+            call echor
+            call echov ("Torp ")
+            call echohn (xUNT$name$c,$$MaxLit)
+            call echov (" begins circle search, TGT miss")
+            call echov (" *** .. ")
+            call echov ("rand = ")
+            call echof (random_number,2)
+            }
+ 
+        call torp_acquisition_range ( TRP$Pointer,          # in
+                                      xUNT$Truelatitude$F,  # in
+                                      xUNT$Truelongitude$F, # in
+                                      idummy,               # out
+                                      acquisition_range)    # out, nm
+ 
+        if ( trace$SmartTorp != $no )
+            {
+            call echov ("*** ")
+            call echohn (xUNT$name$c,$$MaxLit)
+            call echov (" missed ")
+            call echohn (xUNT2$name$c,$$MaxLit)
+            call echov (" *** .. ")
+            }
+ 
+        # if engagement log desired
+        if (log$engage != $no)
+            {
+            call engdata (unt$pointer, unt2$pointer)
+            PUTeng$Result$i( eng$Miss$code )
+            PUTeng$Resultph$f( TRP$PbHit$F * 100. )
+ 
+            call write_eng_rec
+            }
+ 
+        } # end if a miss occurs
+}
+ 
+return
+end
+
+Subroutine get_torpedo_ph(unt2$pointer,      # Target
+                          trp$pointer,       # Torpedo type
+                          ph)                # Return ph (0.0-1.0)
+########################################################
+#$%
+#$% Purpose:  get_torpedo_ph returns  probability of hit of torpedo
+#$%           against all target types.
+#$%
+#$% Called By: check_hit,   ALSP_Receive_Torpedo_Engage
+#$%
+#$% Calls:     None
+#$%
+#$% Tables:    TRP        UNT
+#$%
+#$% Date:      June 28, 2006
+#$%
+#$% Author:    James O. Allen
+#$%
+########################################################
+ 
+BBCommon
+BBDeclare(unt2$pointer,trp$pointer,trp$PbHit$F)
+real ph
+ 
+TRP$PbHit$F = xTRP$PbHit$F
+ 
+if (xUNT2$SuperType$i == $CtrMeasure$SuperCode)
+{
+    #$% reduce probability of hit against countermeasure target
+    TRP$PbHit$F = 0.0
+}
+ 
+#$% Torpedo must be able to engage torpedoes
+if ((Xunt2$SuperType$i == $Torpedo$SuperCode) &
+    (XTRP$TargetCode$i != $TorpedoTargetType$Code))
+{
+    TRP$PbHit$F = 0.0
+}
+ 
+ph = TRP$PbHit$F
+ 
+return
+end
+ 
+
+subroutine send_msg( UnitIndx,              # launching or target platform
+                     Torp_UnitIndx,         # torpedo unit index
+                     MsgCode )
+BBCommon
+integer*4   UnitIndx
+integer*4   Torp_UnitIndx
+integer*4   MsgCode
+ 
+literal     cstrip8
+integer*4   ilen
+literal     UNT$name$c
+integer*4   UNT$Pointer
+integer*4   UNT$view$i
+literal     UNT2$name$c
+integer*4   UNT2$Pointer
+real*4      Range, Bearing
+character   msg[ARB]
+ 
+#            123456789012345678901234567890123456789012345678901234567890
+#String msga "         , torpedo in water."
+#String msgb "         , torpedo acquired target."
+#String msgc "         , torpedo          shutdown."
+#String msgd "         , torpedo          exploded."
+#String msge "         , torpedo explosion."
+ 
+UNT$Pointer$To UnitIndx
+ 
+UNT$name$c = xUNT$name$c
+UNT$view$i = xUNT$view$i
+ 
+if (MsgCode == $AcquiredTarget$Code)
+    {
+    #$% move unit name to msg array
+    ilen = 0
+    Call SMOVHN(UNT$name$c,$$MaxLit,msg,ilen)              # launch unit name
+    Call SMOVV(" , torpedo acquired target.",msg,ilen)
+    #$% display message
+    call send_(UNT$view$i,0,ilen,msg)    #             1/10/91
+    }
+else if (MsgCode == $ShutDown$Code)
+    {
+    UNT2$Pointer$To Torp_UnitIndx
+ 
+    UNT2$name$c = xUNT2$name$c
+ 
+    #$% move unit name to msg array
+    ilen = 0
+    Call SMOVHN(UNT$name$c,$$MaxLit,msg,ilen)              # launch unit name
+    Call SMOVV(" , torpedo ",msg,ilen)
+    Call SMOVHN(UNT2$name$c,$$MaxLit,msg,ilen)             # torpedo name
+    Call SMOVV(" shutdown",msg,ilen)
+    #$% display message
+    call send_(UNT$view$i,0,ilen,msg)    #             1/10/91
+    }
+else if (MsgCode == $Exploded$Code)
+    {
+    UNT2$Pointer$To Torp_UnitIndx
+ 
+    UNT2$name$c = xUNT2$name$c
+    #$% move unit name to msg array
+    ilen = 0
+    Call SMOVV("Torpedo ",msg,ilen)
+    Call SMOVHN(UNT2$name$c,$$MaxLit,msg,ilen)             # torpedo name
+    call SMOVV(" exploded.", msg, ilen)
+ 
+   #$% display message
+    call send_(UNT$view$i,0,ilen,msg)    #             1/10/91
+    }
+else if (MsgCode == $ExplosionAt$Code)
+    {
+    #$% move unit name to msg array
+    ilen = 0
+    call SMOVHN(UNT$name$c, $$MaxLit, msg, ilen)
+    call SMOVV(" HIT by torpedo.", msg,ilen)
+     #$% display message
+    call send_(UNT$view$i,0,ilen,msg)    #             1/10/91
+    }
+else if ( MsgCode == $InWater$Code )
+    {
+    #$% find the bearing of the torpedo from the assigned unit
+    UNT2$Pointer$To Torp_UnitIndx
+    call GETRB (UNT$Pointer, UNT2$Pointer, Range, Bearing)
+    bearing = (bearing * 180.0) / $Pi # convert radians to degrees for display
+ 
+    #$% move unit name to msg array
+    ilen = 0
+    Call SMOVHN(UNT$name$c,$$MaxLit,msg,ilen)              # target unit
+    Call SMOVV(" , torpedo in water bearing ",msg,ilen)
+    call smoviz(INT(Bearing),3,msg,ilen)
+    Call SMOVV(".  ",msg,ilen)
+    #$% display message
+    call send_(UNT$view$i,0,ilen,msg)    #             1/10/91
+    }
+else
+    {
+    return
+    }
+ 
+end
+ 
+
+#$% determines if a target is within torpedo acquisition envelop
+integer*4 function within_envelop ( UNT2$Pointer,     # in, pointer to Torp.
+                                    Heading,          # in, torpedo heading
+                                    Acquisition_Range,# in, torp acq. range, nm
+                                    Speed,            # in, n.mi per minute
+                                    UNT$Pointer)      # in, pointer to target
+BBCommon
+TRPCommon
+ 
+integer*4   UNT2$Pointer
+Real*4      Heading
+Real*4      Acquisition_Range
+real*4      Speed            # N.Mi /Minute;
+integer*4   UNT$Pointer
+ 
+literal     cstrip8
+real*4      diff
+real*4      MAXRange
+real*4      UNT$TrueLatitude$F
+real*4      UNT$TrueLongitude$F
+real*4      UNT$COSTrueLat$F
+real*4      X
+real*4      Y
+real*4      AHEAD            # Envelope dimension AHEAD
+real*4      TANPHI, PHI      # Tangent; and corresponding radians PHI
+ 
+# default result
+within_envelop = $no
+ 
+#$% get target LL
+UNT$TrueLatitude$F  = xUNT$TrueLatitude$F
+UNT$TrueLongitude$F = xUNT$TrueLongitude$F
+UNT$COSTrueLat$F    = xUNT$COSTrueLat$F
+ 
+#$% get range and bearing to target
+call proxim_M(UNT$Pointer$Index,
+              UNT$TrueLatitude$F,
+              UNT$TrueLongitude$F,
+              UNT$COSTrueLat$F,
+              Target_Range,                   # out, range, in TRPcommon
+              Target_Bearing)                 # out, true bearing, in TRPCommon
+ 
+# if too far away to reach (based on speed and life)
+if (Target_Range < 0.0)
+    {
+    if ( trace$SmartTorp != $no )
+        {
+        call echohn (xUNT$name$c,$$MaxLit)
+        call echov (" too far.. ")
+        }
+    return
+    }
+ 
+#$% if torp. is allowed a radial search
+if (xUNT2$RadialSearchFlag$i == $yes)
+    {
+    #$% allow radial search pattern only the game minute torp. is enabled
+    putUNT2$RadialSearchFlag$i ($No)
+ 
+    #$% if target within range
+    if (Target_Range <= Acquisition_Range)
+        {
+        within_envelop = $yes
+        if ( trace$SmartTorp != $no )
+            {
+            call echohn (xUNT$name$c,$$MaxLit)
+            call echov (" in rad. envelop.. ")
+            }
+        return
+        }
+    else
+        {
+        if ( trace$SmartTorp != $no )
+            {
+            call echohn (xUNT$name$c,$$MaxLit)
+            call echov (" out rad. envelop.. ")
+            call echov("tgt rng ")
+            call echof(Target_Range,3)
+            }
+        }
+ 
+    }
+ 
+diff = Target_Bearing - Heading
+$angpi(diff)
+ 
+diff = ABS(diff)
+ 
+#$% if target is abaft of torpedo
+if (diff > $PI/2.)
+    {
+    if ( trace$SmartTorp != $no )
+        {
+        call echohn (xUNT$name$c,$$MaxLit)
+        call echov (" abaft torp.. ")
+        }
+    return
+    }
+ 
+AHEAD  = MAX(Acquisition_Range,Speed*Model$Interval) # Speed is N.Mi per minute   6/7/90
+TANPHI = (2.0 * AHEAD) / max(Acquisition_Range, 0.1)
+PHI    = ATAN(TANPHI)    # Angle (radians) dividing envelope's regions
+ 
+#$% if target is within angle bounded by LOS and farthest corner of ACQ envelop
+If (diff <= PHI)         # Looking toward the region AHEAD..     # 6/7/90
+    {
+    # X is the distance perpendicular to the LOS, on the rectangle
+    X =  AHEAD * TAN(diff)                                       # 6/7/90
+    MAXRange = SQRT(X*X + AHEAD * AHEAD)                        # 6/7/90
+    if ( trace$SmartTorp != $no )
+        {
+        call echohn (xUNT$name$c,$$MaxLit)
+        call echov (" ahead torp.. ")
+        }
+    }
+Else
+    {
+    # Y is the distance ALONG the LOS, in the rectangle
+    Y =  Acquisition_Range/2.0 * TAN( ($PI/2)-diff)
+    MAXRange = SQRT(Y*Y + Acquisition_Range*Acquisition_Range / 4.0 )
+ 
+    if ( trace$SmartTorp != $no )
+        {
+        call echohn (xUNT$name$c,$$MaxLit)
+        call echov (" ahead torp.. ")
+        }
+    }
+ 
+#$% if target is within torpedo acquisition envelop
+If (Target_Range <= MAXRange)
+    {
+    within_envelop = $yes
+    if ( trace$SmartTorp != $no )
+        {
+        call echohn (xUNT$name$c,$$MaxLit)
+        call echov (" in acq. envelop.. ")
+        }
+    return
+    }
+ 
+return
+end
+ 
+
+subroutine torp_hit ( UNT$Pointer,                # in, torpedo pointer
+                      UNT2$Pointer,               # in, target pointer
+                      TRP$Pointer)                # in, torp. characteristics
+#$%
+#$%
+#$% Modified:  JFR (E1104) 12/95
+#$%            Added code to handle BDA.
+#$%
+#$%            Susan Miller 12/97 (E1697)
+#$%            Added 2 update_naval_unit_bda parameters to
+#$%            indicate whether damage is deferred.
+ 
+BBCommon
+NUCommon
+ENCommon
+ 
+integer*4   TRP$Pointer
+integer*4   UNT$Pointer
+integer*4   UNT2$Pointer
+ 
+integer*4   ilen
+integer*4   TRP$EPU$i
+integer*4   UNT2$Hits$i
+integer*4   UNT2$SuperType$i
+integer*4   UNT2$TorpHits$i
+integer*4   UNT$View$i
+ 
+literal     CSTRIP8
+ 
+integer     BDA_TorpedoHits # JFR 6/22/93
+Integer*4   BDA_tracknumber, BDA_Result_code, BDA_nbr_fired # JFR 6/18/93
+Integer*4   BDA_CLASSID
+Literal     BDA_Class
+real*4      BDA_Dam
+ 
+iyield = xTRP$Yield$i
+ 
+#$% if attacking torpedo is NUCLEAR and fired nuclear
+IF(iYield >0 & Nuclear$Capable !=$NO & xUNT$Nuclear$i !=$NO)
+    {
+    FLAT = Xunt2$TrueLatitude$F         # target position
+    FLON = Xunt2$TrueLongitude$F
+ 
+    UNT$View$i = xUNT$View$i
+    if     (UNT$View$i > $LastBlue$View)  kside = 2
+    else if(UNT$View$i > $Neutral$View)   kside = 1
+    else                                  kside = 0
+ 
+    iBURST  = $SubSurface$Code
+    iDEPTH = 1                          # set for shallow depth
+ 
+    IndxTgt = xUNT$AssignedTarget$i
+    IntcptFlag = $no                    # torpedo will not be intercepted
+ 
+    #$% the hit has already occured
+    nPh = 100
+ 
+    call SEND_DETON                            # detonation uses common block
+    }
+ELSE #$% else smart torpedo NOT nuclear
+    {
+    # if engagement log desired
+    if (log$engage != $no)
+        {
+        call engdata (unt$pointer, unt2$pointer)
+        PUTeng$Time$f( game$time )
+        PUTeng$Result$i( eng$Hit$code )
+ 
+        call write_eng_rec
+        }
+ 
+    UNT2$SuperType$i = xUNT2$SuperType$i
+ 
+    #$% if target type is
+    if( UNT2$SuperType$i == $Torpedo$SuperCode    |
+        UNT2$SuperType$i == $SmallBoat$SuperCode  |
+        UNT2$SuperType$i == $Submarine$SuperCode )
+        {
+        TRP$EPU$i  = 200                        # extreme damage, sink it
+        }
+    else if (UNT2$SuperType$i == $CtrMeasure$SuperCode)
+        {
+        TRP$EPU$i = 0                           # do not sink countermeasure
+        }
+    else
+        {
+        TRP$EPU$i = xTRP$EPU$i
+        }
+ 
+    #$% increment pounds TNT delivered
+    UNT2$Hits$i = xUNT2$Hits$i + TRP$EPU$i * 100
+    putUNT2$Hits$i
+ 
+    UNT2$TorpHits$i = xUNT2$TorpHits$i + TRP$EPU$i * 100
+    putUNT2$TorpHits$i
+ 
+    # now get the values for input to update routine - JFR 6/22/93 (E1104)
+    BDA_NBR_FIRED = 1 # smart torpedo's fired 1 at a time - JFR 6/22/93
+    BDA_TORPEDOHits = TRP$EPU$i * 100 # get smart torpedo warhead weight for BDA - JFR 6/22/93
+    BDA_Result_code = $NavalTorpedo$Code
+    call GET_DSS_DATA (UNT2$POINTER, UNT$POINTER, BDA_TorpedoHits,
+                       BDA_Result_code, BDA_Dam, BDA_TRACKNUMBER,
+                       BDA_CLASS, BDA_CLASSID)
+ 
+    #$% Enter data into the DSS table.   --- JFR 6/16/93
+    call Update_Naval_unit_BDA (UNT2$Pointer, UNT$Pointer, $NavalTorpedo$Code,
+                                BDA_Result_code, BDA_Dam, BDA_TRACKNUMBER,
+                                BDA_CLASS, BDA_CLASSID, BDA_NBR_FIRED, xTRP$NAME$C,
+                                $no, 0.0) # no deferred time SMM 12/97 (E1697)
+    } # end else smart torpedo NOT nuclear  # jb E2208 (0.0 vice $NO) 9/27/00
+ 
+return
+end
+ 
+
+Subroutine Deploy_CtrMeasure (OrderNumber,Ord_ID,UNT$Pointer,Num_args,ILEX)
+#######################################################
+#$%
+#$% Purpose:   Deploy_CtrMeasure processes improved torpedo model
+#$%            "deploy countermeasure" commands
+#$%
+#$% Called By: Odeploy
+#$%
+#$% Calls:     FNDORD     ODeployCtm
+#$%
+#$% Tables:    ORD
+#$%
+#$% Date:      May 1990
+#$% Author:    R. Hundt
+#$%
+#######################################################
+ 
+BBcommon
+TRPCommon
+ 
+integer*4   OrderNumber
+integer*4   Ord_ID
+integer*4   Num_Args
+integer*4   ORD$Pointer
+integer*4   UNT$Pointer
+ 
+literal ILEX[$max$args]
+ 
+#$% call to find order
+call FNDORD(Ord_ID,ORD$Pointer)
+ 
+#$% if table is full, return
+if (ORD$Pointer == 0) return
+ 
+nord    = OrderNumber                   # load into common block
+Nargs   = num_args                      # load into common block
+ 
+call ODeployCtm (ORD$Pointer,UNT$Pointer,ilex)
+ 
+return
+end
+ 
+
+Subroutine ODeployCtm (ORD$Pointer,UNT$Pointer,ilex)
+#######################################################
+#$%
+#$% Purpose:   ODeployCtm selectively executes "deploy
+#$%            Countermeasure" orders, based
+#$%            on order validation.
+#$%
+#$% Called By: Deploy_CounterMeasure
+#$%
+#$% Calls:     Validate_CTM     deploy_CTM
+#$%
+#$% Tables:    ORD
+#$%
+#$% Date:
+#$%
+#$% Author:
+#$%
+#######################################################
+ 
+BBcommon
+ 
+integer*4   ORD$Pointer
+integer*4   UNT$Pointer
+integer*4   ORD$Phase$i
+ 
+literal ILEX[$max$args]
+ 
+integer*4   LCL$Pointer
+ 
+#$% if order phase is zero, call to validate countermeasures orders
+if (xORD$Phase$i == 0)
+    {
+    call VALIDATE_CTM(ORD$Pointer,
+                      UNT$Pointer,
+                      ilex)
+    }
+ 
+#$% if order validated, call to execute countermeasures orders
+if (xORD$Phase$i >  0)
+    {
+    call Deploy_CTM(ORD$Pointer,            # out
+                    UNT$Pointer,            # out
+                    ilex)                   # out
+    }
+ 
+return
+end     # End Subroutine ODeployCtm
+ 
+
+Subroutine Validate_CTM(ORD$Pointer,       # in
+                        UNT$Pointer,       # in
+                        ilex)              # in
+#######################################################
+#$%
+#$% Purpose:   Validate_CTM validates "deploy countermeasure"
+#$%            orders and displays error messages to the user.
+#$%
+#$% Called By:
+#$%
+#$% Calls:     GTUNT      SEND       WHSIDE
+#$%            DEQGET
+#$%
+#$% Tables:    UNT        ORD
+#$%
+#$% Date:      MAY 90
+#$%
+#$% Author:    R. Hundt
+#$%
+#######################################################
+ 
+BBcommon
+TRPCommon
+ 
+integer*4   ORD$Pointer
+integer*4   UNT$Pointer
+literal     ILEX[$max$args]
+ 
+literal     cstrip8
+Integer LCOMP   # jb AAI01/LCOMP   E2145 2/14/01
+integer*4   eqlist[5,ARB]
+integer*4   iFind
+integer*4   ilen
+integer*4   N
+integer*4   nfound
+integer*4   ORD$deqindx$i
+integer*4   ORD$Phase$i
+integer*4   CTM$Pointer
+literal     UNT$Name$c
+integer*4   UNT$View$i
+character   msg[ARB]
+ 
+#                     1         2         3         4         5         6
+#            123456789012345678901234567890123456789012345678901234567890
+#String msga "         has no          countermeasures."
+ 
+#$% get unit name and view
+UNT$Name$c = xUNT$Name$c
+UNT$view$i = xUNT$View$i
+ 
+nfound = 0
+ 
+call DEQGET(UNT$Pointer,
+            $Countermeasure$Code,            # send ident code
+            nfound,                        # send/receive nbr items fnd
+            eqlist)                        # send/receive list of EQ
+#----------------------------------------------------------------------
+#          lines from DEQGET:
+#    eqlist[1,nfound] = DEQ$Pointer$index       # save index of equipment
+#    eqlist[2,nfound] = Xdeq$pntr$i             #   equipment Pointer
+#    eqlist[3,nfound] = deq$remaining$i         #   equipment count
+#    eqlist[4,nfound] = 0                       #
+#    eqlist[5,nfound] = 0                       #
+#---------------------------------------------------------------------
+# if countermeasure NOT found on platform
+if (eqlist[1,1] == $No)
+    {
+    #$% move unit name to msg array
+    ilen = 0
+    Call SMOVHN(UNT$name$c,$$MaxLit,msg,ilen)
+    Call SMOVV(" has no ",msg,ilen)
+    Call SMOVHN(ilex[ 3 ],$$MaxLit,msg,ilen)
+    call SMOVV (" countermeasures.",msg,ilen)
+    #$% display message
+    call send_(UNT$view$i,0,ilen,msg)    #             1/10/91
+    return
+    }
+ 
+iFind = $No
+For (N=1; N <= nfound; N =N +1)
+    {
+    CTM$Pointer = eqlist[2,N]
+    if (LCOMP(xCTM$Name$C,ilex[3]) == 0 )    # jb AAI01/LCOMP    2/14/01
+        {
+        iFind = $Yes
+        ORD$DeqIndx$i = eqlist[1,N]   # index into deq table
+        putORD$DeqIndx$i              # for reference in Shoot_Torp
+        BREAK
+        }
+    }
+ 
+#$% if equipment not found in countermeasure characteristics
+if( iFind != $Yes )
+    {
+    #$% move unit name to msg array
+    ilen = 0
+    Call SMOVHN(UNT$name$c,$$MaxLit,msg,ilen)
+    Call SMOVV(" has no ",msg,ilen)
+    Call SMOVHN(ilex[ 3 ],$$MaxLit,msg,ilen)
+    call SMOVV (" countermeasures.",msg,ilen)
+    #$% display message
+    call send_(UNT$view$i,0,ilen,msg)    #             1/10/91
+    return
+    }
+ 
+#$% set order phase to "validated" and store
+ORD$Phase$i = 1
+putORD$Phase$i
+ 
+return
+end # End Validate_CTM
+ 
+
+Subroutine Deploy_CTM(ORD$Pointer,UNT$Pointer,ilex)
+#######################################################
+#$%
+#$% Purpose:   Deploy_CTM deploys countermeasures or
+#$%            displays error messages to the user..
+#$%
+#$% Called By:
+#$%
+#$% Calls:     SEND       UNTGET
+#$%            GTUNT      Build_CTM
+#$%
+#$% Tables:    UNT        ORD
+#$%            CTM
+#$%
+#$% Date:
+#$% Author:
+#$%
+#######################################################
+ 
+BBcommon
+TRPCommon
+integer*4   ORD$Pointer
+literal     ILEX[$max$args]
+integer*4   UNT$Pointer
+Integer LCOMP   # jb AAI01/LCOMP           E2145 2/14/01
+literal     cstrip8
+integer*4   DEQ$Pointer
+integer*4   DEQ$Remaining$i
+integer*4   I
+integer*4   ilen
+integer*4   ineed
+integer*4   nfind [ 11 ]
+integer*4   ORD$deqindx$i
+integer*4   ORD$Phase$i
+integer*4   CTM$Pointer
+literal     UNT$Name$c
+integer*4   UNT$View$i
+integer*4   UNT2$Pointer
+character   msg[ARB]
+ 
+#                     1         2         3         4         5         6
+#            1234567890123456789012345678901234567890123456789012345678901
+#String msg1 "Unit array full -- cannot launch countermeasures."
+#String msg5 "      has no       countermeasures."
+#String msg2 "      deployed countermeasure      ."
+ 
+#$% if order minutes is not game minutes, return
+if (order$minute != game$minute) return
+ 
+#$% get unit name and view
+UNT$Name$c = xUNT$Name$c
+UNT$view$i = xUNT$View$i
+ 
+ORD$deqindx$i = xORD$deqindx$i
+DEQ$Pointer$TO  (ORD$deqindx$i)
+ 
+deq$Remaining$i = Xdeq$Remaining$i
+if (deq$Remaining$i < 1)
+    {
+    #$% clear order phase and save, return
+    ORD$Phase$i = 0
+    putORD$Phase$i
+ 
+    #$% Notify Player that Unit has no countermeasures..
+    ilen = 0
+    Call SMOVHN(UNT$name$c,$$MaxLit,msg,ilen)
+    Call SMOVV(" has no ",msg,ilen)
+    Call SMOVHN(ilex[ 3 ],$$MaxLit,msg,ilen)
+    Call SMOVV(" countermeasures.",msg,ilen)
+    #$% display message
+    call send_(UNT$view$i,0,ilen,msg)    #             1/10/91
+ 
+    return
+    }
+ 
+CTM$Pointer = Xdeq$Pntr$i        # Is this the REQUESTED countermeasure
+if (LCOMP(XCTM$Name$C,ilex[3]) != 0)    # jb AAI01/LCOMP    2/14/01
+    {
+    #$% .. after clearing order phase to cancel..
+    ORD$Phase$i = 0
+    putORD$Phase$i
+ 
+    #$% move unit name to message
+    ilen = 0
+    Call SMOVHN(UNT$name$c,$$MaxLit,msg,ilen)
+    Call SMOVV(" has no ", msg,ilen)
+    Call SMOVHN(ilex[ 3 ],$$MaxLit,msg,ilen)
+    Call SMOVV(" countermeasures.",msg,ilen)
+    #$% Notify Player the REQUESTED "new" countermeasure isn't aboard..
+    call send_(UNT$view$i,0,ilen,msg)    #             1/10/91
+ 
+    return
+    }
+ 
+#$% get number of countermeasures to deploy
+ineed = 1
+ 
+#$% find empty UNT slots for (ineed) countermeasures
+call UNTGET(ineed,NFIND)
+ 
+#$% if not enough slots found, ABORT:
+if (NFIND[1] < ineed)
+    {
+    #$% call to display unit array full message
+    Ilen = 0
+    Call SMOVV("Unit array full -- cannot launch countermeasures.",msg,ilen)
+    call send_(UNT$View$I,0,ilen,msg)    #             1/10/91
+    ORD$phase$i = 0
+    putORD$phase$i
+    return
+    }
+ 
+#$% clear order phase and store
+ORD$Phase$i = 0
+putORD$Phase$i
+ 
+UNT2$Pointer = NFIND[ 2 ]             #get empty slot Pointer
+ 
+#$% call to build countermeasure unit
+call Build_CTM( UNT$Pointer,         # unit firing the torp
+                UNT2$Pointer,        # empty unit slot pointer
+                CTM$Pointer,         # character. pointer
+                ilex)
+ 
+# decrement improved countermeasures
+deq$remaining$i = deq$remaining$i - ineed
+putdeq$remaining$i
+ 
+ilen = 0
+ 
+Call SMOVHN(xUNT$name$c,$$MaxLit,msg,ilen)     # 5 char name, unit deploying
+Call SMOVV(" deployed countermeasure ",msg,ilen)
+Call SMOVHN(xUNT2$name$c,$$MaxLit,msg,ilen)   # 5 char name, counter measure
+Call SMOVV(".",msg,ilen)
+call send_(UNT$View$I,0,ilen,MSG)
+ 
+return
+end        # End  deploy_CTM
+ 
+
+Subroutine Build_CTM(UNT$Pointer,            # unit firing countermeasures
+                     UNT2$Pointer,           # free unit slot
+                     CTM$Pointer,            # countermeasure characteristics
+                     ilex)                   # lex values
+ 
+#######################################################
+#$% index
+#$% Purpose:   Build_CTM builds countermeasure charac-
+#$%            teristics into the UNT tables to be
+#$%            identified after launch.
+#$%
+#$% Called By: Shoot_Torp
+#$%
+#$% Calls:     NAVERR     GETRB_M
+#$%
+#$% Tables:    UNT        CTM
+#$%
+#$% Date:      5/90
+#$%
+#$% Author:    R. Hundt
+#$%
+#$% Modified:  Susan Miller 4/99 (E2078)
+#$%            If countermeasure deployed from a surface
+#$%            unit, put it's depth at 5 feet, else a
+#$%            sub deployed countermeasure should be put
+#$%            at 500 feet.
+#######################################################
+ 
+BBcommon
+TRPCommon
+integer*4   UNT$Pointer
+integer*4   UNT2$Pointer
+integer*4   CTM$Pointer
+literal     ilex[$max$args]
+ 
+literal     cstrip8
+integer*4   CTM$Life$I
+integer*4   UNT2$Stratum$i
+real*4      UNT2$AssumedCourse$F
+real*4      UNT2$AssumedLatitude$F
+real*4      UNT2$AssumedLongitude$F
+real*4      UNT2$AssumedSpeed$F
+real*4      UNT2$AttackBearing$F
+real*4      UNT2$AttackRange$F
+real*4      UNT2$CosTrueLat$F
+integer*4   UNT2$HierarchyId$i
+integer*4   UNT2$LaunchIndx$i
+integer*4   UNT2$OrderedAltDepth$I
+real*4      UNT2$OrderedCourse$F
+real*4      UNT2$OrderedLatitude$F
+real*4      UNT2$OrderedSpeed$F
+integer*4   UNT2$Speed$i
+integer*4   UNT2$Status$I
+integer*4   UNT2$Subtype$i
+real*4      unt2$TimeTerm$f
+integer*4   UNT2$CTMPntr$I
+integer*4   UNT2$TrueAltDepth$I
+real*4      UNT2$TrueCourse$F
+real*4      UNT2$TrueLatitude$F
+real*4      UNT2$TrueLongitude$F
+real*4      UNT2$TrueSpeed$F
+integer*4   UNT2$Type$I
+integer*4   UNT2$View$I
+ 
+UNT2$Type$I = $Sub$Code
+putUNT2$Type$I
+ 
+UNT2$Subtype$i = $CtrMeasure$SubCode       # sub type is countermeasure
+putUNT2$Subtype$i
+ 
+UNT2$Status$I = $Proceeding$Code               # status is proceeding
+putUNT2$Status$I
+ 
+UNT2$View$I = xUNT$View$I                      # view of launch platform
+putUNT2$View$I
+ 
+UNT2$HierarchyId$i = xUNT$HierarchyId$i        # same heirarchy as unit deploying
+putUNT2$HierarchyId$i
+ 
+UNT2$CTMPntr$I = CTM$Pointer                   # enter characteristics ptr
+putUNT2$CTMPntr$I
+ 
+#$% countermeasure run time
+CTM$Life$I = xCTM$Life$I
+ 
+# enter termination time
+unt2$TimeTerm$f = CTM$Life$i + ORDER$MINUTE
+putunt2$TimeTerm$f
+ 
+call assign_unique_unit_name (unt2$pointer)  # common naming routine
+ 
+#$% index of platform firing the countermeasure
+UNT2$LaunchIndx$i = UNT$Pointer$Index
+putUNT2$LaunchIndx$i
+ 
+#$% unconditionally below acoustic layer
+UNT2$Stratum$i = $Below$AcousticLayer
+putUNT2$Stratum$i
+ 
+# negate position order, no ordered position
+UNT2$OrderedLatitude$F = $PI
+putUNT2$OrderedLatitude$F
+ 
+ 
+#$% put depth to some non-zero value
+if (xUNT$Type$I == $Sub$Code)  # SMM 4/99 (E2078)
+     UNT2$TrueAltDepth$I = 500
+# else this is a surface unit launched countermeasure
+else UNT2$TrueAltDepth$I = 5
+putUNT2$TrueAltDepth$I
+ 
+UNT2$OrderedAltDepth$I = UNT2$TrueAltDepth$I
+putUNT2$OrderedAltDepth$I
+ 
+#$% no attack guide
+UNT2$AttackBearing$F = 0.0
+putUNT2$AttackBearing$F
+ 
+UNT2$AttackRange$F = 0.0
+putUNT2$AttackRange$F
+ 
+#$% set maximum speed for unit, not mobile
+UNT2$Speed$i = 0
+putUNT2$Speed$i
+ 
+#$% countermeasure enters at deploying platform location
+UNT2$TrueLatitude$F = xUNT$TrueLatitude$F    # latitude platform delpoying ctm.
+UNT2$TrueLongitude$F = xUNT$TrueLongitude$F
+UNT2$CosTrueLat$F = xUNT$CosTrueLat$F
+ 
+putUNT2$TrueLatitude$F
+putUNT2$TrueLongitude$F
+putUNT2$CosTrueLat$F
+ 
+UNT2$AssumedLatitude$F = UNT2$TrueLatitude$F
+putUNT2$AssumedLatitude$F
+ 
+UNT2$AssumedLongitude$F = UNT2$TrueLongitude$F
+putUNT2$AssumedLongitude$F
+ 
+UNT2$TrueSpeed$F = 0.0                       # enter countermeasure Speed
+putUNT2$TrueSpeed$F
+ 
+UNT2$AssumedSpeed$F = UNT2$TrueSpeed$F       # enter assumed Speed
+putUNT2$AssumedSpeed$F
+ 
+UNT2$OrderedSpeed$F = UNT2$TrueSpeed$F       # enter ordered Speed
+putUNT2$OrderedSpeed$F
+ 
+#$% course is set to eliminate dot(speed vector) above CtrMeasure plot symbol
+UNT2$AssumedCourse$F = $PI
+putUNT2$AssumedCourse$F
+ 
+UNT2$OrderedCourse$F = $PI
+putUNT2$OrderedCourse$F
+ 
+UNT2$TrueCourse$F = $PI
+putUNT2$TrueCourse$F
+ 
+ 
+ 
+return
+end        # End  Build_CTM
+ 
+
+#$% check life expectency of countermeasure
+subroutine countermeasure ( UNT$Pointer )
+BBCommon
+integer*4   UNT$Pointer
+ 
+#$% if torpedo life is exceeded
+if (xunt$TimeTerm$f <= Game$Time)
+    {
+    PUTunt$status$i ($beingdeleted$code)   # remove countermeasure from system
+    return
+    }
+end
+ 
+
+subroutine torp_acquisition_range ( TRP$Pointer,          # in
+                                    UNT$Truelatitude$F,   # in
+                                    UNT$Truelongitude$F,  # in
+                                    SER_Indx,             # out
+                                    acquisition_range)    # out, nm
+BBCommon
+Integer*4   TRP$Pointer
+real*4      UNT$Truelatitude$F
+real*4      UNT$Truelongitude$F
+Integer*4   SER_Indx
+real*4      acquisition_range
+ 
+integer*4   Env_Number
+ 
+#$% get the acoustic environment number
+call NVREGN (UNT$Truelatitude$F,                # in
+             UNT$Truelongitude$F,               # in
+             SER_Indx,                          # out, SER index
+             Env_Number )                       # out, environment number
+ 
+#$% set default acquisition range
+acquisition_range = xTRP$ACQRange$i
+ 
+if ( Env_Number == $Env$Good$code )
+    {
+    acquisition_range = xTRP$ACQ1Range$i
+    }
+else IF ( Env_Number == $Env$Fair$code )
+    {
+    acquisition_range = xTRP$ACQ2Range$i
+    }
+else IF ( Env_Number == $Env$Poor$code )
+    {
+    acquisition_range = xTRP$ACQ3Range$i
+    }
+ 
+#$% set rectangular dimensions for target acquisition
+acquisition_range = acquisition_range / 2000.0        # convert yards to nm
+ 
+return
+end

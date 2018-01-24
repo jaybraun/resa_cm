@@ -1,0 +1,132 @@
+include "ascii.inc"
+include "macros.inc"
+ 
+# Note:  The maximum size of an ALSP message has been increased from
+# 2700 to 20000 (E1693) - clk 12/96.
+ 
+define ($max$ALSP_Message_Size,20480)   # E2158 dew 10/99 - This must be equal-to or larger than ACM
+define ($max$ALSP_MBX_Buffer,13000)     # 65K is VMS Max (16 bits)
+ 
+undefine read
+undefine write
+undefine err
+ 
+define ($debug,#)
+subroutine rev_alsp_log
+ 
+# This routine helps extend review mode, to include insertion of alsp message
+# history.
+# This routine opens the alsp log, filters out all but the read messages,
+# positions the file to the current exercise game minute, and inserts all
+# alsp messages for the current minute into the exercise running in review
+# mode.
+# The log file will be opened if it is not currently open.
+ 
+integer     gm, pos, msg_len, len, sgm_len, mlen, amlen
+integer     str_len,err_rtn, len_trim
+VMSchar     sdate*24 # Formatted as "dd-mmm-yyyy
+VMSchar     stime*24 # Formatted as "hh:mm:ss.ss "   # dew 10/99
+VMSchar     type_io*24
+VMSchar     sgm*24
+VMSchar     smsg_len*24
+VMSchar     msg*$max$ALSP_Message_Size
+VMSchar     str*$max$ALSP_Message_Size
+VMSchar*50  ALSP_log_file
+include "alsp_io_rat.inc"
+ 
+msg_log_rev_unit = 89
+msg_log_open     = .false.
+msg_log_read     = .false.
+msg_log_write    = .false.
+gm               = 0
+ 
+9003
+ 
+while (!msg_log_open)
+    {
+    open (access='SEQUENTIAL',
+         file="alsp_msg.log",
+         recl=arith($max$ALSP_Message_Size,+,64),    # add room for date/time
+         iostat=err_rtn,
+         status='OLD',
+#         disp='DELETE',
+         unit=msg_log_rev_unit)
+#         shared)
+ 
+    if (err_rtn != 0)
+        {
+        #print *,' Error opening alps message log in review mode: ',err_rtn
+        msg_log_open = .false.
+        call delay(1000)
+        }
+    else
+        msg_log_open = .true.
+ 
+    }
+ 
+if (msg_log_open)
+    {
+    # Position file to current game minute
+    while (gm < game$minute)
+        {
+9002
+        read(unit=msg_log_rev_unit,fmt='(A)',end=9001) str
+	str_len = len_trim(str)
+        # datetime, gm, type_io, msg_len, msg
+        pos = 1
+        call next_nonblank_field(str, str_len, pos, sdate, len)
+        call next_nonblank_field(str, str_len, pos, stime, len)
+        call next_nonblank_field(str, str_len, pos, sgm, sgm_len)
+        call next_nonblank_field(str, str_len, pos, type_io, len)
+        call next_nonblank_field(str, str_len, pos, smsg_len, mlen)
+        call skip_leading_blanks(str, str_len, pos)
+        msg_len = str_len - pos + 1
+        if (msg_len <= 0) next
+        if (type_io[1:5] != 'READ:') next       # Filter out all but read msgs
+        msg[1:msg_len] = str[pos:str_len]
+        if (sgm_len == 0) next
+        read(unit=sgm[1:sgm_len],fmt='(i9)',err=9002) gm
+        if (mlen == 0) next
+        read(unit=smsg_len[1:mlen],fmt='(i9)',err=9002) amlen
+        if (amlen == 0) next                    # Empty alsp message
+        }
+    # Review alsp messages for the current game minute
+    while (gm == game$minute)
+        {
+        if (type_io[1:5] == "READ:" &       # Filter out all but read msgs
+            msg_len > 0)                    # Skip badly formed records
+        {
+            #print *, 'parse ', msg[1:msg_len]
+            call alsp_invoke_parser (msg, msg_len)
+        }
+9004
+        read(unit=msg_log_rev_unit,fmt='(A)',end=9001) str
+	str_len = len_trim(str)
+        # datetime, gm, type_io, msg_len, msg
+        pos = 1
+        call next_nonblank_field(str, str_len, pos, sdate, len)
+        call next_nonblank_field(str, str_len, pos, stime, len)
+        call next_nonblank_field(str, str_len, pos, sgm, sgm_len)
+        call next_nonblank_field(str, str_len, pos, type_io, len)
+        call next_nonblank_field(str, str_len, pos, smsg_len, mlen)
+        msg_len = str_len - pos + 1
+        if (msg_len <= 0) next
+        msg[1:msg_len] = str[pos:str_len]
+        if (sgm_len == 0) next
+        read(unit=sgm[1:sgm_len],fmt='(i9)',err=9004) gm
+        if (mlen == 0) next
+        read(unit=smsg_len[1:mlen],fmt='(i9)',err=9004) amlen
+        if (amlen == 0) next                    # Empty alsp message
+        }
+    }
+ 
+return
+ 
+9001
+close (unit=msg_log_rev_unit)
+gm = 0
+msg_log_open = .false.
+goto 9003
+ 
+end
+ 

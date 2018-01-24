@@ -1,0 +1,1335 @@
+####    FILE:   WGOPcreate.rat
+
+
+include "macros.inc"         
+include "bbctl.inc"         
+include "bbcode.inc"         
+
+include "bbunt.inc"         
+include "bbdeq.inc"         
+include "bbaml.inc"         
+include "bbbml.inc"         
+include "bbvue.inc"         
+include "bbshc.inc"         
+include "bbshn.inc"         
+include "bbacc.inc"             # SMM 2/97 (E1746)
+include "bbrpm.inc"             # SMM 2/97 (E1746)
+
+
+include "wimain_eq.inc"         
+
+include "orders.inc"         
+include "ascii.inc"         
+
+define (BBImplicit,
+  Implicit None
+ )
+
+
+
+
+Subroutine OCreate (nord,                         #receive order number 
+                    jview,                        #receive view 
+                    nargs,                        #receive number of LEX ARGs
+                    args)                         #receive parameters 
+
+########################################################
+#$%
+#$% Purpose:   Ocreate allows Control to create a new
+#$%            unit if:  the view is within range 
+#$%                      the name is unique in UNT, AML, BML tables
+#$%                      the class exists in SHC table
+#$%                      there is an available slot in UNT table
+#$%                      all equipment can be loaded into the DEQ table
+#$%            The new unit does not have to have a unique
+#$%            task id number.
+#$%
+#$%            Currently, only Ships and Subs can be created.
+#$%                     (NOT Boats, Shore Bases, Aircraft)
+#$%
+#$% Called By: EXEORD
+#$%
+#$% Calls:     Create_ship  Eq_find  Send_message  
+#$%            SEND  SMOVHN  SMOVV
+#$%            Create_Midflight_Aircraft
+#$%
+#$% Tables:    AML  BML  SHC  UNT  VUE
+#$%
+#$% Date       Jan 1992
+#$%
+#$% Author:    Susan Miller & Dane Wills
+#$%
+#$% Modified:  Carol Kropp 8/96 (E1690)
+#$%            Added check to make sure that the UNT$Pointer
+#$%            was good before creating the unit.
+#$%
+#$%            Susan Miller 2/97 (E1746)
+#$%            Added processing of command to create/launch
+#$%            aircraft midflight.
+#$%
+#$%            Jim Allen 10/01  (E2240)
+#$%            Added processing to process sDIS generated created object
+#$%
+########################################################
+
+BBCommon
+EqErr$Common
+
+integer     nord, jview, nargs
+literal     args[nargs]
+
+literal     name 
+literal     class       
+literal     flag
+literal     report
+integer     task_id     
+real        latitude    
+real        longitude   
+real        course      
+real        speed       
+
+integer     UNT$Pointer
+integer     SHC$Pointer
+integer     isite, iapp, ient
+integer     iview
+integer     i, m
+real        DMS2rad
+
+integer     msglen,   warnlen
+character   msg[300], warn[ARB]
+
+# args[1]args[2]      args[3]           args[4]            args[5]
+# CREATE SHIP (named) <name> (of class) <class> (task id) <task-no>
+#             args[6]     args[7]             args[8]         args[9]
+# (position) <latitude> <longitude> (course) <degrees> (speed) <knots>
+#   [10]         [11]                   [12]              [13]
+#[| DIS (site) <number> (application) <number> (entity) <number>];
+#   [10]        [11]             [12]          [13]             [14]
+#[| FLAG <flag>
+# | REPORT  <name>
+# | TYPE (type) <name> (number) <number>
+# | SCONUM <name6>
+# | NAMED <full-name>
+#]
+
+LitCharEquiv(otg_ilex,18)
+
+data (otg_ilex[m],m=1,4) /$lex$ENTER$,$lex$OTG$,0,$lex$FLAG$ /
+data otg_ilexC[5] /"US"/
+data (otg_ilex[m],m=6,8) /$lex$ID$,0,$lex$REPORT$ /
+data otg_ilexC[9] /"OTH"/
+data (otg_ilex[m],m=10,18) / 0, 0, 0, 0, 0, 0, 0, 0, 0/
+
+integer nargsotg
+integer nordotg
+integer get_nosicId
+integer jj, kk
+
+msglen = 0
+warnlen = 0
+
+#------------------------------------------------------------
+# get the required parameters from the command line
+
+if (args[2] == $lex$SHIP$ |         # Ship/Sub are interchangeable
+    args[2] == $lex$SUBMARINE$ )
+    {
+    name        = args[3]           # name of the new ship
+    class       = args[4]           # class of new unit
+    task_id     = args[5]           # task id of new unit
+    latitude    = DMS2rad(args[6])
+    longitude   = DMS2rad(args[7])
+    course      = args[8]/180. * $PI
+    speed       = args[9]
+
+
+    isite = 0
+    iapp  = 0
+    ient  = 0
+
+
+    call Val_Create_ship (name,           # (input)
+                          class,          # (input)
+                          task_id,        # (input)
+                          msg,            # (in/output)
+                          msglen,         # (in/output)
+                          warn,           # (in/output)
+                          warnlen,        # (in/output)
+                          UNT$pointer,    # (output)
+                          SHC$pointer,    # (output)
+                          iView)          # (output)
+
+    if (UNT$Pointer$Valid)   # clk 8/96 (E1690) - make sure that the unt table pointer
+    {                      # is within the the unt table...caused crashs!
+        if (msglen == 0)
+        {
+           call create_ship(UNT$Pointer,   # (input)
+                            SHC$Pointer,   # (input)
+                            iview,         # (input)
+                            name,          # (input)
+                            task_id,       # (input)
+                            latitude,      # (input)
+                            longitude,     # (input)
+                            course,        # (input)
+                            speed,         # (input)
+                            isite,         # (input)
+                            iapp,          # (input)
+                            ient,          # (input)
+                            msg,           # (in/output)
+                            msglen,        # (in/output)
+                            warn,          # (in/output)
+                            warnlen)       # (in/output)
+
+            nargsotg = 9
+            otg_ilex[3] = name
+            flag = 'YY'
+            if      (iview >= 2 & iview <= 5) flag = 'US'
+            else if (iview >= 6 & iview <= 6) flag = 'US'
+            else if (iview >= 7 & iview <= 9) flag = 'KN'
+            otg_ilex[5] = flag
+            otg_ilex[7] = get_nosicId()
+            report = 'NAVNRU'
+            if      (iview >= 2 & iview <= 5) report = 'NAV'
+            else if (iview >= 6 & iview <= 6) report = 'NAVNRU'
+            else if (iview >= 7 & iview <= 9) report = 'NAVNRU'
+            otg_ilex[9] = report
+            otg_ilex[17] = $BLANKLIT
+            otg_ilex[18] = $BLANKLIT
+            for (i=10; i<=nargs; i=i+2)
+            {
+                if (args[i] == $lex$FLAG$)
+                {
+                    otg_ilex[5] = args[i+1]      # Flag
+                }
+                else if (args[i] == $lex$REPORT$)
+                {
+                    otg_ilex[9] = args[i+1]      # Report
+                }
+                else if (args[i] == $lex$TYPE$)
+                {
+                    otg_ilex[nargsotg+1] = args[i]       # TYPE
+                    otg_ilex[nargsotg+2] = args[i+1]     # Hull type
+                    otg_ilex[nargsotg+3] = args[i+2]     # Hull number
+                    i = i + 1
+                    nargsotg = nargsotg + 3
+                }
+                else if (args[i] == $lex$SCONUM$)
+                {
+                    otg_ilex[nargsotg+1] = args[i]       # SCONUM
+                    otg_ilex[nargsotg+2] = args[i+1]     # name
+                    nargsotg = nargsotg + 2
+                }
+                else if (args[i] == $lex$NAMED$)
+                {
+                    otg_ilex[nargsotg+1] = args[i]       # NAMED
+                    kk = 0
+                    jj = (nargs - i) * 8
+                    call smovh (args[i+1], jj, otg_ilex[nargsotg+2], kk)
+                    nargsotg = nargsotg + nargs - i + 1
+                    i = nargs + 1                       # No more arguments
+                }
+            }
+            nordotg = EnterOTG$order
+            call oenter_otg (nordotg,iview,nargsotg,otg_ilex)
+
+        } # end if no errors in validation
+    }   # end of if the UNT$Pointer is good
+    else  # clk 8/96 (E1690) - print an error message to the swar terminal
+    {
+        call echov  ("Problem in CREATE SHIP...The UNT$Pointer is no good")
+        call echor
+        call echov  ("Ship ")
+        call echohn (name, $$MaxLit)
+        call echov  (" is not going to be created.")
+        call echo   ($Bell)
+        call echo   ($Bell)
+        call echor
+    }
+} # end if $lex$SHIP$
+else if (args[2] == $lex$AIRCRAFT$)    # smm 2/97 (E1764)
+    {
+     call create_midflight_aircraft (nargs, args, msg, msglen)
+    }
+
+else if (args[2] == $lex$SHORE$)    # joa 3/05 per_createbase
+    {
+    name        = args[3]           # name of the new ship
+    class       = args[4]           # class of new unit
+    task_id     = args[5]           # task id of new unit
+    latitude    = DMS2rad(args[6])
+    longitude   = DMS2rad(args[7])
+
+    call Val_Create_shorebase (name,           # (input)
+                          class,          # (input)
+                          task_id,        # (input)
+                          msg,            # (in/output)
+                          msglen,         # (in/output)
+                          warn,           # (in/output)
+                          warnlen,        # (in/output)
+                          UNT$pointer,    # (output)
+                          SHC$pointer,    # (output)
+                          iView)          # (output)
+
+    if (UNT$Pointer$Valid) 
+      {                   
+       if (msglen == 0)
+           {
+           call create_shorebase(UNT$Pointer,   # (input)
+                            SHC$Pointer,   # (input)
+                            iview,         # (input)
+                            name,          # (input)
+                            task_id,       # (input)
+                            latitude,      # (input)
+                            longitude,     # (input)
+                            msg,           # (in/output)
+                            msglen,        # (in/output)
+                            warn,          # (in/output)
+                            warnlen)       # (in/output)
+           } # end if no errors in validation
+       }   # end of if the UNT$Pointer is good
+     else  # print an error message to the swar terminal
+       {
+        call echov  ("Problem in CREATE SHOREBASE...The UNT$Pointer is no good")
+        call echor
+        call echov  ("Ship ")
+        call echohn (name, $$MaxLit)
+        call echov  (" is not going to be created.")
+        call echo   ($Bell)
+        call echo   ($Bell)
+        call echor
+       }
+    }
+
+if (msglen != 0)            # any message to display to the user?
+    {
+    if (warnlen != 0)
+        {
+        call smovv("  **** Warning: ",msg,msglen)
+        call smovh(warn, warnlen, msg,msglen)
+        }
+
+    call send_(0,0,msglen,msg)
+    }
+
+return
+end     # end of subroutine Ocreate
+
+
+
+Subroutine Val_Create_ship (name,           # (input)
+                            class,          # (input)
+                            task_id,        # (input)
+                            msg,            # (in/output)
+                            msglen,         # (in/output)
+                            warn,           # (in/output)
+                            warnlen,        # (in/output)
+                            UNT$pointer,    # (output)
+                            SHC$pointer,    # (output)
+                            iView)          # (output)
+
+########################################################
+#$%
+#$% Purpose:    Val_Create_Ship Verifies the parameters for a new Ship
+#$%             are Valid.  Criteria include:
+#$%                 the Task/View exists
+#$%                 the name is unique in UNT, AML, BML tables
+#$%                 the class exists in SHC table
+#$%                 there is an available slot in UNT table
+#$%                 all equipment can be loaded into the DEQ table
+#$%             The new unit does not have to have a unique
+#$%             task id number.
+#$%
+#$% Called By:  OCREATE
+#$%
+#$% Date       FEB 1992
+#$%
+#$% Author:    D Wills
+#$%
+#$% Modified:  Carol Kropp and Susan Miller - 3/29/95 (E1389)
+#$%            Added yes/no flags to make sure the warning
+#$%            messages are only included once in the message
+#$%            sent to the user...cause array warn to overflow.
+#$%
+########################################################
+
+BBCommon
+EqErr$Common
+
+literal     cstrip8
+literal     name 
+literal     class       
+integer     task_id     
+
+integer     UNT$Pointer
+integer     SHC$Pointer
+integer     VUE$Pointer
+integer     AML$Pointer
+integer     BML$Pointer
+integer     SHC$Category$I
+
+integer     iview, litcmp
+
+integer     msglen,   warnlen, xsave
+character   msg[300], warn[ARB]
+
+integer     available_UNT_slot
+integer     view_code
+integer     isShip
+integer     task_id_is_dup, dups_an_event_name     # clk & smm 3/95
+
+isShip = YES
+goto 10
+entry      Val_Create_shorebase (name,           # (input)
+                                 class,          # (input)
+                                 task_id,        # (input)
+                                 msg,            # (in/output)
+                                 msglen,         # (in/output)
+                                 warn,           # (in/output)
+                                 warnlen,        # (in/output)
+                                 UNT$pointer,    # (output)
+                                 SHC$pointer,    # (output)
+                                 iView)          # (output)
+isShip = NO
+
+10
+
+
+task_id_is_dup = $no
+dups_an_event_name = $no
+
+warnlen = 0
+msglen = 0                              # build an initial error message
+call smovhn(name,$$MaxLit,msg,msglen)
+call smovv(" cannot be created: ",msg,msglen)
+call smov ($tab,msg,msglen)
+call smov (msglen,msg,msglen)
+xsave = msglen                          # save this length (if no change/no err)
+
+# check to see if the new unit view is within range for this scenario
+view_code = (int(task_id)/1000)    # take first two left digits
+
+iview = 0
+FOR_ALL_VALID (VUE)                 # loop through all the views
+    {                               # to see if view is in this scenario
+    if (xVUE$ForceCode$I == view_code) # find view being processed
+        {
+        iview = VUE$Pointer$index    # save it...
+        break                          # and break out of loop
+        }
+    }
+
+if (iview == 0)                 # Task Id not used anywhere
+    { 
+    call smovv("  Non-existent view.",msg,msglen)
+    }
+
+#--------------------------------------------------
+# search AML table for match of name with side number
+
+cflg = NO                                       # no message desired from EQFIND
+call eqfind($$AML,AML$Entry,name,AML$Pointer)   # check AML table for name match
+
+if (AML$Pointer != 0)              # unit name is found in AML table
+    {      
+    call smovv("  Duplicates an A/C side number.",msg,msglen)
+    }
+
+#--------------------------------------------------
+# search BML table for match of name with name
+
+cflg = NO
+call eqfind($$BML,BML$Entry,name,BML$Pointer) # check BML table for name match
+if (BML$Pointer != 0)              # unit name is found in BML table
+    {
+    call smovv("  Duplicates a boat name.",msg,msglen)
+    }
+ 
+#--------------------------------------------------
+# search SHC table for class match
+
+cflg = NO
+call eqfind($$SHC,0,class,SHC$Pointer) # search SHC table for class
+
+if (SHC$Pointer == 0)              # ship class is found in SHC table
+    {
+    if (isShip == YES)
+        call smovv("  No such ship class.",msg,msglen)
+    else
+        call smovv("  No such shorebase template.",msg,msglen)
+
+    }
+else
+    {
+    SHC$Category$I = xSHC$Category$I
+    if (isShip == YES)
+    {
+        if (SHC$Category$I != $Surface$Code &       # If NOT a Ship or a Sub
+            SHC$Category$I != $Sub$Code         )   #   there is a problem
+        {
+            call smovv("  Invalid ship/sub class.",msg,msglen)
+        }
+    }
+    else
+    {
+        if (SHC$Category$I != $Shorebase$Code)
+        {
+            call smovv("  Invalid shorebase template.",msg,msglen)
+        }
+    }
+}
+
+#------------------------------------------------------------
+# search UNT table for free slot,
+# match of name with UNT$Name, UNT$ForceName or UNT$Event
+# and match of UNT$HierarchyId$i
+
+available_UNT_slot  = $no       # flag for slot in UNT table
+
+FOR_ALL_VALID (UNT)                         # loop through all the UNT entries
+    {
+    if(xUNT$InUse$I == 0)                   # if UNT slot not in use
+        {                                   # save pointer for future use
+        if (available_UNT_slot == $no) 
+            available_UNT_slot = UNT$Pointer
+        if (Still_Ok(UNT) ) next            # go to next UNT slot
+        break                               # Got an empty, don't look further
+        }
+
+    if ( litcmp(xUNT$Name$C, name) == 0)    # compare with UNT name
+        {
+        call smovv("  Duplicate Platform name.",msg,msglen)
+        }
+
+    if ( litcmp(xUNT$ForceName$C, name) ==0)    # UNT forcename
+        {
+        call smovv("  Duplicate Force name.",msg,msglen)
+        }
+
+    if ( litcmp(xUNT$Event$C, name) == 0)   # UNT event 
+        {
+         if (dups_an_event_name == $no)
+           call smovv("  Duplicate Event name.",msg,msglen)
+         dups_an_event_name = $yes
+        }
+
+    if (xUNT$HierarchyId$i == task_id)  # if task id duplicated, send warning
+        {                               # send error message
+         if (task_id_is_dup == $no)
+           call smovv("  Duplicate task hierarchy.",warn,warnlen)
+         task_id_is_dup = $yes
+        } 
+    }  # End of search thru UNT table
+
+if (available_UNT_slot == 0)            # if there's NO space in the UNT table
+    {
+    call smovv("  Unit table full.",msg,msglen)
+    }
+
+UNT$Pointer = available_UNT_slot   # clk 8/96 (E1690) - since the UNT$Pointer is
+                                   # continued past the available slot, set it
+                                   # to the available slot
+
+if (msglen == xsave)                    # any errors added to message...
+    {
+    msglen = 0                          # NO, clear out initial message
+    }
+
+return
+end     # end of Subroutine Val_Create_Ship 
+
+
+
+Subroutine create_ship (UNT$Pointer,   # (input)
+                        SHC$Pointer,   # (input)
+                        iview,         # (input)
+                        name,          # (input)
+                        task_id,       # (input)
+                        latitude,      # (input)
+                        longitude,     # (input)
+                        course,        # (input)
+                        speed,         # (input)
+                        isite,         # (input)
+                        iapp,          # (input)
+                        ient,          # (input)
+                        msg,           # (in/output)
+                        msglen,        # (in/output)
+                        warn,          # (in/output)
+                        warnlen)       # (in/output)
+
+########################################################
+#$%
+#$% Purpose:   Create_ship loads pertinent information into
+#$%            UNT and DEQ tables for new unit
+#$%
+#$% Called By: Ocreate
+#$%
+#$% Calls:     load_equipment  SEND SMOVHN  SMOVV  
+#$%
+#$% Tables:    SHC  UNT
+#$%
+#$% Date       Jan 1992
+#$%
+#$% Author:    Susan Miller & Dane Wills
+#$%
+#$% Modified:  Carol Kropp - 4/95 (E1395)
+#$%            Added call to Update_NAM_Unt_Index, so
+#$%            that if this is a "resurrection" there
+#$%            will not be multiple NAM entries.
+#$%
+#$%            James Allen - 2/96 (E1467)
+#$%            When a surface ship is created, InitUntFuel
+#$%            is called to set up fuel tanks.
+#$%
+########################################################
+
+BBCommon
+
+integer     UNT$Pointer
+integer     SHC$Pointer
+integer     SHN$Pointer, SHN$SPD$index
+integer     isite, iapp, ient
+integer     iview
+literal     name 
+integer     task_id     
+real        latitude    
+real        longitude   
+real        course      
+real        speed       
+
+integer     msglen,   warnlen
+character   msg[300], warn[ARB]
+
+integer     success
+
+integer     SHC$Category$I 
+integer     UNT$Type$I 
+integer     UNT$SHCPntr$I 
+integer     UNT$Speed$I 
+real        UNT$TrueCourse$F 
+real        UNT$TrueLatitude$F  
+real        UNT$TrueLongitude$F 
+real        UNT$CosTrueLat$F 
+integer     UNT$JTIDSCapable$I
+
+#------------------------------------------------------------
+# loop thru EQ subtable entries of the SHC table
+# return success = $yes if all equipment loaded into DEQ table
+
+call Set_UNT_AntennaHeight(_
+                              SHC$Pointer,     # ship characteristics pointer
+                              UNT$Pointer,     # unit pointer
+                              success)         # flag whether height found
+
+if (success != YES)
+    {
+    call smovv("Using default max antenna height ", warn, warnlen)
+    call smovi(Xunt$AntennaHeight$i, warn, warnlen)
+    }
+
+call load_SHC_equipment(name,SHC$Pointer,UNT$Pointer,success)
+
+if (success != $YES)          # DEQ table too full for full or partial
+    {                         # equipment load so don't create new unit
+    call smovv("  Not all equipment loaded (DEQ full). ",warn,warnlen)
+    }
+
+#------------------------------------------------------------
+# Set New High water mark if needed
+
+if (UNT$Last < UNT$Pointer)     
+    {
+    UNT$Used = UNT$Pointer$Index * UNT$Entry
+    }
+
+#------------------------------------------------------------
+# Fill in the UNT table Fields
+
+putUNT$Name$C (name)
+putUNT$View$I (iview)
+putUNT$HierarchyId$i (task_id)
+putUNT$Status$I ($Proceeding$Code)
+
+UNT$SHCPntr$I = SHC$Pointer
+putUNT$SHCPntr$I 
+
+SHC$Category$I = xSHC$Category$I
+if (SHC$Category$I == $Surface$Code) # surface ship
+    {
+    UNT$Type$I = $SURFACE$CODE
+    call InitUntFuel ( unt$pointer )    # joa 2/96 (E1467)
+    }
+else if (SHC$Category$I == $Sub$Code) # submarine
+    {
+    SHN$Pointer$To  (xSHC$NoiseIndx$I)
+    for (SHN$SPD$Index = 1; SHN$SPD$Index <= SHN$SPD$Slots;
+         SHN$SPD$Index = SHN$SPD$Index + 1)
+    {
+        if (xSHN$SPD$BbNoise$F != 0)
+            break
+    }
+    if (SHN$SPD$Index > SHN$SPD$slots)  # if true then all the BBN
+    {                                   # values were 0
+        putUNT$SubType$I( $MarkerSub$SubCode )
+    }
+    UNT$Type$I = $SUB$CODE
+    putUNT$TrueAltDepth$I (100)
+    putUNT$OrderedAltDepth$I (100)
+    if (xSHC$NuclearPowered$I != $yes) # diesel not nuclear
+        {
+        putUNT$BatteryCharge$F (100.0) # default to fully charged
+        putUNT$PropulsionMode$I ($Electric$Code) # it's a diesel
+        }
+    } 
+
+putUNT$Type$I
+
+UNT$JTIDSCapable$I = xSHC$JTIDSCapable$I    # clk 12/95 (E1469)
+putUNT$JTIDSCapable$I
+
+UNT$Speed$I = xSHC$MaxSpeed$I
+if (speed > UNT$Speed$I)   # if ordered speed exceeds max unit speed as
+    speed = UNT$Speed$I    # taken from SHC table, set speed to class max
+putUNT$TrueSpeed$F (speed)
+putUNT$AssumedSpeed$F (speed)
+putUNT$OrderedSpeed$F (speed)
+putUNT$Speed$I
+
+UNT$TrueCourse$F = course
+$ang2PI(UNT$TrueCourse$F)
+putUNT$TrueCourse$F
+putUNT$AssumedCourse$F (UNT$TrueCourse$F)
+putUNT$OrderedCourse$F (UNT$TrueCourse$F)
+
+UNT$TrueLatitude$F  = latitude                  # set up lat/long
+UNT$TrueLongitude$F = longitude
+UNT$CosTrueLat$F = COS(UNT$TrueLatitude$F)            
+putUNT$TrueLatitude$F 
+putUNT$TrueLongitude$F
+putUNT$CosTrueLat$F
+putUNT$AssumedLatitude$F (UNT$TrueLatitude$F)
+putUNT$AssumedLongitude$F (UNT$TrueLongitude$F)
+putUNT$OrderedLatitude$F ($PI)                  # this value is a flag
+
+putUNT$GuideTrue$I ($no)
+
+#----------------------------------------
+# Now, add the appropriate links for EM Devices
+
+call add_potential_jammer ( UNT$Pointer$Index )
+
+#------------------------------------------------------------
+# Return with a 'good' message
+
+call smovv("Created the new unit: ",msg,msglen)
+call smovhn(name,$$MaxLit,msg,msglen)
+
+call Update_NAM_Unt_Index (name, UNT$Pointer$Index, success)
+
+return
+end     # end of subroutine create_ship
+
+
+Subroutine create_shorebase (UNT$Pointer,   # (input)
+                        SHC$Pointer,   # (input)
+                        iview,         # (input)
+                        name,          # (input)
+                        task_id,       # (input)
+                        latitude,      # (input)
+                        longitude,     # (input)
+                        msg,           # (in/output)
+                        msglen,        # (in/output)
+                        warn,          # (in/output)
+                        warnlen)       # (in/output)
+
+########################################################
+#$%
+#$% Purpose:   Create_shorebase loads pertinent information into
+#$%            UNT and DEQ tables for new unit
+#$%
+#$% Called By: Ocreate
+#$%
+#$% Calls:     load_equipment  SEND SMOVHN  SMOVV  
+#$%
+#$% Tables:    SHC  UNT
+#$%
+#$% Date       Mar 2005
+#$%
+#$% Author:    James Allen
+#$%
+########################################################
+
+BBCommon
+
+integer     UNT$Pointer
+integer     SHC$Pointer
+integer     iview
+literal     name 
+integer     task_id     
+real        latitude    
+real        longitude   
+
+integer     msglen,   warnlen
+character   msg[300], warn[ARB]
+
+integer     success
+
+integer     SHC$Category$I 
+integer     UNT$Type$I 
+integer     UNT$SHCPntr$I 
+integer     UNT$Speed$I 
+integer     UNT$TrueAltDepth$I
+real        UNT$TrueCourse$F 
+real        UNT$TrueLatitude$F  
+real        UNT$TrueLongitude$F 
+real        UNT$CosTrueLat$F 
+integer     UNT$JTIDSCapable$I
+integer	    the_elevation
+
+#------------------------------------------------------------
+# loop thru EQ subtable entries of the SHC table
+# return success = $yes if all equipment loaded into DEQ table
+
+call load_SHC_equipment(name,SHC$Pointer,UNT$Pointer,success)
+
+if (success != $YES)          # DEQ table too full for full or partial
+    {                         # equipment load so don't create new unit
+    call smovv("  Not all equipment loaded (DEQ full). ",warn,warnlen)
+    }
+
+#------------------------------------------------------------
+# Set New High water mark if needed
+
+if (UNT$Last < UNT$Pointer)     
+    {
+    UNT$Used = UNT$Pointer$Index * UNT$Entry
+    }
+
+#------------------------------------------------------------
+# Fill in the UNT table Fields
+
+putUNT$Name$C (name)
+putUNT$View$I (iview)
+putUNT$HierarchyId$i (task_id)
+putUNT$Status$I ($OnStation$Code)
+
+UNT$SHCPntr$I = SHC$Pointer
+putUNT$SHCPntr$I 
+
+putUNT$Type$I ($Shorebase$Code)
+PUTunt$AirCapable$i ($YES)
+
+UNT$JTIDSCapable$I = xSHC$JTIDSCapable$I    # clk 12/95 (E1469)
+putUNT$JTIDSCapable$I
+
+call InitUntFuel ( unt$pointer )            # Remaining = Capacity
+
+UNT$TrueLatitude$F  = latitude                  # set up lat/long
+UNT$TrueLongitude$F = longitude
+UNT$CosTrueLat$F = COS(UNT$TrueLatitude$F)            
+putUNT$TrueLatitude$F 
+putUNT$TrueLongitude$F
+putUNT$CosTrueLat$F
+putUNT$AssumedLatitude$F (UNT$TrueLatitude$F)
+putUNT$AssumedLongitude$F (UNT$TrueLongitude$F)
+putUNT$OrderedLatitude$F ($PI)                  # this value is a flag
+
+# Set shorebase elevation
+UNT$TrueAltDepth$I = the_elevation (latitude*$rad2deg,
+                                    longitude*$rad2deg)
+# Horizon formula does not handle bases below sea level
+UNT$TrueAltDepth$I = max (0, UNT$TrueAltDepth$I)
+PUTunt$TrueAltDepth$i
+
+
+
+#----------------------------------------
+# Now, add the appropriate links for EM Devices
+
+call add_potential_jammer ( UNT$Pointer$Index )
+
+#------------------------------------------------------------
+# Return with a 'good' message
+
+call smovv("Created the new unit: ",msg,msglen)
+call smovhn(name,$$MaxLit,msg,msglen)
+
+return
+end     # end of subroutine create_shorebase
+
+
+
+Subroutine create_midflight_aircraft (_
+                      nargs,  # in:  number of LEX ARGs
+                      args,   # in:  order parameters
+                      msg,    # in/out: return message
+                      msglen) # in/out: message length
+############################################################################
+#$%
+#$% Purpose:   Create_midflight_aircraft processes the following command:
+#$%
+#$%            CREATE AIRCRAFT (midflight, launched from) <force-name>
+#$%                         (event name) <event> (of type) <aircraft-type>
+#$%                         (size of) <number> (located at) <latitude> <longitude>  
+#$%                         (altitude) <feet> (course) <degrees> (speed) <knots>
+#$%                        [| STATION (on) <force-name> (bearing) <degrees>
+#$%                                           (range) <nautical-miles>]
+#$%
+#$% Called By: Ocreate
+#$%
+#$% Calls:     process_ac_data_for_create
+#$%            Smov...
+#$%            OStati
+#$%
+#$% Tables:    DEQ   UNT   ACC
+#$%
+#$% Date       Feb 1997
+#$%
+#$% Author:    Susan Miller 
+#$%
+#$% Modified:  James O. Allen 12/02  (E2313)
+#$%            Check for duplicate callsign within view
+#$%
+############################################################################
+BBCommon
+
+integer   nargs, msglen, litcmp
+literal   args[nargs]
+character msg[300]
+
+literal  cstrip8    # function used when extracting names from the BB
+
+literal  launch_platform, aircraft_type, DEQ$Type$C, eventName
+integer  available_UNT_slot, DEQ$Ident$I, launcher_found
+integer  save_msglen, ACC$Pointer, UNT$Pointer, UNT_Launcher
+integer  DEQ$Pointer, station_set, UNT2$Pointer
+literal  station_order[4]
+integer  isite, iapp, ient, idup
+#   1       2                                     3
+# CREATE AIRCRAFT (midflight, launched from) <force-name>
+#                4                      5
+# (event name) <event> (of type) <aircraft-type>
+#              6                     7           8
+# (size of) <number> (located at) <latitude> <longitude>  
+#              9                19               11
+# (altitude) <feet> (course) <degrees> (speed) <knots>
+#     12               13                   14
+# [| STATION (on) <force-name> (bearing) <degrees>
+# (range) <nautical-miles>]
+#     12          13                     14                15
+#[| DIS (site) <number> (application) <number> (entity) <number>];
+
+  msglen = 0                          # build an initial error message
+  call smovv ("Aircraft cannot be created:  ", msg, msglen)
+  call smov  ($tab, msg, msglen)
+  call smov  (msglen, msg, msglen)
+  save_msglen = msglen                # save this length (if no change/no err)
+
+  launch_platform = args[3]
+  eventName       = args[4]
+  aircraft_type   = args[5]
+
+  station_set = $no
+  # if a station was entered in create order
+  if (nargs > 11)                           # E2231 joa UFL01
+  {
+        if (args[12] == $lex$STATION$) 
+        {
+         station_set = $yes
+         station_order[1] = args[12] # $LEX$STATION$
+         station_order[3] = args[13] # (on) <force-name>
+         station_order[2] = args[14] # (bearing) <degrees>
+         station_order[4] = args[15] # (range) <nautical-miles>
+        }
+  }
+  available_UNT_slot = $no
+  ACC$Pointer = 0
+  launcher_found = $no
+  idup = $no
+
+  # find the launching platform and an empty unt slot
+  FOR_ALL_VALID (UNT)
+    {
+     if (xUNT$InUse$I == 0)                 # if UNT slot not in use
+       {
+        if (available_UNT_slot == $no) 
+          available_UNT_slot = UNT$Pointer
+         next                               # go to next UNT slot
+       }
+     if (litcmp(xUNT$Name$C, launch_platform) ==0)     # compare with UNT name
+       {
+        launcher_found = $yes
+        UNT_launcher = UNT$Pointer
+       }                                    # the UNT table
+
+     if (Xunt$status$i == $beingDeleted$code) next
+
+     if (Xunt$view$i != Xunt2$view$i) next   # Must be in same view for dup
+
+     If (Xunt$GhostedUnit$i == $YES) next    # Can't give orders to ghosted
+
+     #$% Check for duplicate event
+     if (eventName != $no)
+        {
+        if (LITCMP(eventName,  Xunt$Event$c)     == 0 |
+            LITCMP(eventName,  Xunt$ForceName$c) == 0)
+           {
+            idup = $yes
+            break
+           }
+        }
+
+    } # end of for loop throught UNT table
+
+  if (idup == $yes)
+    {
+     call smovv ("Duplicate Callsign.  ", msg, msglen)
+    }
+  if (available_UNT_slot == $no)
+    {
+     call smovv ("No available UNT slots.  ", msg, msglen)
+    }
+  else
+    {
+     if (launcher_found == $yes)
+       {
+        UNT$Pointer = UNT_launcher
+        if (xUNT$AirCapable$i != $NO)
+          {
+           # search the DEQ chain for the launch platform to see
+           # that it does have this type of aircraft
+           ACC$Pointer = 0
+           FOR_DEQ_CHAIN
+             {
+              # if equipment ID is not aircraft, get next entry
+              DEQ$Ident$I = xDEQ$Ident$I 
+              if (DEQ$Ident$I == $Aircraft$Code)
+                {
+                 DEQ$Type$C = xDEQ$Type$C 
+                 if (litcmp(DEQ$Type$C, aircraft_type) == 0)
+                   {
+                    ACC$Pointer = xDEQ$Pntr$I
+                    break
+                   }   # end of if the a/c type matches
+                }   # end of if equipment item is for an a/c type
+             }   # end of loop through DEQ table looking for a/c type
+
+           if (!ACC$Pointer$Valid) # aircraft type not found
+             {
+              call smovv  ("  Aircraft type ", msg, msglen)
+              call smovhn (aircraft_type, $$MaxLit, msg, msglen)
+              call smovv  (", not found at ", msg, msglen)
+              call smovhn (launch_platform, $$MaxLit, msg, msglen)
+              call smovv  (".", msg, msglen)
+             }   # end of if the launcher does not have that a/c type
+           else
+             {
+              if (msglen == save_msglen)  # no errors added to message
+                 call process_ac_data_for_create(UNT$Pointer, ACC$Pointer,
+                                                 available_UNT_slot,
+                                                 nargs, args, msg, msglen)
+
+              UNT2$Pointer = available_UNT_slot 
+              if (msglen <= save_msglen)  # no errors added to message
+                {
+                msglen = 0        # clear out initial message
+                call smovv  ("Aircraft:  ", msg, msglen)
+                call smovhn (xUNT2$Name$C, $$MaxLit, msg, msglen)
+                call smovv  (", created at position ", msg, msglen)
+                call smovll (xUNT2$TrueLatitude$F, "NS", msg, msglen)
+                call smovv  (" ", msg, msglen)
+                call smovll (xUNT2$TrueLongitude$F,"EW", msg, msglen)
+ 
+                if (station_set == $yes)
+                    {
+                    call OStati (STATION$order, UNT2$Pointer, 4, station_order, 0)
+                    call smovv  (", moving to station", msg, msglen)
+                    }
+                call smovv  (".  ", msg, msglen)
+                }
+             }   # end of if the launcher has that type of a/c
+          }   # end of if specified launching unit is air capable
+        else 
+          {
+           call smovv  ("  Launching platform, ", msg, msglen)
+           call smovhn (launch_platform, $$MaxLit, msg, msglen)
+           call smovv  (", is not air capable.  ", msg, msglen)
+          }
+       }   # end of if specified launching platform found
+     else
+       {
+        call smovv("  Launching platform, ", msg, msglen)
+        call smovhn (launch_platform,$$MaxLit, msg, msglen)
+        call smovv(", not found.  ", msg, msglen)
+       }   # end of if the specified launching platform was not found
+    }   # end of if a slot was available in the UNT table
+
+return
+end
+
+
+Subroutine process_ac_data_for_create (_
+                   UNT$Pointer,        # in:  launch platform UNT pointer
+                   ACC$Pointer,        # in:  ACC pointer to a/c type
+                   available_UNT_slot, # in:  empty UNT slot
+                   nargs,              # in:  number of command arguments
+                   args,               # in:  command arguments
+                   msg,                # in/out: reply message
+                   msglen)             # in/out: length of msg
+############################################################################
+#$%
+#$% Purpose:   process_ac_data_for_create completes the validation of the
+#$%            CREATE AIRCRAFT command and processes the creation of the
+#$%            UNT entry and updates the AML and RPM tables.
+#$% 
+#$% Called By: Create_Aircraft
+#$%
+#$% Calls:     Smov...
+#$%            Check_the_AML
+#$%            Fill_AC_UNT_Data
+#$%            Build_AC_DEQ
+#$%            Build_AML_Entries <wgmdflt.rat>
+#$%            getRPM       setURP
+#$%
+#$% Tables:    UNT  ACC  AML  RPM  
+#$%
+#$% Date       Feb 1997
+#$%
+#$% Author:    Susan Miller 
+#$%
+############################################################################
+BBCommon
+
+integer   UNT$Pointer, ACC$Pointer, available_UNT_slot
+integer   nargs, msglen
+literal   args[nargs]
+character msg[300]
+
+integer   save_msglen, save_AML[200] 
+integer   AML$Pointer, UNT2$Pointer, RPM$Pointer
+integer   number_of_ac
+integer   launch_pointer, create_pointer
+
+  save_msglen = msglen
+  AML$Pointer = 0
+  number_of_ac = args[6]
+
+  # check to see if this unit owns this type of aircraft
+  call Check_the_AML (UNT$Pointer, ACC$Pointer, number_of_ac, 
+                      msg, msglen, save_aml)
+
+  AML$Pointer = save_aml(1)
+  if ((msglen == 0) & (AML$Pointer$Valid))
+    {
+     launch_pointer = UNT$Pointer
+     create_pointer = available_UNT_slot
+     UNT2$Pointer = available_UNT_slot    # new unit
+
+     # set manuver information in a/c UNT entry 
+     AML$Pointer = save_aml(1)
+     call Fill_AC_UNT_Data (create_pointer, ACC$Pointer, 
+                            launch_pointer, AML$Pointer, 
+                            nargs, args)
+
+     call Create_AC_EQ_Entry (ACC$Pointer, create_pointer, AML$Pointer)
+
+     # build the air maintenance log entry
+     call Build_AML_Entries (number_of_ac, save_AML, $no)
+
+     call getRPM (UNT$Pointer, RPM$Pointer) 
+     if (RPM$Pointer$Valid)
+        call setURP(UNT$Pointer, RPM$Pointer)
+    }   # end of if the AML entries were located
+
+  if (msglen == save_msglen)  # no errors added to message
+     msglen = 0               # clear out initial message
+
+return   # end of process_ac_data_for_create
+end
+
+
+Subroutine Check_the_AML (_
+                  UNT$Pointer,        # in: launch platform UNT pointer
+                  ACC$Pointer,        # in: ACC pointer to a/c type
+                  number_of_ac,       # in: number of a/c requested
+                  msg,                # in/out: outgoing message
+                  msglen,             # in/out: length of msg
+                  save_aml)           # out:    array holding aml pointers
+############################################################################
+#$%
+#$% Purpose:   Check_the_AML searches the AML for the launching
+#$%            or creating platform to see if it owns the correct
+#$%            aircraft and has the appropriate number of a/c.
+#$% 
+#$% Called By: Prep_for_Launch
+#$%
+#$% Calls:     Smov...
+#$%
+#$% Tables:    AML  ACC  UNT
+#$%
+#$% Date       Feb 1997  (E1746)
+#$%
+#$% Author:    Susan Miller
+#$%
+############################################################################
+BBCommon
+
+integer   UNT$Pointer, ACC$Pointer, AML$Pointer
+integer   number_of_ac, msglen, save_AML[200] 
+character msg[300]
+
+literal   cstrip8   # function used when extracting names from the BB
+
+integer   number_in_AML_avail
+integer   i
+
+  # initialize to zero
+  for (i=1;i<=200;i=i+1)
+    save_AML(i) = 0
+
+  number_in_AML_avail = 0
+  # search the AML table
+  for (AML$Pointer$First; still_ok(AML) ; AML$Pointer$Next) 
+    {
+     if (xAML$OwnerIndx$I == UNT$Pointer$Index)
+       {
+        if (xAML$ACCPntr$I == ACC$Pointer &
+            xAML$Status$I == $OnDeck$code)
+          {
+           number_in_AML_avail = number_in_AML_avail + 1
+           save_AML[number_in_AML_avail] = AML$Pointer
+
+           if (number_in_AML_avail >= number_of_ac)
+             break
+          }   # end of if the a/c is the right type and available
+       }   # end of if the a/c is owned by the launching platform
+    }   # end of loop through the AML looking for the correct a/c entries
+
+  if (number_in_AML_avail < number_of_ac)
+    {
+     call smovv  ("  Only ", msg, msglen)
+     call smovi  (number_in_AML_avail, msg, msglen)
+     call smovv  (" ", msg, msglen)
+     call smovhn (xACC$Type$C, $$MaxLit, msg, msglen)
+     call smovv  (" aircraft available.  ", msg, msglen)
+    }
+  else
+    msglen = 0              # clear out initial message
+
+return
+end   # end of Check_the_AML
+
+
+
+Subroutine Fill_AC_UNT_Data (_
+                 UNT$Pointer,    # free UNT slot pointer
+                 ACC$Pointer,    # a/c characteristics pntr
+                 UNT2$Pointer,   # launch pointer 
+                 AML$Pointer,    # air maint. pntr
+                 nargs,          # receive number of LEX ARGs
+                 args)           # receive parameters
+############################################################################
+#$%
+#$% Purpose:   Fill_AC_UNT_Data builds active units table
+#$%            or position and maneuver table
+#$%            entries required to construct a
+#$%            flight in air.
+#$% 
+#$% Called By: process_ac_data_for_create
+#$%
+#$% Calls:     Build_Unit_Table_For_AC <wgmdflt.rat>
+#$%            Init_Air_Mission_History
+#$%
+#$% Tables:    UNT     ACC     AML 
+#$%
+#$% Date       Feb 1997
+#$%
+#$% Author:    Susan Miller - reused code from xblunt <wgmdflt.rat>
+#$%
+#$% Modified:  John McCormick- (E2010) 3/99
+#$%            Created AC with fuel consumption on and full tank.
+#$%
+############################################################################
+BBCommon
+
+integer  UNT$Pointer, ACC$Pointer, UNT2$Pointer, AML$Pointer
+integer  nargs
+literal  args[nargs]
+
+literal  cstrip8    # function used when extracting names from the BB
+
+literal  event_name
+integer  number_of_ac
+real     latitude, longitude, course, speed, time_of_launch
+integer  altitude, launch
+literal  name
+integer  UNT$LaunchIndx$I
+real     UNT$CosTrueLat$F, DMS2rad
+integer  ACC$MaxAlt$I,maxfuel,unt$tnk$index
+integer  isite, iapp, ient
+
+  event_name      = args[4]
+  number_of_ac    = args[6]
+  latitude        = DMS2rad(args[7])
+  longitude       = DMS2rad(args[8])
+  altitude        = args[9]
+  course          = args[10]/180. * $PI
+  speed           = args[11]
+  
+    isite = 0
+    iapp  = 0
+    ient  = 0
+    if (nargs >= 12)
+        {
+        if (args[12] == $lex$DIS$)
+            {
+            isite = args[13]
+            iapp  = args[14]
+            ient  = args[15]
+            }
+        }
+
+  maxfuel = xACC$MaxFuel$I            # E2010 jhm 3/99
+  launch = $no
+  name = xAML$SideNumber$C
+  time_of_launch = FLOAT(order$minute)
+  call Build_Unit_Table_For_AC (UNT2$Pointer, UNT$Pointer, ACC$Pointer, 
+                                launch, name, time_of_launch, speed, course,
+                                aml$pointer)
+
+  putUNT$LaunchOrdId$I  (0)
+
+  putUNT$Event$C    (event_name)
+  putUNT$ACCPntr$I  (ACC$Pointer)
+  putUNT$NbrAc$I    (number_of_ac)
+  putUNT$NbrAcTot$I (number_of_ac)
+  putUNT$Nbracsf$I  (number_of_ac)
+
+  UNT$LaunchIndx$I = UNT2$Pointer$Index
+  putUNT$LaunchIndx$I
+  putUNT$RecoverIndx$I (UNT$LaunchIndx$I)
+
+  putUNT$TrueLatitude$F     (latitude)
+  putUNT$TrueLongitude$F    (longitude)
+  putUNT$AssumedLatitude$F  (latitude)
+  putUNT$AssumedLongitude$F (longitude)
+  UNT$CosTrueLat$F = COS(latitude)
+  putUNT$CosTrueLat$F
+
+  ACC$MaxAlt$I = xACC$MaxAlt$I
+  if (altitude > ACC$MaxAlt$I)
+    altitude = ACC$MaxAlt$I
+
+  putUNT$TrueAltDepth$I     (altitude)
+  putUNT$OrderedAltDepth$I  (altitude)
+  putUNT$AltAboveGround$I   (0)
+
+  unt$TNK$index = AviationFuelTank$Index    # jhm 3/99 (E2010)
+  putUNT$TNK$FuelRemaining$F (maxfuel)      # jhm 3/99
+  putUNT$FuelConsumptionFlag$i ($On)        # jhm 3/99 (e2010)
+
+  call Init_Air_Mission_History (UNT$Pointer,$No) # jb E2208 $No  12/11/00
+   # jb $No, a place-holder for split_unt_index) # UNT index of original flight
+
+return
+end   # end of Fill_AC_UNT_Data
+

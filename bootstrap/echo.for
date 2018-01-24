@@ -1,0 +1,6 @@
+      SUBROUTINE ECHO (ICHAR)
+      IMPLICIT NONE
+      LOGICAL*1 ICHAR
+      CALL ECHOP_B (ICHAR)
+      RETURN
+      END

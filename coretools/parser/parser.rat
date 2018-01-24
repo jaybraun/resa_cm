@@ -1,0 +1,1541 @@
+##########################################################################
+#                                                                        #
+#       The PARSER routines were developed by System Development Corp.   #
+#                                                                        #
+#       Copywrite (c) 1982 SDC                                           #
+#                                                                        #
+##########################################################################
+
+
+
+include "ascii.inc"
+include "macros.inc"
+#include "sys_defs:ascii.inc"
+#include "sys_defs:macros.inc"
+include "parser.inc"
+include "parser32.int"
+
+define ($QFIX,)
+define ($debugV,#)      # enable ^V, ^P, and ^D recognition
+define ($debugR,#)      # display routine names
+define ($debugT,#)      # display trace info for assorted 'TEST' functions
+
+define (delete$char, {if (mod(line$length,80) == 0)
+                        {call echo ($ESC)
+                         call echov("[A")
+                         call echo ($ESC)
+                         call echov ("[80C")
+                         call echo ($space)
+                        }
+                      else
+                        {call echo ($CNTLH)              # <SCC> 02/18/1986
+                         call echo ($space)              # ditto
+                         call echo ($CNTLH)              # ditto       
+                        }
+                      line$length = line$length - 1      # ditto
+                      line$char$next = $null             # ditto
+                     })
+
+###########################################################################
+
+subroutine parse_recall (handle)
+implicit integer (a-z)
+pr_common
+data R_Handle / 0 /
+
+if ( handle != 0 ) R_Handle = handle
+
+return
+end
+
+
+subroutine parse_recall_Read (handle)
+implicit integer (a-z)
+pr_common
+
+handle = R_handle 
+
+return
+end
+
+#########################################
+subroutine parse_grp (igrp)
+implicit integer (a-z)
+pr_common
+
+Flag$order$group = 0
+if (igrp >= 0 & igrp <= 25) Flag$order$group = igrp
+
+return
+end
+
+#########################################
+
+subroutine parse_grp_read (igrp)
+implicit integer (a-z)
+pr_common
+
+if (Flag$order$group == 0) 
+    {
+    igrp = -1
+    }
+else 
+    {
+    for (igrp  = 0; igrp  < 25; igrp  = igrp  + 1)
+    	{
+        if ($bitset (Flag$order$group,igrp ) == YES) break
+        }
+    }
+
+return
+end
+
+#########################################
+
+subroutine parse_not_for (itype)
+implicit integer (a-z)
+pr_common
+
+Flag$NotFor = 0
+if (itype >= 0 & itype <= 25) $setbit (Flag$NotFor,itype)
+
+# notice this allows only one bit to be set at any one time
+
+return
+end
+#########################################
+
+integer function parse_not_for_read (itype)
+implicit integer (a-z)
+pr_common
+
+if (Flag$NotFor == 0) 
+    {
+    itype = -1
+    }
+else 
+    {
+    for (itype = 0; itype < 25; itype = itype + 1)
+    	{
+        if ($bitset (Flag$NotFor,itype) == YES) break
+        }
+    }
+
+return (itype)
+end
+
+###########################################################################
+
+subroutine parse_cmd   (table,		# Parse the Table
+    			nargs,
+    			args,
+    			ordn,
+    			MaxArgs,
+    			itime,
+			prompt)
+
+implicit integer (a-z)
+pr_common				# defined common
+
+integer*4	table[20000]		# parsed order table
+integer 	iok[2], force
+character	prompt[ARB], icharx
+character       r_line[MAXLINE], char_2, char_3
+integer         r_pos, r_len
+logical		beep
+literal		args[ARB]
+# init
+
+call echoff
+
+ordn = $null
+nargs = 0
+
+ord$ok = $false
+
+pr_stack = 1
+stack$line_level$pos	= 0
+stack$line_range$pos	= 0
+stack$LowNode		= 1
+stack$NodeCount		= table$NodeCount
+stack$ArgCount		= 1
+
+arg$value = 0
+
+line$length = 0
+line$char = $SPACE
+line$char$next = $NULL
+
+r_pos = 0
+r_len = 0
+len_prompt = length(prompt)
+
+beep = .FALSE.
+
+call echoh (prompt, ARB)
+
+repeat 
+   {
+    while (line$length < stack$line_range$pos)
+    	{
+    	if (pr_stack <= 1) break
+    	pr_stack = pr_stack - 1
+    	}
+
+    if (R_Len > R_Pos)            # is there anyting in the recalled buffer
+        {
+        R_Pos = R_Pos + 1
+        while (r_line(r_pos) == $space &
+              (r_pos == 1 | r_line(r_pos-1) == $space))
+            {
+            r_pos = r_pos + 1
+            }
+        char = R_Line[R_Pos]
+        }
+    else                          # NO.... read a char from TTY/Disk file
+        {
+        call get_ch (char,itime*1000)	# this routine may or may not pause.
+        }
+
+    icharx = char
+
+    if (char >= $LITa & char <= $LITz)	# shift to upper case
+        char = char - $SPACE
+
+    if (char == $CNTLS |                     # These are reserved for system
+        char == $CNTLQ |                     # use at the QIO level....
+        char == $CNTLO  ) then char = $null  # If they make it here, ignore them
+
+    if (force == 0) icharx = char
+
+    if (char == $null)			# check for no input
+	{
+        if (line$length == 0 & prompt[1] == 0)
+	   {
+	    ord$ok = $true
+	   }
+	 else
+	   {
+        beep = beep + 1
+        if (beep > 4) beep = 0
+	    if (beep == 0) call echo ($BELL)
+	   }
+
+	 next
+	}
+
+					# check for backspace character
+
+    else if (char == $DEL | char == $CNTLA | char == $CNTLH)
+	{
+	 call nval ($true,prompt,table)
+	 if (line$length < 1)
+	     call echo($bell)
+	 else
+	     call delchr
+	 next
+	}
+
+    else if (char == $CNTLW)		# check for backspace word
+	{
+	 call nval ($true,prompt,table)
+
+	 if (line$length < 1) call echo($bell)
+	 else                 call delwrd
+
+	 next
+	}
+
+
+    else if (char==$CNTLX|char==$CNTLU)	# check for backspace Line
+	{
+	 call nval ($true,prompt,table)
+
+	 if (line$length < 1) 
+    	     {
+    	     call echo($bell)
+    	     }
+	 else
+    	     {
+             call dellin (table)
+             }
+
+	 next
+	}
+
+
+     else if (char == $CNTLR)		# check for Retype line
+	{
+	 call nval ($true,prompt,table)
+	 call retype (prompt)
+	 next
+	}
+
+
+     else if (char == $EXCLAIM)		# check for HELP
+	{
+	 call nval ($true,prompt,table)
+	 call ordhlp
+	 call retype (prompt)
+	 next
+	}
+
+
+     else if (char == $CNTLN)		# flip-flop Force to upper/lowercase
+	{
+	 call echov ("^n")
+	 force = ! force
+	 next
+	}
+
+    $DEBUGV else if (char == $CNTLP)		# check for Syntax
+    $DEBUGV    {
+    $DEBUGV     call nval ($true,prompt,table)
+    $DEBUGV     call ordsyn (table)
+    $DEBUGV     call retype (prompt)
+    $DEBUGV     next
+    $DEBUGV    }
+    $DEBUGV
+    $DEBUGV
+    $DEBUGV else if (char == $CNTLV)	# check for ordset change
+    $DEBUGV    {
+    $DEBUGV     repeat
+    $DEBUGV        {
+    $DEBUGV         Flag$Order$Group = Flag$Order$Group + 1
+    $DEBUGV         if (Flag$Order$Group > 15) Flag$Order$Group = 0
+    $DEBUGV        } until ($bitset(table$Included,Flag$Order$Group) > 0)
+    $DEBUGV     call echor
+    $DEBUGV     call echov ("Order Group: ")
+    $DEBUGV     call echoi (Flag$Order$Group)
+    $DEBUGV     call echor
+    $DEBUGV     break
+    $DEBUGV    }
+
+    $DEBUGV else if (char == $CNTLD)	# check for stack dump request
+    $DEBUGV    {
+    $DEBUGV     call echor
+    $DEBUGV     call echov ("Stack Pnt = ")
+    $DEBUGV     call echoi (pr_stack)
+    $DEBUGV     call echov (",	Line Len = ")
+    $DEBUGV     call echoi (line$length)
+    $DEBUGV     call echor
+    $DEBUGV     call echor
+    $DEBUGV     call echov (" #  Lev  Rng  Low  Cnt  Args  Value")
+    $DEBUGV     call echor
+    $DEBUGV     
+    $DEBUGV     save_stack = pr_stack
+    $DEBUGV     for (pr_stack = 1; pr_stack <= save_stack; pr_stack=pr_stack+1)
+    $DEBUGV        {
+    $DEBUGV         call echoib(pr_stack,2)
+    $DEBUGV         call echoib(stack$line_level$pos,5)
+    $DEBUGV         call echoib(stack$line_range$pos,5)
+    $DEBUGV         call echoib(stack$LowNode,5)
+    $DEBUGV         call echoib(stack$NodeCount,5)
+    $DEBUGV         call echoib(stack$ArgCount,6)
+    $DEBUGV     
+    $DEBUGV         if (stack$nodeCount == 1)
+    $DEBUGV     	{
+    $DEBUGV         	call echov ("  ")
+    $DEBUGV         	if ($IsNumeric(arg$value)) { k=arg$value;call echoi(k)}
+    $DEBUGV         	else                         call echoh (arg$value,8)
+    $DEBUGV         	}
+    $DEBUGV
+    $DEBUGV         call echor
+    $DEBUGV        } 
+    $DEBUGV     
+    $DEBUGV     pr_stack = save_stack
+    $DEBUGV     call retype (prompt)
+    $DEBUGV     next
+    $DEBUGV    }
+
+    else if (char == $CNTLK)		# check for Cancel Entry
+	{
+	 call nval ($true,prompt,table)
+	 ordn = -1
+	 nargs = 0
+     r_len = 0
+     r_pos = 0
+	 call echov ("^K   Command Kanceled")
+	 call echor
+	 break
+	}
+
+
+    else if (char == $QUEST)		# check for Question
+	{
+	 call nval ($true,prompt,table)
+	 call quest (table)
+	 call retype (prompt)
+	 next
+	}
+
+    else if (char == $ESC)		# check for Command Recall (uparrow)
+	{
+        call nval ($true,prompt,table)
+
+        if (line$length > 0) call dellin (table)
+
+        ordn = -1
+        nargs = 0
+        r_len = 0
+        r_pos = 0
+        call get_ch (char_2,itime*1000)
+        call get_ch (char_3,itime*1000)
+        if (R_handle != 0 & char_2 == LBRACK  & char_3 == BIGA )
+            {
+	    	call echov ("^Arrow   Command Recall")
+            call echor
+            call ttyout_flush
+            call Recall_Line (R_Handle, -1, R_Line, R_len, prompt, len_prompt)
+
+            call echo($return)
+            call echo($ESC)        # Reverse Index
+            call echov("M")
+            call echo($ESC)        # Erase to end of display
+            call echov("[J")
+            call echo($ESC)        # Reverse Index
+            call echov("M")
+
+            if (r_len > 0)
+                {
+                # we need to remove leading & extra spaces in R_LINE
+
+                r_len = r_len + 1
+                r_line[r_len] = $return        # have it self-terminate
+                }
+            }
+        else
+            {
+            call echo ($bell)
+            }
+        call retype (prompt)
+        next
+	}
+
+
+    else if (char==$SPACE ) 	# check for Recognition
+	{
+    	 call recog (char,node$index,token$index,table,stat)
+
+	 if (stat == $TRUE)
+	    {
+	     call nval ($true,prompt,table)
+	     call levbrk (node$index,token$index,table)
+    	     next
+	    }
+	 else if (stat == $FALSE)
+	    {
+	     call nval ($false,prompt,table)
+	     call echo ($bell)
+             R_Len = 0    # throw away anything in the recalled buffer
+	     next
+	    }
+	 else # (stat == $SPACE)
+	    {
+	     continue # process against tables
+	    }
+	}
+
+					# check for line terminator
+
+    else if (char==$RETURN | char==$FORMFEED | char==$LINEFEED)
+	{
+    	 call recog (char,node$index,token$index,table,stat) #check recognition
+
+	 if (stat == $TRUE) call levbrk (node$index,token$index,table)
+
+	 call dontst (ord$ok,table)
+
+	 if (ord$ok==$TRUE)        # this will cause exit of input loop
+	    {
+	     arg$value = -1
+    	     node$index = stack$LowNode
+	     ordn = node$OrderNumber
+	     nargs = stack$ArgCount - 1
+
+	     call echor
+
+	     next
+	    }
+	 else
+	    {
+        call get_getfch_source (xstat)
+        if (xstat == 'DSK')
+            {
+            call dellin (table)
+            call echo ($bell)
+            call echov ("Line Deleted.")
+            call retype (prompt)
+            }
+        else
+            {
+	        call echo ($bell)
+            R_Len = 0    # throw away anything in the recalled buffer
+	        next
+	        }
+        }
+	}
+
+    else if (char<$SPACE)		# check for invalid
+	{
+	 call nval ($false,prompt,table)
+	 call echo ($bell)
+         R_Len = 0    # throw away anything in the recalled buffer
+	 next
+	}
+
+
+#   (else)				# process against tables
+
+
+    new$LowNode = -1
+    first$OkCnt = 0
+    new$OkCnt = 0
+    icnt = 0
+    iflag = $false
+
+
+    for (node$index = stack$LowNode; icnt < stack$NodeCount;
+    	 node$index = node$SiblingIndx)
+    	{
+    	icnt = icnt + 1
+
+    	if (node$SiblingIndx == 0) stack$NodeCount = icnt
+
+    	if ($bitset(node$GroupFlags,Flag$Order$Group) == 0) next
+
+    	k = node$NotForFlags & Flag$NotFor
+    	if (k != 0) next
+
+    	token$index = node$TokenIndx
+
+    	char$ok = $false
+
+    	token$index = node$TokenIndx
+    	call tstlex (Token$Index,char$ok,char,table)
+
+    	if (char$ok == $TRUE)
+    	   {
+	    if (iflag == $false) 
+    		{
+    		first$OkCnt = icnt
+    		new$LoWNode = node$index
+    		}
+
+	    new$OkCnt = icnt
+	    iflag = $true
+	   }
+
+    	}			# end for-order loop
+
+
+    if (iflag == $true)		# was any test ok
+    	{
+    	call nval ($true,prompt,table)
+    	call echo (icharx)
+    	line$length = line$length + 1
+    	line$char = char
+    	line$char$next = $NULL
+
+    	new$NodeCount = new$OkCnt - first$OkCnt + 1
+
+    	if (new$lowNode != stack$LowNode | new$NodeCount != stack$NodeCount)
+    	    {
+    	     i2 = stack$line_level$pos		# keep same level etc.
+    	     i3 = Stack$ArgCount
+
+    	     pr_stack = pr_stack + 1
+    	     stack$LowNode = new$LowNode 
+    	     stack$NodeCount = new$NodeCount
+    	     stack$line_level$pos = i2
+    	     Stack$ArgCount = i3
+    	     stack$line_range$pos = line$length
+    	    }                      		# end new level
+    
+    	}                          		# end test-ok
+    else
+    	{                          		# test not-ok
+    	call nval ($false,prompt,table)
+    	call echo ($bell)	
+        R_Len = 0    # throw away anything in the recalled buffer
+    	}                       	   	# end test-not-ok
+
+    						# end process
+
+    } until (ord$ok == $true)                   # end of character input loop
+
+for (k = 1; k <= nargs; k=k+1) args[k] = pvarg[k]
+for (k = nargs+1; k <= Maxargs; k=k+1) args[k] = -1
+
+if ( R_Handle != 0 & line$length > 0 )    # build a line suitable for recall
+    {
+    paren = 0
+    r_len = 0
+    char_2 = $SPACE
+    for (r_pos = 1; r_pos <= line$length; r_pos = r_pos + 1)
+        {
+        char_3 = line$buf[r_pos] 
+        if (char_3 == $return) next 
+        if (char_3 == $LPAREN ) { paren = paren + 1 ; next } 
+        if (char_3 == $RPAREN ) { paren = paren - 1 ; next } 
+
+        if (paren == 0 & (char_2 != $SPACE | char_3 != $SPACE) )
+            {
+            r_len = r_len + 1
+            r_line[r_len] = char_3
+            char_2 = char_3
+            }
+        }
+
+    # add this line to the recall stack
+    if (r_line(r_len) == $SPACE) r_len = r_len - 1
+    r_line[r_len+1] = EOS
+
+    Call Recall_Add  (R_Handle, R_Line, R_len)    
+    r_len = 0
+    r_pos = 0
+    }
+
+return
+end
+
+
+subroutine nval (istat,prompt,table)
+implicit integer (a-z)
+integer errcnt
+character prompt[ARB]
+integer*4 table[20000]
+
+data errcnt /1/
+
+if (istat == $false) errcnt = errcnt + 1
+else                 errcnt = 1
+
+if (mod(errcnt,4) == 0)
+   {
+    call echov ("  Try .......")
+
+    call quest (table)                  # display options
+    call retype (prompt)                # re-display current line....
+   }
+
+return
+end
+
+
+subroutine levbrk (node$index,token$index,table)
+implicit integer (a-z)
+pr_common
+integer*4	table[20000]
+
+call parse_finish (node$index,token$index,table) # finish keyword (+prompt)
+
+i4 = stack$ArgCount
+
+pr_stack = pr_stack + 1
+stack$LowNode = node$ChildIndx		# i1
+stack$NodeCount = table$NodeCount	# i2
+stack$ArgCount = i4 + 1
+stack$line_range$pos = line$length
+stack$line_level$pos = line$length
+arg$value = 0
+
+return
+end
+
+
+subroutine parse_finish (node$index,token$index,table)	# finish typing 
+implicit integer (a-z)					# Keyword (& prompt)
+pr_common
+integer*4	table[20000]
+
+if (token$type == $Keyword$test)
+    {
+    clen = length(line$TokenText)
+
+    tlen = length(token$text)
+
+    for ( ; tlen > clen; clen = clen + 1)
+        {
+        line$length = line$length + 1
+        line$char = igbyte(token$text,clen+1)
+        
+        call echo (line$char)
+        }
+    }
+    
+if (node$PromptIndx != 0)
+    {
+    line$length = line$length + 1
+    line$char = $space
+    call echo (line$char)
+
+    clen = length(node$Prompt)
+
+    for (i=1; i<= clen; i=i+1)
+        {
+        line$length = line$length + 1
+        line$char = igbyte(node$prompt,i)
+        
+        call echo (line$char)
+        }
+    }
+
+line$length = line$length + 1
+line$char = $space
+call echo (line$char)
+
+line$char$next = $null
+
+return
+end
+
+
+integer function tstok(token$index,table)
+implicit integer (a-z)
+pr_common
+integer*4	table[20000]
+
+$DEBUGR  call echov("<tstok?>")
+
+tstok = $FALSE
+if (line$length == stack$Line_level$pos) return  # reject if no entry at 
+   						 # this level
+$DEBUGR  call echov("<notyet>")
+
+stat = $stat$complete$
+call verlex(token$index,stat,table)
+
+if (stat == $stat$complete$)  
+    {
+    tstok = $TRUE
+    $DEBUGR  call echov("<ok>")
+    }
+
+return
+end
+
+
+subroutine verlex(token$index,stat,table)
+implicit integer (a-z)
+pr_common
+integer*4	table[20000]
+
+$DEBUGT  call echov("<verlex=")
+
+testc = token$type				# get test code
+
+stat = $stat$complete$				# set default to complete
+
+    						# alternates are:
+						#   $stat$ok$  &
+						#   $stat$nogood$
+
+if (testc == $no$test)				# no test ?
+    {
+    $DEBUGT  call echov("0>")
+    continue                                    # ok
+    }
+else if (testc == $keyword$test)		# KEYWORD test ?
+    {
+    $DEBUGT  call echov("K>")
+    call parse_test_keyword (stat,token$text,token$index)
+    }
+else if (testc == $ALPHA$test)			# alpha test ?
+    {
+    $DEBUGT  call echov("A>")
+    call parse_test_alpha (stat)
+    }
+else if (testc == $number$test)			# Numeric test ?
+    {
+    $DEBUGT  call echov("N>")
+    call parse_test_number (stat)
+    }
+else if (testc == $special$test)		# special test ?
+    {
+    $DEBUGT  call echov("S>")
+    call parse_test_special (stat,token$index)
+    }
+
+return
+end
+
+
+
+#subroutine parse_test_alpha (stat)
+#implicit integer (a-z)
+#pr_common
+#literal		word
+#integer litcmp_v
+#
+#word = $BLANKLIT
+#cnt = 0
+#
+#for (i = stack$line_level$pos + 1; i <= line$length; i=i+1)
+#    {
+#    cnt = cnt + 1
+#    char = line$buf[i]
+#
+#    if (cnt  == 1     &				# first letter alpha
+#	char >= $LETA &
+#	char <= $LETZ)  continue
+#
+#   else if (cnt>1 & cnt<6 &                    # other letters (2-5) alpha
+#	     ((char >= $LETA & char <= $LETZ)|  #                  or numeric
+#	      (char >= $DIG0 & char <= $DIG9) )
+#	    ) continue
+#
+#    else
+#    	{
+#    	stat = $stat$nogood$                     # set stat to nogood
+#    	return
+#    	}
+#
+#    call ipbyte(word,cnt,char)
+#   }
+#
+#if (litcmp_v(word,"TIME")) stat = $stat$nogood$
+#
+#arg$value = word
+#
+#return
+#end
+
+
+subroutine parse_test_range (stat,low,high)
+implicit integer (a-z)
+pr_common
+integer	stat, low, high, num
+
+call parse_test_number (stat)
+
+if (stat != $stat$nogood$) 
+    {
+    num = arg$value
+
+    if      (num < 0 | num > high) stat = $stat$nogood$
+    else if (low > 0 & num ==   0) stat = $stat$nogood$
+    else if (num < low)            stat = $stat$ok$
+    }
+
+return
+end
+
+
+subroutine parse_test_number (stat)
+implicit integer (a-z)
+pr_common
+literal		num	# ??????
+
+cnt = 0
+num = 0
+
+for (i = stack$line_level$pos + 1; i <= line$length; i=i+1)
+    {
+    char = line$buf[i]
+    cnt = cnt + 1
+    if (char >= $DIG0 &                         # from 0 - 9
+	char <= $DIG9)
+    	{
+	if (cnt <= 8)                           # First 7 digits
+    	    {
+	    num = num * 10 + char - $DIG0
+            }
+	else
+	   {
+	   stat = $stat$nogood$                 # set stat to nogood
+	   break
+	   }
+    	}
+    else
+        {
+    	stat = $stat$nogood$                     # set stat to nogood
+	break
+    	}
+    }
+
+arg$value = num
+
+return
+end
+
+
+subroutine parse_test_real (stat,low,high)
+implicit integer (a-z)
+pr_common
+integer	stat, low, high
+real*8	num
+
+call parse_test_floating (stat)
+
+if (stat != $stat$nogood$) 
+    {
+    num = arg$value
+
+    if (num == 0.0)
+    	{
+    	if      (num < low ) stat = $stat$ok$
+        else if (num > high) stat = $stat$ok$
+    	}
+    else if (num < 0.0)
+    	{    
+        if      (low > 0   ) stat = $stat$nogood$
+        else if (num > high) stat = $stat$ok$
+        else if (num < low ) stat = $stat$nogood$
+        }
+    else # if (num > 0.0)
+    	{    
+        if      (num  > high) stat = $stat$nogood$
+        else if (num  < low ) stat = $stat$ok$
+        }
+    }
+
+return
+end
+
+
+subroutine parse_test_floating (stat)	# allow positive/negative real numbers
+implicit integer (a-z)
+pr_common
+literal		num	# ??????
+real*8		sign, scale
+
+cnt = 0
+num = 0
+
+sign = 1.0d0
+ipoint = -1
+
+for (i = stack$line_level$pos + 1; i <= line$length; i=i+1)
+    {
+    char = line$buf[i]
+    cnt = cnt + 1
+    switch (char)
+    	{
+    	case $minus:				# from '-'
+            {
+            if (cnt == 1)			# First character
+                {
+	        sign = -1.0d0
+                }
+	    else
+	        {
+	        stat = $stat$nogood$		# set stat to nogood
+	        break
+	        }
+    	    }
+    	case $dig0-$dig9:			# from '0123456789'
+            {
+            if (cnt <= 16)			# First 16 characters
+                {
+	        num = num * 10.0 + (char - $DIG0 * 1.0)
+                }
+	    else
+	        {
+	        stat = $stat$nogood$		# set stat to nogood
+	        break
+	        }
+    	    }
+    	case $period:				# from '.'
+            {
+            if (ipoint == -1)			# Only Once !!
+                {
+    		ipoint = cnt
+                }
+	    else
+	        {
+	        stat = $stat$nogood$		# set stat to nogood
+	        break
+	        }
+    	    }
+        default:
+            {
+    	    stat = $stat$nogood$		# set stat to nogood
+	    break
+    	    }
+        }
+    }
+
+if (ipoint == -1) scale = 1.0d0
+else              scale = 1.0d0 / 10.0d0 ** (cnt - ipoint)
+
+num = dnint(num)
+arg$value = num * sign * scale
+
+return
+end
+
+
+#Subroutine parse_test_latitude (stat)
+#implicit integer (a-z)
+#pr_common
+#
+#stat = $stat$ok$
+#deg = 0
+#min = 0
+#sec = 0
+#hem = 1
+#flag = 0                # possible flags
+#    			#  0 = degree
+#			#  1 = minutes
+#			#  2 = hemisphere
+#kk = 0
+#for (i = stack$line_level$pos + 1; i <= line$length; i=i+1)
+#   {
+#    kk = kk + 1
+#    char = line$buf[i]
+#
+#   if      (char >= $DIG0 & char <= $DIG9) itype = 0
+#    else if (char == $LETN | char == $LETS) itype = 1
+#    else if (char == $MINUS)                itype = 2
+#   else
+#       {
+#	stat = $stat$nogood$
+#	break
+#      }
+#
+#   if (char == $LETS) hem = -1
+#
+#   if (flag == 0)                              # degrees
+#       {
+#	if (itype == 0)                         #   number
+#	   {
+#	    deg = deg * 10 + char - $DIG0
+#	    if (deg > 90)
+#	       {
+#		stat = $stat$nogood$
+#		break
+#	       }
+#	   }
+#	else if (itype == 1)                    #   hemisphere
+#	   {
+#	    stat = $stat$complete$
+#	    flag = 3
+#	   }
+#	else if (itype == 2)                    #   minus
+#	   {
+#	    flag = 1
+#	   }
+#      }
+#
+#   else if (flag == 1)                         # minutes
+#       {
+#	if (itype == 0)                         #   number
+#	   {
+#	    min = min * 10 + char - $DIG0
+#	    if (min > 59)
+#	       {
+#		stat = $stat$nogood$
+#		break
+#	       }
+#	   }
+#	else if (itype == 1)                    #   hemisphere
+#	   {
+#	    stat = $stat$complete$
+#	    flag = 3
+#	   }
+#	else if (itype == 2)                    #   minus
+#	   {
+#	    flag = 2
+#	    break
+#	   }
+#      }
+#
+#   else if (flag == 2)         # hemisphere
+#      {
+#       if (itype == 0)
+#           {
+#           sec = sec * 10 + char - $DIG0
+#           if (sec > 59)
+#                {
+#               stat = $stat$nogood$
+#               break
+#               }
+#           }
+#       else if (itype == 1)
+#           {
+#	        stat = $stat$complete$
+#           flag = 3
+#            }
+#       else if (itype == 2)
+#            {
+#           stat = $stat$nogood$
+#            break
+#           }
+#       else if (flag == 3)
+#           {
+#           stat = $stat$nogood$
+#        	break
+#           }
+#       }
+#  }
+#
+#if (deg == 90 & (min > 0 | sec > 0))
+#  {
+#    stat = $stat$nogood$
+#   }
+#else if (stat == $stat$complete$)
+#   {
+#    arg$value = (deg*100 + min + sec/100.0) * hem
+#   }
+#
+#return
+#end
+
+
+#Subroutine parse_test_longitude (stat)
+#implicit integer (a-z)
+#pr_common
+#
+#stat = $stat$ok$
+#deg = 0
+#min = 0
+#hem = 1
+#flag = 0                # possible flags
+    			#  0 = degree
+			#  1 = minutes
+			#  2 = hemisphere
+#
+#for (i = stack$line_level$pos + 1; i <= line$length; i=i+1)
+#  {
+#   char = line$buf[i]
+#
+#   if      (char >= $DIG0 & char <= $DIG9) itype = 0
+#   else if (char == $LETE | char == $LETW) itype = 1
+#   else if (char == $MINUS)                itype = 2
+#   else
+#      {
+#	stat = $stat$nogood$
+#	break
+#      }
+#
+#   if (char == $LETW) hem = -1
+#
+#   if (flag == 0)                              # degrees
+#      {
+#	if (itype == 0)                         #   number
+#	   {
+#	    deg = deg * 10 + char - $DIG0
+#	    if (deg > 180)
+#	       {
+#		stat = $stat$nogood$
+#		break
+#	       }
+#	   }
+#	else if (itype == 1)                    #   hemisphere
+#	   {
+#	    stat = $stat$complete$
+#	    flag = 2
+#	   }
+#	else if (itype == 2)                    #   minus
+#	   {
+#	    flag = 1
+#	   }
+#      }
+#
+#   else if (flag == 1)                         # minutes
+#      {
+#	if (itype == 0)                         #   number
+#	   {
+#	    min = min * 10 + char - $DIG0
+#	    if (min > 59)
+#	       {
+#		stat = $stat$nogood$
+#		break
+#	       }
+#	   }
+#	else if (itype == 1)                    #   hemisphere
+#	   {
+#	    stat = $stat$complete$
+#	    flag = 2
+#	   }
+#	else if (itype == 2)                    #   minus
+#	   {
+#	    stat = $stat$nogood$
+#	    break
+#	   }
+#      }
+#
+#   else if (flag == 2)         # hemisphere
+#      {
+#	stat = $stat$nogood$
+#	break
+#      }
+#  }
+#
+#f (deg == 180 & min > 0)
+#  {
+#   stat = $stat$nogood$
+#   }
+#else if (stat == $stat$complete$)
+#   {
+#    arg$value = (deg*100 + min) * hem
+#  }
+#
+#return
+#end
+
+
+subroutine parse_test_keyword (stat,keyword,token$index)
+implicit integer (a-z)
+pr_common
+character  keyword[ARB]
+
+$debugt call echov ("<test_key=")
+
+k=0
+for (i = stack$line_level$pos + 1; i <= line$length; i=i+1)
+   {
+    k = k + 1
+    char = keyword[k]
+
+    if (char != line$buf[i])   # | char < BIGA | char > BIGZ) 10/21/85 <SCC>
+    	{
+    	stat = $stat$nogood$
+    	$debugt call echov ("no> ")
+    	return
+    	}
+   }
+
+arg$value = -1 * (20000 + token$index)
+
+$debugt call echov ("ok>")
+
+return
+end
+
+
+
+
+subroutine tstlex(token$index,char$ok,char,table)
+implicit integer (a-z)
+pr_common
+integer*4	table[20000]
+
+line$length = line$length + 1                # put the char in the line
+line$char = char                             # for a moment
+line$char$next = $null
+
+call verlex (token$index,stat,table)         # call test routine
+
+line$length = line$length - 1                # remove the char from
+line$char$next = $null
+
+char$ok = $TRUE                              # set default
+if (stat == $stat$nogood$) char$ok = $false  # OK ???.....
+
+return                                       # return
+end
+
+
+subroutine delchr
+implicit integer (a-z)
+pr_common
+
+ichar = line$char
+delete$char                                         # <SCC> 02/18/1986     
+if (line$char==$RPAREN)
+   {while (line$char!=$LPAREN & line$length > 0)
+   {delete$char}                                    # ditto
+    delete$char;                                    # ditto
+    delete$char;                                    # ditto
+   }
+if (line$length < 0) line$length = 0
+
+return
+end
+
+
+subroutine delwrd
+implicit integer (a-z)
+pr_common
+
+delete$char                                             # ditto
+while (line$char!=$SPACE)
+   {
+    if (line$char==$RPAREN)
+       {while (line$char!=$LPAREN)
+	     {delete$char}                              # ditto
+         delete$char                                     # ditto
+       }
+    delete$char;                                        # ditto
+   }
+if (line$length < 0) {line$length = 0}           # ditto
+return
+end
+
+
+
+subroutine dellin (table)
+implicit integer (a-z)
+pr_common
+integer*4	table[20000]
+
+while (line$length > 0) {delete$char}                   # <SCC> 02/18/1986
+
+pr_stack = 1
+stack$line_level$pos	= 0
+stack$line_range$pos	= 0
+stack$LowNode		= 1
+stack$NodeCount		= table$NodeCount
+stack$ArgCount		= 1
+
+arg$value = 0
+
+line$length = 0
+line$char = $SPACE                                
+line$char$next = $NULL
+
+
+return
+end
+
+
+
+subroutine retype (prompt)
+implicit integer (a-z)
+pr_common
+character prompt[ARB]
+
+cnt = 0
+call echoR
+
+for (j=1; prompt[j] != $null; j=j+1)
+  {
+   cnt = cnt + 1                        # wrap-around the line
+   if (cnt >= 72)
+       {
+         if (prompt[j-1] == $SPACE)
+            {
+            	cnt = 0
+            	call echor
+            }
+       }
+   call echo(prompt[j])
+  }
+
+for (j=1; j<=line$length; j=j+1)
+  {
+   cnt = cnt + 1                        # wrap-around the line
+   if (cnt >= 72 & line$buf[j-1] == $SPACE)
+       {
+       cnt = 0
+       call echor
+       }
+   call echo(line$buf[j])
+  }
+
+return
+end
+
+
+subroutine recog (char,node$index,token$index,table,stat)    # Test Recognition
+implicit integer (a-z)               	# possible results are:
+pr_common                            	#    a) $FALSE  -- No Recog
+integer*4 table[20000]		     	#    b) $TRUE   -- Recog
+				     	#    c) $SPACE  -- Allow space input
+
+$DEBUGR  call echov("<recog>")
+
+stat = $FALSE                        	# Set default to NO RECOG
+
+if (stack$NodeCount == 1)
+   {
+    node$index = stack$LowNode
+
+    if (node$tokenIndx == 0) return	# end of line (command)
+
+    token$index = node$TokenIndx
+
+    # spaces allowed in lexical
+
+    if (char == $SPACE & parse_space (token$index) == $TRUE)
+    	{
+    	stat = $space			# yes
+    	}
+    else				# process ESC
+    	{
+    	if (tstok(token$index,table) == $TRUE) # is lexical ok as is?
+            {
+            stat = $TRUE		# yes
+            }
+    	else
+            {
+            return			# no
+            }
+    	}
+    }
+else
+    {
+    return				# order not unique at this level
+    }
+
+$DEBUGR  call echov("<ok>")
+
+return
+end
+
+
+
+
+subroutine dontst (flag,table)
+implicit integer (a-z)
+pr_common
+integer*4	table[20000]
+
+flag = $false
+
+node$index = stack$LowNode
+
+if ($bitset(node$GroupFlags,Flag$Order$Group) == 0) return 
+
+k = node$NotForFlags & Flag$NotFor
+if (k != 0) return 
+
+if (node$TokenIndx == 0) flag = $true
+
+return
+end
+
+
+
+subroutine quest (table)
+implicit integer (a-z)
+pr_common
+integer*4 table[20000]
+
+$DEBUGT call echo($QUEST)
+$DEBUGT call echo($QUEST)
+$DEBUGT call echoi (stack$LowNode)
+$DEBUGT call echo($QUEST)
+$DEBUGT call echoi (stack$NodeCount)
+$DEBUGT call echo($QUEST)
+
+call echov ("?   one of the following:")
+call echor
+
+col = 0                                 # set column indicator to 0
+icnt = 0
+
+for (node$index = stack$LowNode; icnt < stack$NodeCount;
+	node$index = node$siblingIndx)
+   {
+    icnt = icnt + 1
+
+    if (node$SiblingIndx == 0) stack$NodeCount = icnt
+
+    if ($bitset(node$GroupFlags,Flag$order$group) == 0) next
+
+    k = node$NotForFlags & Flag$NotFor
+    if (k != 0) next
+
+    token$index = node$tokenIndx
+
+    len = length(token$text)
+    call echoh (token$text,len)
+    
+    col = col + len
+
+    if (col >= 60)
+       {
+	call echor
+	col = 0
+       }
+    else
+       {
+	repeat
+	   {
+	    call echo ($space)
+	    col = col + 1               # set column up 1
+	   } until (mod(col,12) == 0)
+       }
+    }                                    # end of range
+
+call echor
+
+return
+end
+
+
+define($echoline,call echov(@1); call echor)
+
+subroutine ordhlp
+implicit integer (a-z)
+
+$echoline ("!  (Help)")
+$echoline ("This program accepts various characters to perform specific")
+$echoline ("editing functions.  The accepted characters and the")
+$echoline ("associated functions are:")
+$echoline ("    ^a, ^h, DEL  Character Delete.")
+$echoline ("    ^w           Word Delete.")
+$echoline ("    ^u, ^x       Line Delete.")
+$echoline ("    ^k           Kancel Command.")
+$echoline ("    ^r           Retype Line.")
+$echoline ("    !            This Help Display.")
+$echoline ("    ?            Short Syntax List.")
+$echoline ("    SPACE, ESC   Command Recognition.")
+$echoline ("    CR, LF, FF   Command Recognition and Termination.")
+$echoline ("  ^ indicates a control code sequence.")
+call echor
+$echoline ("Improper or invalid characters are not echoed and are")
+$echoline ("indicated with a warning bell.")
+call echor
+$echoline ("In addition, an UP-ARROW will recall previous commands from a")
+$echoline ("command stack.  Within command recall, the following keys are ")
+$echoline ("used for editing:")
+$echoline ("    ^a           Toggle INSERT/OVERSTRIKE mode.")
+$echoline ("    ^e           Move to right-most position.")
+$echoline ("    ^h           Move to left-most position.")
+$echoline ("    ^j           Word Delete.")
+$echoline ("    ^r           Retype Line.")
+$echoline ("    ^u, ^x       Line Delete.")
+$echoline ("    Up-Arrow     Recall previous command in stack.")
+$echoline ("    Dn-Arrow     Recall subsequent command in stack.")
+$echoline ("    Return/Enter Submit the recalled (edited) command for validation.")
+call echor
+$echoline ("Improper or invalid characters in a edited command will cause a")
+$echoline ("warning bell and the remainder of the command to be ignored.")
+
+return
+end
+
+
+
+subroutine ordsyn (table)
+implicit integer (a-z)
+pr_common
+integer*4	table[20000]
+
+
+call echov ("^p   one of the following:")
+call echoR
+
+icnt = 0
+
+for (node$index = stack$LowNode; icnt < stack$NodeCount;
+	node$index = node$siblingIndx)
+   {
+    icnt = icnt + 1
+
+    if (node$SiblingIndx == 0) stack$NodeCount = icnt
+
+    if ($bitset(node$GroupFlags,Flag$order$group) == 0) next
+
+    k = node$NotForFlags & Flag$NotFor
+    if (k != 0) next
+
+    token$index = node$tokenIndx
+
+    call echoh (line$buf[1],line$length)
+
+    len = length(token$text)
+    call echoh (token$text,len)
+    call echo ($space)
+    
+    if (node$promptIndx != 0) call echoh (node$prompt,80) 
+
+    call echor
+    }                                    # end of range
+
+return
+end

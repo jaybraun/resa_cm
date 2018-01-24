@@ -1,0 +1,1903 @@
+####FILE:      PTDRAW.rat
+ 
+####################################################################
+#$%
+#$% Information on the programs and subroutines located in DWDRAW.RAT
+#$% along with those that are called is provided in DOC.WHO.
+#$%
+#$% Flowcharts illustrating the interrelationships of the programs
+#$% and subprograms for this program are contained in *.HIR
+#$%
+#$% draw_rectangle
+#$% draw_ellipse
+#$% ccross
+#$% envlop
+#$% satoi
+#$% smv
+#$% smvhn
+#$% smvib
+#$% tb_find_lines
+#$% tb_find_corners
+#$% get_points
+#$%
+####################################################################
+ 
+define ($debug,#)
+ 
+#___________________________________________________________________
+# Routines within this file:
+#
+#
+# Lat/Lon arguments are in REAL*4 Degrees (Deg <==> Radians * (180/$pi))
+#
+#
+#
+#___________________________________________________________________
+ 
+define ($PI    ,3.141592654)
+define ($TWOPI ,6.283185307)
+define ($2Pi   ,$twopi)
+define ($DegRad,180.0/$pi)
+define ($Max$envelopes,50)
+ 
+define ($DI_color_offset,10)
+define ($Ramax,32767)
+ 
+define(minxcg,1)
+define(minycg,1)
+define(maxxcg,500)
+define(maxycg,500)
+define(CG$Common,
+    byte char_grid_cell[maxxcg,maxycg]
+    integer grid_cell_W, grid_cell_H
+    integer grid_Font_H, grid_Font_W
+    common/char_grid/ char_grid_cell, grid_cell_W, grid_cell_H,
+                      grid_Font_H, grid_Font_W
+)
+ 
+define ($max$env$arcs,30)         #max arcs in single circle
+define ($circle$inside,1)         #code for circle 1 inside circle 2
+define ($circle$intersect,2)      #code for circle 1 and 2 intersect
+define ($circle$encloses,3)       #code for circle 1 encloses circle 2
+define ($circle$separate,4)       #code for circles 1 and 2 separate
+define ($xcenter,1)                     #index in chold table
+define ($ycenter,2)                     #index in chold table
+define ($radius,3)                      #index in chold table
+define ($start,1)                       #index in iarc table
+define ($end,2)                         #index in iarc table
+ 
+ 
+define ($use_sync,)            # Disable calls to X$SYNC
+ 
+include "ascii.inc"
+include "bbcode.inc"
+include "bbctl.inc"
+include "bbwet.inc"
+include "macros.inc"
+include "elevation.inc"
+include "ptcolor.inc"
+include "ptgraph.inc"
+include "ptwand.inc"
+include "ptmain.inc"
+include "ptgraphix.inc"
+#include "ptvext.inc"  contains EXTcommon
+include "secdef.inc"
+include "ptdraw.inc"
+include "parallel.inc"
+#include "decw$xlibdef.inc"
+ 
+undefine read
+undefine write
+undefine err
+ 
+ 
+ 
+define($deg2rad,0.0174533)
+ 
+define($angpi,
+    {
+    while (@1 >   $pi) @1 = @1 - $twopi
+    while (@1 <= -$pi) @1 = @1 + $twopi
+    })
+ 
+define($ang2pi,
+    {
+    while (@1 >= $twopi) @1 = @1 - $twopi
+    while (@1 <      0.) @1 = @1 + $twopi
+    })
+ 
+
+subroutine draw_RECTANGLE (_  # Display RECTANGLE / Joe Bryant 1987
+                              lat1,
+                              lon1,
+                              Length,
+                              Korient,
+                              Kwidth,
+                              color,
+                              ipoly_type)
+ 
+implicit none
+ 
+real            orient, PHI, dir[4],HEADNG      # jb    7/6/87
+real            lat1, lon1, hLNGTH,hWIDTH,Diag  # jb    7/6/87
+real            tcos,tcosi[4],Ratio             # jb    7/6/87
+real            plat[4], plon[4]        # J.Bryant      7/6/87
+integer*2       Kwidth,Korient          # J.Bryant      7/6/87
+integer         x, DRAW_FULL, LENGTH, NV, COLOR, IPOLY_TYPE, I, ID, NVERT
+ 
+#if (draw_full(X) == YES)
+#  return
+ 
+orient = Korient * $PI/180.     # jb    Expressed in Radians
+hLNGTH = length / 2.            #   HALVE length & width, con-
+hWIDTH = Kwidth / 2.            #       verting to real
+ 
+if(Kwidth > Length)             # jb - ELLIPSE..
+ {
+  Ratio = hWIdth/hLngth       # jb Set the number of vertices 9/8/88
+  if (Ratio >= 1.3) nV = 20   # (Usual eliptical case)    9/30/88
+  else if(Ratio < 1.03) nV = 28 # (Very nearly circular)    9/30/88
+  ELSE nV = 24   #    (Intermediate)            9/28/88
+   {
+    call draw_ELLIPSE(_
+                      lat1,
+                      lon1,
+                      hLNGTH,
+                      Korient,
+                      hWIDTH,
+                      nv,
+                      color,
+                      ipoly_type)
+    RETURN
+   }
+ }
+ 
+                           # Angle (at center of rectangle) between
+PHI = atan2(hWIDTH,hLNGTH) #  ORIENT and a line thru a vertex #    8/16/88
+if(PHI < 0) PHI = PHI + $2PI                                  #    8/16/88
+ 
+Diag   = (hLNGTH * hLNGTH) + (hWIDTH * hWIDTH) # Pytha-
+Diag   = SQRT (Diag)                    # gorus --> Length of diagonal
+ 
+dir[1] = ORIENT - PHI      # Direction from center to 1st vertex
+$ang2pi(dir[1])
+dir[3] = dir[1] + $PI      # Direction from center to 3rd vertex
+$ang2pi(dir[3])
+                                 #              8/21/85
+dir[2] = ORIENT + PHI      # Direction from center to 2nd vertex
+$ang2pi(dir[2])
+dir[4] = dir[2] + $PI      # Direction from center to 4th vertex
+$ang2pi(dir[4])
+ 
+HEADNG = 000.           # (Set so that input rel. brg = true brg)
+tcos  = cos(Lat1)
+ 
+for (i=1; i<= 4; i = i +1)      # for each of 4 vertices...
+ {
+  tcosi[i] = tcos
+  PLAT[i] = lat1
+  PLON[i] = lon1
+ 
+  Call RRB2LL( _            #Rhumb line Range/Bearing to Lat/Lon
+                   PLAT[i],     # latitude (input & output)
+                   PLON[i],     # longitude (input & output)
+                   Diag,        # range (input)
+                   dir[i],      # relative bearing (input)
+                   HEADNG,      # ref. bearing (input) = 0.0
+                   tcosi[i])    #cosine of latitude (input & output)
+ 
+  plat[i] = pLAT[i] * 180/ $PI  # jb            7/7/87
+  plon[i] = pLON[i] * 180/ $PI  # jb            7/7/87
+ }
+ 
+ID = 0
+nVERT = 4
+call Draw_polygon_C (ID,PLAT,PLON, nVERT,COLOR, ipoly_type)
+ 
+return
+end     # end  Function draw_RECTANGLE
+
+#Programmer note:    New draw_ellipse, in anticipation of user
+#request for control of the number of vertices.  It's being used as of
+#10/5/88 as a reliablity check, and for increasing number of vertices
+#for ellipses of very low eccentricity.  For simplicity/efficiency if
+#you have hardware constraints, you might instead use DRAW_EL20, which
+#is restricted to 20 vertices.
+ 
+subroutine draw_ELlipse (_  # Joe Bryant - Aug. 1988 (V vertices)
+                      latD,
+                      lonD,
+                      Sminor,
+                      Korient,
+                      Smajor,
+                      v,
+                      color,                            # dew   9/22/91
+                      ipoly_type)                   #            9/27/88
+ 
+implicit none
+ 
+#GPHcommon  not needed? SMM 4/14
+#GPH1common not needed? SMM 4/14
+ 
+#$      let V = number of vertices (where 12 <= V <= 36);
+#$      let L = number of elements needed by YY = 4 + (V-20)/4
+#$   PXXnn and XX need twice as many elements as does YY(L]
+#$   Xlats(V), PLATS(V), Xlons(V) & PLONS(V)...need V elements.
+ 
+integer*2       Korient
+REAL    PXX(16) # x-axis displacements (% of semimajor axis)     9/28/88
+REAL    PXX20(8) # x-axis % displacements for 20 vertices        9/28/88
+REAL    PXX24(10)# x-axis % displacements for 24 vertices        9/28/88
+REAL    XX(16)  # corresponding X-axis distances         #       9/28/88
+REAL    YY(8)   # corresponding Y-axis distances         #        9/28/88
+REAL    Xlats(36),Xlons(36)   # Geo. positions on oriented X-axis 9/28/88
+REAL    Plats(36),Plons(36) # Polygon Latitudes/Longitudes   # jb 9/28/88
+REAL    Orient,Dorient,Up,Down # Bearings along & perp. to major axis
+REAL    latD, lonD, Sminor, Smajor, SQsMAJOR, cosDAT, NORTH
+REAL    xCOS, xDIR, xDIST
+REAL    Phi, Theta    # jb - radians (To calculate PXX elements)   9/30/88
+DATA NORTH/0.0/
+ 
+integer V, V1, V3, V2, V4
+integer L, I_SWITCH_1, I, K, M, J, N, ID, COLOR, IPOLY_TYPE
+ 
+## For #'s of vertices, circular ellipses' equal-arc projections on x-axis
+## are decimal fractions of the radius as follows (twice):  # jb 8/18/88
+ # 24 vertices:
+DATA PXX24/0.259,0.5,0.707,0.866,0.966,0.259,0.5,0.707,0.866,0.966/ #/
+ # 20 vertices:
+DATA PXX20/0.31,0.59,0.81,0.95,0.31,0.59,0.81,0.95/        #$ jb 9/27/88
+ 
+## L = number of elements needed by YY = 4 + ((V-20)/4)
+L = 4 + ((V-20)/4)                                        # jb   9/30/88
+V1 = V/4; V3 = 3*V1; V2 = 2*V1;  V4 = V                   # jb   9/28/88
+ 
+SWITCH (V)                                 #$ jb - add SWITCH 9/28/88
+ {
+  case 20:                    # jb Populate PXX for 20 vertices 9/28/88
+   {
+    for (i=1; i <= 2*L; i =i +1)
+     PXX[i] = PXX20[i]
+   }
+  case 24:                    # jb Populate PXX for 24 vertices 9/28/88
+   {
+    for (i=1; i <= 2*L; i =i +1)
+     PXX[i] = PXX24[i]
+   }
+  default:                    # jb Populate PXX for V vertices 9/28/88
+   {
+    if(V !=28 & V !=32 & V !=36 & V !=12 & V !=16) RETURN
+    Theta = ($PI/2.0) / (L +1)    # jb - Radians subtended by line 9/30/88
+    Phi   = Theta            # jb  between two vertices in a  9/30/88
+    FOR(I=1; I<= L; I=I +1)  # jb  circular ellipse..
+     {                       # jb  For elements 1-L:
+      pxx[I] = SIN(PHI)      # jb - Decimal fractions of SM axis; and
+      pxx[I +L] = pxx[I]     # jb  Same for elements (L+1) thru (2L)
+      PHI = PHI + THETA      # jb  -- On to next vertex..?
+     }
+   }
+ }
+ 
+#       STEPS:
+#1. Use ORIENT to compute/insert perpendicular bearings (UP and DOWN):
+#2.Use ORIENT,latD,lonD & Smajor to insert posits for 2 axis ends; &
+#   ORIENT,latD,lonD,Sminor,UP,Down to insert posits for the other 2.
+#3. Use PXX, Sminor & Smajor to insert XX and YY elements' magnitudes.
+#4. Use ORIENT,latD,lonD and XX to compute/insert posits for Xlats & Xlons
+#5. Use xLATS,xLONs,UP,DOWN & YY to compute/insert posits for Plats & Plons
+#6. Use PLATs,PLONs color, and V (# of vertices) to call Draw_Polygon_C
+#####################################################################
+ 
+# 1. Use ORIENT to compute/insert bearings into Dorient, UP, and DOWN
+ORIENT = Korient * $PI/180.     # jb    Convert to radians
+Dorient = ORIENT + $PI
+$ang2pi(Dorient)
+UP = ORIENT - $PI/2                                     #       9/8/87
+$ang2pi(UP)
+DOWN = ORIENT + $PI/2                                   #       9/8/87
+$ang2pi(DOWN)
+ 
+cosDAT = COS(latD)
+ 
+#2.Use (d)ORIENT,latD,lonD & Smajor to compute/insert Plats[V1] and [V3];
+#   & latD,lonD,Sminor,UP,Down to compute/insert Plats[V2] and [V]
+ 
+#$ Note: V1 = V/4; V3 = 3*V1; V2 = V/2; and V4 = V, representing
+#$      the four "axis" indices in Plats, as well as governing this
+#$      FOR statement:
+ 
+for(i=V1; i <= V; i = i +V1)                               # jb 9/27/88
+ {
+  if      (i==V1) { xDIR  = ORIENT;  xDIST = sMAJOR }   # jb  9/27/88
+  else if (i==V3) { xDIR  = dORIENT; xDIST = sMAJOR }   # jb  9/27/88
+  else if (i==V2) { xDIR  = DOWN;    xDIST = sMINOR }   # jb  9/27/88
+  else            { xDIR  = UP;      xDIST = sMINOR }   # jb  9/29/88
+#  else if (i== V) { xDIR  = UP;      xDIST = sMINOR }   # jb  9/29/88
+ 
+  pLATS[i] = latD
+  pLONS[i] = lonD
+  xCOS = cosDAT
+  Call RRB2LL( _            #Rhumb line Range/Bearing to Lat/Lon
+                   PLATs[i],    # latitude (input & output)
+                   PLONs[i],    # longitude (input & output)
+                   xDIST,       # range (input)
+                   xDIR,        # relative bearing (input), with
+                   NORTH,       #       ref. bearing (input) = 0.0
+                   xCOS)    #cosine of latitude (input & output)
+  PLATs[i] = pLATs[i] * 180/ $PI        # jb            9/9/87
+  PLONs[i] = pLONs[i] * 180/ $PI        # jb            9/9/87
+ }
+ 
+#3. Use PXX,Sminor & Smajor to insert XX and YY elements' magnitudes.
+ 
+SQsMAJOR = Smajor * Smajor      # Square of SemiMajor axis
+#for(i =1; i <=5; i = i +1)                                  # jb 8/18/88
+for(i =1; i <=L; i = i +1)                                  # jb 9/27/88
+ {
+  XX[i] = Smajor * PXX[i]
+  XX[i+L] =XX[i] # \/ YY = b * sqrt(a*a - XX*XX)/a  # jb 8/18/88
+  YY[i] = Sminor * SQRT(SQsMAJOR  - XX[i]*XX[i])/Smajor
+ }
+ 
+#4. Use ORIENT,latD,lonD,YY and XX to insert posits for Xlats & Xlons
+ 
+xDIR = ORIENT
+k = 1           # Starting xLATS index
+m = 0           # to adjust  XX index in RRB2LL call            9/8/87
+for (j = 1; j <= 2; j = j +1)
+ {
+  if(j > 1)
+   {
+    xDIR = dORIENT
+    k = V2 +1   # Starting xLATS index                     # jb 9/27/88
+##    m = 6     # to adjust  XX index in RRB2LL call            9/8/87
+    m = V1 +1   # to adjust  XX index in RRB2LL call       # jb 8/18/88
+   }
+##  for(i =k; i <= k +3; i = i +1)
+  for(i =k; i <= k +L-1; i = i +1)                         # jb 9/28/88
+   {
+    xLATS[i] = latD
+    xLONS[i] = lonD
+    xCOS = cosDAT
+    Call RRB2LL( _            #Rhumb line Range/Bearing to Lat/Lon
+                   XLATs[i],     # latitude (input & output)
+                   xLONs[i],     # longitude (input & output)
+                   XX[i-m],      # range (input)        jb      9/8/87
+                   xDIR,        # relative bearing (input), with
+                   NORTH,       #       ref. bearing (input) = 0.0
+                   xCOS)    #cosine of latitude (input & output)
+   }
+ }
+j = V1 -1                                   # jb - initialize j    9/28/88
+for(i=V1+1; i<= V2-1; i=i+1)                # jb                   9/28/88
+ {
+  Xlats[i]=Xlats[j]; Xlons[i] = Xlons[j]            # jb       9/27/88
+  j = j -1                                          # jb       9/28/88
+ }
+j=V2+1
+for(i=V-1; i>= V3+1; i=i-1)                  # jb       9/28/88
+ {
+  Xlats[i]=Xlats[j]; Xlons[i] = Xlons[j]            # jb       9/27/88
+  j = j +1                                          # jb       9/28/88
+ }
+# note: V1 = V/4; V3 = 3*V1; V2 = V/2; and V4 = V, representing
+ 
+ 
+#5. Use xLATs,xLONs,UP,DOWN & YY to compute/insert posits for Plats & Plons
+        # Note "k" is the index for xLATS[k], xLONS[k]
+ 
+for (j = 1; j <= 4; j = j +1)   # For each of four quadrants...
+ {
+ 
+  if      (j == 1) { xDIR = UP;   k = 1;    m=  1; n = 1    }
+  else if (j == 2) { xDIR = DOWN; k = V1+1; m= -1; n = V1-1 }
+  else if (j == 3) { xDIR = DOWN; k = V2+1; m=  1; n = 1    }
+  ELSE             { xDIR = UP;   k = V3+1; m= -1; n = V1-1 }
+ 
+#  FOR(i =k; i <= k +3; i = i +1)
+#  for(i =k; i <= k +4; i = i +1)                           # jb 8/18/88
+  for(i =k; i <= k +V1-2; i = i +1)                           # jb 9/27/88
+   {
+    Plats[i] = xLATs[i]
+    Plons[i] = xLONs[i]
+    xCOS = COS(xLATs[i])
+    Call RRB2LL( _            #Rhumb line Range/Bearing to Lat/Lon
+                   Plats[i],     # latitude (input & output)    9/8/87
+                   Plons[i],     # longitude (input & output)   9/8/87
+                   YY[n],        # range (input)                9/9/87
+                   xDIR,        # relative bearing (input), with
+                   NORTH,       #       ref. bearing (input) = 0.0
+                   xCOS)    #cosine of latitude (input & output)
+    n = n + m                           # jb            9/9/87
+ 
+    PLATs[i] = pLATs[i] * 180/ $PI      # jb            9/9/87
+    PLONs[i] = pLONs[i] * 180/ $PI      # jb            9/9/87
+   }
+ }
+ 
+#6. Use PLATs, PLONs color, and V (# of vertices) to call Draw_Polygon_C
+ 
+ID = 0
+call Draw_polygon_C (ID,PLATs,PLONs, V, COLOR, ipoly_type)
+ 
+return
+End             # End function draw_ELLIPSE
+
+ 
+Subroutine ccross(xc1,yc1,r1,xc2,yc2,r2,begang,endang,icode)
+ 
+#####################################################################
+#$%
+#$% Purpose:   CCROSS determines the relationship between two circles
+#$%
+#$% Called by:  ENVLOP
+#$%
+#$% Calls:      NONE
+#$%
+#$% Author:     J. ALLEN
+#$%
+#$% Date:       FEBRUARY 1982
+#$%
+#####################################################################
+ 
+implicit none       #  integer*2(a-z)
+real xc1,yc1,r1,xc2,yc2,r2,begang,endang
+real*8 dist,top,bot,cosa,ang,brng,xdiff,ydiff,rsum
+integer*2  icode
+ 
+#$% get distance of x,y coordinates of center points in two circles
+xdiff = abs(xc2 - xc1)
+ydiff = abs(yc2 - yc1)
+ 
+#$% get the sum of the two radii
+rsum = r1 + r2
+ 
+#$% if the x or y coordinate distance is >= to the sum of the two
+#$% radii in two circles then they could not intersect each other
+#$% and should be displayed as separate circles
+if (xdiff >= rsum | ydiff >= rsum)
+{
+   #$% set flag to indicate separate circles and return
+   icode = $circle$separate
+   return
+}
+#$% get the direct distance between the center points of the
+#$% two circles ie. hypotenuse of a right triangle
+dist = sqrt(xdiff * xdiff + ydiff * ydiff)
+#$% if the direct distance is >= to the sum of the two radii
+#$% in the two circles, then they could not intersect each other
+#$% and should be displayed as separate circles
+if (dist >= rsum)
+{
+   #$% set flag to indicate separate circles and return
+   icode = $circle$separate
+   return
+}
+#$% if the direct distance of the circles center points plus the
+#% radius of the 2nd circle are <= to the radius of the 1st circle,
+#$% then circle 1 encloses circle2
+if ((dist + r2) <= r1)
+{
+   #$% set flag to indicate enclosed circles and return
+   icode = $circle$encloses
+   return
+}
+#$% same as above with circles reversed
+if ((dist+r1) <= r2)
+{
+   #$% set flag to indicate enclosed circles and return
+   icode = $circle$inside
+   return
+}
+#$% if none of the above conditions are true, then the circles
+#$% must intersect
+icode = $circle$intersect
+#
+#find angle between intersections using formula
+#    cos(a) = (b**2 + c**2 - a**2) / (2 * b * c)
+#
+#$% compute top and bottom of above equation
+top = r1 * r1 - r2 * r2 + dist * dist
+bot = 2. * r1 * dist
+ 
+#$% if the bottom is an extremely small value, then cos(a)
+#$% is approaching 1 therefore the intersect angle is
+#$% approaching zero
+if (abs(bot) < .0001)
+{
+   #$% if circle 1 is small or = to circle 2
+   if (r1 <= r2)
+   {
+      #$% set flag to indicate circle 2 encloses circle 1 and return
+      icode = $circle$encloses
+      return
+   }
+   #$% else circle 2 is inside circle 1
+   else
+   {
+      #$% set flag accordingly and return
+      icode = $circle$inside
+      return
+   }
+}
+#$% get cos of intersecting angles
+cosa = top / bot
+#$% round off values where intersecting angles approach zero
+if (cosa < -1.) cosa = -1.
+if (cosa >  1.) cosa =  1.
+ 
+#$% compute the interescting angle atan and sqrt are intrinsic functions)
+if (cosa != 0.)
+ {
+   ang = atan(sqrt(1-cosa*cosa)/cosa)           #acos(cosa)
+#   $angpi(ang)                     # jb     9/27/91    10/1/91
+#   ang = abs(ang)                  # jb                10/1/91
+ }
+else
+   ang = PI / 2.
+ 
+#$% compute arc of the two circles
+if(yc2-yc1==0.0 & xc2-xc1==0.0) # jb  Precaution vs         9/27/91
+    brng = 0.0                  # jb   atan2 crash...       9/27/91
+else                            # jb                        9/27/91
+ {
+  brng = atan2(dble(yc2-yc1),dble(xc2-xc1))
+#  $ang2pi(brng)                               # jb         10/1/91
+ }
+begang = brng - ang
+#$ang2pi(begang)                               # jb 9/27/91 10/1/91
+ 
+endang = brng + ang
+#$ang2pi(endang)                               # jb 9/27/91 10/1/91
+ 
+return
+end # end of ccross
+
+ 
+Subroutine envlop(chold,numcir)
+ 
+#####################################################################
+#$%
+#$% Purpose:    ENVLOP determines the relationship between the given circles
+#$%             and draws only the outer boundary of the area defined.
+#$%
+#$% Called by:  DOENV
+#$%
+#$% Calls:      CCROSS    ARC
+#$%
+#$% Author:     J. ALLEN
+#$%
+#$% Date:       FEBRUARY 1982
+#$%
+#$%    Sept.-October 1991:  Changes to improve ENVELOPE command results,
+#$% with respect to omitted and extended arcs; to extraneous straight
+#$% lines; and to instability when varying display radius or/and envelope
+#$% radius:
+#$%    Variation of results when a radius is changed by 1 mile, along with
+#$% use if the INT function in DWVEXT.rat vs. the NINT function in DWDRAW.rat
+#$% suggest possible problem with using integer arithmetic.  But, changing
+#$% INT to NINT in ENVLOP hurt instead of helped--so INT was restored.
+#$%  Logic changes:
+#$%    BLOCK 1 (ICODE cases except for $circle$intersect): changed BREAK
+#$%       to NEXT 2 and NEXT for $circle$inside and $circle$encloses
+#$%    BLOCK 2 (Within $circle$intercect):
+#$%       add two new IF's:
+#$%          if (harc[$start,k] >= begang & harc[$end,k] <= endang)
+#$%            { # jb ( ADD: 'Other' circle's arc accounted for) 9/26/91
+#$%          if (begang >=harc[$start,k] & endang <=harc[$end,k])
+#$%            {  # jb ADD: begang->endang arc encompassed by HARC element
+#$%       Under "store arc in ascending sequence"
+#$%          change BREAK to NEXT
+#$% These changes improved, but did not solve, extraneous lines/extended
+#$% arcs/missing arcs and instability with respect to changes in display
+#$% radius.  Extraneous lines still vary markedly with changes in envelope
+#$% radius.  Problems are less visible when ships in a group are in roughly
+#$% circular formations and groups are widely separated compared to envelope
+#$% radius.   Linearly extended formations (and, particularly, groups whose
+#$% outlying units are closer to other groups' units than double the envelope
+#$% radius) render problems rather obvious. (Investigate at low priority?)
+#####################################################################
+#####################################################################
+#
+# Arguments
+#       chold   A two dimensional single precision real array containing
+#               the circle definitions in the envelope.  The first dimension
+#               contains the X center, Y center and radius.
+#               The center point and radius are in screen units.
+#       numcir  An integer variable containing the number of circles in the
+#               chold array
+#
+#####################################################################
+ 
+implicit none       #  integer*2(a-z)
+real chold[3,$MAX$ENV$CIRCLES],harc[2,$max$env$arcs]
+real begang
+real endang
+integer*2  numcir
+integer*2  I, ICODE, IARCS, J, K, L, M, JK
+ 
+for (i=1; i<=numcir; i = i + 1)         #for each circle in envelope
+{
+   icode = $circle$separate             #default relationship between circles
+   iarcs = 0                            #number of arcs in subject circle
+   for (j=1; j<=numcir; j = j + 1)      #check relationship with other circles
+   {
+      if (i == j) next                  #don't check self
+      call ccross(chold[$xcenter,i],_   #ccross determines relationship
+                  chold[$ycenter,i],_   #..between 2 given circles
+                  chold[$radius,i],_
+                  chold[$xcenter,j],_
+                  chold[$ycenter,j],_
+                  chold[$radius,j],_
+                  begang,_
+                  endang,_
+                  icode)
+ 
+############  BLOCK 1 - ICODE cases except for $circle$intersect: #####
+      if (icode == $circle$inside)
+      {            # (The outer-loop circle is INSIDE the "OTHER" circle
+         chold[$xcenter,i] = chold[$xcenter,numcir] #remove inside circle
+         chold[$ycenter,i] = chold[$ycenter,numcir] #..by replacing with
+         chold[$radius,i]  = chold[$radius,numcir]  #..last circle
+         i = i - 1                      #don't skip last circle
+         numcir = numcir -1             #decrement circle count
+         iarcs = -1                     #wait till next loop to process circle
+#         break                         # jb                     10/3/91
+         NEXT 2      # jb Get next circle in the OUTER loop      10/3/91
+      }
+      else if (icode == $circle$encloses)     # jb    else        9/26/91
+      {    # (The "OTHER" circle is ENCLOSED BY the outer-loop circle..)
+         chold[$xcenter,j] = chold[$xcenter,numcir] #remove inside circle
+         chold[$ycenter,j] = chold[$ycenter,numcir] #..by replacing with
+         chold[$radius,j]  = chold[$radius,numcir]  #..last circle
+         numcir = numcir - 1
+#         break                # jb                              10/1/91
+         j = j -1              # jb                              10/1/91
+         NEXT        # jb Get next "OTHER" (INNER-loop) circle   10/1/91
+      }
+      else if (icode == $circle$separate) next  # jb  else        9/26/91
+ 
+############  Ent of BLOCK 1 ##########################################
+############  BLOCK 2 - ICODE case $CIRCLE$INTERSECT: #################
+      else if (icode == $circle$intersect)      # jb  else        9/26/91
+      {
+100
+         if (iarcs == 0)                #first arc to store
+         {
+            iarcs = 1
+            harc[$start,1) = begang
+            harc[$end,1) = endang
+         }
+         else
+         {
+            for (k=1; k<=iarcs; k = k + 1)
+             {
+               if (harc[$start,k] >= begang & harc[$end,k] <= endang) # jb
+               { # jb ( ADD: 'Other' circle's arc accounted for) 9/26/91
+                chold[$xcenter,j] = chold[$xcenter,numcir] #remove circle j
+                chold[$ycenter,j] = chold[$ycenter,numcir] #..by replacing with
+                chold[$radius,j]  = chold[$radius,numcir]  #..last circle
+                j = j - 1            #don't skip (former) last circle 9/26/91
+                numcir = numcir -1   #decrement circle count          9/26/91
+                NEXT 2 # jb Now process the former 'last' circle etc..9/26/91
+               }
+ 
+               if (begang >=harc[$start,k] & endang <=harc[$end,k]) # 10/1/91
+               {  # jb ADD: begang->endang arc encompassed by HARC element
+                NEXT 2 # jb Get next  begang/endang combination      10/1/91
+               }
+ 
+               if (harc[$start,k] <= begang & harc[$end,k] >= begang)
+               {    # HARC arc ~ overlaps begang ?...
+                  begang = harc[$start,k]      #extend begang/endang
+                  endang = amax1(harc[$end,k],endang)
+                  for (l=k; l<=iarcs-1;l=l+1)  #-- and remove the arc
+                  {
+                     harc[1,l) = harc[1,l+1)
+                     harc[2,l) = harc[2,l+1)
+                  }
+                  k = 0
+                  iarcs = iarcs - 1
+                  goto 100
+ 
+               }
+               if (harc[$start,k] <= endang & harc[$end,k] >= endang)
+               {    # HARC arc ~ overlaps endang ?...
+                  begang = amin1(harc[$start,k],begang)
+                  endang = harc[$end,k]        #extend begang/endang,
+ 
+                  for (l=k; l<=iarcs-1;l=l+1)  #-- and remove the arc
+                  {
+                     harc[1,l) = harc[1,l+1)
+                     harc[2,l) = harc[2,l+1)
+                  }
+                  k = 0
+                  iarcs = iarcs - 1
+                  goto 100
+               }
+ 
+#              store arc in ascending sequence
+               if (harc[$start,k] > begang)  #found place to insert
+               {                             # the new arc..
+                  iarcs = iarcs + 1
+                  if (iarcs > $max$env$arcs)    #arc table overflow
+                  {
+                     iarcs = $max$env$arcs      #forget arc
+##                     break        # jb                10/3/91
+                     NEXT     # jb Continue for remaining arcs-- 10/3/91
+                       # since iarcs MAY be decremented as in preceding IF
+                  }
+                  for (m=iarcs; m > k; m = m - 1) #make room for new arc
+                  {
+                     harc[$start,m] = harc[$start,m-1]
+                     harc[$end,m]   = harc[$end,m-1]
+                  }
+                  harc[$start,k] = begang         #store arc
+                  harc[$end,k] = endang
+                  break
+               }
+               if (k == iarcs)                  #add to end of arc list
+               {
+                  iarcs = iarcs + 1
+                  if (iarcs > $max$env$arcs)    #arc table overflow
+                  {
+                     iarcs = $max$env$arcs      #forget arc
+                     break
+                  }
+                  harc[$start,iarcs) = begang     #store arc
+                  harc[$end,iarcs) = endang
+                 break
+              } # End for k >= iarcs
+            } #end for insert arc
+         } #end for else insert
+      } #end if circle intersect
+############  End of BLOCK 2 - ICODE case $CIRCLE$INTERSECT: ###
+   } #end inner circle loop (Relationship w/other circles..)
+#################################################################
+#  for (kk=1; kk<=iarcs; kk = kk + 1)
+#  {
+#   if (harc[$end,kk] >= harc[$start,kk+1])
+#    {  # jb This arc, kk, extends (in)to arc kk+1; so--
+#      harc[$end,kk] = MAX(harc[$end,kk+1],harc[$end,kk])
+#      for (l=kk+1; l<=iarcs-1;l=l+1)  #-- and remove arc kk+1
+#       {
+#        harc[1,l) = harc[1,l+1)        # jb     9/26/91
+#        harc[2,l) = harc[2,l+1)        # jb     9/26/91
+#       }
+#      iarcs = iarcs - 1                 # jb     9/26/91
+#      kk = kk-1        # (So NEW arc kk will now be tested
+#      NEXT             #   for overlap into the next arc)
+#    }
+#  }
+#################################################################
+#  draw what remains of subject circle
+   if (iarcs > 0)
+   {
+      for (jk = 1; jk <= iarcs; jk = jk + 1) # jb jk vice j 9/24/91
+      {
+         begang = harc[$end,jk)
+         if (jk == iarcs) endang = harc[$start,1)
+         else endang = harc[$start,jk+1)
+ 
+         call arc_c(int(chold[$xcenter,i)),int(chold[$ycenter,i)),_
+                  int(chold[$radius,i)),begang,endang)
+      } #end for
+   }
+   else if (iarcs == 0)
+      call arc_c(int(chold[$xcenter,i)),int(chold[$ycenter,i)),_
+                  int(chold[$radius,i)),0.,PI2)
+} #end for outer circle loop
+ 
+return
+end # end of envlop
+ 
+
+ 
+integer function satoi(str,slen,ierr)
+ 
+#####################################################################
+#$%
+#$% Purpose:    SATOI  converts a numeric string to an internal integer.
+#$%             The numeric string may have a leading plus or minus sign.
+#$%             Leading spaces are ignored.  The numeric string is terminated
+#$%             when:
+#$%                1. (slen) numeric characters are processed.
+#$%                2. a non-numeric character is encountered
+#$%                   (except leading spaces or plus or minus)
+#$%
+#$% Called by:  SYMOPN    GETMAP
+#$%
+#$% Calls:      NONE
+#$%
+#$% Author:     J. ALLEN
+#$%
+#$% Date:       FEBRUARY 1982
+#$%
+#####################################################################
+ 
+#####################################################################
+#
+# Arguments
+#
+#       str     packed numeric source string.
+#               The string is terminated by a null or backslash.
+#       slen    The number of characters in the source string
+#               to be converted to internal integer.
+#       ierr    Error code.
+#                       0       normal return
+#                       1       non-numeric digit found
+#                       2       overflow
+#
+#        Example
+#
+#       Before
+#               str = -123         (input)
+#               slen = 100              (input)
+#               ierr = 0                (output)
+#       i = satoi(str,slen,ierr)
+#
+#       After
+#               i = -123
+#               ierr = 0
+#
+#####################################################################
+ 
+implicit none       #  integer*2(a-z)
+integer*2  slen,ierr,isgn
+character str[200],ichar,igbyte
+integer*4 i
+integer*2 k
+ 
+#$% initialize values
+isgn = 1
+k = 0
+ierr = 0
+ 
+#$% for each character
+for (i=1; i<=slen; i=i+1)
+{
+   #$% get each character from the string
+   ichar = igbyte(str,i)
+   #$% if a null or backslash is reached, break from loop
+   if (ichar  == $null | ichar == $backslash) break
+   #$% if character is a space
+   if (ichar == $space)
+      #$% if number is zero, get next character
+      if (k == 0) next
+      else break
+   #$% check for plus/minus number
+   if (ichar == $plus & k == 0) next
+   if (ichar == $minus & k == 0)
+   {
+      isgn = -1
+      next
+   }
+   #$% if character is not a number, set err flag and break
+   if (ichar < $dig0 | ichar > $dig9)
+   {
+      ierr = 1          #non numeric digit found
+      break
+   }
+   if (k >= 3276 & ichar > $dig7) ierr = 2      #overflow
+ 
+   #$% convert character to digit
+   k = k * 10 +ichar - $dig0
+}
+#$% apply plus or minus to the number and return value to calling
+#$% subroutine
+satoi = k * isgn
+return
+end # end of satoi
+ 
+
+ 
+Subroutine smv(i,dest,len2)
+ 
+#####################################################################
+#$%
+#$% Purpose:    SMV moves a single character into the destination string.
+#$%             Then len2 is incremented by one.
+#$%
+#$% Called by:  GRID    SMVHN    SMVI    SMVIB    SMVIZ    SMVST
+#$%             SPACK   SYMOPN
+#$%
+#$% Calls:      IPBYTE
+#$%
+#$% Author:     J. ALLEN
+#$%
+#$% Date:       FEBRUARY 1982
+#$%
+#####################################################################
+ 
+#####################################################################
+#
+# Arguments
+#
+#       i       right justified character to be moved
+#       dest    packed destination string
+#       len2    number of characters after which character is moved.
+#
+# Example
+#
+#       Before
+#               i = \           (input)
+#               dest = 12     (input & output)
+#               len2 = 2        (input & output)
+#
+#       call smv(i,dest,len2)
+#
+#       After
+#               dest = 12\
+#               len2 = 3
+#
+#####################################################################
+ 
+implicit none       #  integer*2(a-z)
+ character i
+ character dest[200]
+ integer*4 len4, len2
+ 
+ #$% increment len2
+ len2 = len2 + 1
+ len4 = len2
+ 
+ #$% store character (i) into character position (len4) of string (dest)
+ call ipbyte (dest,len4,i)
+ return
+ end # end of smv
+ 
+
+ 
+Subroutine smvHn (hstrng,len,dest,len2)
+ 
+#####################################################################
+#$%
+#$% Purpose:    SMVHN moves a packed substring to a destination packed
+#$%             substring.  The move starts with the first character of the
+#$%             source string and terminates when (len) characters have been
+#$%             moved or a string terminator (null or backslash) is
+#$%             encountered.
+#$%
+#$% Called by:  STRINT    SYMOPN
+#$%
+#$% Calls:      SMV
+#$%
+#$% Author:     J. ALLEN
+#$%
+#$% Date:       FEBRUARY 1982
+#$%
+#####################################################################
+ 
+##################################################################
+#
+# Arguments
+#    hstrng     packed source string
+#    len        number of characters in source string to move
+#    dest       packed destination string
+#    len2       number of characters after which source string is
+#               appended
+#
+# Example
+#
+#       Before
+#               hstrng = 'abcd\'   (string terminator "\" comes before
+#               len = 100           100 characters indicated by len)
+#               dest = '123'
+#               len2 = 3
+#
+#       call smvhn(hstrng,len,dest,len2)
+#
+#       After
+#               hstrng = abcd\        (input)
+#               len = 100#              (input)
+#               dest = 123abcd        (output)
+#               len2 = 7                (output)
+#
+ 
+implicit none       #  integer*2(a-z)
+ character char
+ character hstrng[200],dest[200]
+ character igbyte
+integer*4 i, len, len2
+ 
+ #$% for each character in the source string
+ for (i=1; i <= len; i=i+1)
+   {
+    #$% get each character in string "hstrng"
+    char = igbyte(hstrng,i)
+ 
+    #$% terminate string if "\" or null is reached
+    if (char == $backslash | char == $null) return
+ 
+    #$% move char into array "dest"
+    call smv(char,dest,len2)
+   }
+ 
+  return
+  end # end of smvHn
+ 
+
+ 
+Subroutine smvib(i,n,dest,len2)
+ 
+#####################################################################
+#$%
+#$% Purpose:    SMVIB right justifies and blank fills an internal integer
+#$%             into a field (n) characters wide.  A minus sign precedes
+#$%             negative numbers.  If the number of digits exceeds the field
+#$%             width, the high order digit(s) are lost.
+#$%
+#$% Called by:  TBD
+#$%
+#$% Calls:      SMV
+#$%
+#$% Author:     J. ALLEN
+#$%
+#$% Date:       FEBRUARY 1982
+#$%
+#####################################################################
+ 
+#####################################################################
+#
+# Arguments
+#
+#       i               internal integer to be converted
+#       n               character width of packed destination substring
+#       dest            packed destination string
+#       len2            number of characters after which string is
+#                       stored.
+# Example
+#
+#       Before
+#               i = 322         (input)
+#               n = 5           (input)
+#               dest = ""       (input & output)
+#               len2 = 0        (input & output)
+#
+#       call smvib(i,n,dest,len2)
+#
+#       After
+#               dest = 322
+#               len = 5
+#
+#####################################################################
+ 
+implicit none       #  integer*2(a-z)
+character strng[11],dest[200]
+integer*2 ifill, K, I, J, ISGN, N
+integer*4 LEN2
+ 
+#$% set flag
+ifill = $space
+ 
+#$% set end of string to null
+100  strng[11] = $NULL
+ 
+#$% get absolute value of input number
+k = abs(i)
+ 
+#$% for each value of j
+for (j = 1; j<= 10; j = j+1)
+   {
+    #$% mod k units to individual digits and convert to ASCII
+    strng[j] = mod(k,10) + $DIG0
+    #$% get rid of last right-hand zero which was added on in mod process
+    k = k/10
+   }
+#$% for each value of j and change from right to left justified
+for (j=10; j > 1; j = j-1)
+    #$% get rid of left-hand zeros
+    if (strng[j]!=$DIG0) break
+ 
+#$% if original input number was negative, set sign to minus
+if (i < 0)  isgn = $minus
+#$% else set sign to space
+else        isgn = ifill
+ 
+#$% starting with substring width value and working backwords
+for (k=n; k>= 1; k=k-1)
+   {
+    #$% if there is no fill required and there is a minus sign
+    if (ifill == $dig0 & isgn == $minus)
+       {
+        #$% move minus sign into dest array
+        call smv(isgn,dest,len2)
+        #$% set isgn to zero and get next k
+        isgn = ifill
+        next
+       }
+    #$% set isgn (space or minus) just before the numbers in the array
+    if      (k-1== j) call smv(isgn,dest,len2)
+    #$% else if substring width is greater than amount of numbers to be
+    #$% placed in the substring, fill in with spaces
+    else if (k  >  j) call smv(ifill,dest,len2)
+    #$% else move numbers from strng to dest
+    else              call smv(strng[k],dest,len2)
+   }
+ 
+return
+end  # end of smvib
+ 
+
+Subroutine map(imap)
+ 
+##############################################################################
+#$%
+#$% Purpose:     MAP generates the visible portion of the map
+#$%
+#$% Calls:       DRWCLP     MOVCLP
+#$%
+#$% Called by:   draw_center
+#$%
+#$% Author:      J. ALLEN
+#$%
+#$% Date:        FEBRUARY 1982
+#$%
+##############################################################################
+ 
+implicit none
+ 
+real xf,yf
+integer*4   imap
+integer*4   clpmsk_wrap, lp, icolor, i, mx_wrap, my_wrap, jx, jy
+logical     Last_Visible, Curr_Visible, Next_Visible
+
+#$x$gc_values$structure
+#$x$point$structure
+ 
+#DECW$Common
+#DECW$Common_GC
+DECW$Common_Points
+
+GPHcommon #maptbl_ptr
+GPH2common #maptbl
+ 
+maptbl_ptr = 1                  # initialize ptr to maptbl
+mapdef_ptr = 1
+ 
+repeat
+    {
+    lp = maptbl[maptbl_ptr]     # get number of points in this line
+    if (lp == 0) break          # all done
+ 
+    maptbl_ptr = maptbl_ptr + 1
+ 
+    if (lp == $land)            # are we ready to do land mass
+        {
+        call set_color_wrap ($Color$land) # change current color to blue
+        next
+        }
+    else if (lp == $boundaries)         # are we ready to do country boundaries
+        {
+        if (geo_boundaries == NO) call skip_map
+        else
+          {
+            call set_color_wrap ($Color$Boundaries) # change current color to mud
+          }
+        next
+      }
+    else if (lp == $rivers)             # are we ready to do rivers
+      {
+        if (geo_rivers == NO) call skip_map
+        else
+          {
+            call set_color_wrap ($Color$River)    # change current color to blue
+          }
+        next
+      }
+    else if (lp <= $userHI & lp >= $userLO)     # if user-def. color 6/24/87
+     {
+      iCOLOR = lp - $userBASE                   # find color's nbr   6/24/87
+      call set_color_wrap (iCOLOR)                # set user's color   6/24/87
+      NEXT                                      #                    6/24/87
+     }
+    else if (lp <= $userHId & lp >= $userLOd)   # if user-def. color 6/24/87
+     {
+      iCOLOR = lp - $userBASEd                  # find color's nbr   6/24/87
+      call set_color_wrap (iCOLOR)                   # set user's color   6/24/87
+ 
+      call set_dash_c ($yes)
+      NEXT                                      #                    6/24/87
+     }
+ 
+    # Point values in MAPDEF are floating point degrees
+ 
+    Last_Visible = .false.
+    DW_Pnt_Count = 0
+ 
+    for (i=mapdef_ptr; i <= mapdef_ptr+lp-1; i=i+1) # Process world map
+        {
+        xf = mapdef[1,i]                            # Get point
+        yf = mapdef[2,i]
+ 
+        Curr_Visible = ( 0 == clpmsk_wrap (xf,yf) )      # Is it visible
+ 
+        if ( i+1 <= mapdef_ptr+lp-1)                # look ahead one point
+            {
+            Next_Visible = ( 0 == clpmsk_wrap (mapdef[1,i+1],mapdef[2,i+1]) )
+            }
+        else                                        # no point to look at
+            {                                       #  (end of line series)
+            Next_Visible = .false.
+            }
+ 
+        if (Last_Visible | Curr_Visible | Next_Visible)
+            {                                   # should we add this point?
+            jx = mx_wrap (xf)
+            jy = my_wrap (yf)
+ 
+            DW_Pnt_Count = DW_Pnt_Count + 1
+            DW_Pnt_X[DW_Pnt_Count] = jx
+            DW_Pnt_Y[DW_Pnt_Count] = jy
+ 
+            if (DW_Pnt_Count > 1)              # check for duplicate points
+                {
+                if (DW_Pnt_X[DW_Pnt_Count-1]== jx &
+                    DW_Pnt_Y[DW_Pnt_Count-1] == jy  )
+                    {
+                    DW_Pnt_Count = DW_Pnt_Count - 1         # YES, dup'ed
+                    }
+                }
+ 
+            if (DW_Pnt_Count >= DW$Max_Points)
+                {
+                print *, "Map Point Array full"              #@!
+ 
+                call x_draw_lines()
+                DW_Pnt_Count = 1                    # leave this one point in
+                DW_Pnt_X[DW_Pnt_Count] = mx_wrap (xf)
+                DW_Pnt_Y[DW_Pnt_Count] = my_wrap (yf)
+                }
+            }
+        else if (DW_Pnt_Count > 1)              # NO, draw what we have
+            {
+            call x_draw_lines()
+ 
+            jx = mx_wrap (xf)
+            jy = my_wrap (yf)
+ 
+            DW_Pnt_Count = 1
+            DW_Pnt_X[DW_Pnt_Count] = jx
+            DW_Pnt_Y[DW_Pnt_Count] = jy
+            }
+		else
+			{
+            jx = mx_wrap (xf)
+            jy = my_wrap (yf)
+ 
+            DW_Pnt_Count = 1
+            DW_Pnt_X[DW_Pnt_Count] = jx
+            DW_Pnt_Y[DW_Pnt_Count] = jy
+			}
+ 
+        Last_Visible = Curr_Visible
+ 
+        } # end for loop of all points
+ 
+    if (DW_Pnt_Count > 1)
+        {
+        call x_draw_lines()
+        }
+ 
+    mapdef_ptr = mapdef_ptr + lp
+    }                                   # end repeat
+
+
+if ($bitset(imap,$map$Terrain) != $NO) 
+	call map_fill
+ 
+call set_dash_c ($NO)
+ 
+end
+ 
+
+Subroutine map_fill
+ 
+##############################################################################
+#$%
+#$% Purpose:     MAP_FILL uses dted to fill map
+#$%
+#$% Calls:       None
+#$%
+#$% Called by:   MAP
+#$%
+#$% Author:      J. Allen
+#$%
+#$% Date:        December 2014
+#$%
+##############################################################################
+ 
+BBCommon
+
+real xf, yf
+real xl, xr, yb, yt, saved_xl, saved_xr, saved_yb, saved_yt
+real swlat, swlon, nwlat, selon, lat, lon, resinc
+integer*4   clpmsk_wrap, mx_wrap, my_wrap, jx, jy
+integer*4   ljx, ljy
+integer	    elevation, the_elevation
+logical     Curr_Visible
+integer*4   saved_lines_x1[20000],
+            saved_lines_y1[20000],
+            saved_lines_x2[20000],
+            saved_lines_y2[20000]
+integer*4   num_saved_lines, saved_line_index
+
+DECW$Common_Points
+ElevationCommon
+ 
+# Scan terrain playbox from bottom to top, left to right using resoluton
+# draw lines where contiguous elevation values > 0
+ 
+if(N_elev_regions == 0)
+{
+    return
+}
+
+call get_window (xl, yb, xr, yt)
+
+#See if we can simply redraw the map fill that we drew last time.
+if (xl==saved_xl & yb==saved_yb & xr==saved_xr & yt==saved_yt) {
+
+   DW_Pnt_Count = 2
+   for (saved_line_index=1; saved_line_index<=num_saved_lines; saved_line_index=saved_line_index+1) {
+      DW_Pnt_X[1]=saved_lines_x1[saved_line_index]
+      DW_Pnt_Y[1]=saved_lines_y1[saved_line_index]
+      DW_Pnt_X[2]=saved_lines_x2[saved_line_index]
+      DW_Pnt_Y[2]=saved_lines_y2[saved_line_index]
+      call x_draw_lines()
+   }
+   return
+
+}
+else { #we will have to recompute, but maybe we can try next time
+   saved_xl=xl
+   saved_yb=yb
+   saved_xr=xr
+   saved_yt=yt 
+   num_saved_lines=0 #start collecting again
+}
+
+ 
+# resolution increment proportional to window size
+resinc = (yt-yb)/1000.0
+ 
+for (lat = yb; lat <= yt; lat = lat + resinc)
+{
+	DW_Pnt_Count = 0
+	for (lon = xl; lon <= xr; lon = lon + resinc)
+	{
+           elevation = the_elevation(lat, lon)
+           yf = lat
+           xf = lon
+           Curr_Visible = ( 0 == clpmsk_wrap (xf,yf) )      # Is it visible
+           jx = mx_wrap (xf)
+           jy = my_wrap (yf)
+				
+		if (elevation > 0 & Curr_visible & DW_Pnt_Count == 0)
+		{
+            DW_Pnt_Count = DW_Pnt_Count + 1
+            DW_Pnt_X[DW_Pnt_Count] = jx
+            DW_Pnt_Y[DW_Pnt_Count] = jy
+		}
+		else if (elevation <= 0 & DW_Pnt_Count > 0)
+		{
+			DW_Pnt_Count = 2
+            DW_Pnt_X[DW_Pnt_Count] = ljx
+            DW_Pnt_Y[DW_Pnt_Count] = ljy		
+                        num_saved_lines=num_saved_lines+1
+                        saved_lines_x1[num_saved_lines]=DW_Pnt_X[1]
+                        saved_lines_y1[num_saved_lines]=DW_Pnt_Y[1]
+                        saved_lines_x2[num_saved_lines]=DW_Pnt_X[2]
+                        saved_lines_y2[num_saved_lines]=DW_Pnt_Y[2]
+			call x_draw_lines()
+			DW_Pnt_Count = 0
+		}
+		ljx = jx
+		ljy = jy
+ 
+	}
+	if (DW_Pnt_Count > 0)
+	{
+		DW_Pnt_Count = 2
+        DW_Pnt_X[DW_Pnt_Count] = ljx
+        DW_Pnt_Y[DW_Pnt_Count] = ljy			
+                num_saved_lines=num_saved_lines+1
+                saved_lines_x1[num_saved_lines]=DW_Pnt_X[1]
+                saved_lines_y1[num_saved_lines]=DW_Pnt_Y[1]
+                saved_lines_x2[num_saved_lines]=DW_Pnt_X[2]
+                saved_lines_y2[num_saved_lines]=DW_Pnt_Y[2]
+		call x_draw_lines()
+	}
+}
+return
+end
+ 
+
+Subroutine skip_map
+ 
+##############################################################################
+#$%
+#$% Purpose:     SKIP_MAP bypasses a portion of global map data
+#$%
+#$% Calls:       None
+#$%
+#$% Called by:   MAP
+#$%
+#$% Author:      G. Hartling
+#$%
+#$% Date:        October 1983
+#$%
+##############################################################################
+ 
+implicit none
+ 
+GPHcommon
+GPH2common
+integer lp
+ 
+repeat
+  {
+    lp = maptbl[maptbl_ptr]             # get number of points in this line
+ 
+    if (lp == $boundaries |             # country boundaries
+        lp == $rivers     |             # rivers
+        lp == $land       |             # land mass
+        lp == 0)        break           # end of data
+ 
+    mapdef_ptr = mapdef_ptr + lp        # increment ptr into mapdef array
+ 
+    maptbl_ptr = maptbl_ptr + 1         # increment index into maptbl array
+ 
+  }     # end repeat
+ 
+return
+end
+ 
+
+subroutine tb_Find_Lines (Text, Width, N_Lines, Longest_Line, Pos_S, Pos_E, text_len)
+ 
+# Use the text & width to determine the number of lines, and...
+# compute number of characters on the longest line.
+ 
+implicit none
+ 
+VaxCharacter*(*)    text            # with newlines
+integer*4           width           # text width (wrap)
+integer*4           n_lines, longest_line
+integer*4           pos_s[$tb_max$lines], pos_e[$tb_max$lines]
+ 
+integer*4           space, p, mx, text_len
+ 
+space = 0
+ 
+mx = $tb_max$Line_Len
+if (width > 0) mx = min(mx, width)
+ 
+longest_line = 1
+n_lines = 1
+pos_s[n_lines] = 1
+ 
+for (p = 1; p <= text_len; p = p + 1 )
+    {
+    if (text[p:p] == "") space = p
+ 
+    if (text[p:p] == char($linefeed) )
+        {
+        pos_e[n_lines] = p - 1
+        longest_line = max(longest_line, pos_e[n_lines] - pos_s[n_lines] + 1)
+        n_lines = N_Lines + 1
+        pos_s[n_lines] = p + 1
+        space = 0
+        }
+ 
+    else if (p-pos_s[n_lines]+1 > mx)
+        {
+        if (space != 0) pos_e[n_lines] = space - 1
+        else            pos_e[n_lines] = p - 1
+ 
+        p = pos_e[n_lines] + 1
+        longest_line = max(longest_line, pos_e[n_lines] - pos_s[n_lines] + 1)
+        n_lines = N_Lines + 1
+        pos_s[n_lines] = p + 1
+        space = 0
+        }
+    }
+ 
+pos_e[n_lines] = text_len
+longest_line = max(longest_line, pos_e[n_lines] - pos_s[n_lines] + 1)
+ 
+ 
+end
+
+subroutine tb_find_corners (x,y, angle, height, width,   # input
+                            UL_X, UL_Y, LR_X, LR_Y)      # output
+ 
+# . determine anchor point from relative angle
+#   * possible anchor points are:
+#       top-left, top-center, top-right, right-center,
+#       left-center, bottom-left, bottom-center, bottom-right
+# . Compute x,y for opposite corners for the Box
+#
+# Given an Angle,
+#
+#                      |    |       |     |
+#                      |    |       |     |
+#                      |    |       |     |
+#                ______|    |_______|     |__________
+#                       3       4        5
+#                      135     180     225
+#                         \     |     /
+#                          \    |    /
+#                           \   |   /
+#         ______             \  v  /              ______
+#              |                                  |
+#              | 2 90 ------>   *   <------ 270 6 |
+#         _____|                                  |_____
+#                            /  ^  \
+#                           /   |   \
+#                          /    |    \
+#                         /     |     \
+#                       45      0      315
+#                       1       0       7
+#               ________    _________    _______
+#                      |    |       |    |
+#                      |    |       |    |
+#                      |    |       |    |
+#
+ 
+implicit none
+ 
+ 
+integer*4       x,y,angle,height,width
+integer*4       UL_X, UL_Y, LR_X, LR_Y
+ 
+integer*4       k, I_switch_1
+ 
+k = (abs(angle) + 22.5) / 45.0
+k = mod(k, 8)
+ 
+switch (k)
+    {
+    case 0,4:   UL_X = X - (width/2)
+    case 1-3:   UL_X = X -  width
+    case 5-7:   UL_X = X
+    }
+switch (k)
+    {
+    case 0,1,7: UL_Y = Y
+    case 3-5:   UL_Y = Y -  height
+    case 2,6:   UL_Y = Y - (height/2)
+    }
+ 
+LR_X = UL_X + Width
+LR_Y = UL_Y + Height
+ 
+end
+ 
+
+####################################################################
+#
+# GET_POINTS
+#
+# purpose: get x and y coords from a relative position using a
+#          vectoring method
+#
+# author : R. Hundt
+#
+# date   : 7/91
+####################################################################
+subroutine get_points ( L_1,      # in, length in one plane
+                        L_2,     # in, length in perpendicular plane
+                        In_angle, # in, angle of line
+                        Center_x, # in, pixel relative position
+                        Center_y, # in, pixel relative position
+                        Sign_flag,# in, sign indicator
+                        X,        # out
+                        Y)        # out
+ 
+implicit none
+ 
+integer*4   L_1
+integer*4   L_2
+real*4      In_angle
+integer*2   Center_x
+integer*2   Center_y
+integer*4   Sign_flag
+integer*2   X
+integer*2   Y
+ 
+Real*4      angle_1
+Real*4      angle_offset
+Real*4      radius
+ 
+Radius = SQRT(float( L_2 * L_2 ) + float( L_1 * L_1))
+ 
+#$% get the angle from the arrow point to the third point
+#angle_offset = ACOS( L_1 / radius )
+ 
+angle_offset = ATAN ( float(L_2)/L_1)
+ 
+angle_1 = In_angle + (sign_flag * Angle_Offset)
+ 
+$ang2pi (angle_1)
+ 
+X = center_x + NINT(radius * SIN ( angle_1 ))
+Y = center_y - NINT(radius * COS ( angle_1 ))
+ 
+return
+end
+
+
+Subroutine label_declutter (name1, name2, ix, iy, id)
+#Draw label of tactical symbol in closest available space
+#draw line from left or right end of label to center of symbol
+ 
+implicit none
+
+DECW$Common
+#DECW$Common_GC
+
+integer         ID
+integer         font_h, font_w
+character       name1[ARB], name2[ARB]
+character       name[ARB]
+logical         inview
+integer         x, draw_full, ix, iy, length, lbl, 
+                ixtl, iytl, kk, index
+integer         ixcg, iycg
+integer		get_font_height, get_font_width
+
+integer lix,mix,liy,miy
+
+DW_Tactical_Font = $dw$Small_Tactical_Font 
+call set_font (DW_Tactical_Font)
+#Font_H = DW_Font_H[DW_Tactical_Font] + 2
+#Font_W = DW_Font_W[DW_Tactical_Font]
+Font_H = get_font_height(DW_Tactical_Font) + 2
+Font_W = get_font_width(DW_Tactical_Font)
+
+call cg_mark_symbol (ix, iy)
+
+kk = 0; call smovhn (name1,ARB,name,kk)
+
+if (name2[1] != EOS) 
+{
+    call smovv ('-',name,kk)
+}
+
+if (name2[1] == '!')                 # skip blinking char
+{
+    call smovhn (name2[2],ARB,name,kk)
+}
+else                                # default to first char
+{
+    call smovhn (name2,ARB,name,kk)
+}
+call smov (EOS, name, kk)
+
+# Convert pixel to character grid cell
+ixcg = ix / Font_W + 1 
+iycg = iy / Font_H + 1
+
+# Find closest available characters
+call cg_closest_cell(ixcg, iycg, kk-1)
+# Convert character cell grid to pixel
+ixtl = (ixcg - 1) * Font_W
+iytl = (iycg - 1) * Font_H + Font_H
+
+if (ID != 0)
+    call add_hook (id, ixtl, iytl)      # save hook-able position
+
+#call bzXDrawString (DW_Display, DW_Live_Pixmap, DW_GC, 
+#                    ixtl, iytl, dtext)
+call draw_string (ixtl, iytl, name)
+
+# Draw line from label to symbol
+if (ixtl < ix - (Font_W*kk/2))                  # Line from end of label
+    ixtl = ixtl + Font_W*(kk)
+
+#call bzXDrawLine (DW_Display, DW_Live_Pixmap, DW_GC,
+#                  ixtl, iytl, ix, iy)
+call draw_line (ixtl, iytl, ix, iy)
+
+return
+end
+
+
+subroutine cg_mark_symbol(ix, iy)
+# Allocate space that symbol occupies in character grid (CG)
+# There is no guarantee that label will not occupy symbols space since
+#  label is drawn after each symbol.
+
+implicit none
+
+#DECW$Common
+CG$Common
+
+integer ix, iy
+integer ixcg, iycg
+integer Font_W, Font_H
+integer i
+
+# Convert pixel to character grid cell
+ixcg = ix / grid_Font_W + 1 
+iycg = iy / grid_Font_H + 1
+
+for (i=-1; i<=1; i=i+1)
+{
+    call cg_mark_string (max(ixcg-1,minxcg), iycg+i, 3)
+}
+
+return
+end
+
+Subroutine cg_closest_cell(ixcg, iycg, nchar)
+# Find closest avaiable cell using expanding ring around the symbol
+# algorithm.
+
+CG$Common
+integer ixcg, iycg, nchar
+integer tx, ty, tx0, ty0
+integer sci
+integer ncircles
+data ncircles/5/
+integer cg_string_avail
+
+# How to determine if visible
+# Determine if starting or ending character
+# Maximum number of concentric search circles
+# How to avoid crossing lines - process symbols top down on display
+
+for (sci=2; sci<=ncircles; sci=sci+1)
+{
+    tx = max(ixcg+sci, minxcg)
+    for (ty = iycg; ty <= iycg + sci; ty = ty + 1)
+    {
+        if (ty > grid_cell_H) break
+        if (cg_string_avail[ixcg, tx, ty, nchar] == $yes) break 2
+    } 
+    ty = ty - 1
+    tx0 = tx
+    for (; tx >= tx0 - sci*2; tx = tx - 1)
+    {
+        if (tx < minxcg) break
+        if (cg_string_avail[ixcg, tx, ty, nchar] == $yes) break 2
+    } 
+    tx = tx + 1
+    ty0 = ty
+    for (; ty >= ty0 - sci*2; ty = ty - 1)
+    {
+        if (ty < minycg) break
+        if (cg_string_avail[ixcg, tx, ty, nchar] == $yes) break 2
+    } 
+    ty = ty + 1
+    tx0 = tx
+    for (; tx <= tx0 + sci*2; tx = tx + 1)
+    {
+        if (tx > grid_cell_W) break
+        if (cg_string_avail[ixcg, tx, ty, nchar] == $yes) break 2
+    } 
+    tx = tx - 1
+    ty0 = ty
+    for (; ty <= ty0 + sci; ty = ty + 1)
+    {
+        if (ty > grid_cell_H) break
+        if (cg_string_avail[ixcg, tx, ty, nchar] == $yes) break 2
+    } 
+}
+
+if (sci <= ncircles)            # Found available space for string
+{
+    if (tx < ixcg)              # Convert right end to left end of string
+    {
+        tx = tx - nchar
+    }
+    ixcg = tx
+    iycg = ty
+}
+
+return
+end
+
+integer function CG_string_avail (ixcg, nxcg, nycg, nc)
+# Check to see if there is free space in character grid for label
+
+CG$Common
+integer nxcg, nycg, nc
+integer avail
+integer ioffset
+integer i
+
+Avail = $yes
+if (nxcg < ixcg) ioffset = nc
+else             ioffset = 0
+
+# Check for crossing left boundary
+if ((nxcg-ioffset) < minxcg) return( $no )
+
+if ((nxcg-ioffset+nc) > grid_cell_W) return( $no )
+
+# Make sure each char is available
+for (i=0; i<nc; i=i+1)
+{
+    if (char_grid_cell[nxcg+i-ioffset,nycg] == $yes)
+    {
+        Avail = $no
+        break
+    }
+}
+
+# mark string as used
+if (avail == $yes)
+{
+    call cg_mark_string (nxcg-ioffset, nycg, nc)
+}
+
+return( avail )
+end
+
+
+subroutine CG_clear
+# Executed each time plot is updated.
+# Clears character grid array (CG)
+# Allocates info box area so labels will not use area
+# Get font size for tactical font
+# Calculate size of CG in character size cells.
+
+CG$Common
+DECW$common
+
+integer i, j
+integer get_font_height, get_font_width, get_screen_width, get_screen_height
+integer info_box_l, info_box_r, info_box_t, info_box_b
+
+grid_Font_H = get_font_height(DW_Tactical_Font) + 2
+grid_Font_W = get_font_width(DW_Tactical_Font)
+
+grid_cell_W = get_screen_width() / grid_Font_W + 1
+grid_cell_H = get_screen_height() / grid_Font_H + 1
+
+
+for (i=1; i<=maxxcg; i=i+1)
+{
+    for (j=1; j<=maxycg; j=j+1)
+    {
+        char_grid_cell[i,j] = $no
+    }
+}
+
+info_box_l = grid_cell_W - ($DW$Info_W / grid_Font_W) - 3
+info_box_r = grid_cell_W
+info_box_t = 1
+info_box_b = $DW$Info_H / grid_Font_H + 1
+
+
+# Mark info box as used.
+for (i=info_box_l; i<= info_box_r; i=i+1)
+{
+    for (j=info_box_t; j<=info_box_b; j=j+1)
+    {
+        char_grid_cell[i,j] = $yes
+    }
+}
+
+
+return
+end
+
+
+Subroutine cg_mark_string (nxcg, nycg, nc)
+# Mark string space in CG as allocated.
+
+CG$Common
+integer nxcg, nycg, nc
+integer i
+
+for (i=0; i<nc; i=i+1)
+{
+    if (nxcg+i > maxxcg) break
+    char_grid_cell[nxcg+i,nycg] = $yes
+}
+
+return
+end

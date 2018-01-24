@@ -1,0 +1,378 @@
+# Blackboard Allocation/Mapping Routines ....
+ 
+include "bbctl.inc"
+include "bbcode.inc"
+include "ascii.inc"
+ 
+#include "secdef.inc"
+#include "ssdef.inc"             # av 10/96 (E1722)
+ 
+define ($DEBUGSEG,#)            # generate allocation messages
+define ($DEBUGSEG2,#)           # generate LOD1 messages
+define ($DEBUGOPT,#)            # disable optimization (bbtrim)
+ 
+define(alpha_pages,1)           # For Vax - av 10/96 (E1722)
+ 
+define(BBimplicit,Implicit None)
+ 
+
+subroutine bbaloc (tbl,jname,Nseg,islots,ientry)      # allocate $$tbl
+    # WARNING: arguments may be CONSTANTS: DON'T CHANGE!
+#########################################################################
+#$%
+#$% Purpose:    BBALOC sets up a table ($$tbl) in the blackboard
+#$%
+#$% Called by:  BBINIT   WGLCOR   WGLFRC   WGLLCL   WGLOAD   WGLOWN
+#$%             WGLPND   WGLRMT
+#$%
+#$% Calls:      SMOVHN
+#$%
+#$% Author:     DANA WILLS
+#$%
+#$% Date:       SEPTEMBER 1980
+#$%
+########################################################################
+ 
+BBcommon
+BBcommon_Map
+integer prevtbl / 0 /
+integer tbl,lsttbl,Nseg,islots,ientry,iname
+VMSchar*(*) jname
+integer k, $$tbl, iflag
+#external nwiss$_bbtoosmall
+ 
+#$% move table name (jname) into iname array
+k=0
+iname = $BLANKI4
+call smovvn (jname,iname,k)
+ 
+if (Max$BB$Words < $$BB$BeginTables) Max$BB$Words = $$BB$BeginTables
+ 
+$$tbl = tbl
+ 
+if ($$tbl < 1) return
+ 
+#$% get data for the table
+tbl$Len  = ientry                # basic table entry size (negative if varbl)
+tbl$Size = islots * iabs(ientry) # number of words to allocate
+tbl$Name = iname                 # table mnemonic
+tbl$Used = 0
+tbl$aloc = 0                     # Subsequent table index
+ 
+if (prevtbl != 0)                 # Have previous table point to this one
+    {
+    $$tbl = prevtbl
+    tbl$aloc = tbl               # Insert Subsequent table index, in previous table
+    $$tbl = tbl
+    }
+ 
+prevtbl = tbl
+ 
+if (Max$BB$Words + tbl$size > $$MaxBBSIZE           |
+    Max$BB$Words + tbl$size > IBB_Pages_Mapped * 128 )
+    {
+    #$% display error message
+    call echor
+    call echov ("Error on Allocating table #")
+    call echoi ($$tbl)
+    call echov (" (")
+    call echohn(tbl$name,5)
+    call echov (").  ")
+ 
+    call echor
+    if ($$MaxBBSIZE == IBB_Pages_Mapped * 128 )
+        {
+        call echov ("Exceeded maximum of ")
+        call echoi ($$MaxBBSIZE)
+        call echov (" words for blackboard.")
+        }
+    else
+        {
+        call echov ("Exceeded current maximum of ")
+        call echoi ( IBB_Pages_Mapped )
+        call echov (" block blackboard.")
+        }
+ 
+    call echor
+ 
+    call echoV ("The ")
+    call echohn(tbl$name,5)
+    call echoV (" table requires a total of ")
+    call echoi ( tbl$size )
+    call echoV (" words.")
+    call echor
+ 
+    k = (Max$BB$Words + tbl$size + 127) / 128   # Pages needed
+    call echoV ("An additional ")                     # jb  V   12/2/93
+    call echoi ( k - IBB_Pages_Mapped )
+    call echoV (" blocks are needed for this one table.")    # jb  V   12/3/9
+    call echor
+ 
+    call echoi ( Max$BB$Words )
+    call echoV (" words out of ")
+    call echoi ( IBB_Pages_Mapped * 128 )
+    call echoV (" words are already allocated.")
+    call echor
+ 
+    if (IBB_Pages_Mapped < $$BBPages)
+        {
+        call echor
+        call echoV ("Note:  Your current BlackBoard is only ")
+        call echoi ( IBB_Pages_Mapped )
+        call echoV (" pages of the ")
+        call echoi ( $$BBPages )
+        call echoV (" allowed.")
+        call echor
+        call echoV ("       You will have to delete the existing ")
+        call echoV ("BlackBoard file, and restart")
+        call echor
+        call echoV ("       Game Initialization with a larger (or default) ")
+        call echoV ("size specification.")
+        call echor
+        call echor
+        }
+ 
+    call echoV ("Initialization is aborted....")                # DEW 12/5/94
+    call echor
+ 
+    stop 'Blackboard too small'
+    }
+ 
+tbl$Base = Max$BB$Words
+ 
+#$% make Max$BB$Words to include all table slots
+Max$BB$Words = Max$BB$Words + tbl$size
+Data$Base$Highwater = max(Max$BB$Words, Data$Base$Highwater)
+ 
+#$% set lsttbl to the last table entered
+lsttbl = $$tbl
+ 
+return
+ 
+#======================================================================
+#$% trim to actual table size
+ENTRY bbtrim (tbl)                    # trim size to that used
+    # WARNING: argument probably a CONSTANT: DON'T CHANGE!
+ 
+$$tbl = tbl
+ 
+$DEBUGOPT return
+ 
+#$% if trimming is to be skipped, return
+if (skip$bbtrim == $yes) return
+ 
+#$% if the table was called but none of the table was used
+if (tbl$used == 0)
+   {
+    #$% set flag
+    iflag = 1
+    #$% insert "Em T" into blackboard table
+    $$InsLit ("Em T",IBB[tbl$base],1,4)
+   }
+#$% else if all or part of table was used
+else
+    #$% set flag
+    iflag = 0
+ 
+#$% if table to be trimmed is the last table
+if (lsttbl == $$tbl)
+   {
+    #$% trim the table
+    Max$BB$Words = Max$BB$Words - tbl$size + tbl$used + iflag
+    lsttbl = 0
+   }
+#$% reset table size
+tbl$size = tbl$used + iflag
+ 
+return
+end
+ 
+ 
+ 
+subroutine bbzapt ($$tbl)               # ZAP a table
+    # WARNING: argument probably a CONSTANT: DON'T CHANGE!
+#########################################################################
+#$%
+#$% Purpose:    BBZAPT enters zeros into a blackboard table
+#$%
+#$% Called by:  BBINIT   WGLCOR   WGLFRC    WGLLCL   WGLOAD   WGLOWN
+#$%             WGLPND   WGLRMT
+#$%
+#$% Calls:      ECHOR    ECHOH    ECHOHN    ECHOI    ECHO
+#$%
+#$% Author:     DANA WILLS
+#$%
+#$% Date:       SEPTEMBER 1980
+#$%
+########################################################################
+ 
+BBcommon
+integer $$tbl, isize, ipnt
+ 
+#$% if table is invalid
+if (tbl$base > Max$BB$Words | tbl$name == 0)
+   {
+    #$% display error message
+    call echor
+    call echov ("Error on Zapping table #")
+    call echoi ($$tbl)
+    call echov (" (")
+    call echohn(tbl$name,5)
+    call echov (").  ")
+    if (tbl$name == 0)           call echov ("Not Defined.  ")
+    if (tbl$base > Max$BB$Words) call echov ("Not Mapped.")
+    stop
+   }
+ 
+#$% Zap the table (enter zeros)
+for (ipnt = 0; ipnt < tbl$size; ipnt = ipnt + 1) ibb[tbl$base+ipnt] = 0
+ 
+ 
+return
+end
+ 
+ 
+subroutine BBSMap (wname,kpages)                # Map/Unmap blackboard#smn011
+ 
+#########################################################################
+#$%
+#$% Purpose:    BBSMAP
+#$%
+#$% Called by:  BBINIT   WGLCOR   WGLFRC    WGLLCL   WGLOAD   WGLOWN
+#$%             WGLPND   WGLRMT
+#$%
+#$% Calls:      ECHOR    ECHOH    ECHOHN    ECHOI    ECHO
+#$%
+#$% Author:     DANA WILLS
+#$%
+#$% Date:       SEPTEMBER 1980
+#$%
+########################################################################
+ 
+BBcommon
+BBcommon_Map
+ 
+VMSchar*(*) wname
+character   fname[ARB], sname[ARB], section_name[60]
+VMSchar     msg*ARB
+integer     kpages, npages, fopenm, fpmap, pages_mapped, save_err
+#external        nwiss$_mapinsuff
+#external        nwiss$_mapinsuf
+integer     ilen, i, lenf, length, seg$jfn, ierr, kk
+ 
+#$% get number of pages
+npages = kpages
+ 
+#$% move name and null into file name (fname) array
+ilen = 0
+call smovvn (wname,fname,ilen)
+call smov ($null,fname,ilen)
+ 
+ilen = 0
+call smov ($null,section_name,ilen)     # Section name not needed for mmap
+ 
+#------------------------------------------------------------
+# Process UNMAP function
+ 
+if (npages < 0)                         # if called to unmap....
+   {
+    $DEBUGSEG2 call echor
+    $DEBUGSEG2 call echov ("UNMAP:  Last page used=")
+    $DEBUGSEG2 call echoi (Seg$Next$Page)
+    $DEBUGSEG2 call echor
+ 
+    return
+   }
+ 
+#------------------------------------------------------------
+# Process MAP
+ 
+#$% get number of blackboard pages
+npages = min ($$BBPages, kpages)
+ 
+if (npages < 4000)
+    {
+    # Notice to programmers:
+    #   We cannot use ECHO routines here (in non-fatal situations), because
+    #   the I/O may not have been redirected as of yet..... Must use TYPE
+    #   statements only!!!
+    #
+ 
+    print *, "Sorry, cannot request BB with fewer than 4000 pages, not",npages
+    npages = $$BBpages
+    }
+ 
+#$% open blackboard file
+ierr = FOPENM (SEG$JFN,fname,npages,ierr)
+ 
+#$% if there is an error in opening, display error message and stop
+if (ierr == YES)
+   {
+    stop 'Error on Opening Blackboard file'
+   }
+ 
+#$%  map the blackboard
+ 
+pages_mapped = FPMAP (SEG$JFN,section_name,npages,ibb,0,ierr)
+ 
+IBB_Pages_Mapped = pages_mapped
+ 
+if (npages != pages_mapped)                     # did we get what we asked for?
+    {                                           # NO...
+    ierr = 1
+    }
+ 
+#$% if there is an error, display error message and stop
+if (ierr == 1)
+   {
+    stop 'Error on Mapping Blackboard'
+   }
+ 
+return
+end
+
+ 
+integer function fopenm (jfn,filename,pages,istat)
+IMPLICIT NONE           # jb  4/21/98
+character       filename[FILENAMESIZE]
+integer         jfn,pages,
+                istat,length   # jb  4/21/98
+integer         mmap_file_open
+logical*4       file_present
+integer*4       lfc, kk
+integer*4       irec
+EXTERNAL length
+ 
+istat = mmap_file_open (jfn, filename, pages, istat)  # C routine
+ 
+return(istat)
+end
+ 
+
+ 
+integer function fpmap (jfn,section_name,pages,array,offset,istat)
+IMPLICIT NONE           # jb  4/21/98
+ 
+integer jfn, pages, array[ARB], offset, istat
+character section_name[60]
+ 
+integer mmap_addr, c_mmap
+ 
+mmap_addr = c_mmap(jfn, array, pages*512)
+ 
+return pages
+end
+ 
+
+ 
+integer function FPMAP_DTED(jfn,name,pages,array,offset,ok_to_write,istat)
+implicit none
+integer jfn, pages, array[ARB], offset, ok_to_write, istat
+character name[60]
+integer mmap_addr, c_mmap_dted
+ 
+# todo: add read only flag
+mmap_addr = c_mmap_dted(jfn, array, pages*512)
+ 
+return pages
+end

@@ -1,0 +1,864 @@
+ 
+##############################################################################
+#                                                                            #
+#  File:     ALSP_TIME.RAT                                                   #
+#                                                                            #
+#  Created:  Feb. 28, 1994                                                   #
+#                                                                            #
+#  Author:   Carol L. Kropp                                                  #
+#                                                                            #
+#  Purpose:  Routines used by RESA for ALSP time management.                 #
+#                                                                            #
+##############################################################################
+ 
+include "alsp.inc"
+include "alsp_resa.inc"
+ 
+include "bbrmt.inc"
+include "bbtrk.inc"
+include "bbacc.inc"
+ 
+define (BBImplicit, Implicit None) # SMM 3/00
+ 
+define ($DEBUGV,)             # copied form wgmain.rat
+define ($X_model,             # copied from wgmain.rat
+    {
+    $$InsVaxC(@3,test$name,1,8)
+    $DEBUGV if (@2 == $no)
+    $DEBUGV    {
+                @1                              # call the model
+                $DEBUGV call dbreak ($no)
+    $DEBUGV    }
+    $DEBUGV else if (@2 > $yes)
+    $DEBUGV    {
+    $DEBUGV     call wgpaus (kstat,"Skipped model....")
+    $DEBUGV    }
+ 
+    if (trace$random != $NO & trace$random != $YES)
+        {
+        call echov  ("After ")
+        call echoh  (test$name,8)
+        call echov  (" M=")
+        call echoi  (game$minute)
+        call echov  (" seed[")
+        call echoi  (random$count)
+        call echov  ("]=")
+        call echox  (random$seed,8)
+        call echor
+        }
+    }
+    )
+ 
+subroutine ALSP_Request_Advance
+##################################################################
+#$%
+#$% Purpose:   ALSP_Request_Advance will send a message to the
+#$%            ACM asking to go ahead in time and then process
+#$%            all messages sent by the ACM until a GRANT_ADVANCE
+#$%            is received.  While waiting, the RMT table will be
+#$%            clear of old entries and entered orders will be
+#$%            processed once.
+#$%
+#$% Called By: WARCYC
+#$%
+#$% Calls:     ALSP_Advance_Time <transifsend.c>
+#$%            ALSP_Chk_Adv      <alsp_receive_create.rat>
+#$%            WgOrdP            <wgop.rat>
+#$%            GTime             <ratfor library>
+#$%            Zero_RMT_Entry    <wgmdrem.rat>
+#$%
+#$% Tables:    RMT      TRK
+#$%
+#$% Date:      July 1993
+#$%
+#$% Author:    Carol Kropp
+#$%
+#$% Modified:  Carol Kropp - 7/95 (E1419)
+#$%            Added processing of TMS data when
+#$%            RESA is waiting for an advance and
+#$%            there is data waiting to be sent.
+#$%
+########################################################
+BBcommon
+ 
+real    ALSP_time
+integer ALSP_time_adv_status, alsp_msg_len, alsp_delay_count
+character  alsp_msg [ARB], current_time[16]
+integer RMT$Pointer, KSTAT, I  # SMM 3/00
+ 
+  ALSP_time = game$time * $hours$per$minute   # JHM CT00 FIX (E2205)
+ 
+  call ALSP_Advance_Time (ALSP_time)
+  ALSP_time_adv_status = -1
+ 
+  call alsp_chk_adv (ALSP_time_adv_status)  # read & process incoming msgs
+  if (ALSP_time_adv_status != 0)            # if adv wasn't received on first try
+    {
+     call alsp_chk_adv (ALSP_time_adv_status)   # try again for a GRANT_ADVANCE
+     if (ALSP_time_adv_status != 0)
+       {
+        ALSP_delay_count = 2      # have waited twice already
+        while (ALSP_time_adv_status != 0)
+          {
+           $DEBUGV call dbreak ($no)
+           if (Halt$Request != $no)
+             {
+             halt$forks = $yes
+             call wghalt
+             }
+           else
+             halt$forks = $no
+ 
+           if (ALSP$Active == $no)     # if ALSP is not active at this point,
+             ALSP_time_adv_status = 0  # then a RESIGN command was entered
+           else
+             {
+              call alsp_chk_adv (ALSP_time_adv_status)
+ 
+              if (ALSP_time_adv_status != 0)
+                {
+                 alsp_delay_count = alsp_delay_count + 1
+                 call delay (250)    # ct03 JHM E2331 (from 1000)
+                 if (alsp_delay_count == 480)  # if pending for two minutes
+                   {                           # since ALSP usually runs at 1:1
+                    alsp_msg_len = 0
+                    call gtime (current_time)          # signal ALSP time pending
+                    call echor                         # on the swar terminal
+                    call echov ("ALSP TIME PENDING   ")
+                    call echoh (current_time, 16)
+ 
+                    call smovv  ("ALSP TIME PENDING", alsp_msg, alsp_msg_len)
+ 
+                    for (i = 1; i <= $LastOrange$View; i = i + 1)
+                      call send_ (i, 0, alsp_msg_len, alsp_msg)
+                   }
+                }
+             }  # end of is ALSP is still active
+          }     # end of loop until GRANT_ADVANCE is received
+ 
+        if (alsp_delay_count >= 480)   # after pending for two minutes, msg was sent
+          {
+           call gtime (current_time)                 # send proceeding msg on swar
+           call echov ("     TIME PROCEEDING   ")
+           call echoh (current_time, 16)
+           call echor
+ 
+           alsp_msg_len = 0
+           call smovv  ("ALSP TIME PROCEEDING", alsp_msg, alsp_msg_len)
+ 
+           for (i = 1; i <= $LastOrange$View; i = i + 1)
+             call send_ (i, 0, alsp_msg_len, alsp_msg)
+          }     # end of time pending longer than twice the cycle length
+       }        # end of GRANT_ADVANCE not received on second try
+    }           # end of GRANT_ADVANCE was not received on first try
+ 
+ 
+return
+end
+
+ 
+subroutine ALSP_Time_Advance_Block (time)  # in:  Floating pointer value to
+                                           #      advance time to.
+#########################################################################
+#$%
+#$% Purpose:   ALSP_Time_Advance_Block will request a time advance to
+#$%            time, and then read from the ACM (doing blocking reads)
+#$%            until a GRANT_ADVANCE is received.
+#$%
+#$% Called By: ALSP_Init    <alsp_init.rat>
+#$%
+#$% Calls:     ALSP_Advance_Time        <transifsend.c>
+#$%            Echo...                  <lbecho.rat>
+#$%            ALSP_Invoke_Parser       <alsp_parse.c>
+#$%
+#$% Tables:    None
+#$%
+#$% Date:      Feb. 28, 1994
+#$%
+#$% Author:    Carol L. Kropp
+#$%
+#$% Modified:  Carol Kropp - 12/96 (E1693)
+#$%            ALSP message size increased from 2700 to 20000.
+#$%
+#########################################################################
+implicit none
+real     time
+ 
+integer  msg_len, err
+%      character*20000   msg
+ 
+  call ALSP_Advance_Time (time)
+  repeat
+    {
+     msg_len = 0    # make sure that the length is initialized
+     call alsp_read_mbx (msg, msg_len, .true., err)
+ 
+     if (err != 0)
+       {
+        call echov ("WGALSP: Error trying to read")
+        call echov (" mailbox in alsp_chk_adv")
+        call echor
+        call echov ("ERROR = ")
+        call echoi (err, 5)
+        call echor
+       }
+     else if (msg_len > 0)
+       call alsp_invoke_parser (msg, msg_len)
+    }
+  until (msg(1:9) == 'GRANT_ADV')
+ 
+return
+end
+
+ 
+subroutine ALSP_Receive_Signal (signal)   # in:  Enumeration code of
+                                          #      signal received
+#########################################################################
+#$%
+#$% Purpose:   ALSP_Receive_Signal will handle the receipt of SIGNAL(...)
+#$%            messages.  The first implementation of this message only
+#$%            has one value (SIGNAL(REGISTER_OBJECTS)) and is intended
+#$%            to create a phased JOIN sequence to reduce refresh
+#$%            requirements.
+#$%
+#$% Called By: Handle_at_Signal         <at_mess_handler.c>
+#$%
+#$% Calls:     ALSP_Register_Enumerations
+#$%            ALSP_Enumerations_Complete  <transifsend.c>
+#$%
+#$% Tables:    None
+#$%
+#$% Date:      Sept. 25, 1995
+#$%
+#$% Author:    Carol L. Kropp
+#$%
+#$% Modified:  Susan Miller 10/96 (E1694) ALSP JTC 97
+#$%            Implemented new signal message (SIGNAL(REGISTER_ENUMERATIONS))
+#$%            which starts the automated enumerations process by calling
+#$%            the routine ALSP_Register_Enumerations.  Once all the enumer-
+#$%            ations have been sent a corresponding message,
+#$%            (SIGNAL(ENUMERATIONS_COMPLETE)) is sent to the ACM.
+#$%
+#########################################################################
+implicit none
+integer  signal
+integer  i_switch_1  # SMM 3/00
+ 
+  switch (signal)
+    {
+     case $alsp_signal_register_objects:
+       {
+        call echor
+        call echov ("REGISTER OBJECTS SIGNAL RECEIVED FROM ACM")
+        call echor
+        call echov ("SIGNAL SHOULD HAVE BEEN ")
+        call echov ("HANDLED DURING JOIN SEQUENCE")
+       }
+     case $alsp_signal_register_enumerations:  # SMM 10/96 (E1694)
+       {
+        call echor
+        call echov ("REGISTER ENUMERATIONS SIGNAL ")
+        call echov ("RECEIVED FROM THE ACM")
+        call echor
+        call echov ("SENDING REGISTER_ENUMERATION MESSAGES BACK TO ACM")
+ 
+        call ALSP_Register_Enumerations
+ 
+        # send message SIGNAL(ENUMERATIONS_COMPLETE) to ACM
+        call ALSP_Enumerations_Complete
+       }
+     default:
+       {
+        call echor
+        call echov ("UNKNOWN SIGNAL RECEIVED FROM THE ACM")
+        call echor
+        call echov ("CHECK ALSP_MBX_MSG.LOG FOR THE SIGNAL PARAMETER")
+       }
+    }
+  call echo ($Bell)
+  call echo ($Bell)
+  call echor
+ 
+return
+end
+
+define (Name_enum_common,            # SMM 10/96 (E1694)
+        integer RESA_name_len[MAX_PARAM], default_RESA_len
+        integer default_flag
+        vaxcharacter*$$MaxName   RESA_name[MAX_PARAM], default_RESA
+        character RESA_name_char[$$MaxName,MAX_PARAM], default_RESA_char
+ 
+        Equivalence (RESA_name_char, RESA_name)
+        Equivalence (default_RESA_char, default_RESA)
+        common /enum_common/ RESA_name_len, default_RESA_len, default_flag,
+                             RESA_name_char, default_RESA_char)
+ 
+define (ALSP_enum_common,            # SMM 10/96 (E1694)
+        integer enum_index, ALSP_class, register_type, attribute_type
+        common /enum_ALSP_common/ enum_index, ALSP_class,
+                                  register_type, attribute_type)
+ 
+
+Subroutine ALSP_Register_Enumerations
+#########################################################################
+#$%
+#$% Purpose:   ALSP_Register_Enumerations loops through the list of
+#$%            all the enumerations and calls ALSP_Send_Enum to
+#$%            generate a REGISTER_ENUMERATION message.
+#$%
+#$% Called By: ALSP_Receive_Signal
+#$%
+#$% Calls:     ALSP_Send_Enum   Init_default_variables
+#$%            ALSP_Aircraft_enum_info      ALSP_Missile_enum_info
+#$%            ALSP_Sea_Unit_enum_info      ALSP_Emitter_enum_info
+#$%            ALSP_Weapon_enum_info
+#$%
+#$% Tables:    None
+#$%
+#$% Date:      Oct. 1996  (E1694)
+#$%
+#$% Author:    Susan Miller
+#$%
+#$% Modified: Dec 2002 (E2325)
+#$% by:       John McCormick
+#$% intent:   Trying to only register objects that are in game.
+#$%           Extensive modification of this module.
+#########################################################################
+implicit none
+Name_enum_common
+ALSP_enum_common
+ 
+ALSP$Aircraft_Common
+ALSP$Missile_Common
+ALSP$Sea_Common
+ALSP$Emitter_Common
+ALSP$Weapon_Common
+ 
+integer j, k, list_loop, enum_type, list_type, loop_count
+integer emitter_class, RESA_num_of_names
+integer temp_len, two_messages,  temp_ALSP_class
+integer i_switch_1  # SMM 3/00
+literal resa_name_lit  #JHM 12/02
+integer weapon_found   #
+BBdeclare  (tbl$pointer)   #JHM 12/02
+ 
+ loop_count = 0
+ RESA_num_of_names = 0
+ list_type = 0
+ enum_type = 5
+ register_type = 0
+ attribute_type = 0
+ emitter_class = 0
+ default_RESA = ""
+ default_flag = $no
+ temp_len = 0
+ two_messages = $no
+ 
+ for (k=1;k<=MAX_PARAM;k=k+1)
+   {
+    RESA_name_len[k] = 0
+    RESA_name[k]     = ""
+    RESA_name_char[5,k] = $SPACE
+   }
+ 
+ while (enum_type != 0)
+   {
+    switch (enum_type)
+      {
+       case 5:   list_loop = number_of_aircraft_maps        # E2151 DEW 9/99
+       case 4:   list_loop = number_of_missile_maps         # E2151 DEW 9/99
+       case 3:   list_loop = number_of_sea_maps             # E2151 DEW 9/99
+       case 2:   list_loop = Number_of_Emitter_maps         # E2151 DEW 9/99
+       case 1:   list_loop = number_of_weapon_maps          # E2151 DEW 9/99
+       default:  list_loop = 0
+      } # end switch
+ 
+    for (loop_count = 1;
+         loop_count <= list_loop;
+         loop_count = loop_count + 1)
+       {
+        # always clear out the first name
+        RESA_name_len[1] = 0
+        RESA_name[1] = ""   # JHM 12/02
+ 
+        switch (enum_type)
+          {
+           case 5:  call ALSP_Aircraft_enum_info (loop_count,j)
+           case 4:  call ALSP_Missile_enum_info (loop_count,j)
+           case 3:  call ALSP_Sea_Unit_enum_info (loop_count, j)
+           case 2:  call ALSP_Emitter_enum_info (loop_count, j)
+           case 1:  call ALSP_Weapon_enum_info (loop_count, j, two_messages)
+          } # end switch
+ 
+        RESA_num_of_names = 1  #JHM 12/02 from j
+        # if (j > 1) loop_count = (loop_count + j - 1)   JHM 12/02
+        default_flag = 0    #JHM 12/02 (E2325)
+        call Move_str_lit(RESA_name,resa_name_lit)
+        if((ALSP_class >= $aircraft_begin | ALSP_class <= $aircraft_end)
+                   & (attribute_type == $unit_type))
+         {
+           call ALSP_Send_Enum(register_type,attribute_type,enum_index,
+                            RESA_num_of_names,%%REF(RESA_name),RESA_name_len,
+                            ALSP_class,
+                            default_flag,%%REF(default_RESA),default_RESA_len)
+         }
+        else if((ALSP_class == $air_cruise_missile |
+                 ALSP_class == $air_ballistic_missile)
+                   & (attribute_type == $unit_type))
+         {
+           call ALSP_Send_Enum(register_type,attribute_type,enum_index,
+                            RESA_num_of_names,%%REF(RESA_name),RESA_name_len,
+                            ALSP_class,
+                            default_flag,%%REF(default_RESA),default_RESA_len)
+         }
+         else if((ALSP_class == $sea_surface_ship |
+                  ALSP_class == $sea_surface_boat |
+                  ALSP_class == $sea_subsurface)
+                   & (attribute_type == $unit_type))
+         {
+           call ALSP_Send_Enum(register_type,attribute_type,enum_index,
+                            RESA_num_of_names,%%REF(RESA_name),RESA_name_len,
+                            ALSP_class,
+                            default_flag,%%REF(default_RESA),default_RESA_len)
+         }
+         else if (ALSP_class == $alsp_class_ground_maneuver_radar)
+         {
+           call ALSP_Send_Enum(register_type,attribute_type,enum_index,
+                            RESA_num_of_names,%%REF(RESA_name),RESA_name_len,
+                            ALSP_class,
+                            default_flag,%%REF(default_RESA),default_RESA_len)
+         }
+         else if(attribute_type == $alsp_attr_weapon)
+         {
+           call ALSP_Send_Enum(register_type,attribute_type,enum_index,
+                            RESA_num_of_names,%%REF(RESA_name),RESA_name_len,
+                            ALSP_class,
+                            default_flag,%%REF(default_RESA),default_RESA_len)
+         }
+        else if ((attribute_type == $radar ) &
+             (ALSP_class == $air_fixedwing | ALSP_class == $sea_surface_ship))
+         {
+           {
+            call ALSP_Send_Enum(register_type,attribute_type,enum_index,
+                            RESA_num_of_names,%%REF(RESA_name),RESA_name_len,
+                            ALSP_class,
+                            default_flag,%%REF(default_RESA),default_RESA_len)
+            if (ALSP_class == $air_fixedwing) temp_ALSP_class = $air_helicopter
+            if (ALSP_class == $sea_surface_ship) temp_ALSP_class = $sea_surface_boat
+ 
+            # send same data for helicopters, send same data for boats
+            call ALSP_Send_Enum(register_type,attribute_type,enum_index,
+                                RESA_num_of_names,%%REF(RESA_name),RESA_name_len,
+                                temp_ALSP_class,
+                                default_flag,%%REF(default_RESA),default_RESA_len)
+            # send same data for subs
+            if (ALSP_class == $sea_surface_ship)
+               {
+                 temp_ALSP_class = $sea_subsurface
+                 call ALSP_Send_Enum(register_type,attribute_type,enum_index,
+                                RESA_num_of_names,%%REF(RESA_name),RESA_name_len,
+                                temp_ALSP_class,
+                                default_flag,%%REF(default_RESA),default_RESA_len)
+                }
+            } #end of found radar block
+          }  #end of radar attribute block
+ 
+        else if ((attribute_type == $jammer ) &
+             (ALSP_class == $air_fixedwing | ALSP_class == $sea_surface_ship))
+         {
+           {
+            call ALSP_Send_Enum(register_type,attribute_type,enum_index,
+                            RESA_num_of_names,%%REF(RESA_name),RESA_name_len,
+                            ALSP_class,
+                            default_flag,%%REF(default_RESA),default_RESA_len)
+            if (ALSP_class == $air_fixedwing) temp_ALSP_class = $air_helicopter
+            if (ALSP_class == $sea_surface_ship) temp_ALSP_class = $sea_surface_boat
+ 
+            # send same data for helicopters, send same data for boats
+            call ALSP_Send_Enum(register_type,attribute_type,enum_index,
+                                RESA_num_of_names,%%REF(RESA_name),RESA_name_len,
+                                temp_ALSP_class,
+                                default_flag,%%REF(default_RESA),default_RESA_len)
+            # send same data for subs
+            if (ALSP_class == $sea_surface_ship)
+               {
+                 temp_ALSP_class = $sea_subsurface
+                 call ALSP_Send_Enum(register_type,attribute_type,enum_index,
+                                RESA_num_of_names,%%REF(RESA_name),RESA_name_len,
+                                temp_ALSP_class,
+                                default_flag,%%REF(default_RESA),default_RESA_len)
+                }
+             } # end of found jammer block
+            }  #end of if jammer attribute block
+ 
+        else
+         call ALSP_Send_Enum(register_type,attribute_type,enum_index,
+                            RESA_num_of_names,%%REF(RESA_name),RESA_name_len,
+                            ALSP_class,
+                            default_flag,%%REF(default_RESA),default_RESA_len)
+ 
+ 
+         default_flag = $no # reset flag
+       } # end for
+    if ((enum_type >= 1) & (enum_type <= 5))
+       {
+        call echor
+        call echov (" COMPLETED SENDING ")
+        call echoi (list_loop)
+        switch (enum_type)
+          {
+           case 5:  call echov (" AIRCRAFT UNIT ")
+           case 4:  call echov (" MISSILE UNIT ")
+           case 3:  call echov (" SEA UNIT ")
+           case 2:  call echov (" EMITTER TYPE ")
+           case 1:  call echov (" WEAPON TYPE ")
+           default:
+          }
+        call echov ("ENUMERATIONS.  ")
+        call echor
+       }
+    enum_type = enum_type - 1
+   } # end while
+ 
+return
+end
+
+ 
+Subroutine Init_default_variables
+#########################################################################
+#$%
+#$% Purpose:   Init_default_variables clears the specified arrays before they
+#$%            are used.
+#$%
+#$% Called By: ALSP_Register_Enumerations
+#$%
+#$% Calls:     None
+#$%
+#$% Tables:    None
+#$%
+#$% Date:      Oct. 1996  (E1694)
+#$%
+#$% Author:    Susan Miller
+#$%
+#########################################################################
+implicit none
+Name_enum_common
+ 
+integer k
+ 
+ for (k=2;k<=MAX_PARAM;k=k+1)
+    {
+     RESA_name_len[k] = 0
+     RESA_name[k]     = ""   #JHM FROM 1 SPACE
+     RESA_name_char[$$MaxName,k] = $SPACE
+    }
+ 
+ default_flag = $yes
+ default_RESA_char = $SPACE
+ default_RESA_len = 0
+ 
+return
+end # Init_default_variables
+
+ 
+Subroutine ALSP_Aircraft_enum_info (loop_count, name_count)
+#########################################################################
+#$%
+#$% Purpose:   ALSP_Aircraft_enum_info gets the aircraft enumeration
+#$%            information.
+#$%
+#$% Called By: ALSP_Register_Enumerations
+#$%
+#$% Calls:     Init_default_variables       smov...
+#$%
+#$% Tables:    None
+#$%
+#$% Date:      Oct. 1996  (E1694)
+#$%
+#$% Author:    Susan Miller
+#$%
+#########################################################################
+implicit none
+Name_enum_common
+ALSP_enum_common
+ 
+ALSP$Aircraft_Common                # E2151 DEW 9/9
+ 
+integer loop_count
+integer name_count
+ 
+ enum_index = aircraft_unit_type[1,loop_count]
+ call smovhn (aircraft_unit_type[2,loop_count], $$MaxLit,
+              RESA_name_char[1,1], RESA_name_len[1])
+ ALSP_class = aircraft_unit_type[3,loop_count]
+ register_type = $class         # 2
+ attribute_type = $unit_type    # 28
+ 
+ # if there are more than one RESA name per Enumeration index,
+ # find all of them
+ name_count = 1
+ if(aircraft_unit_type[1,loop_count] == aircraft_unit_type[1,loop_count+name_count])
+    {
+     call Init_default_variables
+ 
+     call smovhn (aircraft_unit_type[2,loop_count], $$MaxLit,
+                  default_RESA_char, default_RESA_len)
+ 
+     while(aircraft_unit_type[1,loop_count] == aircraft_unit_type[1,loop_count+name_count])
+        {
+         call smovhn (aircraft_unit_type[2,loop_count+name_count], $$MaxLit,
+                      RESA_name_char[1,name_count+1], RESA_name_len[name_count+1])
+         name_count = name_count + 1
+        }
+    } # end if more than one RESA name per ALSP enumeration
+ 
+return
+end # ALSP_Aircraft_enum_info
+
+ 
+Subroutine ALSP_Missile_enum_info (loop_count, name_count)
+#########################################################################
+#$%
+#$% Purpose:   ALSP_Missile_enum_info gets the missile enumeration
+#$%            information.
+#$%
+#$% Called By: ALSP_Register_Enumerations
+#$%
+#$% Calls:     Init_default_variables       smov...
+#$%
+#$% Tables:    None
+#$%
+#$% Date:      Oct. 1996  (E1694)
+#$%
+#$% Author:    Susan Miller
+#$%
+#########################################################################
+implicit none
+Name_enum_common
+ALSP_enum_common
+ 
+ALSP$Missile_Common                 # E2151 DEW 9/99
+ 
+integer loop_count
+integer name_count
+ 
+ enum_index = missile_unit_mappings[1,loop_count]
+ call smovhn (missile_unit_mappings[2,loop_count], $$MaxLit,
+              RESA_name_char[1,1], RESA_name_len[1])
+ ALSP_class = missile_unit_mappings[3,loop_count]
+ register_type = $class         # 2
+ attribute_type = $unit_type    # 28
+ 
+ # if there are more than one RESA name per Enumeration index,
+ # find all of them
+ name_count = 1
+ if(missile_unit_mappings[1,loop_count]==missile_unit_mappings[1,loop_count+name_count])
+    {
+     call Init_default_variables
+ 
+     call smovhn (missile_unit_mappings[2,loop_count], $$MaxLit,
+                  default_RESA_char, default_RESA_len)
+ 
+     while(missile_unit_mappings[1,loop_count]==missile_unit_mappings[1,loop_count+name_count])
+        {
+         call smovhn (missile_unit_mappings[2,loop_count+name_count], $$MaxLit,
+                      RESA_name_char[1,name_count+1], RESA_name_len[name_count+1])
+ 
+         name_count = name_count + 1
+        }
+    } # end if more than one RESA name per ALSP enumeration
+ 
+return
+end # ALSP_Missile_enum_info
+
+ 
+Subroutine ALSP_Sea_Unit_enum_info (loop_count, name_count)
+#########################################################################
+#$%
+#$% Purpose:   ALSP_Sea_Unit_enum_info gets the sea unit enumeration
+#$%            information.
+#$%
+#$% Called By: ALSP_Register_Enumerations
+#$%
+#$% Calls:     Init_default_variables       smov...
+#$%
+#$% Tables:    None
+#$%
+#$% Date:      Oct. 1996  (E1694)
+#$%
+#$% Author:    Susan Miller
+#$%
+#########################################################################
+implicit none
+Name_enum_common
+ALSP_enum_common
+ 
+ALSP$Sea_Common                     # E2151 DEW 9/99
+ 
+integer loop_count
+integer name_count
+ 
+ enum_index = sea_unit_mappings[1,loop_count]
+ call smovhn (sea_unit_mappings[2,loop_count], $$MaxLit,
+              RESA_name_char[1,1], RESA_name_len[1])
+ ALSP_class = sea_unit_mappings[3,loop_count]
+ register_type = $class         # 2
+ attribute_type = $unit_type    # 28
+ 
+ # if there are more than one RESA name per Enumeration index,
+ # find all of them
+ name_count = 1
+ if(sea_unit_mappings[1,loop_count]==sea_unit_mappings[1,loop_count+name_count])
+   {
+    call Init_default_variables
+ 
+    call smovhn (sea_unit_mappings[2,loop_count], $$MaxLit,
+                 default_RESA_char, default_RESA_len)
+ 
+    while(sea_unit_mappings[1,loop_count]==sea_unit_mappings[1,loop_count+name_count])
+       {
+        call smovhn (sea_unit_mappings[2,loop_count+name_count], $$MaxLit,
+                     RESA_name_char[1,name_count+1], RESA_name_len[name_count+1])
+        name_count = name_count + 1
+       }
+   } # end if more than one RESA name per ALSP enumeration
+ 
+return
+end # ALSP_Sea_Unit_enum_info
+
+ 
+Subroutine ALSP_Emitter_enum_info (loop_count, name_count)
+#########################################################################
+#$%
+#$% Purpose:   ALSP_Emitter_enum_info gets the emitter enumerations
+#$%            information.
+#$%
+#$% Called By: ALSP_Register_Enumerations
+#$%
+#$% Calls:     Init_default_variables       smov...
+#$%
+#$% Tables:    None
+#$%
+#$% Date:      Oct. 1996  (E1694)
+#$%
+#$% Author:    Susan Miller
+#$%
+#########################################################################
+implicit none
+Name_enum_common
+ALSP_enum_common
+ 
+ALSP$Emitter_Common                     # E2151  DEW 9/99
+ 
+integer loop_count
+integer name_count
+ 
+ enum_index = alsp_emitter_list[1,loop_count]
+ call smovhn (alsp_emitter_list[2,loop_count], $$MaxLit,
+              RESA_name_char[1,1], RESA_name_len[1])
+ if (alsp_emitter_list[3,loop_count] == $radar$code)
+     attribute_type = $radar
+ else attribute_type = $jammer
+ 
+ ALSP_class = alsp_emitter_list[4,loop_count]
+ register_type = $class         # 2
+ 
+ # if there are more than one RESA name per Enumeration index,
+ # find all of them
+ name_count = 1
+ if(alsp_emitter_list[1,loop_count]==alsp_emitter_list[1,loop_count+name_count])
+   {
+    call Init_default_variables
+ 
+    call smovhn (alsp_emitter_list[2,loop_count], $$MaxLit,
+                 default_RESA_char, default_RESA_len)
+ 
+    while(alsp_emitter_list[1,loop_count]==alsp_emitter_list[1,loop_count+name_count])
+       {
+        call smovhn (alsp_emitter_list[2,loop_count+name_count], $$MaxLit,
+                     RESA_name_char[1,name_count+1], RESA_name_len[name_count+1])
+        name_count = name_count + 1
+       }
+   } # end if more than one RESA name per ALSP enumeration
+ 
+return
+end # ALSP_Emitter_enum_info
+
+ 
+Subroutine ALSP_Weapon_enum_info (loop_count, name_count, two_messages)
+#########################################################################
+#$%
+#$% Purpose:   ALSP_Weapon_enum_info gets the weapon enumerations
+#$%            information.
+#$%
+#$% Called By: ALSP_Register_Enumerations
+#$%
+#$% Calls:     smov...
+#$%
+#$% Tables:    None
+#$%
+#$% Date:      Oct. 1996  (E1694)
+#$%
+#$% Author:    Susan Miller
+#$%
+#$% Modified:  Susan Miller 2/98 (e1929)
+#$%            Require the alsp class to match in addition to
+#$%            the weapon name.
+#########################################################################
+implicit none
+Name_enum_common
+ALSP_enum_common
+ 
+alsp$weapon_common                  # E2151  DEW 9/99
+ 
+integer loop_count
+integer name_count
+integer two_messages
+integer k
+ 
+ enum_index = weapon_type[1,loop_count]
+ call smovhn (weapon_type[2,loop_count], $$MaxLit,
+              RESA_name_char[1,1], RESA_name_len[1])
+ ALSP_class = weapon_type[4,loop_count]
+ register_type = $int_kind      # 3
+ attribute_type = $alsp_attr_weapon  # 54
+ 
+ # if there are more than one RESA name per Enumeration index,
+ # find all of them
+ name_count = 1
+ if((weapon_type[1,loop_count]==weapon_type[1,loop_count+name_count]) &
+    (ALSP_class==weapon_type[4,loop_count+name_count]))
+   {
+    for (k=2;k<=MAX_PARAM;k=k+1)
+       {
+        RESA_name_len[k] = 0
+        RESA_name_char[5,k] = $SPACE
+       }
+ 
+    default_flag = $yes
+    if (two_messages == $no)
+      {
+       default_RESA_char = $SPACE
+       default_RESA_len = 0
+       call smovhn (weapon_type[2,loop_count], $$MaxLit,
+                    default_RESA_char, default_RESA_len)
+      }
+ 
+    while((weapon_type[1,loop_count]==weapon_type[1,loop_count+name_count]) &
+          (ALSP_class==weapon_type[4,loop_count+name_count]))
+       {
+        call smovhn (weapon_type[2,loop_count+name_count], $$MaxLit,
+                     RESA_name_char[1,name_count+1], RESA_name_len[name_count+1])
+        name_count = name_count + 1
+        if (name_count == 14)
+          {
+           name_count = name_count - 1
+           two_messages = $yes
+           break
+          }
+        else if (two_messages == $yes)
+          two_messages = $no
+       }
+   } # end if more than one RESA name per ALSP enumeration
+return
+end # ALSP_Weapon_enum_info

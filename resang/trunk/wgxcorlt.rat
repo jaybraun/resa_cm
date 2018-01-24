@@ -1,0 +1,1675 @@
+ 
+##                      File WGXCORLT.rat
+ 
+### 15-Sept-1994 - Carol Kropp
+### Replaced routine ASTKNO with Obtain_View_Track_Nbr and added
+### Free_View_Track_Nbr.  Available view associated RMT Track numbers are
+### stored in queues within the VUE table.  Previous mechanism of rolling
+### back to 1 after 999 was assigned created duplicate numbers to be
+### assigned. (E1082)
+###
+### 15-Sept-1994 - Carol Kropp
+### Removed old, unused routine LATCOR (CORLAT superceeded it).
+ 
+ 
+#####   version 3.1  dated-  7apr81
+###
+### mod to version 3.0          dated 25-feb-1981
+###
+### smn prog  date     module  comments
+### === ==== =======   ======  =================================================
+### 002 rjw  2/25/81   corown  new routine
+### 002 rjw  2/12/81   lcltid  new routine
+### 002 dew  2/10/81   rmtbog  new routine
+### 002 sfc  1/6/81            new file for Reporting Policy; models correlation
+###                            of detection data received at the Player platform
+###                            from units in his view;
+#####   version 3.0     dated 22-dec-1980
+ 
+ 
+# 
+ 
+include "macros.inc"
+include "bbcode.inc"
+include "bbctl.inc"
+include "bbacc.inc"
+include "bblcl.inc"
+include "bbown.inc"
+include "bbrmt.inc"
+include "bbshc.inc"
+include "bbunt.inc"
+include "bbvue.inc"
+include "bbtrk.inc"                                     #               1/13/84
+include "orders.inc"                                    #               7/3/84
+include "bbdeq.inc"                                     # khc 10/92
+include "plplay.inc"
+include "ascii.inc"
+ 
+define(BBimplicit,Implicit None)
+ 
+define (RMT_Active_Index_Common,     # clk 6/7/93 - index into RMT for an active detection
+    # The following field is now a RMT INDEX (not a pointer)
+    # Valid for 32000 RMT slots
+    # Also, View #1 is control and never has any tracks     # E2160 - DEW 12/16/99
+    integer*2   unit_rmt_index_array [2:VUE$slots, UNT$slots]
+    common /RMT_ACTIVE_INDEX/ unit_rmt_index_array
+    )
+
+#############################################################################
+Subroutine CORLAT (vue$pointer,  #Correlate Detection Data (RMT not chained)
+                   lcl$pointer,  #vue$pointer = pntr to view of the detection
+                   indxdr,       #lcl$pointer =  pointer to data in LCL table
+                   time,        #indxdr = index of detecting platform
+                   i2way)        #time = time report sent
+                                 #i2way = flag indicating 2-way comm
+#############################################################################
+BBcommon
+RMT_Active_Index_Common        # clk 6/7/93
+ 
+integer rmt_slot_located, vue_slot_index
+real    tsave[12], time
+integer     indxdr, i2way, iview, itn, iptruu, imyel, imesm, iptrod,
+            ioldtm, newtrk, lstrmt, iact, ierlst, ilatst, ihist
+BBdeclare  (Vue$Pointer,
+            LCL$Pointer, LCL$Detectee$i, LCL$Sonobuoynbr$I,
+            LCL$Lastdettime$f, lcl$Firstdettime$f, LCL$Class$I,
+            LCL$Detectiontype$I,
+            RMT$Pointer, RMT$Detectee$I, RMT$Detectiontype$I,
+            RMT$Lastdettime$F, RMT$Firstdettime$F, RMT$TrkIndx$I,
+            TRK$Pointer)
+ 
+#$% get detectee
+lcl$Detectee$i    = Xlcl$Detectee$i             # initialization
+ 
+#$% if no detectee, return
+if (lcl$Detectee$i == 0) return
+ 
+#$% set view
+iview              = vue$pointer$index
+ 
+#$% if own force
+if (xlcl$OwnForce$i != $no)
+   {
+    call COROWN(lcl$pointer,iview)
+    return
+   }
+ 
+#$% get sonobuoy number, last detection time and class
+lcl$SonoBuoyNbr$i  = Xlcl$SonoBuoyNbr$i
+lcl$LastDetTime$f  = Xlcl$LastDetTime$f   # For VTS - JFR 1/27/94
+lcl$FirstDetTime$f = Xlcl$FirstDetTime$f  # For VTS - JFR 1/27/94
+lcl$Class$i        = Xlcl$Class$i
+ 
+#$% initialize
+itn             = 0     # sequential track number
+iptruu          = 0     # Ptr to an unused slot
+imYEL           = $NO   # Ptr to YELlow  esm track      6/24/86
+imESM           = $NO   # Ptr to CURRENT esm track      7/21/86
+ 
+iptrod          = 0     # Ptr to oldest NON-esm track
+ioldtm          = 999999 #prerequisite tst for IPTROD
+ 
+#$% set new track flag to NO
+newtrk = $no
+ 
+#$% get detection type
+lcl$DetectionType$i = Xlcl$DetectionType$i
+ 
+rmt_slot_located = $no
+ 
+#$% set RMT pointer to last RMT index
+rmt$pointer$to Xvue$LastRmtIndx$i
+lstrmt = rmt$pointer
+vue_slot_index = VUE$Pointer$Index
+ 
+ 
+#$% if type is active visual or active non visual, set to YES
+if (lcl$DetectionType$i == $ActiveVisual$code  |
+    lcl$DetectionType$i == $ActiveNonVisual$code)
+  {
+   iact = $yes
+ 
+   #$% clk 6/7/93 - use the index into the rmt table if the
+   #$%              unit was detected before.
+   if (unit_rmt_index_array [vue_slot_index, LCL$Detectee$I] != 0)
+     {
+      RMT$Pointer$to unit_rmt_index_array [vue_slot_index, LCL$Detectee$I]
+ 
+      #$% Check to make sure that this RMT slot is still valid
+      RMT$Detectee$I = xRMT$Detectee$I
+      if (RMT$Detectee$I == LCL$Detectee$I)     # if the detectee matches
+        {
+         RMT$DetectionType$I = xRMT$DetectionType$I
+         if (RMT$DetectionType$I == $ActiveNonVisual$Code |     # is an active
+             RMT$DetectionType$I == $ActiveVisual$Code    )     # track
+           {
+            if (xRMT$OverHoriz$I == $no)                        # but not a rothr
+              rmt_slot_located = $yes
+           }
+        }
+      if (rmt_slot_located == $no)      # if no longer a valid reference, clear it out
+        unit_rmt_index_array [vue_slot_index, LCL$Detectee$I] = 0
+     }
+  }
+else
+  iact = $no
+ 
+if (rmt_slot_located != yes)
+  {
+   #$% compute first detection time and last detection time
+   ierlst = lcl$FirstDetTime$f - Minutes$To$Old    # For VTS - JFR 1/27/94
+   ilatst = lcl$LastDetTime$f  + Minutes$To$Old    # For VTS - JFR 1/27/94
+ 
+   #$% for each RMT entry
+   for (rmt$pointer$to Xvue$FirstRmtIndx$i;rmt$pointer<=lstrmt;rmt$pointer$next)
+      {                   # search for existing data
+       #$% if slot not in use
+ 
+       if (Xrmt$InUse$i == $no)                    # if slot unused
+          {
+           iptruu = rmt$pointer                    #       6/24/86
+           next
+          }
+ 
+       #$% get first detection time and last detection time
+       rmt$FirstDetTime$f = Xrmt$FirstDetTime$f    # For VTS - JFR 1/27/94
+       rmt$LastDetTime$f  = Xrmt$LastDetTime$f     # For VTS - JFR 1/27/94
+ 
+       rmt$DetectionType$i = Xrmt$DetectionType$i  # moved up 6/24/86
+ 
+       if(rmt$LastDetTime$f + Minutes$to$OLD < game$time) # For VTS - JFR 1/27/94
+          {
+           rmt$TRKindx$i = Xrmt$TRKindx$i          #       6/24/86
+           if (rmt$TRKindx$i > 0)                  #       6/24/86
+            {
+             TRK$Pointer$TO (rmt$TRKindx$i)        #       6/24/86
+             trk$ZERO                              #       6/24/86
+             PUTtrk$Modified$i (YES)               #       6/24/86
+            }
+ 
+           if (RMT$DetectionType$I == $ActiveNonVisual$Code |  # clk 6/7/93
+               RMT$DetectionType$I == $ActiveVisual$Code    )  # clear rmt index array entry
+             {
+              unit_rmt_index_array [vue_slot_index, LCL$Detectee$I] = 0
+             }
+ 
+           call Zero_RMT_Entry (RMT$Pointer)
+ 
+           iptruu = rmt$pointer                    #       6/24/86
+           NEXT                                    #       6/24/86
+          }
+ 
+       if (rmt$LastDetTime$f < ioldtm &    # [&] ptr to oldest NON- # For VTS - JFR 1/27/94
+           (rmt$LastDetTime$f + Minutes$to$YELLOW < game$time | # For VTS - JFR 1/27/94
+           Xrmt$IsAssigned$i == $NO) ) # assigned or YELLOW trk  7/28/86
+          {
+           iptrod = rmt$pointer
+           ioldtm = rmt$LastDetTime$f              # For VTS - JFR 1/27/94
+          }
+ 
+       if (iact == $no)                            # if passive detection
+        {
+           if(rmt$DetectionType$i == $ESM$code)    #<<<>>> 6/24/86
+            {
+             if(rmt$LastDetTime$f + Minutes$to$YELLOW <game$time) # For VTS - JFR 1/27/94
+              {
+               imYEL = rmt$Pointer                 #       6/24/86
+              }
+             else                                  #       7/21/86
+              {
+               imESM = rmt$Pointer                 #       7/21/86
+              }
+            }
+ 
+           if (Xrmt$Detector$i     != indxdr              )  next
+           if (Xrmt$Detectee$i     != lcl$Detectee$i      )  next
+           if (rmt$DetectionType$i != lcl$DetectionType$i ) next #x 6/24/86
+ 
+           if (rmt$LastDetTime$f    <  ierlst              )  next # For VTS - JFR 1/27/94
+           if (rmt$FirstDetTime$f   >  ilatst              )  next # For VTS - JFR 1/27/94
+ 
+           #$% if ESM and emitter pointer not same, get next
+           if ( lcl$DetectionType$i == $ESM$code          &
+               Xrmt$EmitterPntr$i   != Xlcl$EmitterPntr$i  )  next
+ 
+           #$% if passive sonar and sonobuoy number not same , get next
+           if ( lcl$DetectionType$i == $PassiveSonar$code &
+               Xrmt$SonoBuoyNbr$i   != lcl$SonoBuoyNbr$i   )  next
+ 
+           if (Xrmt$TimeReported$f  >= time) return  # throw it away # For VTS - JFR 1/27/94
+           itn = xRMT$TrackNumber$I
+        }
+       else                                        # if active detection
+        {
+           if (Xrmt$OverHoriz$i     != $NO )  NEXT # Rothr: see WGXCOTH.rat
+                                                                 # CML 4/19/90
+           if (Xrmt$Detectee$i      != lcl$Detectee$i |
+               Xrmt$Class$i         != Xlcl$Class$i    )  next
+ 
+           if (rmt$DetectionType$i != $ActiveNonVisual$Code &    # 5/14/84
+               rmt$DetectionType$i != $ActiveVisual$Code) next   # 5/14/84
+ 
+           if (rmt$LastDetTime$f    <  ierlst          )  next # For VTS - JFR 1/27/94
+           if (rmt$FirstDetTime$f   >  ilatst          )  next # For VTS - JFR 1/27/94
+ 
+           #$% clk 6/7/93:  At this point an exact match has been found
+           #$% (a break out of the loop is immediatelly following this else)
+           #$% This is a backup, when it was new it should have been added.
+           unit_rmt_index_array [vue_slot_index, LCL$Detectee$I] = RMT$Pointer$index
+        }
+ 
+       break
+      }         # end of loop through view's rmt entries
+  }             # end of if rmt entry was located through indexing array
+ 
+##-----------------------------------------------------------------
+if (rmt$pointer > lstrmt)       # NO MATCH; new track
+   {
+    #$% set new track to YES
+    newtrk = $yes
+ 
+    IF (iptruu != 0) rmt$pointer = iptruu # Un-Used slot
+ 
+    else if (iptrod != 0) # iptrod NOT zero, but prefer esm track:
+     {
+      if     (imYEL !=$NO) rmt$pointer = imYEL  #esm YELLOW     6/24/86
+ 
+      else if(imESM !=$NO) rmt$pointer = imESM  #esm CURRENT    7/21/86
+ 
+      else              # note that iptrod is NON-ZERO HERE..   7/28/86
+       {        # # can use any unassigned or YELLOW trk        7/21/86
+        rmt$pointer = iptrod    # oldest dispensable track      7/21/86
+ 
+        if( tsave[iview] !=game$time ) # For VTS - JFR 1/27/94
+         {
+          tsave[iview] = game$time #$% set view's flag to game minute # For VTS - JFR 1/27/94
+          call echor
+          call echov ("(Overwriting oldest RMT for view #")
+          call echoi (iview)
+          call echov  (')')
+         }
+       }
+     }  # End else if(iptrod != 0)                              7/21/86
+ 
+    else #          if(iptrod == 0)                             7/21/86
+     {
+      if (tsave[iview] == game$time) return # For VTS - JFR 1/27/94
+      tsave[iview] = game$time              # For VTS - JFR 1/27/94
+      call echov (" No unused or dispensable RMT slots for view #")
+      call echoi (iview)
+      call echor
+      RETURN
+     }
+ 
+    #$% clk 6/15/93:  Set up the RMT active track index if an active track
+    if (iact == $yes)
+      unit_rmt_index_array [vue_slot_index, LCL$Detectee$I] = RMT$Pointer$index
+ 
+    call Zero_RMT_Entry (RMT$Pointer)
+    # joa 8/98 (E2020) - Removed the check to see if itn was == 0
+    # before placing the call to Obtain_View_Track_Nbr and the
+    # following "if" for no available numbers.
+    call Obtain_View_Track_Nbr (VUE$Pointer, LCL$DetectionType$I,
+                                  LCL$Class$I, itn)
+    if (itn == -1)    # if no track number was available,
+       return          # return - SMM 6/7/95 (E1413)
+   }    # End if no match;  NEW TRACK..
+##-----------------------------------------------------------------
+ 
+if   ( newtrk == NO &
+      Xlcl$LastDetTime$f <= Xrmt$LastDetTime$f) ihist = NO # For VTS - JFR 1/27/94
+else                                            ihist = YES
+ 
+ 
+#$% call enter detection
+call RMTPUT (rmt$pointer,                       # enter detection
+             iact,
+             indxdr,
+             lcl$detectee$i,
+             lcl$detectiontype$i,
+             itn,
+             time,
+             newtrk,
+             i2way,
+             lcl$pointer)
+ 
+if ( Maintain$Track$History     != $NO  &                       #       1/13/84
+          iact                  != $NO  &                       #       1/16/84
+          lcl$Class$i      == $air$code &                       #       1/13/84
+          ihist                 == YES  )
+ {
+  call TRKPUT ( RMT$Pointer,                            #       1/13/84
+                lcl$detectee$i,
+                iview)
+ }
+ 
+return
+end
+
+ 
+############################################################################
+Subroutine TRKPUT (RMT$Pointer,
+                   lcl$detectee$i,    # (Non-zero, else not called)
+                   iview)
+###########################################################################
+#$% Purpose: For rmt$class$i == $AIR$code, TRKPUT starts and maintains the
+#$%          Track-History for up to TRK$pos$SLOTS of the most recent Lat/Long
+#$%
+#$% Called By: CORLAT
+#$%
+#$% Calls:
+#$%
+#$% Tables:    RMT      TRK
+#$%
+#$% Date:      Jan 84
+#$%
+#$% Author:    Joe Bryant
+#$%
+#######################################################
+ 
+BBcommon
+integer     iview, itkx
+BBdeclare  (RMT$Pointer, RMT$TrkIndx$i,
+            TRK$Pointer, trk$Pos$Index, TRK$FirstPoint$i, TRK$NbrPoints$I,
+            lcl$detectee$i)
+ 
+rmt$TRKindx$i = Xrmt$TRKindx$i
+if (rmt$TRKindx$i == 0)                 # If NO track hist. now
+ {
+  itkx = 0
+  for (TRK$Pointer$First; TRK$Pointer$Valid; TRK$Pointer$Next)
+   {
+    if (xTRK$RmtIndx$i > 0) NEXT        # Slot not available
+ 
+    itkx = TRK$Pointer$Index
+    PUTrmt$TRKindx$I (itkx)
+    PUTtrk$RMTindx$I (RMT$Pointer$Index)
+    PUTtrk$TargetIndx$i (lcl$Detectee$i) # Non-zero, else not called
+    PUTtrk$FirstPoint$i (1)
+    PUTtrk$NbrPoints$i (1)
+    trk$POS$index = 1
+    BREAK                               #                       1/17/84
+   }            # End of FOR (TRK$Pointer$First...
+ 
+  If (itkx < 1)
+   {
+    call echor
+    call echov (" TRK tbl full:  can't start track-history.")
+    return
+   }
+ }      # End of if NO TRACK HISTORY now..
+ 
+ELSE                            # NOT a new track:  TRK slot already set
+ {
+  itkx = rmt$TRKindx$i
+  TRK$Pointer$TO ( itkx )
+  TRK$FirstPoint$i = xTRK$FirstPoint$i
+  TRK$NbrPoints$i = xTRK$NbrPoints$i
+ 
+  if (TRK$NbrPoints$i < TRK$pos$SLOTS)
+   {
+    TRK$NbrPoints$i = TRK$NbrPoints$i +1                #       1/17/84
+    putTRK$NbrPoints$i
+    trk$POS$index = TRK$NbrPoints$i     # additional posit.
+   }
+ 
+  else                          # already TRK$pos$SLOTS positions entered
+   {
+    trk$POS$index = TRK$FirstPoint$i    # Replace oldest posit.
+    if (TRK$FirstPoint$i == TRK$pos$SLOTS) putTRK$FirstPoint$i (1)
+    else putTRK$FirstPoint$i (TRK$FirstPoint$i +1)
+   }            # End of ELSE already TRK$pos$SLOTS positions entered
+ 
+ }      # End of ELSE not a new track..
+ 
+PUTtrk$Modified$i ($YES)
+PUTtrk$POS$Latitude$F  ( Xrmt$ApparentLat$F )
+PUTtrk$POS$Longitude$F ( Xrmt$ApparentLon$F )
+ 
+return
+end
+
+ 
+############################################################################
+Subroutine RMTBOG (indxdr,                        # Update Bogey Info in RMT
+                   rmt$pointer,
+                   lcl$pointer,
+                   time,
+                   Do_Update)
+############################################################################
+ 
+BBcommon
+Logical RMT_ASSIGN, DO_Update
+integer     indxdr
+real        time
+BBdeclare  (RMT$Pointer, RMT$Remaining$i, RMT$TallyHo$i, RMT$HeadsUp$i,
+            LCL$Pointer, LCL$Remaining$i, LCL$TallyHo$i, LCL$HeadsUp$i)
+ 
+#$% get remaining; and insure RMT shows at least the LCL value
+rmt$remaining$i = Xrmt$remaining$i
+lcl$Remaining$i = Xlcl$Remaining$i        # jb    Moved up    8/15/90
+if(lcl$Remaining$i > rmt$remaining$i)     # jb                8/15/90
+   {
+    rmt$remaining$i = lcl$Remaining$i    # jb                8/17/90
+    PUTrmt$remaining$i                   # jb                8/15/90
+   }
+##DO_Update = $Yes                  ## <RG> 9/17/85 bogey tote/for TTGP.
+## jb Removed line above - it is overcome by the next line    8/15/90
+DO_Update = RMT_ASSIGN(indxdr,rmt$pointer,time)   ## function call.
+ 
+if (!DO_Update)  RETURN               ## <RG> 9/17/85  for change to bogey tote
+                                      ## board for TTGP.  RMT table info does
+                                      ## not need to be updated, so leave.
+lcl$TallyHo$i      = Xlcl$TallyHo$i
+if (lcl$TallyHo$i == 0) return
+ 
+##lcl$Remaining$i    = Xlcl$Remaining$i        # jb (Moved up)   8/15/90
+#if (Xrmt$TallyHo$i != 0 & Xrmt$Remaining$i <= lcl$Remaining$i) return
+if (Xrmt$TallyHo$i  != 0 & rmt$Remaining$i  <= lcl$Remaining$i) return
+ 
+#$% get heads up                        # jb  Moved up           8/15/90
+lcl$HeadsUp$i      = Xlcl$HeadsUp$i
+rmt$HeadsUp$i      = lcl$HeadsUp$i
+PUTrmt$HeadsUp$i
+ 
+#$% get remaining                        # jb  Moved up           8/15/90
+#rmt$Remaining$i    = lcl$Remaining$i    # jb  See above          8/17/90
+#PUTrmt$Remaining$i                      # jb  See above          8/17/90
+ 
+#$% if no engagements
+if (Xrmt$TallyHo$i == 0)                        # initial engagement
+   {  # jb Note: rmt$remaining & rmt$headsup updated above..    8/15/90
+    #$% get tally ho
+    rmt$TallyHo$i      = lcl$TallyHo$i
+    PUTrmt$TallyHo$i
+   }
+else if (lcl$HeadsUp$i != 0)           # some-one broke off
+   {    # jb Note: rmt$remaining & rmt$headsup updated above..  8/15/90
+   }
+else                                   # some-one still engaging
+   {    # jb Note: rmt$remaining updated above..                8/15/90
+    #$% zero heads up
+    rmt$HeadsUp$i      = 0
+    PUTrmt$HeadsUp$i
+   }
+ 
+return
+end
+ 
+
+Logical function RMT_ASSIGN(indxdr,rmt$pointer,time)
+#####################################################################
+#$%
+#$%  PURPOSE   :     Function RMT_ASSIGN returns the value TRUE if
+#$%                  the information in this RMT entry needs to be
+#$%                  updated.  The update is based on time first,
+#$%                  and if the times are equal, the precedence of
+#$%                  the data for update is:
+#$%                    1) Taking aircraft
+#$%                    2) Covering aircraft
+#$%                    3) All others  (no update)
+#$%
+#$%                  NOTE : Only Aircraft with a mission of Cap or
+#$%                         Strike Cap are capable of Taking or
+#$%                         Covering.
+#$%
+#$%
+#$%  CALLED BY :     RMTBOG
+#$%
+#$%  CALLS     :     none
+#$%
+#$%  TABLES    :     RMT    UNT
+#$%
+#$%  DATE      :     September 1985
+#$%
+#$%  AUTHOR    :     RUSS GOLISH
+#$%
+#####################################################################
+ 
+BBcommon
+integer     indxdr
+real        time
+BBdeclare  (RMT$Pointer, RMT$Detectee$i, RMT$Detector$i,
+            RMT$TimeReported$f, RMT$ShipAssignedTo$i,
+            UNT$Pointer, UNT$View$I, UNT$Type$i, UNT$AttackIndx$I,
+            UNT$AssignedTarget$i, UNT$CoverFlag$i, UNT$Mission$i,
+            UNT2$Pointer, UNT2$Type$i, UNT2$AttackIndx$I, UNT2$CoverFlag$i,
+            UNT2$AssignedTarget$i)
+ 
+RMT_ASSIGN = $No
+ 
+unt$pointer$to    (indxdr)                      # The Detector
+unt$View$i = Xunt$View$i
+if (unt$View$i == $Neutral$View) RETURN         # jb    7/10/86
+ 
+rmt$Detectee$i     =   Xrmt$Detectee$i
+rmt$Detector$i     =   Xrmt$Detector$i
+rmt$TimeReported$f =   Xrmt$TimeReported$f        # For VTS - JFR 1/27/94
+ 
+unt2$Pointer$To   rmt$Detector$i
+ 
+unt$type$i        =    Xunt$type$i
+unt2$type$i       =    Xunt2$type$i
+unt$AttackIndx$i  =    Xunt$AttackIndx$i
+unt$AssignedTarget$i = Xunt$AssignedTarget$i
+unt2$AttackIndx$i =    Xunt2$AttackIndx$i
+unt$coverflag$i   =    Xunt$coverflag$i
+unt2$coverflag$i  =    Xunt2$coverflag$i
+ 
+if (unt$type$i == $Air$code)
+  {
+   unt$mission$i = Xunt$mission$i
+   if (unt$mission$i == $StrikeCap$code | unt$mission$i == $Cap$code |
+       unt$mission$i == $AirDefense$Code)           # clk 4/92
+     {
+      if (time > rmt$TimeReported$f)              # For VTS - JFR 1/27/94
+        {
+         PUTrmt$ShipAssignedTo$i   ($no)
+         RMT_ASSIGN = $Yes
+         if (unt$AttackIndx$i == rmt$Detectee$i)      # attack index is set
+           {
+            PUTrmt$AcAssignedTo$i  (indxdr) # jb Up frm if/else 3/19/87
+            PUTrmt$ShipAssignedTo$i($No)        # jb    3/19/87 4/16/87
+            if (unt$coverflag$i == $No)               # he's attacking track
+              {
+               PUTrmt$coverflag$i     ($No)
+               if (unt$pointer == unt2$pointer)       # new detector was also
+                  PUTunt$coverflag$i    #[jb no ($No)]the old, now attacking
+              }
+            else                                      # he's covering track
+              {
+               PUTrmt$coverflag$i     ($Yes)
+               if (unt2$AttackIndx$i == rmt$detectee$i &  # new cover is taking
+                   unt2$coverflag$i  == $Yes &            # over this track for
+                   unt2$type$i       == $Air$code &       # the B/T board.
+                   unt2$pointer      != unt$pointer)
+                   PUTunt2$coverflag$i  ($No)
+              }
+           }
+         else              # just a detection
+           {
+            PUTrmt$AcAssignedTo$i   ($no)                 # clear it
+            PUTrmt$coverflag$i      ($no)                 # clear it
+           }
+        }    ## end  if (time > rmt$TimeReported$f)    # For VTS - JFR 1/27/94
+ 
+      else if (time == rmt$TimeReported$f)             # For VTS - JFR 1/27/94
+        {
+         if (unt$AttackIndx$i == rmt$detectee$i)      # attack index is set
+           {
+            if (unt$coverflag$i == $No)               # he's attacking track
+              {
+               if ((unt2$AttackIndx$i == rmt$detectee$i)  # old was attking or
+                    & (unt2$type$i == $Air$code))         # covering aircraft
+                 {
+                  if (unt2$coverflag$i == $Yes)       # old was covering aircrf
+                    {
+                     RMT_ASSIGN = $Yes                # new attacking aircraft
+                     PUTrmt$ACassignedTo$i (indxdr)   # will take over for data
+                     PUTrmt$ShipAssignedTo$i($No)               # jb    3/19/87
+                     PUTrmt$CoverFlag$i    ($No)      # and B/T board.
+                    }
+                 }
+               else                  # old was detection or ship engagement
+                 {                   # , do the update.
+                  RMT_ASSIGN = $Yes
+                  PUTrmt$ACassignedTo$i (indxdr)
+                  PUTrmt$ShipAssignedTo$i($No)          # jb    3/19/87
+                  PUTrmt$CoverFlag$i    ($No)
+                 }
+              }
+            else                     # he's covering this track
+              {
+               if ((unt2$AttackIndx$i != rmt$detectee$i)  # old was detection
+                       | (unt2$type$i != $Air$code))      # or ship engagement.
+                 {
+                  RMT_ASSIGN = $Yes                       # do update for the
+                  PUTrmt$ACassignedTo$i (indxdr)          # covering aircraft
+                  PUTrmt$ShipAssignedTo$i($No)          # jb    3/19/87
+                  PUTrmt$CoverFlag$i    ($Yes)
+                 }
+              }
+           }  ## end  if (unt$AttackIndx$i == rmt$detectee$i)
+        }  ## end  if(time == rmt$TimeReported$f)   # For VTS - JFR 1/27/94
+     }  ## end  if ($StrikeCap$code | $Cap$code)
+ 
+   else           # mission not StrikeCap of Cap
+     {
+      if (time > rmt$TimeReported$f)                # For VTS - JFR 1/27/94
+        {
+         RMT_ASSIGN = $Yes
+         PUTrmt$ACassignedTo$i   ($No)
+         PUTrmt$ShipassignedTo$i ($No)
+         PUTrmt$coverflag$i      ($No)
+        }
+     }
+  }  ## end  if(unt$type$i == $Air$code)
+ 
+else if (unt$type$i == $Surface$code  ) # |
+#        unt$type$i == $SurfaceWithAC$code)
+  {
+   if (time > rmt$TimeReported$f)                   # For VTS - JFR 1/27/94
+     {
+      RMT_ASSIGN = $Yes                    # do update
+      PUTrmt$AcAssignedTo$i    ($No)       # clear it
+      PUTrmt$coverflag$i       ($No)       # clear it
+ 
+      if (unt$AssignedTarget$i == rmt$detectee$i | # if ship is engaging on
+          unt$AttackIndx$i == rmt$detectee$i)      # bogey he is assigned.
+          PUTrmt$ShipAssignedTo$i  (indxdr)
+      else
+          PUTrmt$ShipAssignedTo$i  ($No)          # clear it.
+     }
+ 
+   else      ## time is equal to last
+     {
+      if (unt$AssignedTarget$i == rmt$detectee$i | # if ship is engaging on
+          unt$AttackIndx$i == rmt$detectee$i)      # bogey he is assigned.
+          PUTrmt$ShipAssignedTo$i  (indxdr)
+          if (Xrmt$TallyHo$i == $no)
+             RMT_ASSIGN = $Yes
+     }
+  }
+ 
+else        # unit not Aircraft or Ship
+  {
+   if (time > rmt$TimeReported$f)                   # For VTS - JFR 1/27/94
+     {
+      RMT_ASSIGN = $Yes                    # do update
+      PUTrmt$AcAssignedTo$i    ($No)       # clear it
+      PUTrmt$ShipAssignedTo$i  ($No)       # clear it
+      PUTrmt$coverflag$i       ($No)       # clear it
+     }
+  }
+ 
+## The following code was added to determine if a SHIP is assigned to
+## this BOGEY, for the case when the ship isn't reporting the BOGEY.
+ 
+rmt$shipAssignedTo$i = Xrmt$ShipAssignedTO$i
+if (rmt$shipAssignedTO$i == $No)
+  {
+   for (unt2$pointer$first;unt2$pointer$Ok;unt2$pointer$next)
+      {
+       if ( unt$view$i != Xunt2$view$i) next            # DEW 4/12/90
+ 
+       unt2$type$i = Xunt2$type$i
+       if (unt2$type$i == $Surface$code ) # |
+#          unt2$type$i == $SurfaceWithAC$code)
+         {
+          unt2$AssignedTarget$i = Xunt2$AssignedTarget$i
+          unt2$AttackIndx$i     = Xunt2$AttackIndx$i
+          if (unt2$AssignedTarget$i == rmt$Detectee$i |
+              unt2$AttackIndx$i     == rmt$Detectee$i)
+            {
+#             if (time > rmt$TimeReported$f)   #<<<>>> 10/21/85
+#               RMT_ASSIGN = $Yes               #<<<>>> 10/21/85
+              PUTrmt$ShipassignedTO$i  (unt2$pointer$index)
+              BREAK
+            }
+         }
+      }
+   }
+ 
+return
+end
+ 
+
+subroutine NEWBOG(rmt$pointer,lcl$pointer)
+#####################################################################
+#$%
+#$%  PURPOSE   :     Subroutine NEWBOG will update the RMT slot bogey
+#$%                  information if this is a new bogey track.
+#$%
+#$%  CALLED BY :     RMTBOG
+#$%
+#$%  CALLS     :     none
+#$%
+#$%  TABLES    :     RMT    LCL
+#$%
+#$%  DATE      :     September 1985
+#$%
+#$%  AUTHOR    :     RUSS GOLISH
+#$%
+#####################################################################
+ 
+BBcommon
+BBdeclare  (RMT$Pointer, RMT$Remaining$i, RMT$TallyHo$i, RMT$HeadsUp$i,
+            LCL$Pointer, LCL$Remaining$i, LCL$TallyHo$i, LCL$HeadsUp$i)
+ 
+#$% get remaining; and insure RMT shows at least the LCL value
+rmt$remaining$i    = Xrmt$remaining$i
+lcl$Remaining$i    = Xlcl$Remaining$i    # jb  Moved up
+if(lcl$Remaining$i > rmt$remaining$i)        # jb             8/15/90
+   {
+    rmt$remaining$i = lcl$Remaining$i       # jb             8/17/90
+    PUTrmt$remaining$i                      # jb             8/15/90
+   }
+ 
+## get tally ho engagement
+lcl$TallyHo$i      = Xlcl$TallyHo$i
+ 
+## get remaining
+if (Xrmt$TallyHo$i != 0 & rmt$Remaining$i <= lcl$Remaining$i) return
+                                                    # !!!???
+## get heads up
+lcl$HeadsUp$i      = Xlcl$HeadsUp$i
+ 
+## set heads up                          # jb Moved up        8/15/90
+rmt$HeadsUp$i      = lcl$HeadsUp$i
+PUTrmt$HeadsUp$i
+ 
+## if no engagements
+if (Xrmt$TallyHo$i == 0)                # initial engagement
+   {    # jb Note: rmt$remaining & rmt$headsup updated above..
+    ## get tally ho
+    rmt$TallyHo$i      = lcl$TallyHo$i
+    PUTrmt$TallyHo$i
+   }
+else                                    # some-one still engaging
+   {    # jb Note: rmt$remaining updated above..
+    ## zero heads up
+    rmt$HeadsUp$i      = 0
+    PUTrmt$HeadsUp$i
+   }
+ 
+return
+end
+ 
+ 
+
+############################################################################
+Subroutine RMTPUT (rmt$pointer,                    # Make entry in RMT Table
+                   iact,
+                   indxdr,
+                   lcl$Detectee$i,        # NON-zero; else CORLAT won't call
+                   lcl$DetectionType$i,
+                   itn,
+                   time,
+                   newtrk,
+                   i2way,
+                   lcl$pointer)
+ 
+# Modified: Jim Allen - 8/98 UFL (E2020)
+#           Once an active track is created do not change class. An air track
+#           or surface track number has been assigned.
+ 
+BBcommon
+Logical  Do_Update
+integer  id                      # khc 10/92
+integer  AEG_target, SHC$Pointer, LCL$AssocAEGIndex$I  # SMM 2/94
+integer     iact, indxdr, itn, newtrk, i2way, iview
+real        time
+BBdeclare  (RMT$Pointer, RMT$Classified$i, RMT$ACCPntr$i, RMT$SHCPntr$i,
+            RMT$TargetId$i, RMT$Detectee$i, RMT$LastDetType$i,
+            RMT$ClassScore$i, RMT$Bearing$i, RMT$Detector$i,
+            RMT$LastDetTime$f, RMT$FirstDetTime$f, RMT$DetectionAge$i)
+BBdeclare  (RMT$DetectionType$I, RMT$TimeReported$f, RMT$TrackNumber$i,
+            RMT$OrigLat$f, RMT$OrigLon$f, RMT$UpTime$f, RMT$DownTime$f,
+            RMT$FingerPrinted$i, RMT$BrgError$i,
+            RMT$AcousticComm$I, RMT$OmniFlag$i, RMT$TMAFlag$i, RMT$Class$i)
+BBdeclare  (RMT$TmaQuality$i, RMT$TmaLat$f, RMT$TmaLon$f, RMT$Range$f,
+            RMT$Course$i, RMT$broadband$i, RMT$EchoFreq$i, RMT$SonoBuoyNbr$i,
+            RMT$Speed$i, RMT$PropMode$i, RMT$Altitude$i,
+            RMT$ApparentLat$f, RMT$ApparentLon$f)
+BBdeclare  (RMT$EmitterPntr$i, RMT$SL$Field$i, RMT$Composition$i,
+            LCL$Pointer, LCL$Detectee$I, LCL$DetectionType$I, LCL$TargetId$i,
+            LCL$FirstDetTime$f)
+BBdeclare  (UNT$Pointer, UNT2$pointer, UNT2$Type$i,
+            UNT3$pointer, DEQ2$Pointer)
+ 
+AEG_target = $no
+ 
+if (iact == $yes)
+   {
+    unt2$pointer$to  lcl$detectee$i        ## <RG> 9/19/85   Don't call
+    unt2$type$i = Xunt2$type$i             ## unless air non-friendly detectee.
+ 
+    if (unt2$type$i == $air$code | unt2$type$i == $CruiseMissile$Code |
+        unt2$type$i == $SAMissile$code) # air !
+        {
+        AEG_target = $yes   #indicate possible AEG target SMM 2/94
+ 
+        lcl$TargetID$i = Xlcl$TargetID$i
+ 
+        if (lcl$TargetID$i != $friendly$code       ## not known to be friend
+            & newtrk == $No)                       ## and not a new track.
+            {
+            call RMTBOG (indxdr,                   ## then, Update Bogey Info
+                         rmt$pointer,
+                         lcl$pointer,
+                         time,
+                         Do_Update)   ## If Do_Update is returned as False, no
+            if (!Do_Update)  return   ## update should be done.
+            }
+        else if (lcl$TargetID$i != $friendly$code       ## not known to be friend
+                 & newtrk != $No)                     ## and, this is new track.
+            {
+            PUTrmt$ACassignedTo$i   ($No)              ## clear fields.
+            PUTrmt$ShipAssignedTo$i ($No)
+            PUTrmt$coverflag$i      ($No)
+            call NEWBOG(rmt$pointer,lcl$pointer)       ## new routine.
+            }
+        }   ##  end <RG>
+ 
+    if (Xlcl$VisualClass$i == $yes)
+       {
+        PUTrmt$VisualClass$i (YES)
+       }
+ 
+    #$% if classified
+    if (Xlcl$Classified$i == $yes)
+       {
+        #$% set classified to YES
+        rmt$Classified$i = $yes
+        PUTrmt$Classified$i
+ 
+        #$% if aircraft
+        if (Xlcl$Class$i == $air$code)
+           {
+            #$% set ACC pointer
+            rmt$AccPntr$i = Xlcl$AccPntr$i
+            PUTrmt$AccPntr$i
+           }
+        else
+           {
+            #$% set SHC pointer
+            rmt$ShcPntr$i = Xlcl$ShcPntr$i
+            PUTrmt$ShcPntr$i
+           }
+       }
+ 
+    if (Xlcl$IffDesignated$i  == $YES )                         # DEW 4/2/91
+        {
+        if (Xrmt$UserDesignated$i == $No )
+            {
+             rmt$TargetId$i = Xlcl$TargetId$i
+             unt$pointer$to indxdr                          # khc 10/92
+             call lclid(xUNT$view$i,xUNT2$view$i,id)
+ 
+             #$% if unknown tracks are friendly forces in different view #khc 10/92
+             #$% and if radar is on, then the tracks will be classified friendly.
+             if (id == $friendly$code)
+               {
+                for_DEQ2_CHAIN
+                  {
+                   if (xDEQ2$Ident$i != $RADAR$Code) next
+                   if (xDEQ2$On$i == $NO)            next
+                   rmt$TargetId$i = id
+                   break
+                  }
+               }                                  # khc 10/92
+            PUTrmt$TargetId$i
+            }
+        else
+            {
+            # do nothing (throw it away)
+            }
+        }
+    else # this is not an IFF designation
+        {
+        rmt$TargetId$i = Xrmt$TargetId$i
+ 
+        #$% if new track or target ID is unknown
+        if (newtrk         == $yes          |
+            rmt$TargetId$i == $Unknown$code  )
+            {
+            rmt$TargetId$i = Xlcl$TargetId$i
+            unt$pointer$to indxdr                                  # khc 10/92
+            call lclid(xUNT$view$i,xUNT2$view$i,id)
+ 
+            #$% if unknown tracks are friendly forces in different view #khc 10/92
+            #$% and if radar is on, then the tracks will be classified friendly.
+            if (id == $friendly$code)
+              {
+               for_DEQ2_CHAIN
+                 {
+                   if (xDEQ2$Ident$i != $RADAR$Code) next
+                   if (xDEQ2$On$i == $NO)            next
+                   rmt$TargetId$i = id
+                   break
+                 }
+              }                                           # khc 10/92
+            PUTrmt$TargetId$i
+            }
+        else if (i2way == $yes)
+            {
+            # Update LCL Id from RMT setting
+ 
+            call LCLTID (indxdr,lcl$Detectee$i,rmt$TargetId$i)
+            }
+        }
+ 
+    if (Xrmt$LastDetTime$f >= Xlcl$LastDetTime$f)
+        {
+         # if this is an active track and a possible AEG target
+         if ((AEG_target == $yes) & (Iact == $yes))
+            {
+             # if this LCL track already has an assoc. AEG, then return
+             LCL$AssocAEGIndex$I = xLCL$AssocAEGIndex$I
+             if (LCL$AssocAEGIndex$I != 0) return
+ 
+             # if the target is being deleted, skip it
+             if (xUNT2$Status$I == $BeingDeleted$Code) return
+ 
+             # check to see if the detector is an AEGIS type ship
+             unt$pointer$to indxdr
+             if (xUNT$Type$I == $Surface$Code)
+                {
+                 SHC$Pointer = xUNT$SHCPntr$I
+                 if (xSHC$AEGISType$I == $yes)
+                    {
+                     call Prep_AEG_slot (UNT$Pointer,RMT$Pointer,
+                                         xSHC$TrackLimit$I,lcl$Detectee$i)
+                     if (trace$visual != $no)
+                        {
+                         call echor
+                         call echov (" Filling an AEG slot.  ")
+                         call echor
+                        }
+                    } # end if vessel is an AEGIS type
+                } # end if detector is a surface vessel
+            } # end if this is an active detection and a possible AEG track
+         return # throw it away
+        }
+   }
+ 
+rmt$Detectee$i          = lcl$Detectee$i        # for all types of detections
+PUTrmt$Detectee$i
+ 
+RMT$LastDetType$i       = Xlcl$LastDetType$i    #               DEW 2/1/91
+putRMT$LastDetType$i                            #               DEW 2/1/91
+ 
+RMT$ClassScore$i        = Xlcl$ClassScore$i     #               7/12/83
+putRMT$ClassScore$i                             #               7/12/83
+ 
+#$% get bearings
+rmt$Bearing$i           = Xlcl$Bearing$i
+PUTrmt$Bearing$i
+ 
+#$% set detector
+rmt$Detector$i          = indxdr
+PUTrmt$Detector$i
+ 
+unt3$pointer$to indxdr
+iview = Xunt3$view$i
+ 
+PUTrmt$DetectorView$i (iview)               # Store Detector's View
+ 
+ 
+#$% get last detector time
+rmt$LastDetTime$f       = Xlcl$LastDetTime$f   # For VTS - JFR 1/27/94
+PUTrmt$LastDetTime$f                           # For VTS - JFR 1/27/94
+#$% if last detection time exceeded, set detection age to current
+if (rmt$LastDetTime$f >= game$time -  # For VTS - JFR 1/27/94
+                         minutes$to$old) rmt$DetectionAge$i = $current$code
+#$% else set detection age to old
+else                                     rmt$DetectionAge$i = $old$code
+PUTrmt$DetectionAge$i
+ 
+#$% get first detection time
+rmt$FirstDetTime$f      = Xrmt$FirstDetTime$f  # For VTS - JFR 1/27/94
+ 
+lcl$FirstDetTime$f      = Xlcl$FirstDetTime$f  # For VTS - JFR 1/27/94
+ 
+#$% if first detection time is zero or
+if (rmt$FirstDetTime$f == 0                 |  # For VTS - JFR 1/27/94
+    rmt$FirstDetTime$f > lcl$FirstDetTime$f  ) # For VTS - JFR 1/27/94
+   {
+    #$% get RMT first detection time
+    rmt$FirstDetTime$f = Xlcl$FirstDetTime$f   # For VTS - JFR 1/27/94
+    PUTrmt$FirstDetTime$f                      # For VTS - JFR 1/27/94
+   }
+ 
+#$% set RMT detection type
+rmt$DetectionType$i     = lcl$DetectionType$i
+PUTrmt$DetectionType$i
+ 
+#$% set time reported
+rmt$TimeReported$f      = time                 # For VTS - JFR 1/27/94
+PUTrmt$TimeReported$f                          # For VTS - JFR 1/27/94
+ 
+#$% if track number is valid and RMT number is zero
+if (itn != 0 & Xrmt$TrackNumber$i == 0)
+   {
+    #$% set track number
+    rmt$TrackNumber$i = itn
+    PUTrmt$TrackNumber$i
+   }
+ 
+#$% if not active
+if (iact == $no)                                # if passive detection
+   {
+    #$% get orig. latitude
+    rmt$OrigLat$f           = Xlcl$OrigLat$f
+    PUTrmt$OrigLat$f
+ 
+    #$% get orig. longitude
+    rmt$OrigLon$f           = Xlcl$OrigLon$f
+    PUTrmt$OrigLon$f
+ 
+    #$% if ESM detection
+    if (lcl$DetectionType$i == $ESM$code)       # ESM detection
+       {
+        #$% get update time
+        rmt$UpTime$f            = Xlcl$UpTime$f # For VTS - JFR 1/27/94
+        PUTrmt$UpTime$f                         # For VTS - JFR 1/27/94
+ 
+        #$% get downtime
+        rmt$DownTime$f          = Xlcl$DownTime$f # For VTS - JFR 1/27/94
+        PUTrmt$DownTime$f                         # For VTS - JFR 1/27/94
+ 
+        #$% get fingerprint list
+        rmt$FingerPrinted$i     = Xlcl$FingerPrinted$i
+        PUTrmt$FingerPrinted$i
+ 
+        #$% get emitter pointer
+        rmt$EmitterPntr$i       = Xlcl$EmitterPntr$i
+        PUTrmt$EmitterPntr$i
+ 
+        rmt$BrgError$I  =Xlcl$BrgError$i        # ESM brg.err.  9/30/85
+        PUTrmt$BrgError$i                               #       9/30/85
+       }
+    else                                        # Passive sonar detections
+       {
+        #$% if passive bistatic detection
+        if ( RMT$LastDetType$I == $Bistatic$Type )
+            {
+             putRMT$EllipseMajorAxis$I (xLCL$MajorAxis$I)
+             putRMT$EllipseMinorAxis$I (xLCL$MinorAxis$I)
+             putRMT$EllipseOrientation$I (xLCL$Orientation$I)
+            }
+ 
+        #$% get acoustic communication
+        rmt$AcousticComm$i      = Xlcl$AcousticComm$i
+        PUTrmt$AcousticComm$i
+ 
+        rmt$OMNIflag$i          =Xlcl$OMNIflag$i        #       7/7/83
+        PUTrmt$OMNIflag$i                               #       7/7/83
+ 
+        rmt$BrgError$I  =Xlcl$BrgError$i                #       9/15/83
+        PUTrmt$BrgError$i                               #       9/15/83
+ 
+        rmt$TMAflag$i           =Xlcl$TMAflag$i         #       7/7/83
+        if(rmt$TMAflag$i != $NO)                        #       7/7/83
+         {
+          PUTrmt$TMAflag$i                              #       7/7/83
+ 
+         if (newtrk == $YES)         # joa 8/98 (E2020) only put info on new track
+            {
+            #$% get class
+            rmt$Class$i             = Xlcl$Class$i
+            PUTrmt$Class$i
+            }
+ 
+          rmt$TargetID$I        =Xlcl$TargetID$I        #       8/22/83
+          PUTrmt$TargetID$I                             #       8/22/83
+          rmt$TMAQuality$i      =Xlcl$TMAQuality$i      #       7/7/83
+          PUTrmt$TMAQuality$i                           #       7/7/83
+          rmt$TMAlat$F          =Xlcl$TMAlat$F          #       7/7/83
+          PUTrmt$TMAlat$F                               #       7/7/83
+          rmt$TMAlon$F          =Xlcl$TMAlon$F          #       7/7/83
+          PUTrmt$TMAlon$F                               #       7/7/83
+          rmt$Range$f           = Xlcl$Range$f          #       8/16/83
+          PUTrmt$Range$f                                #       8/16/83
+          rmt$Course$i          = Xlcl$Course$i         #       8/16/83
+          PUTrmt$Course$i                               #       8/16/83
+         }
+ 
+        #$% get broadband
+        rmt$BroadBand$i         = Xlcl$BroadBand$i
+        PUTrmt$BroadBand$i
+ 
+        #$% get echo frequency
+        rmt$EchoFreq$i          = Xlcl$EchoFreq$i
+        PUTrmt$EchoFreq$i
+ 
+        #$% get sonobuoy
+        rmt$SonoBuoyNbr$i       = Xlcl$SonoBuoyNbr$i
+        PUTrmt$SonoBuoyNbr$i
+ 
+        #$% get SL field
+        rmt$sl$Field$i          = Xlcl$sl$Field$i
+        PUTrmt$sl$Field$i
+ 
+        #$% get ship characteristics pointer
+        rmt$ShcPntr$i           = Xlcl$ShcPntr$i
+        PUTrmt$ShcPntr$i
+ 
+        rmt$Speed$i             = Xlcl$Speed$i
+        PUTrmt$Speed$i
+ 
+        #$% get prop mode
+        rmt$PropMode$i          = Xlcl$PropMode$i
+        PUTrmt$PropMode$i
+       }
+   }
+else                                            # Active detections
+   {
+    #$% if active bistatic detection
+    if ( RMT$LastDetType$I == $Bistatic$Type )
+         {
+          putRMT$BrgError$I (xLCL$BrgError$I)
+          putRMT$EllipseMajorAxis$I (xLCL$MajorAxis$I)
+          putRMT$EllipseMinorAxis$I (xLCL$MinorAxis$I)
+          putRMT$EllipseOrientation$I (xLCL$Orientation$I)
+         }
+ 
+    #$% get apparent latitude
+    rmt$ApparentLat$f       = Xlcl$ApparentLat$f
+    PUTrmt$ApparentLat$f
+ 
+    #$% get apparent longitude
+    rmt$ApparentLon$f       = Xlcl$ApparentLon$f
+    PUTrmt$ApparentLon$f
+ 
+    #$% get range
+    rmt$Range$f             = Xlcl$Range$f
+    PUTrmt$Range$f
+ 
+    if (newtrk == $YES)         # joa 8/98 (E2020) only put info on new track
+        {
+        #$% get class
+        rmt$Class$i             = Xlcl$Class$i
+        PUTrmt$Class$i
+        }
+ 
+    #$% get speed
+    rmt$Speed$i             = Xlcl$Speed$i
+    PUTrmt$Speed$i
+ 
+    #$% get course
+    rmt$Course$i            = Xlcl$Course$i
+    PUTrmt$Course$i
+ 
+    #$% if aircraft
+    if (rmt$Class$i == $Air$code)
+       {
+        #$% GET ALTITUDE
+        rmt$Altitude$i      = Xlcl$Altitude$i
+        PUTrmt$Altitude$i
+ 
+        #$% get composition
+        rmt$Composition$i   = Xlcl$Composition$i
+        PUTrmt$Composition$i
+       }
+   }
+ 
+ # if this is an active track and a possible AEG target
+ if ((AEG_target == $yes) & (Iact == $yes))
+    {
+     # if this LCL track already has an assoc. AEG, then return
+     LCL$AssocAEGIndex$I = xLCL$AssocAEGIndex$I
+     if (LCL$AssocAEGIndex$I != 0) return
+ 
+     # if the target is being deleted, skip it
+     if (xUNT2$Status$I == $BeingDeleted$Code) return
+ 
+     # check to see if the detector is an AEGIS type ship
+     UNT$Pointer$To indxdr
+     if (xUNT$Type$I == $Surface$Code)
+        {
+         SHC$Pointer = xUNT$SHCPntr$I
+         if (xSHC$AEGISType$I == $yes)
+            {
+             call Prep_AEG_slot (UNT$Pointer,RMT$Pointer,
+                                 xSHC$TrackLimit$I,lcl$Detectee$i)
+             if (trace$visual != $no)
+                {
+                 call echor
+                 call echov (" Filling an AEG slot.  ")
+                 call echor
+                }
+            } # end if vessel is an AEGIS type
+        } # end if detector is a surface vessel
+    } # end if this is an active detection and a possible AEG track
+
+return
+end
+
+Subroutine LCLTID (indxdr,indxtg,id)
+ 
+BBcommon
+integer     indxdr, indxtg, id
+BBdeclare  (UNT$Pointer, LCL$Pointer,
+            LCL$NextIndx$i, LCL$DetectionType$i, LCL$TargetId$i)
+ 
+unt$pointer$to indxdr
+ 
+#$% get LCL next index
+lcl$NextIndx$i = xunt$FirstLclIndx$i
+ 
+#$% wjile LCL next index is valid
+while (lcl$NextIndx$i != 0)
+   {
+    #$% set LCL index to next pointer
+    lcl$pointer$to lcl$NextIndx$i
+    lcl$NextIndx$i = xlcl$NextIndx$i
+ 
+    #$% if detectee is not target, get next
+    if (xlcl$Detectee$i != indxtg) next
+ 
+    #$% get detection type
+    lcl$DetectionType$i = xlcl$DetectionType$i
+ 
+    #$% if detection type is not active visual or active non visual, get next
+    if (lcl$DetectionType$i != $ActiveVisual$code  &
+        lcl$DetectionType$i != $ActiveNonVisual$code) next
+ 
+    #$% set target ID
+    lcl$TargetId$i = id
+    #$% store target ID
+    PUTlcl$TargetId$i
+ 
+    #$% break loop
+    break
+   }
+ 
+return
+end
+ 
+
+Subroutine RMTAGE
+ 
+BBcommon
+integer     itmold, RMT$Pointer
+ 
+itmold = game$time - Minutes$To$Old  # For VTS - JFR 1/27/94
+ 
+for (rmt$pointer$first;rmt$pointer$valid;rmt$pointer$next)
+   {
+    if (xrmt$DetectionAge$i == $old$code)  next         # already old, get next
+ 
+    if (xrmt$LastDetTime$f >= itmold)  next             # not old yet, get next# For VTS - JFR 1/27/94
+ 
+    PUTrmt$DetectionAge$i ($old$code)                   # set age to old
+   }
+ 
+return
+end
+ 
+
+Subroutine COROWN(lcl$pointer,iview)
+ 
+BBcommon
+integer     iview, idummy, noroom
+BBdeclare  (LCL$Pointer, LCL$Detectee$i, LCL$LastDetTime$f,
+            LCL$Class$i, LCL$Remaining$i,
+            OWN$Pointer)
+ 
+lcl$Detectee$i = xlcl$Detectee$i
+ 
+call FNDOWN(own$pointer,lcl$detectee$i,idummy,noroom)
+ 
+if (noroom != $no) return                       # if no room, return
+ 
+lcl$LastDetTime$f = xlcl$LastDetTime$f          # get last detection time # For VTS - JFR 1/27/94
+ 
+if (xown$Unit$i == 0)                           # if new
+   {
+    PUTown$Unit$i   (xlcl$Detectee$i)           # set own unit to detectee
+    PUTown$View$i   (iview)                     # set view
+    PUTown$Type$i   ($CruiseMissile$code)       # set type to cruise missile
+   }
+ 
+#$% if last detection time does not exceed time observed, return
+if (lcl$LastDetTime$f <= xown$TimeObserved$f)  return # For VTS - JFR 1/27/94
+ 
+PUTown$TimeObserved$f (lcl$LastDetTime$f)       # set time observed # For VTS - JFR 1/27/94
+ 
+#$% if last detection time does not exceed time reported, return
+if (lcl$LastDetTime$f <= xown$TimeReported$f)  return # For VTS - JFR 1/27/94
+ 
+lcl$Class$i = xlcl$Class$i                      # get class
+ 
+if (lcl$Class$i == $air$code)                   # if aircraft
+   {
+    PUTown$Altitude$i (xlcl$Altitude$i)         # get altitude
+ 
+    lcl$Remaining$i = Xlcl$Remaining$i          # jb    8/17/90
+    PUTown$NbrAc$i (lcl$Remaining$i )           # jb    8/17/90
+   }    # End if CLASS is $Air$Code
+ 
+PUTown$Latitude$f (xlcl$ApparentLat$f)          # set apparent latitude
+PUTown$Longitude$f (xlcl$ApparentLon$f)         # set apparent longitude
+PUTown$Speed$i (xlcl$Speed$i)                   # set speed and store`
+PUTown$Course$i (xlcl$Course$i)                 # set course and store
+ 
+return
+end
+
+Subroutine Obtain_View_Track_Nbr (_
+              VUE$Pointer,        # in:  Pointer to the VUE table entry
+              detection_type,     # in:  detection type code (bbcode.def table 1.0)
+              unit_class,         # in:  unit type code (bbcode.def table 3.0)
+              new_track_number)   # out: the next avail track number (-1 if n/a)
+#############################################################################
+#
+#    Purpose:  Obtain_View_Track_Nbr will return the next available track
+#              sequence number for the type of detection.  The track numbers
+#              are sequenced by view and kept track of using queues.  The
+#              appropriate queue will be access and the head index will be
+#              updated.  The head and tail indexes will be compared to make
+#              sure there is an available track number.
+#
+#    Called By:
+#
+#    Calls:     None
+#
+#    Tables:    VUE
+#
+#    Date:      14-Sept-1994
+#
+#    Author:    Carol Kropp
+#
+#    Modifed:   Dane Wills  - 8/18/99 (KBSC)
+#               Revised logic to see if FORTRAN confised by track number assignment
+#               logic of Increment/decriment procedure.
+#
+#               Susan Miller - 6/7/95 (E1413)
+#               When no track number is available send a message to
+#               the wargame terminal.
+#
+#               John McCormick - 4/98 (E1950)
+#               Warning can obscur SWAR information when there are many
+#               track without numbers, so send a summary on track table full.
+#
+#               Dane Wills - 11/99 (E2172)
+#               Revised to utilize larger number (5 digits) of tracks
+#
+#############################################################################
+BBcommon
+ 
+integer  VUE$Pointer, detection_type, unit_class, new_track_number
+integer  VUE$TK$Index, initial_index, VUE$TK$LastAvail$I
+ 
+integer  Err_Cycle_Count[VUE$Slots] / VUE$Slots * 0 /
+integer  iVUE, istart, iend, VUE_TK_Index
+ 
+ 
+new_track_number = -1       # initialize the value to be not available
+ 
+VUE$TK$Index = VUE_TK_Index (Detection_Type, Unit_Class)
+ 
+if (VUE$TK$Index == 0) return
+ 
+initial_index       = xVUE$TK$NextNumber$I
+VUE$TK$LastAvail$I  = xVUE$TK$LastAvail$I
+ 
+if (initial_index > Number$Track$Alloc |    # time to wrap-around...
+    initial_index > VUE$TK$LastAvail$I  )   # any left in this block...
+    {
+    # At this point, we are out of numbers.
+    # Either it is time to wrap around and restart at 1, or
+    # we already have, and the next "block" of available numbers is run out
+ 
+    if (VUE$TK$LastAvail$I >= Number$Track$Alloc) # Time to wrap-around
+        VUE$TK$LastAvail$I = 1
+    else
+        VUE$TK$LastAvail$I = VUE$TK$LastAvail$I + 1
+ 
+    # Now, go look for a block of unused track numbers
+    # between VUE$TK$LASTAVAIL$I and NUMBER$TRACK$ALLOC
+ 
+    call find_free_tk_nbrs (vue$pointer, VUE$TK$Index,
+                            VUE$TK$LASTAVAIL$I, NUMBER$TRACK$ALLOC,
+                            istart, iend)
+ 
+    if (istart <= iend)     # Successful ?
+        {
+        VUE$TK$LastAvail$I  = iend
+        putVUE$TK$LastAvail$I
+ 
+        initial_index       = istart
+        }
+    }
+ 
+if (initial_index <= VUE$TK$LASTAVAIL$I)
+    {
+    new_track_number = initial_Index
+    }
+ 
+putVUE$TK$NextNumber$I (initial_index + 1)
+ 
+ 
+if (new_track_number == -1) # SMM 6/7/95 (E1413)
+    {
+    iVUE = VUE$Pointer$Index
+ 
+    if(ERR_Cycle_Count[iVUE] != Cycle$Count) # jhm 4/23/98 (E1950)
+        {
+        ERR_Cycle_Count[iVUE] = Cycle$Count  #jhm 4/23/98
+ 
+        # Only one message per minute
+ 
+        call echor
+        call echov ("RMT Track Number OVERFLOW, view #")
+        call echoi (iVUE)
+        call echov (", out of ")
+        call echoi (Number$Track$Alloc)
+        call echo ($bell)
+        }  # end if new to this view
+    }  # end if no new number
+ 
+return
+end
+
+ 
+Subroutine Free_View_Track_Nbr (_
+              VUE$Pointer,      # in: Pointer to the VUE table entry
+              detection_type,   # in: detection type code (bbcode.def table 1.0)
+              unit_class,       # in: unit type code (bbcode.def table 3.0)
+              track_number)     # in: the track number
+#############################################################################
+#
+#    Purpose:  Free_View_Track_Nbr will reset the track sequence number
+#              in the track subtable of the VUE entry to available.
+#
+#    Called By: Zero_RMT_Entry   <wgmdrem.rat>
+#
+#    Calls:     None
+#
+#    Tables:    VUE
+#
+#    Date:      21-Sept-1994
+#
+#    Author:    Carol Kropp
+#
+#    Modified:  Dane Wills, 11/99 (E2172)
+#               Available Track Numbers are no longer maintained in an
+#               array. This logic is no longer required.
+#               All of the places that call this routine are being left
+#               alone, for future consideration.
+#
+#############################################################################
+BBcommon
+ 
+integer  VUE$Pointer, detection_type, unit_class, track_number
+ 
+return
+end
+
+ 
+subroutine find_free_tk_nbrs (vue$pointer, existing_TK_Index,
+                              from_number, thru_number, istart, iend)
+BBcommon
+integer     vue$pointer, Existing_TK_Index,
+            from_number, thru_number, istart, iend
+ 
+byte        used[ $Hi_VUE$TK$NextNumber$I ]
+integer     ifree, icnt, kk, jj, LastRMT, itry, c_min, c_opt,
+            in_free, in_cnt, tk_index, vue_tk_index, u_cnt
+logical     iused, ibreak, last_chance
+BBdeclare  (RMT$pointer, RMT$DetectionType$i, RMT$Class$i, RMT$TrackNumber$i)
+ 
+integer     t_call / 0  /
+integer     c_limit / 100 /
+integer     a_calls / 0 /
+integer     v_calls[vue$slots,0:vue$tk$slots], mm
+VMSchar     msg*100
+ 
+#------------------------------
+# Record/Report some statistics
+ 
+if (game$minute != t_call)
+    {
+    if (t_call != 0 & a_calls > c_limit)
+        {
+        # report last minute's info
+ 
+        mm = 0
+        call vmovv ("@@@",              msg, mm)
+        call vmovi (t_call,             msg, mm)
+        call vmovv (" Find-TK ",        msg, mm)
+        call vmovi (a_calls,            msg, mm)
+ 
+        for (kk = 1; kk <= vue$slots; kk = kk + 1)
+            {
+            if (v_calls[kk,0] == 0) next
+ 
+            call vmovv (", V",          msg, mm)
+            call vmovi (kk,             msg, mm)
+            call vmovv (" w/",          msg, mm)
+            call vmovi (v_calls[kk,0],  msg, mm)
+            call vmovv ("(",            msg, mm)
+            for (jj = 1; jj <= vue$tk$slots; jj = jj + 1)
+                {
+                if (jj > 1)
+                    call vmovv ("/",            msg, mm)
+                if (v_calls[kk,jj] > 0)
+                    call vmovi (v_calls[kk,jj], msg, mm)
+                }
+            call vmovv (")",            msg, mm)
+            }
+ 
+        call echor
+        call echov (msg[1:mm])
+        }
+ 
+    t_call = game$minute
+    a_calls = 0
+    for (kk = 1; kk <= vue$slots; kk = kk + 1)
+        {
+        for (jj = 0; jj <= vue$tk$slots; jj = jj + 1)
+            {
+            v_calls[kk,jj] = 0
+            }
+        }
+    }
+ 
+kk = vue$pointer$index
+jj = existing_TK_Index
+ 
+a_calls         = a_calls + 1           # Count all calls
+v_calls[kk, 0]  = v_calls[kk,0] + 1     # count VUE calls
+v_calls[kk,jj]  = v_calls[kk,jj] + 1    # Count VUE/Class Calls
+ 
+#------------------------------
+# Set flags for Error condition
+ 
+istart = 1
+iend   = 0
+ 
+#------------------------------
+# Clear all workspace
+ 
+ifree  = 0
+icnt   = 0
+ 
+for (kk = 1; kk <= Thru_Number; kk = kk + 1)
+    {
+    used [ kk ] = $no
+    }
+ 
+ 
+#------------------------------
+# Look for used track numbers
+ 
+rmt$pointer$to Xvue$LastRmtIndx$i
+lastrmt = rmt$pointer
+u_cnt = 0
+ 
+#$% for each RMT entry in this VUE
+for (rmt$pointer$to Xvue$FirstRmtIndx$i; rmt$pointer<=lastrmt; rmt$pointer$next)
+    {
+    if (Xrmt$InUse$i == $no) next                   # if slot not in use
+ 
+    RMT$DetectionType$i = xRMT$DetectionType$i
+    RMT$Class$i         = xRMT$Class$i
+ 
+    tk_index = VUE_TK_Index (RMT$DetectionType$i, RMT$Class$i)
+ 
+    if (Existing_tk_index != tk_index) next         # If not same Sequence
+ 
+    RMT$TrackNumber$i = xRMT$TrackNumber$i
+ 
+    used[RMT$TrackNumber$i] = $Yes
+    u_cnt = u_cnt + 1
+    }
+ 
+#------------------------------
+# Look for block of unused numbers
+ 
+# ifree/icnt will be the start/length of largest block of free numbers
+ 
+c_min = 10                                  # Minimum size of block
+c_opt = 100                                 # Stop looking if this many
+ 
+ifree   = 0         # Largest block
+icnt    = 0
+in_free = 0         # working values
+in_cnt  = 0
+ 
+for (kk = 0; kk < Thru_Number; kk = kk + 1)
+    {
+    itry = kk + From_Number
+ 
+    ibreak = (itry > Thru_Number)           # are we at the end of the sequence
+    if (ibreak)
+        {
+        itry = 1
+        }
+ 
+    iused = (used[itry] != $no)             # Is this one used
+    last_chance = (kk+1 >= thru_number)
+ 
+    if (ibreak | iused | last_chance)       # time to asess where we are
+        {
+        if (in_free != 0)                   # in a free block?
+            {
+            if (in_cnt > icnt)              # was that a longer block?
+                {
+                ifree = in_free
+                icnt  = in_cnt
+                }
+ 
+            if (icnt > c_opt) break         # we have a very healthy block
+ 
+            in_free = 0
+            in_cnt  = 0
+            }
+ 
+        if (ibreak      &                   # at the end of the sequence AND
+            icnt >= c_min ) break           # a big-enough block
+        }
+ 
+    if (! iused)
+        {
+        if (in_free == 0)
+            {
+            in_free = itry
+            in_cnt  = 0
+            }
+ 
+        in_cnt = in_cnt + 1
+        }
+ 
+    } # end loop through one complete pass
+ 
+if (ifree != 0)                             # Any free numbers ?
+    {
+    istart = ifree
+    iend   = ifree + icnt - 1
+    }
+ 
+return
+end

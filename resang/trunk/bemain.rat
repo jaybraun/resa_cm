@@ -1,0 +1,1055 @@
+ 
+#####   WES version 3.1 converted to the VAX11/780   dated-12feb82
+ 
+#############################################################################
+# This program allows the user to create a sonar environment file.
+#
+# The environment file is created by reading a text file containing the
+# environment information and storing it into the xxxxx.env file in a format
+# that WES can use.  The format of the input file is the same as the output
+# file created by pemain(Print Environment.)
+#
+# This program uses the software tools routines.
+#
+# The environment file consists of 22 records of 360 long words.  All of the
+# data is numeric except the names(types) of the sonars and sonobuoys.
+# The sonobuoy types are in record number 1, and the sonars are in record
+# number 22.  Records 2 - 21 contain propagation loss data which is all
+# numeric.  There is a max of 20 sonars and 20 sonobuoys allowed in WES at this
+# date - 12feb82.  There is some space remaining in records 1 and 22.  The
+# other records are full.  The "type" specifications now fill 2 long words.
+# Additional information may be found in wildenv.rat, or pemain.rat.
+#
+#   Modified 2-Aug-2000 DEW
+#   -   Changed references of ALMOSTEQUAL to ALMOSTEQUAL_HV
+#
+#############################################################################
+ 
+
+ 
+#$%     MODULE                         UTILITY                     DATA
+#$%   SUBROUTINES                    SUBROUTINES                  TABLES
+#$%   ===========                    ===========                  ======
+#$%
+#$%     BLDVENV                         ECHOH
+#$%     SONIC                           ECHOR
+#$%     NUMFREQ                         ECHOI
+#$%     SONOBY                          GET_LN
+#$%     SONARS
+#$%     FREQ
+#$%     NOISE
+#$%     SBYDAT
+#$%     SNRDAT
+#$%     PROP
+#$%     BEINIT
+#$%     BUFOUT
+#$%
+#$%
+#$%
+#$%
+#$%   NOTES
+#$%   =====
+#$%
+#$%   1.  UTILITY SUBROUTINES ARE NOT SHOWN ON FLOWCHART.
+#$%
+#$%
+#$%
+#$%   FLOWCHART FOR PLOT IS IN BEMAIN.HIR
+#$%   ===================================
+#$%
+#$%
+ 
+define(EnvCommon,
+ 
+integer  ibuf[23,360],numsby,numsnr,numfreq,lfc
+character file9[ARB],file2[ARB],line[132],type[ARB]
+vmschar*ARB file2_v
+equivalence (file2, file2_v)
+ 
+real buf[23,360]
+equivalence (buf,ibuf)
+ 
+common   /scratch_env1/ibuf,numsby,numsnr,numfreq,lfc
+common   /scratch_env2/file9,file2,line,type
+	)
+ 
+include "ascii.inc"
+include "macros.inc"
+define ($YES,1)
+define ($NO,0)
+define (bbimplicit, implicit none)
+
+ 
+program bldenv
+ 
+#######################################################################
+#$%
+#$% Purpose:   BLDENV controls the creation of an environment file
+#$%
+#$%
+#$% Called By:
+#$%
+#$% Calls:     BINIT    SONIC    NUMFRQ   SONOBY    SONARS    FREQ
+#$%            NOISE    SBYDAT   SNRDAT   PROP      GET_LN    ECHOR
+#$%            ECHOH    BUFOUT   CLOSE
+#$%
+#$% Tables:    NONE
+#$%
+#$% Date:      FEB 82
+#$%
+#$% Author:    DONGOD
+#$%
+###########################################################################
+implicit none
+EnvCommon
+integer    almostequal_vh                     #integer funct to compare strings
+ 
+external   close                           # jb E2149  1/11/00
+integer    IEOF, IEXIT, ISTRT
+ 
+call initr4
+ 
+ieof = $no                                 #end of file pre set to no
+ 
+call help_pgm(1,
+              "envbld: build sonar environment tables from ascii file with .tab extension",
+              "envbld Tags: Environment, Sonar",
+              "Usage: envbld <sonar file without .tab extension>",
+              "",
+              "",
+              "",
+              "",
+              "Example: envbld keas1")
+ 
+call beinit(iexit)                         #initialization
+ 
+istrt = 1                                  #position in string
+ 
+repeat                                    #repeat for header lines in text file
+    {
+     if (     almostequal_vh ('SONIC LAYER DEPTH',         line[istrt]) == YES )
+        call sonic
+ 
+     else if (almostequal_vh ('NUMBER OF FREQUENCIES',     line[istrt]) == YES )
+        call numfrq
+ 
+     else if (almostequal_vh ('NUMBER OF ACTIVE SONOBUOYS',line[istrt]) == YES )
+        call sonoby
+ 
+     else if (almostequal_vh ('NUMBER OF ACTIVE SONARS',   line[istrt]) == YES )
+        call sonars
+ 
+     else if (almostequal_vh ('FREQUENCIES',               line[istrt]) == YES )
+        call freq
+ 
+     else if (almostequal_vh ('AMBIENT NOISE',             line[istrt]) == YES )
+        call noise
+ 
+     else if (almostequal_vh ('ACTIVE SONOBUOY DATA',      line[istrt]) == YES )
+        call sbydat
+ 
+     else if (almostequal_vh ('ACTIVE SONAR DATA',         line[istrt]) == YES )
+        call snrdat
+ 
+     else if (almostequal_vh ('PROPAGATION LOSS DATA',     line[istrt]) == YES )
+        call prop
+ 
+     call get_ln(istrt,ieof)              #get head line of input from txt file
+ 
+     #$% continue till end of file or exit
+    }until(ieof == YES | iexit == YES)
+ 
+#$% if at end of file
+if (ieof == YES)
+    {
+     #$% display message to user
+     call echor
+     call echov  ('Successful Run.  End of Environment File Build.')
+     call echor
+     call bufout                                    #output array to file
+     call close(lfc)                                #close input file
+    }
+ 
+end
+ 
+
+ 
+ 
+subroutine get_ln(istrt,ieof)
+ 
+#######################################################################
+#$%
+#$% Purpose:   GET_LN gets a line of input from the text file
+#$%
+#$%
+#$% Called By: BLDENV    FREQ    NOISE    SBYDAT    SNRDAT     PROP
+#$%
+#$% Calls:     UPPER
+#$%
+#$% Tables:    NONE
+#$%
+#$% Date:      FEB 82
+#$%
+#$% Author:    DONGOG
+#$%
+###########################################################################
+implicit none
+Envcommon
+ 
+integer    getlin,stat             #integer function getlin
+integer    IEOF, ISTRT, I, K
+ 
+#$% initialize end of file flag and start
+ieof   = $no
+istrt = 1                          #position in string
+ 
+do i =1,132                            #set line to blanks
+    {
+     line[i] = $space
+    }
+ 
+repeat                                  #get a valid line
+    {
+     stat = getlin(line,lfc)            #stat=# of chars or eof
+ 
+     if (stat == eof)                   #if end of file
+         {
+          ieof = $yes                   #set flag
+          break                         #and break loop
+         }
+ 
+     if (stat == 0)                     #if no char in line
+         next                           #get next line
+ 
+     for (k=1; k<=stat; k=k+1)          #delete any NULLs
+         {
+          if (line[k] == $NULL) line[k] = $space
+         }
+ 
+     call upper(line)                   #convert to upper case
+ 
+     for (istrt=1; istrt<=stat; istrt=istrt+1) #delete leading blanks
+         {
+          if (line[istrt] != $space)
+              break
+         }
+ 
+     if (istrt == stat)                 #if entire line is blank
+         next                           #get next line
+ 
+     else if (line[istrt] == $POUND)       #if line is a comment
+         next                           #get next line
+ 
+     else                               #otherwise valid line
+         break                          #so...return with it
+ 
+    }until (ieof == $yes)               #until end of file
+ 
+return
+end
+ 
+
+ 
+subroutine sonic             #get sonic layer depth and store in array
+ 
+#######################################################################
+#$%
+#$% Purpose:   SONIC gets sonic layer depth and stores it in the array
+#$%
+#$%
+#$% Called By: BLDENV
+#$%
+#$% Calls:     ECHOH    ECHOR
+#$%
+#$% Tables:    NONE
+#$%
+#$% Date:      FEB 82
+#$%
+#$% Author:    DONGOG
+#$%
+###########################################################################
+implicit none
+envcommon
+integer  ctoi                #integer funct Convert char TO Integer
+integer  LOC, INDEX_V, IDEPTH
+ 
+ 
+loc = index_v(line,"=")        #find the location of '=' in line
+                             # E2281 JOA UFL02 - replace index with index_v
+idepth = ctoi(line,loc+1)    #Convert sonic layer depth to Integer
+ 
+if (idepth == 0)             #error on input
+     {
+      #$% display warning message to user
+      call echor
+      call echov  ('Sonic layer depth input is zero.')
+      call echor
+     }
+ 
+ibuf[1,1] = idepth           #store sonic layer depth in buffer
+ 
+return
+end
+ 
+
+ 
+subroutine numfrq            #get number of frequencies and store in array
+ 
+###########################################################################
+#$%
+#$% Purpose:   NUMFRQ gets the number of frequencies and stores in the array
+#$%
+#$%
+#$% Called By: BLDENV
+#$%
+#$% Calls:
+#$%
+#$% Tables:    NONE
+#$%
+#$% Date:      FEB 82
+#$%
+#$% Author:    DONGOG
+#$%
+###########################################################################
+implicit none
+envcommon
+integer  ctoi                #integer funct Convert char TO Integer
+integer  LOC, INDEX_V
+ 
+loc = index_v(line,"=")        #find the location of = in line
+ 
+numfreq = ctoi(line,loc+1)   #Convert number of frequencies to Integer
+ 
+if (numfreq == 0)            #error on input
+     {
+      #$% display warning message to user
+      call echor
+      call echov  ('Number of frequencies input is zero.')
+      call echor
+     }
+ 
+if (numfreq != 20)           #WES requires 20 frequencies
+     {
+      #$% display warning message to user
+      call echor
+      call echov  ('Number of frequencies input is ')
+      call echor
+      call echoi (numfreq)
+      call echor
+      call echov  ('Expecting number of frequencies to be 20.')
+      call echor
+     }
+ 
+ibuf[1,2] = numfreq            #store number of frequencies in buffer
+ 
+return
+end
+ 
+
+ 
+subroutine sonoby
+ 
+###########################################################################
+#$%
+#$% Purpose:   SONOBY gets the number of sonobuoys and stores it in an array
+#$%
+#$%
+#$% Called By: BLDENV
+#$%
+#$% Calls:     ECHOR    ECHOH
+#$%
+#$% Tables:    NONE
+#$%
+#$% Date:      FEB 82
+#$%
+#$% Author:    DONGOG
+#$%
+###########################################################################
+implicit none
+envcommon
+integer  ctoi                #integer funct Convert char TO Integer
+integer  LOC, INDEX_V
+ 
+loc = index_v(line,"=")        #find the location of = in line
+ 
+numsby = ctoi(line,loc+1)    #Convert number of sonobuoys to Integer
+ 
+if (numsby == 0)             #error on input
+     {
+      #$% display warning message to user
+      call echor
+      call echov  ('Number of sonobuoys input is zero.')
+      call echor
+     }
+else if (numsby > 106)		#error on input
+     {
+      #$% display warning message to user
+      call echor
+      call echov  ('Number of sonobuoys exceeds 106.')
+      call echor
+ 
+      pause "You will have to cut down the number of Sonobuoys"
+     }
+ 
+ibuf[1,3] = numsby           #store number of sonobuoys in buffer
+ 
+return
+end
+ 
+
+ 
+subroutine sonars
+ 
+###########################################################################
+#$%
+#$% Purpose:   SONARS gets number of active sonars and stores in an array
+#$%
+#$%
+#$% Called By: BLDENV
+#$%
+#$% Calls:     ECHOH    ECHOR
+#$%
+#$% Tables:    NONE
+#$%
+#$% Date:      FEB 82
+#$%
+#$% Author:    DONGOG
+#$%
+###########################################################################
+implicit none
+envcommon
+integer  ctoi                #integer funct Convert char TO Integer
+integer  LOC, INDEX_V
+ 
+loc = index_v(line,"=")        #find the location of = in line
+ 
+numsnr = ctoi(line,loc+1)    #Convert number of sonars to Integer
+ 
+if (numsnr == 0)             #error on input
+     {
+      #$% display warning message to user
+      call echor
+      call echov  ('Number of sonars input is zero.')
+      call echor
+     }
+else if (numsnr > 48)		#error on input
+     {
+      #$% display warning message to user
+      call echor
+      call echov  ('Number of sonars exceeds 48.')
+      call echor
+ 
+      pause "You will have to cut down the number of Sonars"
+ 
+      stop "There is no way to continue"
+ 
+      1984 continue 	# dummy statement label to avoid compiler warning
+     }
+ 
+ibuf[1,4] = numsnr           #store number of sonars in buffer
+ 
+return
+end
+ 
+
+ 
+subroutine freq              #get frequencies and store in array
+ 
+###########################################################################
+#$%
+#$% Purpose:   FREQ gets number of sonar frequencies and stores in an array
+#$%
+#$%
+#$% Called By: BLDENV
+#$%
+#$% Calls:     ECHOH    ECHOR    ECHOI    GET_LN
+#$%
+#$% Tables:    NONE
+#$%
+#$% Date:      FEB 82
+#$%
+#$% Author:    DONGOG
+#$%
+###########################################################################
+implicit none
+envcommon
+integer  ctoi                #integer funct Convert char TO Integer
+integer  ISTRT, IEOF, J, I, IFREQ
+ 
+call get_ln(istrt,ieof)      #get next line with frequencies on it
+ 
+if (ieof == YES)             # if end of file return
+    return
+ 
+j = 1                                     #j = position in line
+ 
+do i = 1,numfreq                          #for the number of frequencies
+    {                                     #numfreq should be 20
+     ifreq = ctoi(line,j)                 #get integer value of frequency
+ 
+     if (ifreq == 0)                      #unexpected end of input
+         {
+          #$% display warning message to user
+          call echor
+          call echov  ('Only ')
+          call echoi (i-1)
+          call echov  (' frequencies in the input file.')
+          call echor
+          call echov  ('Expecting ')
+          call echoi (numfreq)
+          call echor
+          break
+         }
+ 
+     ibuf[1,i+4] = ifreq                  #store in ibuf[1,5-24]
+    }
+ 
+return
+end
+ 
+
+ 
+subroutine noise             #get 20 ambient noise figures and store in array
+ 
+###########################################################################
+#$%
+#$% Purpose:   NOISE gets 20 ambient noise figures and stores in an array
+#$%
+#$%
+#$% Called By: BLDENV
+#$%
+#$% Calls:     ECHOH    ECHOR    GET_LN
+#$%
+#$% Tables:    NONE
+#$%
+#$% Date:      FEB 82
+#$%
+#$% Author:    DONGOG
+#$%
+###########################################################################
+implicit none
+envcommon
+integer  ctoi                #integer funct Convert char TO Integer
+integer  ISTRT, IEOF, J, I, INOISE
+ 
+call get_ln(istrt,ieof)      #get next line with noise values in it
+ 
+if (ieof == YES)             # if end of file return
+    return
+ 
+j = 1                                     #j = position in line
+ 
+do i = 1,20                               #for 20 noise values
+    {
+     inoise = ctoi(line,j)                #get integer value of noise input
+ 
+     if (inoise == 0)                     #unexpected end of input
+         {
+          #$% display warning message to user
+          call echor
+          call echov  ('Only ')
+          call echoi (i-1)
+          call echov  (' ambient noise values in the input file.')
+          call echor
+          call echov  ('Expecting 20.')
+          call echor
+          break
+         }
+ 
+     ibuf[1,i+24] = inoise                  #store in ibuf[1,25-44]
+    }
+ 
+return
+end
+ 
+
+ 
+subroutine sbydat               #get sonobuoy data and store in array
+ 
+###########################################################################
+#$%
+#$% Purpose:   SBYDAT gets sonobuoy data and stores it in an array
+#$%
+#$% Called By: BLDENV
+#$%
+#$% Calls:     ECHOH    ECHOR    GET_LN
+#$%
+#$% Tables:    NONE
+#$%
+#$% Date:      FEB 82
+#$%
+#$% Author:    DONGOG
+#$%
+###########################################################################
+implicit none
+envcommon
+integer     getwrd, it, jpos
+real 		ctof
+real        temp
+character   char1[5]
+integer     IPOS, J, ISTRT, IEOF, ISIZE, ILEN
+ 
+ 
+ 
+#do it = 1,numsby				#		4/2/86
+for(it = 1; it <= numsby; it = it +1)		#		4/2/86
+    {
+     ipos = 1                   #position in string
+ 
+     j = 42 + (3 * it)
+ 
+     call get_ln(istrt,ieof)    #get next line with sonobuoy values in it
+ 
+     if (ieof == YES)           # if end of file return
+         return
+ 
+     type[5] = EOS
+     isize = getwrd(line,ipos,type)            #get sonobuoy type in type
+ 
+     #$% if sonobuoy type not found
+     if (isize == 0)
+         {
+          #$% display warning message to user and break
+          call echor
+          call echov  ('Sonobouy type not found.')
+          call echor
+          break                                #return
+         }
+ 
+     #$% move data into array
+ 
+     ilen = 0                                  #store in array
+     call smovhn (type[1],4,ibuf[1,J],ilen)
+     while (ilen < 4) call smovv (' ',ibuf[1,J],ilen)
+ 
+     ilen = 0
+     call smovhn(type[5],4,ibuf[1,J+1],ilen)
+     while (ilen < 4) call smovv (' ',ibuf[1,J+1],ilen)
+ 
+     ilen  = 0
+     call smovv("     ",char1,ilen)
+ 
+     isize = getwrd(line,ipos,char1)           #get range in character form
+ 
+     #$% is not found
+     if (isize == 0)
+         {
+          #$% display warning message to user and get next entry
+          call echor
+          call echov  ('Cannot find sonobuoy range')
+          call echov  (' for sonobuoy ')
+          call echohn (type,10)
+          call echor
+          next
+         }
+	jpos = 1
+	temp = ctof (char1, jpos) #change range to floating point
+ 
+      buf[1,J+2] = temp                        #store in array
+    }		#  End  FOR....				#	4/2/86
+ 
+return
+end
+ 
+
+ 
+subroutine snrdat
+ 
+###########################################################################
+#$%
+#$% Purpose:   SNRDAT gets certain sonar data  and stores it in an array
+#$%
+#$% Called By: BLDENV
+#$%
+#$% Calls:     ECHOH    ECHOR    GET_LN
+#$%
+#$% Tables:    NONE
+#$%
+#$% Date:      FEB 82
+#$%
+#$% Author:    DONGOG
+#$%
+###########################################################################
+implicit none
+envcommon
+integer     getwrd, ctoi, almostequal_vh	# rc, OTS...		4/3/86
+integer     jpos
+real		ctof
+real        temp[12]
+character   char1[5]
+integer     i, ipos, j, k9, istrt, ieof, loc
+integer     index_v, isize, ilen, idep, k, m
+ 
+ 
+#$% is sonars found
+if (numsnr > 0)
+    {
+     #$% get values of j in increments of 15
+     do i = 1,numsnr
+         {
+          ipos = 1                         #position in string
+ 
+          j = 15 * (I - 1)
+ 
+    	  if (i < 25) 			# allow 48 sonars
+    	      {
+              k9 = 22
+              j  = 15 * (I - 1)
+              }
+    	  else        			# send set of 24 in rec nbr 23
+    	      {
+              k9 = 23
+              j  = 15 * (I - 25)
+              }
+ 
+          repeat
+              {
+               call get_ln(istrt,ieof)     #get next line
+ 
+               if (ieof == YES)            # if end of file return
+                   return
+ 
+               #$% look for "-" in the line
+               loc = index_v(line,"-")
+ 
+               if (loc != 0)               #if "-" is in the line
+                   next                    #get next line
+ 
+               else if (almostequal_vh('DIP/',line[istrt]) == YES) #if a header
+                   next                    #get next line
+ 
+               else if (almostequal_vh('TYPE',line[istrt]) == YES) #if a header
+                   next                    #get next line
+ 
+               else                        #good line so go with it
+                   break
+              }
+ 
+          type[5] = EOS
+          isize = getwrd(line,ipos,type)   #get sonar type in type
+ 
+          #$% if none found
+          if (isize == 0)
+              {
+               #$% display warning message to user
+               call echor
+               call echov  ('Sonar type not found.')
+               call echor
+               break                                    #return
+              }
+ 
+          ilen = 0                                      #store in array
+          call smovhn (type[1],4,ibuf[k9,J+1],ilen)
+          while (ilen < 4) call smovv (' ',ibuf[k9,J+1],ilen)
+ 
+          ilen = 0
+          call smovhn(type[5],4,ibuf[k9,J+2],ilen)
+          while (ilen < 4) call smovv (' ',ibuf[k9,J+2],ilen)
+ 
+          idep = ctoi(line,ipos)           #get depth in idep
+ 
+          ibuf[k9,j+3] = idep              #store in array
+ 
+          do k = 1,12                      #get 12 real values
+              {
+               ilen  = 0
+               call smovv("     ",char1,ilen)
+ 
+               #$% get sonar values
+               isize = getwrd(line,ipos,char1)
+ 
+               #$% if no values found
+               if (isize == 0)
+                   {
+                    #$% display warning to user
+                    call echor
+                    call echov  ('Expecting 13 sonar values per line.')
+                    call echor
+                    call echov  ('Able to read only ')
+                    call echoi (k)
+                    call echov  (' for sonar ')
+                    call echohn (type,10)
+                    call echor
+                    next
+                   }
+ 
+			   jpos = 1
+			   temp[k] = ctof (char1, jpos) #change range to floating point
+              }
+ 
+          #$% store floating point in array
+          do m = 1,12
+              {
+               buf[k9,j+3+m] = temp[m]
+              }
+ 
+         }
+    }
+return
+end
+ 
+
+ 
+subroutine prop
+ 
+###########################################################################
+#$%
+#$% Purpose:   PROP gets propagation loss data and stores it in an array
+#$%
+#$%
+#$% Called By: BLDENV
+#$%
+#$% Calls:     ECHOH    ECHOR    GET_LN
+#$%
+#$% Tables:    NONE
+#$%
+#$% Date:      FEB 82
+#$%
+#$% Author:    DONGOG
+#$%
+###########################################################################
+implicit none
+envcommon
+integer     getwrd,ctoi,almostequal_vh,mile
+integer     jpos
+real        ctof
+real        temp[15]
+character   char1[5]
+integer     i, istrt, ieof, loc, index_v, ipos, j, isize
+integer     rc, k, m2, n, ilen
+ 
+i = 0                       #used to track the 4 prop loss groups of data
+ 
+repeat
+    {
+     repeat                           #get a valid line
+         {
+          call get_ln(istrt,ieof)     #get next line
+ 
+          loc = index_v(line,"H")       #see if H is in this line
+ 
+          if (ieof == YES)            # if end of file return
+              return
+ 
+          else if (loc != 0)          #if "H" is in the line
+              next                    #get next line
+ 
+          else if (almostequal_vh('MILE',line[istrt]) == YES) #if a header
+              {
+               i = i+1                #keep track of 4 groups of data
+               next                   #get next line
+              }
+ 
+          else                        #good line so go with it
+              break
+         }
+ 
+     ipos  = 1
+     mile  = ctoi(line,ipos)          #get integer value for mile
+     do j = 1,15
+         {
+          ilen  = 0
+          call smovv("     ",char1,ilen)
+ 
+          isize = getwrd(line,ipos,char1)     #get prop loss in char form
+ 
+          if (isize == 0)                     #if error
+              {
+               #$% display warning message to user
+               call echor
+               call echov  ('Expecting 15 prop loss values per line.')
+               call echor
+               call echov  ('Able to read only ')
+               call echoi (j-1)
+               call echov  (' for mile ')
+               call echoi (mile)
+               call echor
+               next
+              }
+    	    jpos = 1
+		    temp[j] = ctof (char1, jpos)  	#change to float point
+ 
+         }
+ 
+     k = 5*(i-1) + 1
+ 
+     m2 = 3*(mile-1)
+ 
+     do n = 1,5
+         {
+          do j = 1,3
+              {
+               buf[k+n,m2+j] = temp[(n-1)*3+j]
+              }
+         }
+    }until (ieof == YES)                      #prop loss is last in file
+ 
+return
+end
+ 
+
+ 
+ 
+subroutine beinit(iexit)                      #build environment init
+ 
+###########################################################################
+#$%
+#$% Purpose:   BEINIT initializes the environment file
+#$%
+#$% Called By: BLDENV
+#$%
+#$% Calls:     ECHO..
+#$%
+#$% Tables:    NONE
+#$%
+#$% Date:      FEB 82
+#$%
+#$% Author:    DONGOG
+#$%
+###########################################################################
+implicit none
+envcommon
+integer    open_               #integer funct to open file (s/w tool)
+integer    getlin
+integer    iexit, ilen, i, j
+integer    stat
+character  name[ARB]
+integer    getarg3
+character  argbuf(FILENAMESIZE)
+ 
+ 
+for (i=1; getarg3(i, argbuf, FILENAMESIZE) != EOF; i=i+1)
+{
+    if (argbuf[1] == MINUS)
+    {
+    	next
+    }
+    else if (argbuf[1] == EOS)
+    {
+    	next
+    }
+    else
+    {
+		ilen = 0
+		call smovhn (argbuf,ARB,name,ilen)
+		call smov   ($null,name,ilen)
+    }
+}
+if (i < 3)
+{
+	call remark("usage:  bldenv[sonar env file name w/o extension]")
+	call exit()
+}
+ 
+iexit = NO
+ 
+call echor
+call echov  ('Build the Environment File')
+call echor
+ 
+ 
+ 
+ilen = 0                                         #create file names
+call smovhn (name,ARB,file9,ilen)                  #input file
+call smovv  (".tab",file9,ilen)                #xxxxx.txt
+call smov   ($null,file9,ilen)
+ 
+ilen = 0
+call smovhn (name,8,file2,ilen)                  #output file
+call smovv  (".env",file2,ilen)                #xxxxx.env
+call smov   ($null,file2,ilen)
+ 
+lfc = open_(file9,READ)                           #open file
+ 
+#$% if error in opening the file
+if (lfc == ERR)
+    {
+     #$% display error message to user and return
+     call echor
+     call echov  ('Cannot open input file.')
+     call echor
+     iexit = YES
+     return
+    }
+ 
+do i = 1,23                                      #clear the array
+    {
+     do j = 1,360
+         {
+          ibuf[i,j] = 0
+         }
+    }
+ 
+do i =1,132                                      #set line to blanks
+    {
+     line[i] = $space
+    }
+ 
+return
+end
+ 
+
+undefine write     #undefine now since done with s/w tools routines
+undefine err
+ 
+subroutine bufout
+ 
+###########################################################################
+#$%
+#$% Purpose:   BUFOUT outputs contents of buffer to a file
+#$%
+#$% Called By: BLDENV
+#$%
+#$% Calls:     ECHOH    ECHOR
+#$%
+#$% Tables:    NONE
+#$%
+#$% Date:      FEB 82
+#$%
+#$% Author:    DONGOG
+#$%
+###########################################################################
+implicit none
+envcommon
+integer ios, i, j
+ 
+open(unit    =   2,                              # open output file
+     file    =   file2_v,
+     status  =  'unknown',
+     access  =  'sequential',
+#     dispose =  'save',
+     recl    =   360,
+     form    =  'unformatted',
+     iostat  =   ios,
+     err     =   999)
+ 
+do i = 1,23                                      #write array out
+    {
+     write(2,iostat=ios,err=888) (ibuf[i,j], j = 1,360)
+    }
+ 
+goto 2010
+ 
+#$% display writing error message to user
+888 call echor
+call echov  ('Error on writing to output file.')
+call echor
+call typerr (ios)
+call echor
+ 
+goto 2010
+ 
+#$% display file opening error to user
+999 call echor
+call echov  ('Error on opening output file.')
+call echor
+call typerr (ios)
+call echor
+ 
+2010 continue
+ 
+close(unit=2)                                  #close output file
+ 
+return
+end
+ 

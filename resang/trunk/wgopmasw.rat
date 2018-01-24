@@ -1,0 +1,2069 @@
+#      File WGOPMASW.rat - (processes PERFORM ASW commands)
+ 
+# GENERAL: (Pls. refer to the MACRO ASW Model Description):
+# ONLY the target NEAREST to the center of the defined ASW area AT
+# THE TIME THE AIRCRAFT ARRIVES is considered.  In long, thin areas,
+# a quiet target 30 miles away may be selected, while a noisy target
+# two miles away may be outside the ellipse.  In any area, a noisy
+# target 2 miles away is ignored if there is a quiet target
+# 300 yards (for example) closer to the ellipse center.
+#
+# NOTE:  On 11/19/90, Model Description modifications removed FOM
+# (Figure of Merit) computations and introduced new Probability of
+# Detection and Detection Time calculations.  References to PLOSS,
+# MASW_TONAL, MASW_TEST and FRQDET were eliminated.  Subroutines
+# MASW_TARGET, DO_MACROASW, MASW_MDR and MASW_DETECTTIME were
+# modified.
+#            ---------------------------------------
+# OTHER MODULES/SUBROUTINES AFFECTED:
+#    FRBYE.rat (FSAVMDR and FVMDR);    FRDELET.rat (FDMDR)
+#    FRENTER.rat (FEMDR);              FRINITL.rat (FLMDR)
+#    FRPRINT.rat (FPMDR)
+#    FRMAIN.rat  (FBYEGN,FBYEVR,FPRINT,FDELET,FINIT,EXEORD)
+#    WILD.rat   (WGLOAD);              WILDMDR.rat
+#    WIINIT.rat (BBINIT_AFTER)
+#    WGMDSNR.rat furnishes NVREGN and INDFRQ subroutines, plus
+#             'models' for PLOSS, masw_TONAL, and masw_TEST
+#    WGMDMOT.rat (MOTMAN and MANUVR_LL); WGMDREM.rat (REMOVE)
+#    WGOP.rat    (CANORD, OCANCL, EXPORD)
+#    WGOPORD.rat (HAND_BARRIER and OMISSN)
+#            ---------------------------------------
+     # PERFORM ASW command arguments:
+#    1,2:  "PERFORM ASW"           (lex)
+#      3:   < Sonobuoy NAME >
+#      4:   < Life >  ( hours )
+#      5:  "ELLIPSE" | "RECTANGLE" (lex)
+#      6:   < Latitude >            of Center
+#      7:   < Longitude >           of Center
+#      8:   < N.Mi > (Semi-Major Axis | LENGTH
+#      9:   < degrees > (Orientation)
+#     10:   < N.Mi > (Semi-Minor Axis) | WIDTH
+################################################################
+undefine read
+undefine write
+undefine err
+ 
+define(BBand$Index,16)    # This uses 2000 cps to represent BBand
+    # Specified by model description:
+define($MoreBuoys,16)       # Number to replenish after LifeTime
+define(Macro$SIGMA,9.0)     # Specified Standard-Deviation
+define($CloseEnough,0.7)    # Decibel precision sought (in Masw_MDR)
+ 
+include "ascii.inc"
+include "orders.inc"
+include "bbctl.inc"
+include "bbcode.inc"
+include "bbacc.inc"
+include "bbano.inc"
+include "bbasw.inc"
+include "bbbar.inc"
+include "bbboy.inc"
+include "bbdeq.inc"
+include "bbmdr.inc"
+include "bbord.inc"
+include "bbprl.inc"
+include "bbshc.inc"
+include "bbshn.inc"
+include "bbsob.inc"
+include "bbunt.inc"
+include "intra.inc"
+ 
+define(BBImplicit, Implicit None)       # MJC 5/2/2000 (E-2145)
+ 
+
+ 
+Subroutine OmASW (nord,UNT$Pointer,nargs,args,id)
+ #####################################################
+ #$%
+ #$% Purpose:   OmASW initiates PERFORM ASW processing.
+ #$%    The 1st time thru (Phase=0), discrepancies are
+ #$%    checked; Phase is set to 1; and an ASW slot is
+ #$%    found and populated with: area data, Flight and
+ #$%    View indices, "Radius", designated buoy life,
+ #$%    buoy DEQ index, and buoy characteristic index.
+ #$%    Expendable buoys and fuel are assessed, and the
+ #$%    number of minutes available to loiter on station
+ #$%    after arrival at the area center is computed and
+ #$%    saved in ASW$HrsLoiter$F.
+ #$%    In the PT subtable's 1st slot is placed the area's
+ #$%    center position.  For a rectangle, the remaining
+ #$%    4 slots hold the corner positions.  For an El-
+ #$%    lipse, the positions of the 2 foci occupy slots
+ #$%    2 and 3 (and, Eccentricity may be found in the
+ #$%    last word of the subtable).
+ #$%    Finally, OMASW sends the a/c off at 10,000 ft.
+ #$%    to station at the center of the area.
+ #$%
+ #$%    When PHASE is 1, 2, or 3, OMASW just RETURNs.
+ #$%    When asw$PHASE$i exceeds 3, OMASW sets ord$PHASE$i to
+ #$%    0, for transition from search to barrier-monitoring.
+ #$%
+ #$%    Although the maximim ORD$Phase$i for MacroASW is 3,
+ #$%    ASW$Phase$i has 5 phases.  Phase 4 occurs only when
+ #$%    the program has to wait for a BOY slot (so far this
+ #$%    has never occurred).  Phase 5 arrives when the BOY/
+ #$%    BAR slots have been filled and the barrier is in place.
+ #$%    It concludes when the barrier expires, or the a/c is
+ #$%    (1) destroyed, (2) leaves the vicinity, or (3) hands-over
+ #$%    the barrier.  On the status board, "SRCH" appears in
+ #$%    Status column until the end of Phase 5.
+ #$%
+ #$% Called By: EXEORD
+ #$%
+ #$% Calls:    FNDORD    AC_Fuel_Per_Sec    MIN_TO_TARGET    RRL2RB
+ #$%           RRB2LL    SEND          (smov's)
+ #$%
+ #$% Tables:    UNT    ASW    ORD    DEQ    SOB    ACC
+ #$%
+ #$% Date:      May 1990
+ #$%
+ #$% Author:    Joe Bryant
+ #$%
+ #$% Modified:  James Allen - 2/96 (E1467)
+ #$%            Replaced ACFuelRemaining reference with
+ #$%            TNK subtable.  Replace FuelPerMin call
+ #$%            with call to AC_Fuel_Per_Sec (which was
+ #$%            done for variable time, but the Ship Fuel
+ #$%            Model was developed against 6.0).
+ #$%
+ #$%            James Allen - 12/97 (E1370)
+ #$%            Added call to clear_maneuver_all after
+ #$%            the order is validated.
+ #$%
+ #####################################################
+ 
+bbcommon
+EMICommon
+ 
+integer NARGS,ID,JJ,NUMBUOYS,IFOUNDASW,
+        NORD,KFUELNOW,KRUZSPD,
+        LOITERFUEL,IRESERVE,ICANUSE,
+        MINTOCENTER,LBSKRUZ,LBSTOCENTER,
+        LBSTOBASE,LBSNEEDED,
+        LBS4LOITER,LOITLBS,MINSLOITER,
+        DEQ$Pointer, SOB$Pointer,
+        BOY$Pointer, ACC$Pointer,
+        ORD$Pointer, ORD$Phase$I,
+        ASW$PT$Index, ASW$Pointer,
+        ASW$Flightindx$I, ASW$Radius$I,
+        ASW$Buoylife$I,
+        UNT2$Pointer, UNT$TNK$Index,
+        UNT$Recoverindx$I, UNT$View$I,
+        UNT$Pointer                                 # MJC 5/2/2000 (E2145)
+real    UNT2$Truecourse$F, UNT2$Truespeed$F,
+        UNT2$Truelatitude$F, UNT2$Truelongitude$F,
+        ASW$Hrsloiter$F,DMS2RAD,LOITERSPD,      # jb E2145 (Loiterspd) 9/27/00
+        SEARCHLATITUDE,SEARCHLONGITUDE,
+        FLTLATITUDE,FLTLONGITUDE,
+        RANGE,BRNG,FKRUZ,FFUEL,
+        RANGEB,BRNGB,RADIUS,RMIN,
+        FLAT,FLON,RELBRG,HEADNG,PHI                 # MJC 5/2/2000 (E2145)
+literal UNT$Name$C,CSTRIP8                          # MJC 5/11/2000 (E2145)
+real*4  AAA,
+        COSLAT,
+        COSBASE,
+        CSLAT1,
+        CSLAT2                                      # MJC 5/11/2000 (E2145)
+character    info[ARB]                              # for information messages
+REAL    a,b,aSQ,bSQ,Orient,DISorient
+REAL    Eccentricity
+LITERAL ARGS[nargs]
+ 
+Call FNDORD (id,ord$pointer) # find order # id
+ 
+if (ord$pointer == 0)
+   {
+    call echor
+    call echov ("<OmASW> PERFORM order lost. Id=")
+    call echoi (id)
+    return
+   }
+ 
+ord$phase$i = Xord$phase$i
+ 
+if (ord$phase$i > 0 )
+   {
+    RETURN    # MOTION (and subroutines below) will do processing..
+   }
+ 
+# Else it's PHASE 0 which means first time thru.... (CONTINUE)
+ 
+unt$View$i = Xunt$View$i
+unt$name$c = Xunt$name$c
+ 
+if (xUNT$Mission$I != $AntiSub$Code)
+   {
+    ### Send wrong-mission message:
+    jj = 0
+    call smovhn (unt$name$c, $$MaxLit, info, jj)
+    call smovv(" is not assigned Mission ASW.",info,jj)
+    call send_  (unt$view$i, 0, jj, info)
+ 
+    RETURN
+   }
+ 
+#$% Find out whether the a/c has enough of the right buoys.
+numbuoys = 0
+For_DEQ_Chain
+   {
+    if (xDEQ$TYPE$C != args[3])    NEXT
+    SOB$Pointer = xDEQ$Pntr$i
+    Emi_Deqptr = DEQ$Pointer        #10/90 hdf
+    if(xSOB$ActiveSonar$i == $YES)
+       {
+    ### Send Not_Passive_Buoy message
+        jj = 0
+        call smovhn (args[3], $$MaxLit, info, jj)
+        call smovv(" is not a passive sonobuoy.",info,jj)
+        call send_  (xunt$view$i, 0, jj, info)
+ 
+        RETURN
+       }
+ 
+    numbuoys = xDEQ$Remaining$i
+    if(numbuoys < 2 * $MoreBuoys) # Enough buoys to lay 2 patterns???!!!
+       {
+        ### Send not-enough-buoys message
+        jj = 0
+        call smovhn (unt$name$c, $$MaxLit, info, jj)
+        call smovv(" has too few of that type of sonobuoy.",info,jj)
+        call send_  (unt$view$i, 0, jj, info)
+ 
+        RETURN                                    #    6/27/90
+       }
+ 
+    BREAK  # Enough of the designated buoy type are on the a/c
+ 
+   }    # End of DEQ-chain search for buoys
+ 
+ 
+if(!deq$Pointer$VALID)
+   {
+    ### Send No_such_buoys_onboard message
+    jj = 0
+    call smovhn (unt$name$c, $$MaxLit, info, jj)
+    call smovv(" has no sonobuoys of that type.",info,jj)
+    call send_  (unt$view$i, 0, jj, info)
+ 
+    RETURN
+   }
+ 
+#$% Find ASW slot (and whether a/c is already doing a PERFORM ASW):
+IfoundASW = $NO
+for(ASW$Pointer$FIRST; ASW$Pointer$OK; ASW$Pointer$NEXT)
+   {
+    ASW$FlightIndx$i = xASW$FlightIndx$i
+    if (ASW$FlightIndx$i == UNT$Pointer$Index)
+       {
+################################################################
+        if(Xasw$Phase$i > 3) # a/c at datum for previous PERFORM..
+           {  # Existing Barrier (or attempt) can be abandoned..
+            BOY$Pointer$TO (Xasw$BOYindx$i)            #    6/26/90
+            if (BOY$Pointer$VALID)                     #    6/26/90
+                Putboy$KillTime$f (Game$Time)        #    6/26/90 # game$minute converted to seconds - JFR 11/9/93
+ 
+            PutUNT$ASWindx$i ($NO)
+            ASW$ZERO
+            IfoundASW = ASW$Pointer
+            BREAK    # Use the same ASW slot for new command..
+           }
+################################################################
+        ##    Phase 1, 2 or 3 of a previous PERFORM ASW command:
+        ## Send refusal message (Only 1 ASW search area per customer)
+        jj = 0
+        call smovhn (unt$name$c, $$MaxLit, info, jj)
+               #12345678901234567890123456789012345678901234567890
+        call smovv(" is already conducting ASW search.",info,jj)
+        call send_  (unt$view$i, 0, jj, info)
+        RETURN
+       }    # End if a/c already engaged in PERFORM ASW...
+################################################################
+ 
+     if (IfoundASW == $NO & ASW$FlightIndx$i == 0 )
+       {
+        IfoundASW = ASW$Pointer    # A vacant slot in ASW$USED region!
+       }
+   }    # End of loop thru the ASW slots
+ 
+#define(ASW$used,IBBP[$$PtrUsed,$$ASW])
+#define(ASW$base,IBBP[$$PtrBase,$$ASW])
+#define(ASW$last,(ASW$Base+ASW$Used-1))
+#define(ASW$Last$to,ASW$Used=1-ASW$Base+)
+#define(ASW$Pointer$Ok,(ASW$Pointer>=ASW$Base & ASW$Pointer<=ASW$Last))
+ 
+if(IfoundASW == $NO)    # There is no vacant 'old' slot -- So,
+   {             # use the 1st slot beyond the ASW$USED region 6/25/90
+    ASW$Pointer = ASW$BASE + ASW$USED    # advance the Pointer and
+    if (!ASW$POINTER$VALID)  # If that moves us out of the table,
+       {
+        ## Send incredulous message: Overflow shouldn't happen
+        jj = 0
+        call smovv(" ASW table OverFlow?  Incredible!",info,jj)
+        call send_  (unt$view$i, 0, jj, info)
+        RETURN
+       }
+ 
+    IfoundASW = ASW$Pointer  # Save the ASW$POINTER value 6/26/90
+    ASW$USED = ASW$USED + ASW$ENTRY # advance the high-water mark
+   }
+ 
+ASW$Pointer = IfoundASW  # Set ASW Pointer to 'earliest' empty slot
+#$% #############################################################
+ 
+call clear_maneuver_all (nord, id, xUNT$View$I, UNT$Pointer)
+ 
+PUTord$phase$i (1)        # Enroute to center of search area
+PUTunt$RulesOfEngage$I ($IfAttacked$Code)    # Weapons TIGHT
+ 
+#$% Prepare to compute time to center and time of loiter at center:
+unt$TNK$Index = AviationFuelTank$Index    # joa 2/96 (E1467)
+KfuelNOW    = Xunt$TNK$FuelRemaining$f    # joa 2/96 (E1467)
+ACC$Pointer = xUNT$AccPNTR$I
+KruzSpd     = xACC$CruiseSpeed$i
+LoiterSpd   = xACC$LoiterSpeed$i
+LoiterFuel   = xACC$LoiterFuel$i     # LBS per minute at loiter speed..
+IReserve    = 0.15 * xACC$MaxFuel$i  # LBS require on arrival at MARSHALL
+IcanUse = KfuelNOW - Ireserve  # Fuel to cruise to area; Loiter for ?
+                               # minutes; and intercept the a/c base..
+ 
+SEARCHlatitude  = DMS2rad(args[6])
+SEARCHlongitude = DMS2rad(args[7])
+CSLAT1 = COS(SEARCHlatitude)
+FLTlatitude     = xUNT$TrueLatitude$F
+FLTlongitude    = xUNT$TrueLongitude$F
+CSLAT2 = COS(FLTlatitude)
+ 
+call RLL2RB( _        # Find range to center
+             SEARCHlatitude,     #latitude of center  (input)
+             SEARCHlongitude,    #longitude of center (input)
+             CSLAT1,             #cos(lat of center)  (input)
+             FLTlatitude,        #latitude of a/c     (input
+             FLTlongitude,       #longitude of a/c    (input)
+             CSLAT2,             #cos of lat of a/c   (input)
+             RANGE,        # range, a/c to center (OUTPUT)
+             BRNG   )      # bearing "   "   "    (OUTPUT)
+ 
+Fkruz = float(KruzSpd)
+MinToCenter = 0.5 + (RANGE * $Minutes$Per$Hour) / fKruz
+call AC_Fuel_Per_Sec (ACC$Pointer, xUNT$Status$I,
+                      xUNT$MarshallStatus$I, Fkruz, # jb E2145 vs KrusSpd 9/00
+                      xUNT$TrueAltDepth$I, ffuel)
+LBSkruz = INT (ffuel * $Seconds$Per$Minute)
+LBStoCenter = MinToCenter * LBSkruz
+ 
+#$%    Prepare to find range to BASE:
+UNT$RecoverIndx$i = xUNT$RecoverIndx$i    # UNT index of base..
+unt2$Pointer$TO (UNT$RecoverIndx$i)
+unt2$TrueCourse$F = Xunt2$TrueCourse$F
+unt2$TrueSpeed$F  = Xunt2$TrueSpeed$F
+unt2$TrueLatitude$F = Xunt2$TrueLatitude$F
+unt2$TrueLongitude$F = Xunt2$TrueLongitude$F
+cosBASE = COS(unt2$TrueLatitude$F)
+ 
+call RLL2RB( _        #Rhumb line Lat/Lon to Range/Bearing
+             unt2$truelatitude$F, #latitude of BASE   (input
+             unt2$truelongitude$F, #longitude of BASE (input)
+             cosBASE,             #cos of lat of BASE  (input)
+             SEARCHlatitude,     #latitude of center  (input)
+             SEARCHlongitude,    #longitude of center (input)
+             CSLAT1,             #cos(lat of center)  (input)
+             RANGEB,        # range, a/c to center (OUTPUT)
+             BRNGB   )      # bearing "   "   "    (OUTPUT)
+ 
+#$% Compute time frm center to 5 miles from Base at cruise speed:
+RADIUS = 5.0
+call RMIN_to_TARGET ( RADIUS,
+                     unt2$TrueCourse$F,    # BASE
+                     unt2$TrueSpeed$F,        # POSITION
+                     fKruz,
+                     RANGEB,
+                     BRNGB,
+                     RMIN  )
+ 
+if(RMIN == -3)    RMIN = 1  # (Already close to center) 6/20/90
+else if (RMIN < 0)  { iCANUSE = LoiterFuel } # Flag: CAN'T comply!
+ 
+LBStoBASE = RMIN * LBSkruz
+LBSneeded = LBStoBASE + LBStoCENTER
+LBS4loiter = IcanUSE - LBSneeded
+if (LBS4loiter <= LoiterFuel)
+   {
+    ## Send NO_Loiter-Time message
+    jj = 0
+    call smovhn (Xunt$name$c, $$MaxLit, info, jj)
+               #12345678901234567890123456789012345678901234567890
+    call smovv(" has too little fuel for ASW search.",info,jj)
+    call send_  (xunt$view$i, 0, jj, info)
+    ##    CANCEL THIS ORDER            !!!???
+    PUTord$phase$i (0)        # remove the order from the ORD table
+    RETURN
+   }
+ 
+call AC_Fuel_Per_Sec (ACC$Pointer, xUNT$Status$I,
+                      xUNT$MarshallStatus$I, LoiterSpd,
+                      xUNT$TrueAltDepth$I, ffuel)
+LoitLBS = INT (ffuel * $Seconds$Per$Minute)
+MINSloiter = 0.5 + float(LBS4loiter) / float(LoitLBS)         #    6/20/90
+ASW$HrsLoiter$F = float(MINSloiter)/$Minutes$Per$Hour  #    6/20/90
+ASW$HrsLoiter$F = MIN(ASW$HrsLoiter$F,12.7) # Limited by bits in field..
+ 
+## Send ETA / Minutes_On_Station message
+jj = 0
+call smovhn (Xunt$name$c, $$MaxLit, info, jj)
+call smovv(" to reach center in ",info,jj)
+call smovi(MintoCenter,info,jj)
+call smovv(" mins, then loiter for ",info,jj)
+call smovi(MinsLoiter,info,jj)
+call smovv(" mins.",info,jj)
+call send_  (xunt$view$i, 0, jj, info)
+           #12345678901234567890123456789012345678901234567890
+#$% #############################################################
+#$% Prepare to put data into the ASW$PT subable; first, the
+#$%    position of the search-area center:
+ 
+a = ARGS[8]
+b = ARGS[10]
+a = min(a,float($Hi_ASW$LENGTH$I))    # jb        7/20/90
+b = min(b,float($Hi_ASW$LENGTH$I))    # jb        7/20/90
+ 
+Orient = ARGS[9] * $PI/180.0
+DISorient = Orient + $PI
+$ang2PI(DISorient)
+ 
+ASW$PT$Index = 1
+ 
+FLAT = SEARCHlatitude # (Set the origin to the
+FLON = SEARCHlongitude        #               Center position)
+PUTASW$PT$Latitude$F  (FLAT) # Insert CENTER position into
+PUTASW$PT$Longitude$F (FLON) #  the PT$ subtable
+ASW$PT$Index = 2    # Prepare for next PT$ entry, below
+ 
+RELBRG = 0.0
+COSLAT = COS(FLAT)
+ 
+if(b > a)    # Precaution against reversal of length,width:
+   {
+    aaa = a; a = b; b = aaa
+   }
+ 
+a = max(a,2.0)    # Precaution against division by zero
+b = max(b,1.0)    # Avoid zero-length lines...
+aSQ = a*a                          # jb        7/18/90
+bSQ = b*b                          # jb        7/18/90
+ 
+if (ARGS[5] != $LEX$RECTANGLE$) # ELLIPSE: Need Eccentricity..
+   {                                            #    6/28/90
+    #    e = aSQ - bSQ    # Intermediate value --
+    #    e = SQRT(e) / a    # Eccentricity of the ellipse
+    Eccentricity = SQRT ( 1.0 - (bSQ)/(aSQ) )   # (Equivalent to
+                                                   #   the above)
+    putASW$EllipseType$I ($YES)
+    ASW$RADIUS$I = a + 0.5    # Length of semi-major axis
+    putASW$RADIUS$I
+ 
+    ASW$PT$Index = 5    # Handy place to store Eccentricity..
+    putASW$PT$Longitude$F (Eccentricity) # NOT a longitude...
+ 
+    if (Eccentricity > 0.0) # NON-circular ELLIPSE    6/28/90
+       {
+        putASW$EllipseType$I ($YES)
+        ASW$RADIUS$I = a +0.5            # Length of semi-major axis
+        putASW$RADIUS$I
+ 
+        HEADNG = orient    # Bearing from center to the 1st focus
+        RANGE  = a * Eccentricity # Focal distance from center
+        RELBRG = 0.0
+        COSLAT = COS(FLAT)
+ 
+        ASW$PT$Index = 2    # Set position of the first of 2 foci
+        Call RRB2LL( _            #Rhumb line Range/Bearing to Lat/Lon
+                   FLAT,         #latitude (input & output)
+                   FLON,         #longitude (input & output)
+                   RANGE,        #range (input)
+                   RELBRG,       #relative bearing (input)
+                   HEADNG,       #course (input) WARN: MAY BE a CONSTANT!
+                   COSLAT)       #cosine of latitude (input & output)
+        PUTASW$PT$Latitude$F  (FLAT)
+        PUTASW$PT$Longitude$F (FLON)
+ 
+        ASW$PT$Index = 3    # Set position of the second of 2 foci
+        FLAT = SEARCHlatitude # (Set the origin to the
+        FLON = SEARCHlongitude        #               Center position)
+        HEADNG = DISorient    # Bearing from center to the 2nd focus
+        Call RRB2LL( _            #Rhumb line Range/Bearing to Lat/Lon
+                   FLAT,         #latitude (input & output)
+                   FLON,         #longitude (input & output)
+                   RANGE,        #range (input)
+                   RELBRG,       #relative bearing (input)
+                   HEADNG,       #course (input) WARN: MAY BE a CONSTANT!
+                   COSLAT )      #cosine of latitude (input & output)
+        PUTASW$PT$Latitude$F  (FLAT)
+        PUTASW$PT$Longitude$F (FLON)
+       }    # End if NON-circular ELLIPSE search area
+ 
+    Else    #    (Eccentricity == 0.0)  CIRCULAR search area 7/19/90
+       {
+        ASW$PT$Index = 2    # Set position of the first of 2 foci
+        PUTASW$PT$Latitude$F  (SEARCHlatitude)
+        PUTASW$PT$Longitude$F (SEARCHlongitude)
+ 
+        ASW$PT$Index = 3    # Set position of the second of 2 foci
+        PUTASW$PT$Latitude$F  (SEARCHlatitude)
+        PUTASW$PT$Longitude$F (SEARCHlongitude)
+       }    # End else Ellipse is CIRCULAR
+   }    # End if a NON-Circular or Circular ELLIPSE initialization
+ 
+ELSE    # (ARGS[5] == $LEX$RECTANGLE$) -> RECTANGULAR search area
+   {
+    putASW$EllipseType$I ($NO)
+    ASW$RADIUS$I = 0.5*(1.0 + SQRT(aSQ + bSQ)) # Length of half-diagonal
+    putASW$RADIUS$I    # This is the longest possible target range..
+ 
+    phi = ATAN(b/a)    # (Deviation from the ORIENT direction)
+ 
+        # DEAL FIRST WITH Vertices #1 AND #4:
+    HEADNG = orient - phi    # Bearing from Center to 1st Vertex
+    $ang2PI(HEADNG)
+    RANGE  = ASW$RADIUS$I     # Length of half-diagonal
+    Call RRB2LL( _           # Rhumb line Range/Bearing to Lat/Lon
+                   FLAT,         #latitude (input & output)
+                   FLON,         #longitude (input & output)
+                   RANGE,        #range (input)
+                   RELBRG,       #relative bearing (input)
+                   HEADNG,       #course (input) WARN: MAY BE a CONSTANT!
+                   COSLAT)       #cosine of latitude (input & output)
+    PUTASW$PT$Latitude$F  (FLAT)
+    PUTASW$PT$Longitude$F (FLON)
+ 
+ 
+    ASW$PT$Index = 5    # Set index for 4th Vertex
+    RANGE  = a           # LENGTH of the Rectangle
+    HEADNG = DISorient   # Bearing from Point 1 to Point 4
+    Call RRB2LL( _            #Rhumb line Range/Bearing to Lat/Lon
+                   FLAT,         #latitude (input & output)
+                   FLON,         #longitude (input & output)
+                   RANGE,        #range (input)
+                   RELBRG,       #relative bearing (input)
+                   HEADNG,       #course (input) WARN: MAY BE a CONSTANT!
+                   COSLAT)       #cosine of latitude (input & output)
+    PUTASW$PT$Latitude$F  (FLAT)
+    PUTASW$PT$Longitude$F (FLON)
+ 
+ 
+        ## NOW, DEAL WITH RECTANGLE POINTS #2 AND #3:
+    ASW$PT$Index = 3    # Set index for 2nd Vertex
+    FLAT = SEARCHlatitude # (Set the origin to the
+    FLON = SEARCHlongitude        #               Center position)
+    HEADNG = orient + phi    # Bearing from Center to Point 2
+    $ang2PI(HEADNG)
+    RANGE = ASW$RADIUS$I      # Length of half-diagonal
+    Call RRB2LL( _            #Rhumb line Range/Bearing to Lat/Lon
+                   FLAT,         #latitude (input & output)
+                   FLON,         #longitude (input & output)
+                   RANGE,        #range (input)
+                   RELBRG,       #relative bearing (input)
+                   HEADNG,       #course (input) WARN: MAY BE a CONSTANT!
+                   COSLAT)       #cosine of latitude (input & output)
+    PUTASW$PT$Latitude$F  (FLAT)
+    PUTASW$PT$Longitude$F (FLON)
+ 
+    ASW$PT$Index = 4    # Set index for 3rd Vertex
+    RANGE  = a           # LENGTH of the Rectangle
+    HEADNG = DISorient   # Bearing from Point 2 to Point 3
+    Call RRB2LL( _            #Rhumb line Range/Bearing to Lat/Lon
+                   FLAT,         #latitude (input & output)
+                   FLON,         #longitude (input & output)
+                   RANGE,        #range (input)
+                   RELBRG,       #relative bearing (input)
+                   HEADNG,       #course (input) WARN: MAY BE a CONSTANT!
+                   COSLAT)       #cosine of latitude (input & output)
+    PUTASW$PT$Latitude$F  (FLAT)
+    PUTASW$PT$Longitude$F (FLON)
+   }    # End of RECTANGULAR search area initialization
+ 
+#$%    Populate the ASW slot:
+putASW$HrsLoiter$F                    # jb        6/20/90
+putASW$DEQIndx$i   (DEQ$Pointer$INDEX)
+putASW$SOBindx$i  (SOB$Pointer$INDEX)
+ASW$BuoyLife$i =  args[4]            # jb        6/20/90
+putASW$BuoyLife$i
+putASW$FlightIndx$I (UNT$Pointer$Index)  # Searcher Index
+putASW$OrderID$i (ID)
+putASW$PHASE$i  (1)    # Phase 1 = Enroute to center of search area
+putASW$SemiMajor$I (int(a))    # (For a Rectangular area, this is LENGTH)
+putASW$SemiMinor$I (int(b))    # (For a Rectangular area, this is WIDTH)
+putASW$View$i  (unt$View$i)
+ 
+#$%  Record index of the ASW slot, and insert maneuver orders:
+putUNT$ASWindx$I     (ASW$Pointer$Index)  # Reference for game-cycles..
+putUNT$OrderedLatitude$F  (SEARCHlatitude)
+putUNT$OrderedLongitude$F (SEARCHlongitude)
+putUNT$OrderedSpeed$F     (fKruz)  # Until on station; then 0 !!!???
+putUNT$OrderedALTdepth$i  (10000)    # Until arrival on station; then 500
+ 
+return
+end        # End of Subroutine OMASW..
+
+            # Note:  DON'T call mASW_Target for UNT neutral...
+ Subroutine mASW_Target (UNT$Pointer,      # Pointer to ASW-search Flight
+                       unt3$Pointer,    # (Output) Target Pointer
+                       TargetRange,     # (Output) Range, Center to Target
+                       TargetBRG,       # (Output) Brg,   Center to Target
+                       FLAT2,           # (Output) Latitude      of Target
+                       FLON2   )        # (Output) Longitude     of Target
+ #####################################################
+ #$%
+ #$% Purpose:    mASW_Target identifies the non-own-View submarine
+ #$%    (if any) that is NEAREST TO THE CENTER OF THE AREA.  Then
+ #$%    it determines whether THIS target will be detected, and
+ #$%    calls mASW_DetectTime to designate when detection will take
+ #$%    place.  Result:  ASW$TargetIndx$i and asw$DetectTime$f.
+ #$%    Meanwhile it determines MDR (Median Detection Range) from
+ #$%    table lookup in BBMDR; or, if that fails by computation from
+ #$%    signal versus PropLoss data in the Environment table.
+ #$%        The detection algorithm is essentially that in the PAS-
+ #$%    SIVE SONAR model, although:  probability of detection is mod-
+ #$%    ified by pseudo-timelate and standard deviation is 9 instead
+ #$%    of 6; search is simulated by using the Minimum of (MDR, Target
+ #$%    distance to center) for computing PROPLOSS; PROPLOSS is the
+ #$%    MINIMUM of (IN,DEEP,CROSS) with respect to density layer.
+ #$%
+ #$%    Detection is first assessed at BroadBand (2000 cps).  If
+ #$%    that fails, each Tonal is assessed in turn until there is
+ #$%    a success or until all have failed.  If all fail, there is
+ #$%    NO DETECTION for the entire search, regardless of whether
+ #$%    there may be a fast ALPHA churning the water, 400 yards
+ #$%    farther out.  Also ignored is any sub entering the search
+ #$%    area after this initial look.
+ #$%
+ #$% Called By: DO_MacroASW, when PHASE is 1
+ #$%
+ #$% Calls:    PLOSS    masw_TONAL    mASW_DetectTime    RRL2RB
+ #$%           INOUT    NVREGN   SEND invoke MASW_TEST  (smov's)
+ #$%
+ #$% Tables:    UNT    ASW    PRL    SHN    SHC    SOB
+ #$%
+ #$% Date:      May 1990; New Specifications, November 1990
+ #$%
+ #$% Author:    Joe Bryant
+ #$%
+ #####################################################
+    # Indices and corresponding frequencies:
+# 1     2     3     4     5     6     7     8     9    10
+# 10    15    20    30    40    60    80   100   125   250
+ 
+#  11    12    13    14    15    16    17   18     19    20
+#  315   630   900  1250  1600  2000  2500  3500  5000 10000
+ 
+bbcommon
+EMICommon
+ 
+character    info_T[ARB]                    # for information messages
+Real    LAT[5], LON[5]
+Real    TargetRange,TargetBRG
+Real    FLAT1,FLON1, FLAT2,FLON2    # Center(1), and Sub(2)
+Real    FLAT3,FLON3, FLAT4,FLON4  # Positions of 1st & 2nd Foci
+Real    RANGE,RANGE1,RANGE2 # Center to Sub; Sub to focus1; Sub to focus2
+Real    x[4], y[4]    # Longitudes & Latitudes of 4 Rectangle Vertices
+Real    MDR                                 #        6/21/90
+Real*4 Intra_Degradation
+Integer*4 Hold_Deq
+ 
+INTEGER kRANG[4]                                     # jb    11/19/90
+REAL    LATEFCTR[4]    # for  PSEUDO-TimeLate Factor # jb    11/19/90
+data kRANG    /15,   30,   60,    100/               # jb    11/19/90
+data LATEFCTR /1.0,  0.7,  0.5,   0.3/               # jb    11/19/90
+ 
+integer JJ,NVERT,INSIDE,IFHI,IFLO,
+        IRD,IDI,IRDI,INDSER,INVNUM,
+        INDXFREQ,IMDR,NBUOYS,IPROB,IDETFLG,
+        UNT$View$I, UNT$Pointer, UNT$Aswindx$I,
+        ASW$Pointer, ASW$Targetindx$I,
+        ASW$Semimajor$I, ASW$Semiminor$I,
+        ASW$PT$Index, ASW$Radius$I,
+        ASW$Ellipsetype$I, ASW$Sobindx$I,
+        ASW$Deqindx$I,
+        SOB$Pointer, SOB$SEC$Index,
+        SHC$Pointer, DEQ$Pointer,
+        DEQ2$Pointer, UNT3$Pointer,
+        UNT2$Pointer, UNT2$View$I       # MJC 5/2/2000 (E2145)
+real    UNT2$Truelatitude$F,
+        UNT2$Truelongitude$F,
+        PBDETECT_INTRA,BRNG,
+        BRNG1,BRNG2,STDV,
+        SUBSPEED,BBNOIS,
+        ONSTA,SEMI_MAJOR,
+        SEMI_MINOR,SIZE,
+        XX,PROB,TLFCTR,
+        RAND_NUM,RANDOM                 # MJC 5/2/2000 (E2145)
+literal CSTRIP8                         # MJC 5/11/2000 (E2145)
+real*4  CSLAT1,
+        CSLAT2,
+        CSLAT3,
+        CSLAT4                          # MJC 5/11/2000 (E2145)
+ 
+EQUIVALENCE  (x,LON[2])    # The position of the 1st of the 4 vertices
+EQUIVALENCE  (y,LAT[2])     #  is in the 2nd elements of LAT and LON
+data xx/0.0/		# Get next random number in sequence
+TargetBRG   = $PI
+TargetRange = 9999.99
+ 
+unt$view$i = xunt$view$i                # jb            11/20/90
+ 
+UNT$ASWindx$i = xUNT$ASWindx$i
+ASW$Pointer$TO (UNT$ASWindx$i)
+if (!ASW$Pointer$VALID)
+   {
+    ### Send bad_asw_Pointer message
+    jj = 0
+    call smovv("Unexpected invalid ASW reference.",info_T,jj)
+    call smovv("  Zeroing ASW index for ",info_T,jj)
+    call smovhn (Xunt$name$c, $$MaxLit, info_T, jj)
+               #12345678901234567890123456789012345678901234567890
+    call smovv(".",info_T,jj)
+    call send_  (unt$view$i, 0, jj, info_T)  # jb     11/20/90
+    putUNT$ASWindx$i (0)                    #        6/12/90
+    RETURN
+   }
+ 
+#$% Prepare to find THE (closest) non-own-view TARGET:
+ASW$TargetIndx$i = 0                # Initialize to non-valid
+ 
+    #$%    Extract data from the ASW table:
+ASW$SemiMajor$i = xASW$SemiMajor$i  # For RECTANGLEs, 'LENGTH'
+ASW$SemiMinor$i = xASW$SemiMinor$i  # For RECTANGLEs, 'WIDTH'
+for(ASW$PT$index=1;ASW$PT$index<=ASW$PT$Slots;ASW$PT$index=ASW$PT$index+1)
+   {
+    LAT[ASW$PT$index] = xASW$PT$Latitude$F
+    LON[ASW$PT$index] = xASW$PT$Longitude$F
+   }
+ 
+FLAT1 = LAT[1]        # Player Input Data for position of CENTER
+FLON1 = LON[1]
+CSLAT1 = COS(FLAT1)
+ 
+ASW$RADIUS$I = xASW$RADIUS$I    # Test-value for target range
+ASW$EllipseType$i = xASW$EllipseType$i
+ 
+#$% Find THE closest valid target:
+unt3$Pointer = 0    # Initialize target pointer to INvalid..
+for (unt2$Pointer$FIRST; unt2$Pointer$OK; unt2$Pointer$NEXT)
+   {
+    If (Xunt2$SuperType$I != $Submarine$SuperCode) NEXT
+    unt2$View$i = Xunt2$View$i
+    if (unt2$View$i == $NEUTRAL$VIEW | unt2$View$i == UNT$View$i)
+                                                  NEXT
+    unt2$TrueLatitude$F  = Xunt2$TrueLatitude$F
+    unt2$TrueLongitude$F = Xunt2$TrueLongitude$F
+ 
+    FLAT2 = unt2$TrueLatitude$F    # (Sub's
+    FLON2 = unt2$TrueLongitude$F   #     position
+    CSLAT2 = COS(FLAT2)             #            data)
+    call RLL2RB( _        #Rhumb line Lat/Lon to Range/Bearing
+                   FLAT1,            #latitude of center  (input)
+                   FLON1,            #longitude of center (input)
+                   CSLAT1,           #cos(lat of center)  (input)
+                   FLAT2,            #latitude of  Sub    (input
+                   FLON2,            #longitude of Sub    (input)
+                   CSLAT2,           #cos of lat of Sub   (input)
+                   RANGE,        # range, Center to Sub (OUTPUT)
+                   BRNG   )      # bearing              (OUTPUT)
+ 
+    if ( RANGE > float(ASW$RADIUS$I) | RANGE > 100.0 )    NEXT    # pg 3-8
+ 
+    FLAT2 = unt2$TrueLatitude$F    # (Sub's
+    FLON2 = unt2$TrueLongitude$F   #     position
+    CSLAT2 = COS(FLAT2)             #            data)
+ 
+    if (ASW$EllipseType$i == $YES)        # an ELLIPTICAL area
+       {
+        FLAT3 = LAT[2]     # Data for first focus
+        FLON3 = LON[2]
+        CSLAT3 = COS(FLAT3)
+        call RLL2RB( _        #Rhumb line Lat/Lon to Range/Bearing
+                   FLAT2,            #latitude of Sub   (input)
+                   FLON2,            #longitude of Sub (input)
+                   CSLAT2,           #cos of lat of Sub (input)
+                   FLAT3,            #latitude of 1st focus (input
+                   FLON3,            #longitude of 1st focus(input)
+                   CSLAT3,           #cos of lat of 1st focus(input)
+                   RANGE1,   # range   (OUTPUT) (SUB to the
+                   BRNG1  )  # bearing (OUTPUT)        first focus)
+ 
+        FLAT4 = LAT[3]     # Data for second focus
+        FLON4 = LON[3]
+        CSLAT4 = COS(FLAT4)
+        call RLL2RB( _        #Rhumb line Lat/Lon to Range/Bearing
+                   FLAT2,            #latitude of Sub   (input)
+                   FLON2,            #longitude of Sub (input)
+                   CSLAT2,           #cos of lat of Sub (input)
+                   FLAT4,            #latitude of 2nd focus (input
+                   FLON4,            #longitude of 2nd focus(input)
+                   CSLAT4,           #cos of lat of 2nd focus(input)
+                   RANGE2,   # range   (OUTPUT)    (SUB to the
+                   BRNG2  )  # bearing (OUTPUT)        second focus)
+ 
+            #$% Test for sub inside the Ellipse:
+        if(RANGE1 + RANGE2 > 2.0 * ASW$RADIUS$I)    NEXT
+ 
+       }    # END if Search Area is an ELLIPSE
+ 
+    ELSE     # The ASW search area is a RECTANGLE
+       {
+        nvert = 4
+        Call INOUT (FLON2,FLAT2,  # Position of Sub
+                Nvert,        # Num.Vertices in rectangular area
+                x,y,          # Longitudes,Latitudes of vertices
+                inside)       # Get back: $YES or $NO
+ 
+        if (inside == $NO)        NEXT   # OUTSIDE the rectangle..
+ 
+       }    # END if Search Area is a Rectangle
+ 
+    if (RANGE < TargetRange) # Is this the closest sub so far?
+       {
+        TargetRange = RANGE    # Keep the 'first/best' range
+        unt3$Pointer = unt2$pointer # Save the pointer to that target
+        TargetBRG    = BRNG            # ..and its bearing
+       }
+ 
+   }    # End of loop thru unt2$Pointers
+ 
+TargetRange = MAX(TargetRange,1.0)
+$ang2PI (TargetBRG)    # Adjust bearing between 0.0 and 2 * PI
+ 
+if (!unt3$Pointer$VALID)    RETURN    # NO TARGET within Area..
+        # so, asw$DetectTime$f,TargetIndx$i do NOT get set
+#################---------------------------------------##########
+# Pg. 3-8 algorithm to compute Pdetection as f(speed,noise,MDR,RANGE,
+#                                              and PropLOSS) invnum
+#
+#  z. Model Description doesn't call for ActSonar or Acoustic Comm
+#  y. Get Sonobuoy RD & FREQ limits; and, find NVREGN
+#  x. Get SHN$SIG$INDEX
+ 
+#   a. Compute FOM for each component (BB and up to 6 narrowband) 3-8
+#   b. Determine PropLOSS for each component; MDR; and note Freq. 3-8
+#   c. PROPLOSS = MINIMUM (above,below,cross):                    3-8
+#   d. SigEXCESS = (FOM - PROPLOSS);   STDEV = 9 dB               3-11
+#   e. z =                                                        3-11
+#   f. Pd = 0 for z < -3.0;   Pd = 1.0 for z > +3.0;  ELSE        3-11
+#   g. Pd =
+#   h. 'Late' FACTOR = (1.0 if RANGE <15; 0.7 if <30; 0.5 if <60; 3-11
+#                     0.3 if <= 100 (Note that 100 is maximum range)
+#   i. Pd = Pd * FACTOR                                           3-11
+#   j. NO DETECTION if ( Pd < Random(x) )                         3-11
+##################################################################
+##-----------------------------------------------------------
+#  z. Find Sonobuoy Charactistics and NVREGN
+ 
+ASW$SOBindx$i = xASW$SOBindx$i
+SOB$Pointer$TO (ASW$SOBindx$i)
+STDV = XSOB$StDevBrgErr$F                  # std.dev. of Brg.Err
+IFHI = XSOB$HIENDFREQ$I                    #get upper limit of band
+IFLO = XSOB$LOENDFREQ$I                    #get lower limit of band
+ 
+iRD  = XSOB$RECOGNITIONDIFF$I    # get recognition differential
+SOB$SEC$INDEX = 1                # set (ideal) sector         6/11/90
+iDI = XSOB$SEC$DI$I              # get directivity index      6/11/90
+iRDI = iDI - iRD                 # Combine RD  with DI        6/11/90
+ 
+Call NVREGN ( LAT[1],LON[1],    # Input position of Center
+              indSER,INVNUM )   # Get INVNUM
+###-------------------------------------------------------------
+SubSpeed = xUNT3$TrueSpeed$F                # jb        7/16/90
+if (SubSpeed < 1.0)    SubSpeed = 1.0       # jb       11/19/90
+ 
+SHC$Pointer    = Xunt3$SHCpntr$i            # jb       11/20/90
+ 
+INDXfreq = 16          # for 2000 cps, representing BroadBand
+call Masw_MDR ( SOB$Pointer,
+                SHC$Pointer,
+                ASW$Pointer,
+                UNT3$Pointer,
+                INVNUM,      # 1, 2, 3, or 4
+                INDXfreq,    # Used only for calculate...
+                bbnois,      # Used only for calculate...
+                    MDR     )    # This is returned..
+ 
+MDR = MIN(MDR,TargetRange)  # Give credit for GOOD DATUM!
+Imdr = int(MDR)
+PUTasw$MDR$I (Imdr)                # jb    7/26/90
+ 
+##------------------ Specifications Changed  11/19/90 -------
+asw$DEQindx$I = Xasw$DEQindx$I
+DEQ$Pointer$TO (asw$DEQindx$I)
+Nbuoys = xDEQ$Remaining$i +16     # jb For new equations   11/20/90
+ 
+OnSta = xASW$HrsLoiter$F            # jb For new equation    11/19/90
+ 
+Semi_Major = xASW$SemiMajor$I    # For RECTANGLEs, 'LENGTH'
+Semi_Minor = xASW$SemiMinor$I    # For RECTANGLEs, 'WIDTH'
+SIZE = Semi_Major * Semi_Minor   # For Rectangles, Length * Width;
+if(xASW$EllipseType$i == $YES)
+    SIZE = $PI * SIZE            # For Ellipse, compute like circle..
+ 
+XX = 2 * Nbuoys * MDR * SubSpeed * OnSta / SIZE
+#                nmi
+PROB = 1.0 - EXP(-XX)
+ 
+#  h. 'Late' FACTOR = (1.0 if RANGE <15; 0.7 if <30; 0.5 if <60;
+#              0.3 if <= 100 (Note that 100 is maximum range) 3-11
+ 
+TLfctr = 0.3  #PSEUDO_TimeLate FACTOR (default >= 100 mi) Pg.3-11
+for (jj =1; jj <=3; jj =jj +1)
+   {
+    if ( int(TargetRange) < kRANG[jj] )   # jb  vice iMDR   12/10/90
+       {
+        TLfctr = LATEFCTR[jj]
+        BREAK
+       }
+   }
+ 
+PROB = PROB * TLfctr
+ 
+Iprob = 0.005 + 100 * PROB      # jb - for debug - 12/7/90
+putASW$PROB$I (Iprob)           # jb - for debug - 12/6/90
+ 
+Rand_Num = Random(XX)
+if (PROB >= Rand_Num)  #compare to random number for detection
+   {
+    # Detection is made.....
+    iDETflg = $YES
+   }
+else    RETURN    # jb    No detection                11/19/90
+##-----------------------------------------------------------
+ 
+ 
+if (iDETflg != $NO)
+   {
+    call mASW_DetectTime (ASW$POINTER,    # PUTs asw$DetectTime$f
+                         SubSpeed,    # Target Speed        7/16/90
+                         INVNUM,
+                         TargetRange,        # jb          11/19/90
+                         MDR    )
+   }
+ 
+return
+end    # End of Subroutine oMASW_Target..
+
+ 
+Subroutine Do_MacroASW(UNT$Pointer, elapsed_time)
+ 
+ #####################################################
+ #$%
+ #$% Purposes:
+ #$%    When called by MOTMAN, Do_MacroASW handles replacements of
+ #$%    buoys whose designated life has expired, using ASW$CountDown$i
+ #$%    for the decision.
+ #$%    When called by Manuvr_LL as the a/c arrives at the
+ #$%    center of the search area (end of Phase 1) or on ar-
+ #$%    rival at the DATUM (end of Phase 3), Do_MacroASW handles
+ #$%    the transition to the next phase.
+ #$%
+ #$%    When Phase 1 ends, mASW_Target is called.  At the end of
+ #$%    Phase 3, SETUP_mASW_BARRIER is called and the ASW slot
+ #$%    is eliminated -- which terminates the search.
+ #$%
+ #$% Called By: Manuvr_LL (at end of Phases 1 and 3)
+ #$%            MOTMAN    (during Phase 2)
+ #$%
+ #$% Calls:    mASW_Target    FNDORD    SETUP_mASW_BARRIER
+ #$%           SEND    (smov's)
+ #$%
+ #$% Tables:    UNT    ASW    DEQ    ORD    ACC
+ #$%
+ #$% Date:      May 1990
+ #$%
+ #$% Author:    Joe Bryant
+ #$%
+ #$% Modified:  Carol Kropp - Oct. 1993
+ #$%            Variable Time Step Modification.
+ #$%
+ #$%            James Allen - 12/97 (E1370)
+ #$%            UNT$LastManeuverOrderCode$I is cleared
+ #$%            when the order is terminated or completed.
+ #$%
+ #$%            Susan Miller - 5/98 (E1994)
+ #$%            Changed elapsed_time from an integer to
+ #$%            a real.  Added check for valid target
+ #$%            pointer before proceeding down path assuming
+ #$%            it is valid.
+ #$%
+ #####################################################
+ 
+bbcommon
+ 
+integer  UNT$Pointer
+real     elapsed_time   # SMM 5/27/98 (E1994)
+ 
+character    info_D[ARB]                    # for information messages
+ 
+integer JJ,KRUZSPD,IAVAILBUOYS,
+        IDECREMENT,ISUCCESS,
+        ASW$Pointer, ASW$Phase$I,
+        ASW$Boyindx$I, ASW$Orderid$I,
+        ASW$Deqindx$I, ASW$Buoylife$I,
+        ASW$Countdown$I, ASW$Targetindx$I,
+        ORD$Pointer, ORD$Phase$I,
+        DEQ$Pointer, DEQ$Remaining$I,
+        BOY$Pointer, UNT3$Pointer,
+        ACC$Pointer,
+        UNT$View$I, UNT$Aswindx$I           # MJC 5/2/2000 (E2145)
+real    UNT$Orderedspeed$F,
+        ASW$Detecttime$F,
+        BOY$Killtime$F,
+        TARGETRANGE,
+        TARGETBRG,
+        FLAT2,
+        FLON2                               # MJC 5/2/2000 (E2145)
+literal UNT$Name$C,
+        CSTRIP8                             # MJC 5/4/2000 (E2145)
+ 
+unt$NAME$C = xunt$NAME$C
+unt$view$i = xunt$view$i
+UNT$ASWindx$i = xUNT$ASWindx$i
+ASW$Pointer$TO (UNT$ASWindx$i)
+ 
+if (!ASW$Pointer$VALID)
+   {
+    ### Send bad_asw_Pointer message
+    jj = 0
+    call smovv("Unexpected invalid ASW reference.", info_d,jj)
+    call smovv("  Zeroing ASW index for ",info_D,jj)
+    call smovhn (unt$name$c, $$MaxLit, info_D, jj)
+               #12345678901234567890123456789012345678901234567890
+    call smovv(".",info_D,jj)
+    call send_  (unt$view$i, 0, jj, info_D)
+ 
+    putUNT$ASWindx$i (0)                    #        6/12/90
+    putUNT$LastManeuverOrderCode$I (NO$order)   # Remove maneuver restrictions - joa 12/97 (E1370)
+    RETURN
+   }
+ 
+ASW$PHASE$i = xASW$PHASE$I # Checks on killing buoys and/or
+if (ASW$PHASE$i == 5)        # the ASW slot..        6/20/90
+   {
+    unt$orderedSPEED$f = Xunt$orderedSPEED$f
+    ASW$BOYindx$i = xASW$BOYindx$i
+    BOY$Pointer$TO (ASW$BOYindx$i)
+ 
+    if (BOY$Pointer$VALID)
+       {
+        boy$KillTime$f = xboy$KillTime$f
+        if (boy$KillTime$f <= Game$Time + time$step) # next cycle which is time$step seconds away - JFR 11/4/93
+           {
+            putUNT$ASWindx$i (0)
+            ASW$ZERO    # PERFORM is GONE..(order is LONG gone)
+            putUNT$LastManeuverOrderCode$I (NO$order)   # Remove maneuver restrictions - joa 12/97 (E1370)
+           }
+       }
+                                  # jb Add mission criterion 12/19/90
+    if (unt$orderedSPEED$f > 10.0 | xUNT$Mission$I != $AntiSub$Code)
+       { # Wrong mission: / No-fair if pilot loses interest in buoys!
+        putUNT$ASWindx$i (0)
+        ASW$ZERO
+        putUNT$LastManeuverOrderCode$I (NO$order)   # Remove maneuver restrictions - joa 12/97 (E1370)
+       }
+ 
+    RETURN    # End of processing for ASW$Phase 5..
+   }
+ 
+# Now, Phase of Order may be 1, 2, or 3; and of ASW, 1, 2, 3, or 4..
+        # (where 4 means BOY slot is unavailable so far)
+ 
+ASW$OrderID$I = xASW$OrderID$I
+call fndord (ASW$OrderID$I,ord$pointer)    # find the order in ORD
+if(!ord$pointer$Valid)
+   {
+    jj = 0
+    ###  Send "order not found" message
+    call smovv("Cannot find PERFORM ASW order for ",info_D,jj)
+    call smovhn (unt$name$c, $$MaxLit, info_D, jj)
+    call smovv(".  Zeroing ASW index.",info_D,jj)
+    call send_  (unt$view$i, 0, jj, info_D)
+ 
+    ASW$ZERO
+    PUTunt$ASWindx$i (0)
+    putUNT$LastManeuverOrderCode$I (NO$order)   # Remove maneuver restrictions - joa 12/97 (E1370)
+    RETURN
+    }
+ 
+asw$DEQindx$I = Xasw$DEQindx$I
+DEQ$Pointer$TO (asw$DEQindx$I)
+ 
+asw$BuoyLife$i = Xasw$BuoyLife$i    # time measurement in hours
+ord$PHASE$i = Xord$PHASE$i
+ 
+if (ord$PHASE$i == 1)  # First Time Called by Motion Model, so
+   {                   #    JUST ARRIVED on station...
+    ord$PHASE$i = 2    # On Station at Search Area center..
+    PUTord$PHASE$i
+    PUTasw$PHASE$I (2)
+    asw$CountDOWN$I = asw$BuoyLife$i * $Minutes$Per$Hour
+    PUTasw$CountDOWN$I
+ 
+    DEQ$Remaining$I = xDEQ$Remaining$I - $MoreBuoys   # 6/20/90
+    putDEQ$Remaining$I
+ 
+    PUTunt$OrderedSpeed$F (0.0)
+    PUTunt$OrderedAltDepth$i (500)
+ 
+    ### Send Arrival-on-ASW-Search-Station/#buoys msg !!!???
+    jj = 0
+    call smovhn (unt$name$c, $$MaxLit, info_D, jj)
+    call smovv(" ARRIVED AT CENTER OF ASW AREA. ",info_D,jj)
+    call smovv(" COMMENCING SEARCH.",info_D,jj)
+    call send_  (unt$view$i, 0, jj, info_D)
+ 
+#$% Find whether this search will be blessed by asw CONTACT:
+    Call mASW_Target (UNT$Pointer, # Pointer to ASW-search Flight
+                 unt3$Pointer,    # (Output) Target Pointer 6/26/90
+                 TargetRange,     # (Output) Range, Center to Target
+                 TargetBRG,       # (Output) Brg,   Center to Target
+                 FLAT2,           # (Output) Latitude      of Target
+                 FLON2   )        # (Output) Longitude     of Target
+ 
+    If (unt3$Pointer$Valid)    # There IS a TARGET....
+       {
+        asw$TargetIndx$i = unt3$Pointer$INDEX
+        PUTasw$TargetIndx$i
+       }
+    Else                        # NO target;         !!!???
+       {
+        # Endless replenishments but no contacts..
+       }
+   }    # END if (ord$PHASE$i == 1)
+ 
+asw$DetectTime$f = Xasw$DetectTime$f # (Set by call from mASW_Target)
+asw$TargetIndx$i = Xasw$TargetIndx$i
+if (ASW$TargetIndx$I != 0)      # SMM 5/27/98 (E1994)
+    unt3$Pointer$TO (asw$TargetIndx$i)
+ 
+if (ord$PHASE$i == 2)  # Do NOT make this an 'ELSE if' !!
+   {                   #    ON STATION...
+    if ((asw$DetectTime$f <= Game$Time) &    # Pg. 3-13
+        (unt3$Pointer$Valid)) # and valid target SMM 5/98 (E1994)
+       {
+        ### Send CONTACT message
+        jj = 0
+        call smovhn (unt$name$c, $$MaxLit, info_D, jj)
+        call smovv(" ASW CONTACT: POSITION ",info_D,jj)
+        call smovll(xUNT3$trueLATITUDE$f,"NS",info_D,jj)
+        call smovv(" ",info_D,jj)
+        call smovll(xUNT3$trueLONGITUDE$f,"EW",info_D,jj)
+##        if(Xasw$TonalFlag$i == $YES)           #    11/19/90
+##           call smovv(" [TONAL]",info_D,jj)  #    11/19/90
+        call send_  (unt$view$i, 0, jj, info_D)
+ 
+        Deq$Remaining$i = 0                #    6/21/90
+        if (DEQ$Pointer$Valid)
+                DEQ$Remaining$I = xDEQ$Remaining$I
+        if(Deq$Remaining$i == 0) # Unable to prosecute
+           {
+            ### Send BINGO/UNABLE_TO_PROSECUTE message
+            jj = 0
+            call smovhn (unt$name$c, $$MaxLit, info_D, jj)
+            call smovv(" has no more buoys: CANNOT ",info_D,jj)
+            call smovv("PROSECUTE DETECTION: BINGOing.",info_D,jj)
+            call send_  (unt$view$i, 0, jj, info_D)
+ 
+            putUNT$ASWindx$i (0)
+            Call BINGO(unt$Pointer)                    #    6/28/90
+            PUTord$phase$i (0) # remove the order from the ORD table
+            asw$ZERO
+            RETURN
+           }
+        putUNT$OrderedLatitude$F  (Xunt3$TrueLatitude$F)
+        putUNT$OrderedLongitude$F (Xunt3$TrueLongitude$F)
+ 
+        ACC$Pointer = xUNT$AccPNTR$I
+        KruzSpd     = xACC$CruiseSpeed$i
+        putUNT$OrderedSpeed$F ( float(KruzSPD) )  # Until on station !!!???
+ 
+        PUTord$PHASE$i (3)
+        PUTasw$PHASE$i (3)
+        RETURN
+       }    # End if Game Time has arrived at DetectTime
+ 
+    ELSE    # DetectTime has NOT arrived..
+       {
+        # SMM 5/27/98 (E1994) INT elapsed_time
+        asw$CountDown$i = Xasw$CountDown$i - INT(elapsed_time)
+        PUTasw$CountDOWN$I          #                     6/14/90
+        if (asw$CountDown$i < 1)    # Time to replace sonobuoys..
+           {
+            if (DEQ$Pointer$Valid)
+               {
+                DEQ$Remaining$I = xDEQ$Remaining$I
+                IavailBuoys = DEQ$Remaining$I - $MoreBuoys
+                IavailBuoys = MIN($MoreBuoys,IavailBuoys)
+                if (IavailBuoys > 0)
+                   {
+                    DEQ$Remaining$I = DEQ$Remaining$I -IavailBuoys
+                    putDEQ$Remaining$I
+                    asw$CountDOWN$I = asw$BuoyLife$i * $Minutes$Per$Hour
+                    PUTasw$CountDOWN$I
+ 
+                    ###Send DEPLOYING-BUOYS/NO-CONTACT message
+                    jj = 0
+                    call smovhn (unt$name$c, $$MaxLit, info_D, jj)
+                    call smovv(" Replenishing buoys: NO CONTACT.",info_D,jj)
+                    call send_  (unt$view$i, 0, jj, info_D)
+ 
+                   }
+                else if (DEQ$Remaining$I > 0)
+                   {
+                    putDEQ$Remaining$I (0) # Use the last of the buoys
+                    asw$CountDOWN$I = asw$BuoyLife$i * $Minutes$Per$Hour
+                    PUTasw$CountDOWN$I
+ 
+                    ### Send LAST-BUOYS message
+                    jj = 0
+                    call smovhn (unt$name$c, $$MaxLit, info_D, jj)
+                    call smovv(" Last buoys deployed: WILL BE ",info_D,jj)
+                    call smovv(" OFF STATION in ",info_D,jj)
+                    call smovi(xASW$BuoyLife$i,info_D,jj)        # 6/28/90
+                    call smovv(" hours.  NO CONTACTS.",info_D,jj)
+                    call send_  (unt$view$i, 0, jj, info_D) # Pg 3-7 para 4
+                   }
+                else    # That's ALL, folks/NO BUOYS ABOARD!
+                   {
+                    putUNT$ASWindx$i (0)
+                    PUTord$PHASE$i (0)    # Get rid of order..
+                    asw$ZERO              # Release ASW slot
+                    ### Send OUT-OF-BUOYS/BINGOing message
+                    jj = 0
+                    call smovhn (unt$name$c, $$MaxLit, info_D, jj)
+                    call smovv(" ASW buoys expended: Executing BINGO.",info_D,jj)
+                    call send_  (unt$view$i, 0, jj, info_D)
+ 
+                    Call BINGO(unt$Pointer)                    #    6/28/90
+                   }
+               }    # End if DEQ$Pointer$VALID
+            Else    # DEQ$ Pointer is NOT VALID
+               {
+                PUTord$PHASE$i (0)    # Get rid of order..
+                putUNT$ASWindx$i (0)
+                asw$ZERO              # Release ASW slot
+                Call BINGO(unt$Pointer)                    #    6/28/90
+                ### Send OUT-OF-BUOYS/BINGOing message
+                jj = 0
+                call smovhn (unt$name$c, $$MaxLit, info_D, jj)
+                call smovv(" ASW buoys vanished: Executing BINGO.",info_D,jj)
+                call send_  (unt$view$i, 0, jj, info_D)
+ 
+               }    # End else if DEQ$Pointer  NOT VALID
+           }    # End if time to replace sonobuoys
+       }    # End ELSE if DetectTime has NOT arrived
+   }    # End if (ord$Phase$i == 2)
+ 
+ 
+if (ord$PHASE$i == 3 )    # Just ARRIVED at DATUM
+   {
+    Idecrement = 0    # Prepare to find how many buoys to deploy..
+    if (DEQ$Pointer$VALID)
+       {
+        DEQ$Remaining$i = xDEQ$Remaining$i
+        Idecrement = MIN($MoreBuoys,DEQ$Remaining$i)
+       }
+ 
+    if (Idecrement <= 0)
+       {
+        ### Send OUT-OF-BUOYS/BINGOing message
+        jj = 0
+        call smovhn (unt$name$c, $$MaxLit, info_D, jj)
+        call smovv(" ASW buoys expended: Executing BINGO.",info_D,jj)
+        call send_  (unt$view$i, 0, jj, info_D)        # Pg 3-7 para 5
+ 
+        ASW$ZERO                                      #        6/28/90
+        putUNT$ASWindx$i ($NO)                        #        6/28/90
+        Call BINGO(unt$Pointer)                    #    6/28/90
+       }
+    else    #    if (Idecrement > 0)    # There are buoys to deploy..
+       {
+        DEQ$Remaining$i = DEQ$Remaining$i - Idecrement
+        putDEQ$Remaining$i
+            # Detailed population of BOY/BAR slot pair:
+        call SETUP_mASW_BARRIER (_
+                    Idecrement,
+                    DEQ$Pointer,
+                    UNT$Pointer,
+                    ASW$Pointer,
+                    ASW$TargetIndx$i,
+                    iSUCCESS )
+ 
+        if (iSUCCESS == $NO)  # No slot available!?! 6/12/90
+           {
+            asw$phase$i = 4
+            PUTasw$phase$i  # Awaiting BOY slot???!!!
+            RETURN    #  Don't terminate: Wait for slot???!!!
+           }
+ 
+        asw$phase$i = 5    # Now will monitor the barrier..
+        PUTasw$phase$i    # Flag: BOY slot exists    # 6/12/90
+        PUTunt$RulesOfEngage$I ($SubEnemy$Code) #
+        ### Send AT-DATUM/BUOYS DEPLOYED message
+        jj = 0
+        call smovhn (unt$name$c, $$MaxLit, info_D, jj)
+        call smovv(" AT DATUM / BUOYS DEPLOYED.",info_D,jj)
+        call send_  (unt$view$i, 0, jj, info_D)
+       }
+ 
+        # When ord$PHASE$i == 3 & asw$Phase#i is 3 OR 5,
+    if(asw$phase$i  != 4)    # remove the order from the ORD table
+        PUTord$phase$i (0)     #            ...but NOT the ASW slot
+   }    # End if ORD$Phase$i == 3
+ 
+return
+end    # End of Subroutine DO_MacroASW
+
+ 
+ Subroutine pLOSS(_
+                   iRNG,                 #
+                   INVNUM,
+                   prl$NV$fq$index,     # index of freq.
+                       PRPLS )              # return PROPLOSS
+ #######################################################
+ #$%
+ #$% Purpose: pLOSS finds MINIMUM PropLoss for Tonals
+ #$%            (Adapted from NBPRPL in WGMDSNR)
+ #$% Called By: mASW_Target
+ #$%
+ #$% Calls:
+ #$%
+ #$% Tables:    PRL
+ #$%
+ #$% Date:      May 1990
+ #$%
+ #$% Author:    J. Bryant
+ #$%
+ #######################################################
+ 
+BBcommon
+ 
+integer IRNG,INVNUM,
+        PRL$Pointer,
+        PRL$NV$Index,
+        PRL$NV$FQ$Index                # MJC 5/2/2000 (E-2145)
+real    PRPLSIN,
+        PRPLSDP,
+        PRPLSCR,
+        PRPLS                          # MJC 5/2/2000 (E-2145)
+ 
+if(irng < 1) irng = 1                  # range index   6/20/83
+else if(irng > 100) irng = 100         # for PRL table 6/20/83
+ 
+PRL$Pointer$to irng                    # set PRL pntr  6/20/83
+PRL$NV$index = iNVNUM                  # Envrnmt #     8/18/83
+ 
+PRPLSin = XPRL$NV$FQ$PROPLOSSIN$F     # above-layer loss
+PRPLSdp = XPRL$NV$FQ$PROPLOSSDEEP$F   # below-layer loss
+PRPLScr = XPRL$NV$FQ$PROPLOSSCROSS$F  # cross-layer loss
+ 
+PRPLS = MIN(PRPLSin,PRPLSdp,PRPLScr)  # Use the minimum one..5/16/90
+return
+end            # End of Subroutine pLOSS
+
+ 
+Subroutine masw_TONAL( _                   #FReQuency DETection
+                 ASW$Pointer,
+                 ifreq,               #frequency (in)
+                 level,               #signal level (in)
+                 iRDI,         # vice TERM (DI-RD-PRPLSS[k])   8/4/83
+                 ifHI,
+                 ifLO,
+                 INVNUM,
+                 TargetRange,         # jb            6/7/90
+                     jflag    )       # detect flag (out)
+ #######################################################
+ #$%
+ #$% Purpose:   masw_TONAL determines if a certain
+ #$%            frequency is detected (This is analogous
+ #$%            to FRQDET, in WGMDSNR.rat)
+ #$%
+ #$% Called By: mASW_Target
+ #$%
+ #$% Calls:     INDFRQ    (in WGMDSNR.rat)
+ #$%            mASW_test
+ #$%
+ #$% Tables:    ANO
+ #$%
+ #$% Date:      May '90
+ #$%
+ #$% Author:    Joe Bryant
+ #$%
+ ##############################################################
+ 
+ BBcommon
+ 
+ real AN
+                        #overrides BB implicit
+ real level, MDR                                #               6/21/90
+ 
+ integer IFREQ,IFLO,IFHI,
+         JFLAG,IBELOW,IABOVE,
+         IFBELO,IFABOV,INDXFREQ,
+         INVNUM,IRDI,IRNG,MASW_TEST,
+         ANO$Pointer, ANO$NV$Index,
+         ASW$Pointer, UNT3$Pointer,
+         SHC$Pointer, SOB$Pointer               # MJC 5/2/2000 (E-2145)
+ real    TARGETRANGE,
+         FNOISE,FOM,FSE,PROPLOSS                # MJC 5/2/2000 (E-2145)
+ 
+# integer jFARG[20]
+# data    jFARG /  10,  15,  20,  30,  40,  60,  80, 100, 125, 250,
+#                 315, 630, 900,1250,1600,2000,2500,3500,5000,10000 / # 7/20/83
+ 
+ if (ifreq < iflo |                     #if outside of detector band
+     ifreq > ifhi)
+    {
+     jflag = $no                        #no detection
+     return
+    }
+ 
+ call INDFRQ( _
+             IFREQ,
+             IBELOW,
+             IABOVE,
+             IFBELO,
+             IFABOV)
+ 
+   ##Note: PPS pg 3-22 specifies NEAREST tabulated frequency    7/19/83
+ if (iFabov -iFREQ < iFREQ -iFbelo )            # NEAREST       8/5/83
+      INDXfreq  = iabove
+ else INDXfreq  = ibelow                             #  tabulated    8/5/83
+ ANO$POINTER$TO INDXfreq                            #   frequency.. 8/5/83
+ 
+ 
+ ANO$NV$index = iNVNUM                          # Envrnmt       8/18/83
+ 
+    ##Note:  PPS pg 3-18 specifies AN taken directly from file  7/19/83
+ AN = XANO$NV$NOISE$F/10.       # AMBIENT noise right from tbl  7/19/83
+    #NOTE: dividing AN by 10. prepares for FNOISE computation, below
+ 
+ FNOISE = (1.0D+1)**AN #PPS pg 3-20 (NOTE: No self-noise for sonobuoy)
+ FNOISE = MIN(FNOISE,level)    # !!!??? TEMPORARY for TESTS ONLY!!! 6/19/90
+ FOM =level -FNOISE + iRDI # Fig.of Merit (FOM) for TONAL (Pg.3-8)  6/21/90
+ if(FOM > 0.0)        FOM = MIN(FOM,200.0)        #            7/30/90
+ else if(FOM < 0.0)   FOM = MAX(FOM,-200.0)       #            7/30/90
+ putASW$FOM$F (FOM)                               #            7/30/90
+##---------------------------------------------------------
+unt3$Pointer$TO (Xasw$TargetIndx$i)            #                    6/26/90
+SHC$Pointer    = Xunt3$SHCpntr$i               #                    6/26/90
+SOB$Pointer$TO  (Xasw$SOBindx$i)               #                    6/26/90
+call Masw_MDR ( SOB$Pointer,
+                SHC$Pointer,
+                ASW$Pointer,
+                UNT3$Pointer,
+                INVNUM,      # 1, 2, 3, or 4
+                INDXfreq,    # Used only for calculate... 6/21/90
+                FOM,      # Used only for calculate...
+                    MDR     )    # This is returned..
+ 
+if(MDR < 0.5)    PROPLOSS = 0.0 # (Avoid zero irng) 6/28/90
+else
+   {
+    irng = MDR +0.5            # (Need integer)     6/21/90
+    Call pLOSS(_
+            irng,              #                    6/21/90
+            INVNUM,
+            INDXfreq,                   # index of freq.
+              PROPLOSS )              # output PROPLOSS
+   }
+ 
+## FSE  = level -FNOISE + RDI -PRPLS       #Sig.Excess; PPS pg 3-16 8/8/83
+ FSE  = level -FNOISE + iRDI -PROPLOSS     #                       6/21/90
+# FSE = max(-987.6,FSE)                      #               12/14/83
+ FSE = max(0.0,FSE)                          # jb            6/7/90
+ ##-------------------------------------------------------------
+ 
+# jflag = nltest(0.0,6.0,FSE)   # detect. flag (SIGMA = 6)      9/27/83
+ jflag = mASW_test(0.0,Macro$SIGMA,FSE,MDR)# detect. flag
+ 
+ return
+ end            #  End  Subroutine masw_TONAL
+
+ 
+Subroutine mASW_DetectTime (ASW$POINTER,
+                           SubSpeed,    # Pointer to aircraft
+                           INVNUM,
+                           TargetRange, # jb          11/19/90
+                           MDR    )
+ #######################################################
+ #$%
+ #$% Purpose: mASW_DetectTime computes detection time
+ #$%    using geometry and speed as specified in the
+ #$%    model description
+ #$%
+ #$% Called By: mASW_Target
+ #$%
+ #$% Calls:    none
+ #$%
+ #$% Tables:    ASW    ACC
+ #$%
+ #$% Date:      May 1990
+ #$%
+ #$% Author:    J. Bryant
+ #$%
+ #$% Modified:  Carol Kropp - 10/93
+ #$%
+ #######################################################
+ 
+bbcommon
+ 
+real    DetectTime
+REAL       MDR                            #        6/21/90
+real    minsloiter, onsta
+ 
+integer NBUOYS, INVNUM,
+        ASW$Pointer,
+        DEQ$Pointer                       # MJC 5/2/2000 (E-2145)
+real    SEMI_MINOR,
+        SEMI_MAJOR,
+        SUBSPEED,
+        SIZE,
+        FRAND,
+        X,
+        RANDOM,
+        TARGETRANGE,
+        ASW$Detecttime$F                  # MJC 5/2/2000 (E-2145)
+data x/0.0/		# Get next random number in sequence
+ 
+Semi_Major = xASW$SemiMajor$I    # For RECTANGLEs, 'LENGTH'
+Semi_Minor = xASW$SemiMinor$I    # For RECTANGLEs, 'WIDTH'
+SIZE = Semi_Major * Semi_Minor   # For Rectangles, Length * Width;
+if(xASW$EllipseType$i == $YES)
+    SIZE = $PI * SIZE            # For Ellipse, compute like circle..
+ 
+OnSta = xASW$HrsLoiter$F            # jb For new equation    11/19/90
+ 
+DEQ$Pointer$TO (xASW$DEQIndx$i)     # jb For new equation    11/19/90
+Nbuoys = xDEQ$Remaining$i +16       # jb For new equation    11/20/90
+ 
+SubSpeed = max(1.0,SubSpeed)             #               7/16/90
+fRAND = RANDOM(x)                        # jb            6/27/90
+ 
+DetectTime = 0.5 + ( (-1 * Log(fRAND) * SIZE ) / (SubSpeed * MDR *
+                                                OnSta * Nbuoys) )
+                                       # /\ Re-specified 11/19/90
+ 
+DetectTime = DetectTime * $Minutes$Per$Hour   # Convert to Minutes
+ 
+if ( TargetRange < 15.0 )                # jb New Algorithm 11/19/90
+    DetectTime = DetectTime - $Minutes$Per$Hour
+ 
+MinsLoiter = OnSta * $Minutes$Per$Hour  # jb Hrs to Min.  11/19/90
+WHILE (DetectTime > MinsLoiter)          # jb              11/19/90
+   {
+    DetectTime = DetectTime - $Minutes$Per$Hour  # New algorithm   11/19/90
+   }
+ 
+asw$DetectTime$f = Game$Time + MAX (DetectTime, 5.) # Pg. 3-13 (min of 5 minutes)
+putasw$DetectTime$f
+ 
+return
+end        # End Subroutine ASW_DetectTime..
+ 
+
+ 
+ Function mASW_Test(_                    #Normal TEST
+                 FMEAN,               #mean (input)
+                 STDDEV,              #standard deviation (input)
+                 X,                   #value to be tested (input)
+                 MDR )
+ #####################################################
+ #$%
+ #$% Purpose:   mASW_test Determines success or failure of
+ #$%            an event by matching the position of
+ #$%            the input number X in a normal dis-
+ #$%            tribution, defined by FMEAN and
+ #$%            STDDEV [MULTIPLIED BY A TIME-LATE FACTOR]
+ #$%            against a random number
+ #$%         (This is NLTEST plus the TIME-LATE FACTOR)
+ #$%
+ #$% Called By:    masw_TONAL    mASW_TARGET
+ #$%
+ #$% Invokes:   ABS        INT        RANDOM
+ #$%
+ #$% Tables:    None
+ #$%
+ #$% Date:      May 1990
+ #$%
+ #$% Author:    Adapted from NLTEST by J. Bryant
+ #$%
+ #####################################################
+ 
+ bbcommon
+ 
+ common / NLTABL / STDNL[0:30]        #table of normal probabilities
+ external NLDATA
+ 
+ REAL       MDR                            #        6/21/90
+ INTEGER    KMDR                           #        6/21/90
+ 
+ INTEGER kRANG[4]
+ REAL    LATEFCTR[4]    # for  PSEUDO-TimeLate Factor
+ data kRANG    /15,   30,   60,    100/
+ data LATEFCTR /1.0,  0.7,  0.5,   0.3/
+ 
+ integer I,JJ                         # MJC 5/2/2000 (E-2145)
+ integer MASW_TEST                    # MJC 5/25/2000 (E-2145)
+ real    Z,X,
+         FMEAN,
+         STDDEV,
+         PROB,
+         STDNL,
+         TLFCTR,
+         RANDOM                       # MJC 5/2/2000 (E-2145)
+#data x/0.0/		# Get next random number in sequence
+ 
+ KMDR = MDR +0.5                      #                6/21/90
+ 
+ Z = (X - FMEAN) / STDDEV             #convert to standard normal
+ 
+ mASW_test = $NO                         #initialize
+ 
+ if (Z >= 3.0)
+    {
+     mASW_test = $YES                    #truncate at 3*sigma
+    }
+ else if (Z > -3.0)                   #if between -3 and 3
+    {
+     I = INT(10.0 * ABS(Z) + .5)      #compute closest index into table
+ 
+     PROB = STDNL[I]                  #get tabulated probability
+ 
+     if (Z < 0.0)                     #if Z negative
+        {
+         PROB = 1.0 - PROB            #compute complementary probability
+        }
+ 
+##-----------------------------------------------------------
+#  h. 'Late' FACTOR = (1.0 if RANGE <15; 0.7 if <30; 0.5 if <60;
+#              0.3 if <= 100 (Note that 100 is maximum range) 3-11
+ 
+     TLfctr = 0.3  #PSEUDO_TimeLate FACTOR (default >= 100 mi) Pg.3-11
+     for (jj =1; jj <=3; jj =jj +1)
+       {
+        if ( kMDR < kRANG[jj] )
+           {
+            TLfctr = LATEFCTR[jj]
+            BREAK
+           }
+       }
+     PROB = PROB * TLfctr
+##-----------------------------------------------------------
+ 
+     if (PROB >= RANDOM(X))           #compare with uniform (0,1) deviate
+        {
+         mASW_test = $YES                #     to get outcome of test
+        }
+    }                                 #endelse
+ 
+ return
+ end
+
+ 
+define (space,1.0)    # Between-buoys spacing (modl.descript. pg 3-8)
+ 
+Subroutine SETUP_mASW_BARRIER (_
+                    NumBuoys,
+                    DEQ$Pointer,
+                    UNT$Pointer,
+                    ASW$Pointer,
+                    ASW$TargetIndx$i,
+                        iSUCCESS ) # BOY slot found?  YES/NO
+ #######################################################
+ #$%
+ #$% Purpose: When the searching a/c arrives at DATUM,
+ #$%    SETUP_mASW_BARRIER fills in the fields in a
+ #$%    BOY/BAR slot combination, to bring into being
+ #$%    a 16-buoy linear barrier, centered on the a/c
+ #$%    and with direction the same as that from the
+ #$%    datum to the present position of the target.
+ #$%    (Seems to be a give-away?)
+ #$%
+ #$% Called By: DO_MacroASW
+ #$%
+ #$% Calls:    RRB2LL    RRL2RB    SEND    smov's
+ #$%
+ #$% Tables:    ASW    UNT    SOB    BOY    BAR
+ #$%
+ #$% Date:      May 1990
+ #$%
+ #$% Author:    J. Bryant
+ #$%
+ #$% Modified:  Susan Miller - 2/98 (E1930)
+ #$%            Commented out variable declaration hgametime and
+ #$%            replaced if statement with new one in order to display
+ #$%            the "full" message no more than once a gamecycle.
+ #$%
+ #######################################################
+ 
+bbcommon
+ 
+character    info_B[ARB]            # for information messages
+ 
+REAL    BACKWARDS
+#real    Hgametime
+ 
+integer ISUCCESS,JJ,NUMBUOYS,
+        DEQ$Pointer, SOB$Pointer,
+        UNT$Pointer, UNT3$Pointer,
+        ASW$Targetindx$I, ASW$Sobindx$I,
+        ASW$Pointer, ASW$Boyindx$I,
+        BAR$Pointer, BAR$PT$Index,
+        BOY$Type$I, BOY$Pointer             # MJC 5/2/2000 (E-2145)
+real    BOY$Assumedlatitude$F,
+        BOY$Assumedlongitude$F,
+        BOY$Truedeltalat$F,
+        BOY$Truedeltalon$F,
+        BOY$Birthtime$F,
+        BOY$Killtime$F,
+        BAR$PT$lat$F,
+        BAR$PT$lon$F,
+        ERRLAT,ERRLON,U,V,
+        FLAT1,FLON1,S,T,
+        TGTLAT,TGTLON,
+        FCOSTGT,FCOSA,
+        FAIRLAT,FAIRLON,
+        RANGE,BRNG,
+        DISTBUOY1,
+        FLAT,FLON,
+        RELBRG                              # MJC 5/2/2000 (E2145)
+literal CSTRIP8                             # MJC 5/11/2000 (E2145)
+real*4  COSLAT                              # MJC 5/4/2000 (E2145)
+ 
+BOY$Pointer = 0    # Initialize to an invalid value
+for (BOY$POINTER$FIRST;BOY$POINTER$VALID;BOY$POINTER$NEXT)
+   {                              # find empty slot
+    if (XBOY$TYPE$I == $NULL$CODE)  #  in buoy table
+       {
+        BREAK
+       }
+   }
+ 
+if (!BOY$POINTER$VALID ) #if no empty slot
+   {
+    iSUCCESS = $NO    # Flag couldn't find a BOY slot..
+ 
+    # Output message once per cycle
+    if (AMOD((game$time),float(game$minute)) != 0.0)
+#    if (Hgametime != game$time)  # Output message once per cycle
+#    ### Send BOY-SLOT-NOT-AVAILABLE message
+       {
+#        Hgametime = game$time
+        jj = 0
+        call smovv("Buoy Table OVERFLOW for ",info_B,jj)
+        call smovhn (Xunt$name$c, $$MaxLit, info_B, jj)
+        call smovv(".  Barrier postponed.",info_B,jj)
+        call send_  (xunt$view$i, 0, jj, info_B)
+       }
+    RETURN
+   }
+ 
+ 
+Else    #   Put values into BOY and BAR tables
+   {
+    iSUCCESS = $YES    # Flag BOY slot found
+ 
+    unt3$Pointer$TO (ASW$TargetIndx$i)
+    TGTLAT = Xunt3$Truelatitude$F                #            7/5/90
+    TGTLON = Xunt3$Truelongitude$F               #            7/5/90
+    FCOSTGT  = COS(TGTLAT)                       #            7/5/90
+ 
+    FairLAT  = Xunt$TrueLatitude$F  # Position of a/c on top of target
+    FairLON  = Xunt$TrueLongitude$F    #                       6/5/90
+    FCOSa    = COS(FairLAT)
+ 
+    # Find RANGE & BRNG from aircraft to center of search area:
+    call RLL2RB( _        # Rhumb line Lat/Lon to Range/Bearing
+                   FairLAT,         #latitude of aircraft
+                   FairLON,         #longitude of aircraft
+                   FCOSa,           #cos of lat of a/c  (input)
+                   TGTLAT,        #latitude of target   (input)
+                   TGTLON,        #longitude of target  (input)
+                   FCOSTGT,       #cos of lat of target (input)
+                   RANGE,            #range (output)
+                   BRNG)             #bearing (output)
+ 
+    BACKWARDS = BRNG + $PI    # Line of buoys stretches in this direction
+    $ANG2PI (BACKWARDS)       #    from the FIRST BUOY
+ 
+    # Find LAT & LONG of the position of the 1st buoy:
+    DISTbuoy1 = 0.5 + ( (float(NumBuoys)/2.0) * Space )
+    FLAT = FairLAT    # Lat of aircraft -> Lat of 1st buoy
+    FLON = FairLON    # Lon of aircraft -> Lon of 1st buoy
+    COSLAT = FCOSa    # COS of (Lat of aircraft -> Lat of 1st buoy)
+    RELBRG = 0.0
+    Call RRB2LL( _            #Rhumb line Range/Bearing to Lat/Lon
+                   FLAT,         #latitude (input & output)
+                   FLON,         #longitude (input & output)
+                   DISTbuoy1,    #range (input)
+                   RELBRG,       #relative bearing (input)
+                   BRNG,         #course (input)
+                   COSLAT)       #cosine of latitude (input & output)
+ 
+    putBOY$TrueLatitude$F (FLAT)
+    putBOY$TrueLongitude$F (FLON)
+    putBOY$COStrueLat$F   (COSLAT)
+ 
+    boy$truedeltalat$f =Space*COS(BACKWARDS)*($pi/(180.*60.))
+    boy$truedeltalon$f =Space*SIN(BACKWARDS)*($pi/(180.*60.)) / COSLAT
+    putboy$truedeltalat$f
+    putboy$truedeltalon$f
+    putboy$assumeddeltalat$f (boy$truedeltalat$f)
+    putboy$assumeddeltalon$f (boy$truedeltalon$f)
+ 
+    asw$SOBindx$i = Xasw$SOBindx$i
+    SOB$Pointer$TO   (asw$SOBindx$i)
+    putBOY$EqPntr$i  (SOB$Pointer)
+ 
+    putBOY$OwnerIndx$I (xASW$FlightIndx$i)
+    # set birth time to next cycle which is time$step minutes away - JFR 11/17/93
+    boy$BirthTime$f = Game$Time + time$step
+    putboy$BirthTime$f
+    boy$KillTime$f = boy$BirthTime$f + xSOB$BuoyLife$i
+    putboy$KillTime$f
+ 
+    #------------------------------------------
+    # We're  finished with CountDown .. so we timeshare.. 6/12/90
+    ASW$BOYindx$i = BOY$Pointer$INDEX
+    putASW$BOYindx$i    # (by using this overlapping field.)
+    #------------------------------------------
+ 
+    errlat = Xunt$assumedLatitude$f  - Xunt$TrueLatitude$f
+    errlon = Xunt$assumedLongitude$f - Xunt$TrueLongitude$f
+    Boy$AssumedLatitude$F  = FLAT + errlat
+    Boy$AssumedLongitude$F = FLON + errlon
+    putBoy$AssumedLatitude$F
+    putBoy$AssumedLongitude$F
+ 
+    putBoy$NbrToLay$i (NumBuoys)
+    putBoy$NbrBuoys$i (NumBuoys)
+    putBoy$TrueDepth$i (300)
+    putBoy$ON$i ($YES)
+    putBoy$NBRlines$i (1)
+    putBoy$LineSEQ$i  (1)
+    putBoy$OFFSET$i   (1)
+ 
+    Boy$Type$i = $PassiveBarrier$Code
+    putBoy$Type$i
+ 
+    call assign_unique_boy_name (boy$pointer)
+ 
+    if (!boy$pointer$ok) boy$last$to (boy$pointer +boy$entry -1)
+ 
+    BAR$Pointer$TO (Boy$Pointer$Index)
+    putBAR$View$i  (xASW$View$i)
+    putBAR$Type$i  (Boy$Type$i)
+    putBAR$Modified$i   ($YES)
+    putUNT$HasBarrier$i ($YES)                      #        6/7/90
+ 
+    U = boy$truedeltaLON$f * COSLAT
+    V = boy$truedeltaLAT$f / COSLAT
+ 
+    FLAT1 = BOY$ASSUMEDLATITUDE$F -                  #  of corners
+             .5 * (BOY$trueDELTALAT$F + U)
+    FLON1 = BOY$ASSUMEDLONGITUDE$F -
+             .5 * (BOY$trueDELTALON$F - V)          #   nearest
+ 
+    BAR$PT$INDEX = 1
+    BAR$PT$LAT$F = FLAT1                                 #    start
+    PUTBAR$PT$LAT$F
+    BAR$PT$LON$F = FLON1
+    PUTBAR$PT$LON$F                                      #     point
+ 
+    BAR$PT$INDEX = 2
+    BAR$PT$LAT$F = FLAT1 + U                             #      of barrier
+    PUTBAR$PT$LAT$F
+    BAR$PT$LON$F = FLON1 - V
+    PUTBAR$PT$LON$F
+ 
+    S = NumBuoys * BOY$trueDELTALAT$F           #compute
+    T = NumBuoys * BOY$trueDELTALON$F
+ 
+    BAR$PT$INDEX = 3                                      #    last buoy
+    BAR$PT$LAT$F = BAR$PT$LAT$F + S
+    PUTBAR$PT$LAT$F
+    BAR$PT$LON$F = BAR$PT$LON$F + T
+    PUTBAR$PT$LON$F
+ 
+    BAR$PT$INDEX = 4                                      #      so far
+    BAR$PT$LAT$F = FLAT1 + S
+    PUTBAR$PT$LAT$F
+    BAR$PT$LON$F = FLON1  + T
+    PUTBAR$PT$LON$F
+ 
+   if (!BAR$POINTER$OK)                              #if beyond prev "last"
+         BAR$LAST$TO BAR$POINTER + BAR$ENTRY - 1       #calc new "last"
+   if (!boy$pointer$ok) boy$last$to (boy$pointer +boy$entry -1)
+  }        # End ELSE put values in BOY and BAR Tables..
+ 
+return
+end    # End of Subroutine Setup_mASW_Barrier..
+
+ 
+Subroutine Masw_MDR ( SOB$Pointer,
+                SHC$Pointer,
+                ASW$Pointer,
+                UNT3$Pointer,
+                INVNUM,      # 1, 2, 3, or 4
+                INDXfreq,    # Used only for calculate...
+                FOMerit,      # Used only for calculate...
+                    MDR     )    # Output
+ #######################################################
+ #$%
+ #$% Purpose: mASW_MDR attempts to find the applicable
+ #$%    Median Detection RANGE from the user-populated
+ #$%    MDR table, using the 3 Pointers plus INVNUM.
+ #$%  If that fails, the INVNUM, INDXfreq and FOMerit
+ #$%    inputs are used to find a PROPLOSS match for
+ #$%    FOMerit (at MDR range).
+ #$%
+ #$% Called By: mASW_Target
+ #$%
+ #$% Calls:     PLOSS
+ #$%
+ #$% Tables:    SOB    SHC    MDR
+ #$%
+ #$% Date:      June 1990
+ #$%
+ #$% Author:    Joe Bryant
+ #$%
+##########################################################
+bbcommon
+ 
+REAL       MDR                            #        6/21/90
+INTEGER    OLDidxMDR                      #        6/22/90
+ 
+integer    INVNUM,IHIGH,ILOW,litcmp,
+           IDXMDR,INDXFREQ,
+           NEWIDXMDR,
+           SOB$Pointer,
+           SHC$Pointer,
+           MDR$Pointer,
+           MDR$RNG$Index,
+           ASW$Pointer,
+           UNT3$Pointer                   # MJC 5/2/2000 (E2145)
+real       FOMERIT,
+           DIFF,
+           OLDIF,
+           SMALLDIF,
+           SAVMDR,
+           PROPLOSS                       # MJC 5/2/2000 (E2145)
+literal    SOB$Type$C,
+           CSTRIP8,
+           SHC$Type$C,
+           MDR$Name$C,
+           MDR$Targetclass$C              # MJC 5/11/2000 (E2145)
+real*4     ABSDIFF                        # MJC 5/4/2000 (E2145)
+ 
+##########  MDR from BBMDR (if available) ################
+SOB$TYPE$C = xSOB$TYPE$C
+SHC$Type$C  = xSHC$Type$C
+ 
+MDR = 0.0                                  #        6/21/90
+for(MDR$Pointer$FIRST; MDR$Pointer$VALID; MDR$Pointer$NEXT)
+   {
+    MDR$Name$C = xMDR$Name$C
+    MDR$TargetClass$C = xMDR$TargetClass$C
+    if (litcmp(MDR$NAME$C,       SOB$Type$C) == 0 &
+        litcmp(MDR$TargetClass$C,SHC$Type$C) == 0 )
+        {
+        BREAK
+        }
+   }
+ 
+if (MDR$POINTER$VALID)
+   {
+    MDR$RNG$Index = INVNUM
+    MDR = xMDR$RNG$Median$F
+   }
+ 
+if (MDR > 100.0)    MDR = 100.0      # jb Instead of MIN    11/19/90
+if (MDR <   1.0)    MDR =   1.0      # jb Dan's default     11/19/90
+if (  1 < 2 )       RETURN           # jb Now unconditional 11/20/90
+ 
+############# MDR is NO LONGER COMPUTED  ################   11/19/90
+    # Find MDR by binary search for proploss to match FOMerit:
+ 
+if  (FOMerit <= $CloseEnough)    # need to set MDR to MINIMUM?
+   {
+    MDR = $CloseEnough                            #        6/21/90
+    RETURN    # Minimum MDR..
+   }
+ 
+    # Initialize variables for binary search:
+ 
+diff   = FOMerit # DIFF between FOMerit and PROPLOSS
+oldif  = diff   # Previous DIFF
+iHIGH  = 100    # The decreasing HIGH-bound for idxMDR
+iLOW   = 1      # The increasing  LOW-bound for idxMDR
+OLDidxMDR = 0   # 'Previous' idx for detecting end of search 6/22/90
+idxMDR = 33     # 'Current' idxMDR during search        6/21/90
+NEWidxMDR = idxMDR # Succeding value for idxMDR
+MDR    = 33.0   #  Initialize to correspond to idxMDR
+Smalldif =999.9 # Smallest value of DIFF so far         6/22/90
+savMDR   = MDR  # Value of MDR corresponding to Smalldif...
+ 
+while ( oldif > $CloseEnough )  # Do binary search for idxMDR
+   {
+    Call pLOSS(_         # Find MINIMUM PropLoss (IN,DEEP,CROSS)
+    idxMDR,
+    INVNUM,
+    IndxFREQ,     # index of test frequency
+    PROPLOSS )    # return minimum PROPLOSS
+ 
+    diff = PROPLOSS - FOMerit
+    absdiff = abs(diff)
+    if (absdiff <= $CloseEnough)
+       {
+        MDR = float(idxMDR)                #                6/22/90
+        RETURN    # idxMDR found!
+       }
+    if (diff > 0) # idxMDR too high for PROPLOSS to match FOMerit
+       {
+        iHIGH = idxMDR
+       }
+    else # (diff < 0);  idxMDR too low for PROPLOSS to match FOMerit
+       {
+        iLOW = idxMDR
+       }
+ 
+    NEWidxMDR = 0.5 + ( ( float(iLOW) + float(iHIGH) ) /2.0 )
+    if (NEWidxMDR == idxMDR)                                #    6/22/90
+       {
+        if      (NEWidxMDR == iLOW +1)
+            NEWidxMDR = iLOW
+        else if (NEWidxMDR ==iHIGH -1)
+            NEWidxMDR = iHIGH
+       }
+ 
+    if(absdiff < SMALLdif)    # If this is closest so far,
+       {
+        SMALLdif = absdiff    # Save value of smallest dif-
+        savMDR = float(idxMDR) # ference & corresponding idxMDR  6/22/90
+       }
+ 
+    if (iHIGH - iLOW < 2) # YES!  We'll set MDR to correspond     6/25/90
+       {                           # to the smallest DIFF yet found
+        if( oldif < absdiff & oldif <= SMALLdif)
+             MDR = float(OLDidxMDR)    # MDR is set per oldif     6/22/90
+        else if (absdiff <= SMALLdif)
+             MDR = float(idxMDR)   # MDR will be per current DIFF 6/22/90
+        else MDR = savMDR # idxMDR will be per SMALLdif
+        RETURN  # (We couldn't get $CloseEnough..)
+       }
+ 
+    OLDidxMDR = idxMDR      # Set these for the next        6/22/90
+    idxMDR = NEWidxMDR      # Set these for the next
+    oldif = absdiff #    pass thru this WHILE loop..
+ 
+   }    # End of WHILE loop / binary search
+ 
+MDR = min(MDR,100.0)                            # jb         7/24/90
+ 
+return
+end        # End of Subroutine mASW_MDR

@@ -1,0 +1,1569 @@
+ 
+#####   version 3.1  dated-  7apr81
+ 
+ 
+#####   version 3.0  dated- 22dec80
+ 
+ 
+# 
+ 
+#$%      MODULE                       UTILITY                     DATA
+#$%    SUBROUTINES                  SUBROUTINES                  TABLES
+#$%    ===========                  ===========                  ======
+#$%
+#$%      WGLSEN                        ECHOH                      RAD
+#$%      WGLRAD                        ECHOR                      ESM
+#$%      WGLESM
+#$%      GETSR  <WGLOAD>
+#$%      GSLOTM <WGLOAD>
+#$%      BADFLD <WGLOAD>
+#$%
+#$%
+#$%
+#$%    NOTES
+#$%    =====
+#$%
+#$%    1.  <FILENAME> INDICATES WHERE SUBROUTINE IS LOCATED.
+#$%
+#$%    2.  UTILITY SUBROUTINES NOT SHOWN ON FLOWCHART.
+#$%
+#$%    3.  * INDICATES NO OTHER SUBROUTINES CALLED.
+#$%
+#$%
+#$%
+#$%    FLOWCHART FOR FILE WGLSEN
+#$%    =========================
+#$%
+#$%    START0 <WARGAM> - WGLOAD - WGLSEN - GETSR *
+#$%                                      - WGLRAD - GSLOTM*
+#$%                                               - BADFLD*
+#$%                                      - WGLESM - GSLOTM*
+#$%                                               - BADFLD*
+#$%                                      - BADFLD*
+#$%
+#$% modifications:  1/9/91   RAD$CH$Frequency$i -> RAD$CH$Frequency$F
+#$%
+#$%
+#$%
+ 
+
+ 
+ define ($xxxxx,)                               #skips nonsense radar name
+ include "bbctl.inc"
+ include "bbcode.inc"
+ include "bbesm.inc"
+ include "bbirc.inc"                            # clf 9/1/92 IR characteristics
+ include "bbrad.inc"
+ include "ascii.inc"
+ 
+ define(BBImplicit, Implicit NONE)              # MJC 4/28/2000
+ define($MaxIlluminatingPulses,100000000)       #4/91
+ 
+ Subroutine wglsen(reccnt,recsz,rec,$$tbl)
+ 
+ #######################################################
+ #$%
+ #$% Purpose:   WGLSEN processes the loading of
+ #$%            the RAD and ESM tables.
+ #$%
+ #$% Called By: WGLOAD
+ #$%
+ #$% Calls:     ECHOH      ECHOR      BADFLD
+ #$%            GETSR      WGLESM     WGLRAD
+ #$%
+ #$% Tables:    RAD        ESM
+ #$%
+ #$% Date:      OCT 80
+ #$%
+ #$% Author:    Ron Williams, Dana Wills
+ #$%
+ #######################################################
+ 
+ BBcommon
+ 
+ integer reccnt,recsz
+ literal rec[1500]
+ 
+ integer $$TBL, LOOP                        # MJC 4/28/2000
+ 
+ #$% if file is empty
+ if (reccnt <= 1)
+    {
+     #$% if radar table
+     if ($$tbl == $$rad)
+       {
+        #$% display warning message to user and return
+        call echov("Sensor File Empty")
+        call echor
+       }
+     return
+    }
+ 
+ #$% for each sensor record
+ for (loop = 2; loop <= reccnt; )
+    {
+     #$% get scenerio record
+     call getsr(loop,recsz,rec)
+ 
+     #$% if array word is RADAR
+     if      (rec[5] == 'RADAR')
+        {
+         #$% table radar not found get next entry
+         if ($$tbl != $$rad) next
+$xxxxx   if (rec[3] == 'XXXXX') next
+         #$% get radar characteristics
+         call wglrad(rec)
+        }
+     #$% else if array word is ESM
+     else if (rec[5] == 'ESM')
+        {
+         #$% if ESM table not found, get next entry
+         if ($$tbl != $$esm) next
+         #$% get ESM characteristics
+         call wglesm(rec)
+        }
+     #$% if array word is IR
+     else if (rec[5] == 'IR')
+        {
+         #$% table radar not found get next entry
+         if ($$tbl != $$irc) next
+$xxxxx   if (rec[3] == 'XXXXX') next
+         #$% get ir characteristics
+         call wglirc(rec)
+        }
+     #$% else if sensor field does not match
+     else
+        {
+         #$% display warning message to user
+         call badfld('Sensor    ',rec[3],rec[5])
+         call echov ('Entire record ignored')
+         call echor
+        }
+ 
+    }                                           #end for each record
+ 
+ return
+ end
+ 
+ 
+ 
+ Subroutine wglrad(rec)
+ 
+ ####################################################################
+ #$%
+ #$% Purpose:   WGLRAD loads in the RADAR scenario file data.  Also
+ #$%            computes system loss, radar signal strength, performance
+ #$%            factor and signal excess.
+ #$%
+ #$% Called By: WGLSEN
+ #$%
+ #$% Calls:     ECHOH      ECHOR      BADFLD
+ #$%            GSLOTM
+ #$%
+ #$% Tables:    RAD
+ #$%
+ #$% Date:      OCT 80
+ #$%
+ #$% Author:    Ron Williams, Dana Wills
+ #$%
+ #######################################################################
+ 
+ BBcommon
+ 
+ integer pnt,np[15]
+ literal rec[1500]
+ real    semu[4,15]
+ real    wavlen[  RAD$CH$Slots]     # reh 4/89
+ real    power[ RAD$CH$Slots ]      # reh 4/89
+ real    nsweep
+ integer*4 ibandw[  RAD$CH$Slots ]  # reh 4/89
+ 
+real*4   prr [ RAD$CH$Slots ]       # reh 10/26/89
+real*4   sw [  RAD$CH$Slots ]       # reh 10/26/89
+real*4   srate [  RAD$CH$Slots ]    # reh 10/26/89
+ 
+real*4  temp_npx                    # reh 4/91
+ 
+integer LEN,ISTAT,N,IPOWR,J,NPX,I,
+        RAD$Pointer, RAD$CH$Index,
+        RAD$CH$sensitivity$I,
+        RAD$Emiflag$I, RAD$Radartype$I,
+        RAD$Burnout$I, RAD$Mode1$I,
+        RAD$CH$pulserepetition$I,
+        RAD$Maxrange$I, RAD$Noisefigure$I,
+        RAD$Antennagain$I, RAD$Mtbf$I,
+        RAD$Timetorepair$I, RAD$Offbeamgain$I,
+        RAD$CH$power$I, RAD$CH$intermediatefreq$I,
+        RAD$CH$ifbandwidth$I, RAD$CH$oscillatorfreq$I,
+        RAD$CH$modulationcode$I, RAD$CH$selectivitycode$I,
+        RAD$CH$scanrate$I, RAD$Mainbeamwidth$I,
+        RAD$CH$scanwidth$I, RAD$M1xcntd$I, RAD$Mode2$I,
+        RAD$M2xcntd$I, RAD$Mode3$I, RAD$M3xcntd$I,
+        RAD$CH$signalstrength$I, RAD$CH$performancefactor$I     # MJC 4/28/2000
+real    RAD$CH$pulsewidth$F,
+        RAD$CH$frequency$F, RAD$CH$bandwidth$F,
+        RAD$M1freq$F, RAD$M1pw$F, RAD$M1prr$F,
+        RAD$M1srate$F, RAD$M2freq$F, RAD$M2pw$F,
+        RAD$M2prr$F, RAD$M2srate$F, RAD$M3freq$F,
+        RAD$M3pw$F, RAD$M3prr$F, RAD$M3srate$F,
+        RAD$CH$signalexcessmean$F                               # MJC 4/28/2000
+literal RAD$Type$C,  RAD$M1enote$C, RAD$M1fcode$C,
+        RAD$M1stype$C, RAD$M1polar$C, RAD$M2enote$C,
+        RAD$M2fcode$C, RAD$M2stype$C, RAD$M2polar$C,
+        RAD$M3enote$C, RAD$M3fcode$C, RAD$M3stype$C,
+        RAD$M3polar$C, CSTRIP8                                  # MJC 4/28/2000
+real*4  BW,BANDW,SYSLOS,OPFREQ                                  # MJC 5/3/2000
+BBdeclare  (RAD$FullName$V)
+integer     kk
+ 
+ data semu/ 3.8,   5.1,   6.1,   7.0,
+            1.9,   3.1,   4.0,   4.9,
+            0.8,   2.0,   3.0,   3.8,
+            0.0,   1.2,   2.2,   3.0,
+           -0.5,   0.8,   1.7,   2.3,
+           -1.0,   0.2,   1.1,   1.9,
+           -1.3,  -0.2,   0.8,   1.4,
+           -1.8,  -0.5,   0.5,   1.0,
+           -2.0,  -0.8,   0.0,   0.8,
+           -2.2,  -1.0,  -0.1,   0.5,
+           -4.0,  -2.9,  -2.0,  -1.3,
+           -5.5,  -4.5,  -3.5,  -3.0,
+           -6.5,  -5.5,  -4.5,  -4.0,
+           -7.1,  -6.0,  -5.2,  -4.5,
+           -7.6,  -6.4,  -5.5,  -5.5/
+ 
+ data np/10,20,30,40,50,60,70,80,90,100,200,400,600,800,1000/
+ 
+ #$% get length of record
+ len = rec[1]
+ 
+ #$% get slots for radar table
+ call gslotm(rad$pointer,$$rad,rad$entry,istat)
+ 
+ #$% if table is full
+ if (istat == $no)
+    {
+     #$% display warning message to user and return
+     call echov("Radars from ")
+     call echohn(rec[3],$$MaxLit)
+     call echov(" and on are not loaded.")
+     call echor
+     return
+    }
+ 
+ #$% get radar type and save
+ rad$type$c = rec[3]
+ putrad$type$c
+ 
+ putRAD$Burnout$I (127)
+ 
+#$%  4/91 reh
+#$% default setting required due to redefinition (using Offset) in blackboard
+for (RAD$CH$Index=1; RAD$CH$Index$OK; RAD$CH$Index = RAD$CH$Index+1)
+    {
+    RAD$CH$Sensitivity$I = 0
+    PUTRAD$CH$Sensitivity$I               # reh 4/91
+    }
+ 
+#$% set up default 4/91
+RAD$EMIFlag$i = $NonBEESProcessing
+putRAD$EMIFlag$i
+ 
+ n = 0
+ 
+ #$% for each word in the record
+ for (pnt = 6; pnt <= len; )
+    {
+     if      (rec[pnt] == 'FUNCT')
+        {
+         #$% if next array word is SURF
+         if      (rec[pnt+1] == 'SURF')
+            {
+             #$% set radar type to surface
+             rad$radartype$i = $surface$code
+            }
+         #$% else if next array word is AIR
+         else if (rec[pnt+1] == 'AIR')
+            {
+             #$% set radar type to air
+             rad$radartype$i = $air$code
+            }
+         #$% else is array word is MISS
+         else if (rec[pnt+1] == 'MISS')
+            {
+             #$% set radar type to cruise missile
+             rad$radartype$i = $cruisemissile$code      #not used now
+             pnt =pnt + 2
+            }
+         #$% else if array word is FIRE
+         else if (rec[pnt+1] == 'FIRE')
+            {
+             #$% set radar type to fire control
+             rad$radartype$i = $firecontrol$code        #not used just yet
+            }
+         #$% else if array word is APPRO                # CLF 6/18/86
+         else if (rec[pnt+1] == 'APPRO')
+            {
+             #$% set radar type to fire control
+             rad$radartype$i = $Approach$code
+            }
+         #$% save radar type
+         putrad$radartype$i
+ 
+         #$% increment pointer
+         pnt =pnt + 2
+        }
+ 
+    #$% else if word is Hi or Low end of Freq range reh 10/25/89
+    else if (rec[pnt] == 'HFREQ' |
+             rec[pnt] == 'LFREQ')
+        {
+        #$% not currently used in blackboard
+ 
+        #$% increment counter
+        pnt = pnt + 2
+        }
+     #$% if pointer is at an antenna name, 10/91
+     else if (rec[pnt] == 'ANTEN')
+        {
+        #$% increment pointer, don't do anything this pass
+        pnt = pnt + 4
+        }
+     #$% else if word is Burnout Threshold
+     else if (rec[pnt] == 'BURNO')
+        {
+         RAD$Burnout$i = rec[pnt+1]
+         putRAD$burnout$i
+ 
+         #$% increment counter
+         pnt = pnt + 2
+        }
+     #$% else if word is Pulse related
+     else if (rec[pnt] == 'PULSE')
+        {
+        RAD$CH$Index = rec[pnt+2]
+        RAD$CH$PulseWidth$F = rec[pnt+3]              # microSec
+        putRAD$CH$PulseWidth$F
+ 
+        RAD$CH$PulseRepetition$i = rec[pnt+4]        # Hz
+        putRAD$CH$PulseRepetition$i
+ 
+        #$% increment counter
+        pnt = pnt + 5
+        }
+     #$% else if word is Saturation threshold, 8/90
+     else if (rec[pnt] == 'SATUR')
+        {
+#         RAD$Saturation$i = rec[pnt+1]
+#         putRAD$Saturation$i
+ 
+         #$% increment counter
+         pnt = pnt + 2
+        }
+     #$% else if array word is RANGE
+     else if (rec[pnt] == 'RANGE')
+        {
+         #$% get radar maximum range and save
+         rad$maxrange$i = rec[pnt+1]
+         putrad$maxrange$i
+ 
+         #$% increment pointer
+         pnt = pnt + 2
+        }
+ 
+     #$% else if array word is NSFIG
+     else if (rec[pnt] == 'NSFIG')
+        {
+         #$% get noise figure and save
+         rad$noisefigure$i = rec[pnt+1]
+         putrad$noisefigure$i
+ 
+         #$% increment pointer
+         pnt = pnt + 2
+        }
+ 
+     #$% else if array word is GAIN
+     else if (rec[pnt] == 'GAIN')
+        {
+         #$% get antenna gain and save
+         rad$antennagain$i = rec[pnt+1]
+ 
+        # accomodate old databases to modified field range in BUILD
+#        IF (rad$antennagain$i > 50)        # reh 6/89
+#            rad$antennagain$i = 50  commented   1/22/90
+ 
+         putrad$antennagain$i
+ 
+         #$% increment pointer
+         pnt = pnt + 2
+        }
+ 
+     #$% else if array word is FREQ
+     else if (rec[pnt] == 'FREQ')
+        {
+        FOR (RAD$CH$Index=1; RAD$CH$Index$OK;
+              RAD$CH$Index =RAD$CH$Index+1) # (Loop added)     4/24/89
+            {
+            #$% update blackboard with frequency value from RADART record
+ 
+            # if alternate channel(s) not yet assigned
+            IF (XRAD$CH$FREQUENCY$F == 0 )
+                {
+                RAD$CH$FREQUENCY$F = rec [ pnt + 1 ]     # 4/24/89
+                PUTRAD$CH$FREQUENCY$F                    # 4/24/89
+ 
+                #$% convert operating frequency into wavelength
+                #  wavlen = qkdb(3.0E4/float(rad$operatingfreq$i)) old 8/24/88
+ 
+                OpFreq = RAD$CH$Frequency$F                 # jb 9/2/88
+                If(OpFreq <= 1.0 | OpFreq >= 3.0E4)         # jb 9/2/88
+                    wavlen [ RAD$CH$Index ] = 0.0           # jb 9/2/88
+                Else                                        # jb 9/2/88
+                    {
+                    wavlen [ RAD$CH$Index ] = 3.0E4/OpFreq  #jb 8/24/88
+                    wavlen [ RAD$CH$Index ] =
+                        10.0 * log10(wavlen [ RAD$CH$Index ])  #jb replace QKDB  8/24/88
+                    }
+                } # if alternate channels not assigned
+            } # for all RAD$CH subtable indexes
+ 
+         #$% increment pointer
+         pnt = pnt + 2
+        }
+ 
+     #$% else if array word is MNFAL
+     else if (rec[pnt] == 'MNFAL')
+        {
+         #$% get mean time between failure and save
+         rad$mtbf$i = rec[pnt+1]
+         putrad$mtbf$i
+ 
+         #$% increment pointer
+         pnt = pnt + 2
+        }
+ 
+     #$% else if array word is MNRPR
+     else if (rec[pnt] == 'MNRPR')
+        {
+         #$% get mean time to repair and save
+         rad$timetorepair$i = rec[pnt+1]
+         putrad$timetorepair$i
+ 
+         #$% increment pointer
+         pnt = pnt + 2
+        }
+    else if(rec[pnt] == 'NOMEN')
+        {
+        rad$Fullname$V = ""
+        kk = 0
+        call vmovh (rec[pnt+1], 24, rad$Fullname$V, kk)
+        putrad$Fullname$V
+        pnt = pnt + 4
+        }
+    else if(rec[pnt] == 'UDB')
+        {
+        if      (rec[pnt+1] == 'YES') putrad$UDB$i ($YES)
+        else if (rec[pnt+1] != 'NO')  putrad$UDB$i (!$NO)
+        pnt = pnt + 2
+        }
+     #$% else if array word is IFBW
+ 
+     #$% else if array word is antenna OffBeam correction
+     else if (rec[pnt] == 'OBEAM')
+        {
+        #$% calc. antenna OffBeam Gain
+        rad$OffBeamGain$i = xRAD$antennagain$i + rec [ pnt + 1 ]
+ 
+        PUTrad$OffBeamGain$i
+ 
+        #$% increment pointer
+        pnt = pnt + 2
+        }
+ 
+     #$% else if array word is BDWTH
+     else if (rec[pnt] == 'BDWTH')
+        {
+        # eliminate out-of-bounds bandwidths when using obsolete database
+        # code to check for possible wargame integer overflow error
+ 
+        RAD$CH$Bandwidth$F = rec [ pnt + 1 ]  # store in MHz
+        IF ( RAD$CH$bandwidth$F > 2000 )        # 5/4/89 reh
+            {
+            call echov ('WARNING: BandWidth > 2000 MHz for Radar ')
+            call echoh(xRAD$type$c, ARB)
+            call echor
+            RAD$CH$bandwidth$F = 2000
+            }
+ 
+#       PUTRAD$CH$bandwidth$i
+ 
+        FOR (RAD$CH$Index = 1; RAD$CH$Index$OK; RAD$CH$Index=RAD$CH$Index+1)
+            {
+            PUTRAD$CH$Bandwidth$F
+ 
+            #$% get bandwidth in Hz
+##           bandw = qkdb(rec[pnt+1]*1000000)        # older way  8/24/88
+ 
+            bandw = rec[pnt+1]*1000000              # 8/24/88
+            If( bandw <= 1.0 )
+                ibandw [ RAD$CH$Index ] = 0  # jb 9/2/88
+            Else
+                ibandw [ RAD$CH$Index ] =
+                     10.0 * log10(bandw) +0.5 #jb Ibandw rep.QKDB 9/2/88
+            }
+ 
+         #$% increment pointer
+         pnt = pnt + 2
+        }
+ 
+    # if an alternate mode was defined, "MODEA" and "MODEB" combine to
+    # form complete MODE data
+    else if  ( rec [ pnt ] == 'MODEA' )      # 10/26/89 reh, was 'ACHAN'
+        {
+        #$% this is the channel number
+        RAD$CH$Index = rec [ pnt + 1 ]
+ 
+        # check for valid channel number
+        IF ( RAD$CH$Index > 10 | RAD$CH$Index < 1 ) next
+ 
+        RAD$CH$Frequency$F = rec [ pnt + 3 ]
+        PUTRAD$CH$Frequency$F
+ 
+        OpFreq = RAD$CH$Frequency$F                 # jb 9/2/88
+        If(OpFreq <= 1.0 | OpFreq >= 3.0E4)         # jb 9/2/88
+            wavlen [ RAD$CH$Index ] = 0.0           # jb 9/2/88
+        Else                                        # jb 9/2/88
+            {
+            wavlen [ RAD$CH$Index ] = 3.0E4/OpFreq  #jb 8/24/88
+            wavlen [ RAD$CH$Index ] =
+                   10.0 * log10(wavlen [ RAD$CH$Index ])  #jb replace QKDB  8/24/88
+            }
+ 
+        # get bandwith in Hz
+#        bandw = rec[pnt+1]*1000000              # 8/24/88
+        bandw = rec[pnt+4]*1000000              # reh 10/26/89
+        If( bandw <= 1.0 )
+            ibandw [ RAD$CH$Index ] = 0  # jb 9/2/88
+        Else
+            ibandw [ RAD$CH$Index ] =
+                     10.0 * log10(bandw) +0.5 #jb Ibandw rep.QKDB 9/2/88
+ 
+        RAD$CH$Bandwidth$F = rec [ pnt + 4 ]  # store in MHz
+        PUTRAD$CH$Bandwidth$F
+ 
+        power [ RAD$CH$Index ] = rec [pnt + 2]
+ 
+        RAD$CH$Power$i = power [ RAD$CH$Index ]         # reh 6/89
+ 
+        PUTRAD$CH$Power$i
+ 
+        RAD$CH$IntermediateFreq$I = rec [ pnt + 5 ]
+        PUTRAD$CH$IntermediateFreq$I
+ 
+        RAD$CH$IFBandWidth$I      = rec [ pnt + 6 ]
+        PUTRAD$CH$IFBandWidth$I
+ 
+        RAD$CH$OscillatorFreq$I   = rec [ pnt + 7 ]
+        PUTRAD$CH$OscillatorFreq$I
+ 
+        RAD$CH$Sensitivity$I      = rec [ pnt + 8 ]
+ 
+        #$% check for bounds, added 4/91 reh
+        IF (RAD$CH$Sensitivity$I < $Lo_RAD$CH$Sensitivity$I)
+            {
+            call echov ('WARNING: Sensitivity < ')
+            call echoi($Lo_RAD$CH$Sensitivity$I)
+            call echov (' dBm for Radar ')
+            call echoh(xRAD$type$c, ARB)
+            call echov ('/')
+            call echoi(RAD$CH$Index)
+            call echor
+            RAD$CH$Sensitivity$I = $Lo_RAD$CH$Sensitivity$I
+            }
+        ELSE IF (RAD$CH$Sensitivity$I > $Hi_RAD$CH$Sensitivity$I)
+            {
+            call echov ('WARNING: Sensitivity > ')
+            call echoi($Hi_RAD$CH$Sensitivity$I)
+            call echov (' dBm for Radar ')
+            call echoh(xRAD$type$c, ARB)
+            call echov ('/')
+            call echoi(RAD$CH$Index)
+            call echor
+            RAD$CH$Sensitivity$I = $Hi_RAD$CH$Sensitivity$I
+            }
+ 
+        PUTRAD$CH$Sensitivity$I
+ 
+#       RAD$CH$ModulationCode$I   = function to convert (rec [ pnt + 9 ])
+        RAD$CH$ModulationCode$I = 1   # temp 10/25/89 in lieu of prev functin
+        PUTRAD$CH$ModulationCode$I
+ 
+        if      (rec[pnt+10] == 'POOR')
+                RAD$CH$SelectivityCode$i = $Poor_Selectivity$Code
+        else if (rec[pnt+10] == 'AVG')
+                RAD$CH$SelectivityCode$i = $Average_Selectivity$Code
+        else if (rec[pnt+10] == 'GOOD')
+            RAD$CH$SelectivityCode$i = $Good_Selectivity$Code
+        else if (rec[pnt+10] == 'EXCEL')
+                RAD$CH$SelectivityCode$i = $Excellent_Selectivity$Code
+        else
+                RAD$CH$SelectivityCode$i = $Average_Selectivity$Code
+ 
+        PUTRAD$CH$SelectivityCode$i
+ 
+        pnt = pnt + 11
+        } # end if "MODEA
+    # if an alternate mode was defined, "MODEA" and "MODEB" combine to
+    # form complete MODE data
+    else if  ( rec [ pnt ] == 'MODEB' )
+        {
+        #$% this is the mode number
+        RAD$CH$Index = rec [ pnt + 1 ]
+ 
+        # check for valid channel number
+        IF ( RAD$CH$Index > 10 | RAD$CH$Index < 1 ) next
+ 
+        RAD$CH$ScanRate$I = rec [ pnt + 2 ] # vts radar FOV calculation - JFR 2/11/94
+        PUTRAD$CH$ScanRate$I  # vts radar FOV calculation - JFR 2/11/94
+ 
+        srate[ RAD$CH$Index ] = rec [ pnt + 2 ]
+        prr  [ RAD$CH$Index ] = rec [ pnt + 3 ]
+        sw   [ RAD$CH$Index ] = rec [ pnt + 4 ]
+ 
+        RAD$CH$PulseRepetition$i = rec [ pnt+3 ]              # 6/91, reh
+        putRAD$CH$PulseRepetition$i
+ 
+        pnt = pnt + 5
+        } # end if "MODEB"
+ 
+     #$% else if array word is POWER
+     else if (rec[pnt] == 'POWER')
+        {
+        ipowr = rec [ pnt + 1]                # reh 6/89
+ 
+        # accomodate old databases to modified field range in BUILD
+        IF ( ipowr  > 90 )                    # reh 6/89
+            ipowr = 90
+ 
+ 
+        FOR (RAD$CH$Index = 1;RAD$CH$Index$OK;RAD$CH$Index=RAD$CH$Index+1)
+            {
+            #$% get radar output power
+#            power [ RAD$CH$Index ] = rec[pnt+1]
+            power [ RAD$CH$Index ] = ipowr            # reh 6/89
+ 
+            RAD$CH$Power$i = power [ RAD$CH$Index ]         # reh 6/89
+ 
+            PUTRAD$CH$Power$i
+            }
+ 
+        #$% increment pointer
+        pnt = pnt + 2
+        }
+ 
+     #$% else if array word is SRATE
+     else if (rec[pnt] == 'SRATE')
+        {
+ 
+#        RAD$ScanRate$i = rec[pnt+1]    commented out 10/26/89
+#        PUTRAD$ScanRate$i
+ 
+        FOR (RAD$CH$Index=1; RAD$CH$Index$OK;
+              RAD$CH$Index =RAD$CH$Index+1) # (Loop added)     10/26/89
+            {
+            #$% set default scan rate      10/26/89
+            srate [ RAD$CH$Index ] = rec[pnt+1]
+ 
+            #$% get antenna scan rate
+            RAD$CH$ScanRate$i = rec[pnt+1] # vts radar FOV calculation - JFR 2/11/94
+            PUTRAD$CH$ScanRate$i # vts radar FOV calculation - JFR 2/11/94
+            }
+ 
+         #$% increment pointer
+         pnt = pnt + 2
+        }
+ 
+     #$% else if array word is PRR
+     else if (rec[pnt] == 'PRR')
+        {
+ 
+        #$% set default pulse rep. rate
+        FOR (RAD$CH$Index=1; RAD$CH$Index$OK;
+              RAD$CH$Index = RAD$CH$Index+1) # (Loop added)     10/26/89
+            {
+            prr [ RAD$CH$Index ] = rec [ pnt+1 ]
+            if (prr [ RAD$CH$Index ] > 0) PUTrad$CH$Pulsed$i ($YES)
+ 
+            RAD$CH$PulseRepetition$i = rec [ pnt+1 ]              # 6/91, reh
+            putRAD$CH$PulseRepetition$i
+            }
+ 
+         #$% increment pointer
+         pnt = pnt + 2
+        }
+ 
+     #$% else if array word is BEAM
+     else if (rec[pnt] == 'BEAM')
+        {
+         #$% compute beamwidth
+         bw = rec[pnt+1] * 0.1
+ 
+        #$% convert from tenths of degree
+        RAD$MainBeamWidth$i = NINT(rec[pnt+1] * 0.1 )
+ 
+        #$% if beamwidth was truncated to zero
+        IF ( rec [ pnt + 1 ] != 0 & RAD$MainBeamWidth$i == 0 )
+            {
+            #$% set to minimum beam ( degrees )
+            RAD$MainBeamWidth$i = 1
+            }
+ 
+        PUTRAD$MainBeamWidth$i
+ 
+         #$% increment pointer
+         pnt = pnt + 2
+        }
+ 
+     #$% else if array word is SSECT
+     else if (rec[pnt] == 'SSECT')
+        {
+        FOR (RAD$CH$Index = 1; RAD$CH$Index$OK;         # loop added 10/26/89
+             RAD$CH$Index = RAD$CH$Index + 1)
+            {
+            #$% get sector scan width
+            sw [ RAD$CH$Index ] = rec[pnt+1]
+ 
+            # for VTS we have constant scanning sectors for each channel - JFR 1/27/94
+            # mostly for compatibility of force files - JFR 1/27/94
+            RAD$CH$Scanwidth$I = sw [ RAD$CH$Index ] # JFR 1/27/94
+            # store it for later use in radar model for VTS - JFR 1/27/94
+            putRAD$CH$Scanwidth$I                    # JFR 1/27/94
+            }
+ 
+         #$% increment pointer
+         pnt = pnt + 2
+        }
+ 
+     #$% else if array word is PFA
+     else if (rec[pnt] == 'PFA')
+        {
+         #$% compute probability of false alarm
+         j = rec[pnt+1]/2 - 1
+ 
+         #$% increment pointer
+         pnt = pnt + 2
+        }
+ 
+#     else if (rec[pnt] == 'MODUL')    # jb            9/13/89
+#        {                                  commented out 10/26/89
+#         call TypeModul (rec[pnt + 1],rec[pnt + 2], J_Modul)
+#
+#         PUTrad$ModulationType$i (J_Modul)
+#         #$% increment pointer
+#         pnt = pnt + 3
+#        }
+ 
+     else if (rec[pnt] == 'MFUNC')
+        {
+         n = n + 1
+ 
+         if (n == 1)
+            {
+             RAD$Mode1$I = rec[pnt+1]
+             putRAD$Mode1$I
+ 
+             RAD$M1Enote$C = rec[pnt+2]
+             putRAD$M1Enote$C
+ 
+             RAD$M1Fcode$C = rec[pnt+3]
+             putRAD$M1Fcode$C
+ 
+             RAD$M1Xcntd$I = rec[pnt+4]
+             putRAD$M1Xcntd$I
+ 
+             RAD$M1FREQ$F = rec[pnt+5]
+             putRAD$M1FREQ$F
+ 
+             RAD$M1PW$F = rec[pnt+6]
+             putRAD$M1PW$F
+ 
+             RAD$M1PRR$F = rec[pnt+7]
+             putRAD$M1PRR$F
+ 
+             RAD$M1SRATE$F = rec[pnt+8]
+             putRAD$M1SRATE$F
+ 
+             RAD$M1Stype$C = rec[pnt+9]
+             putRAD$M1Stype$C
+ 
+             RAD$M1Polar$C = rec[pnt+10]
+             putRAD$M1Polar$C
+ 
+             pnt = pnt + 11
+            }
+ 
+         else if (n == 2)
+            {
+             RAD$Mode2$I = rec[pnt+1]
+             putRAD$Mode2$I
+ 
+             RAD$M2Enote$C = rec[pnt+2]
+             putRAD$M2Enote$C
+ 
+             RAD$M2Fcode$C = rec[pnt+3]
+             putRAD$M2Fcode$C
+ 
+             RAD$M2Xcntd$I = rec[pnt+4]
+             putRAD$M2Xcntd$I
+ 
+             RAD$M2FREQ$F = rec[pnt+5]
+             putRAD$M2FREQ$F
+ 
+             RAD$M2PW$F = rec[pnt+6]
+             putRAD$M2PW$F
+ 
+             RAD$M2PRR$F = rec[pnt+7]
+             putRAD$M2PRR$F
+ 
+             RAD$M2SRATE$F = rec[pnt+8]
+             putRAD$M2SRATE$F
+ 
+             RAD$M2Stype$C = rec[pnt+9]
+             putRAD$M2Stype$C
+ 
+             RAD$M2Polar$C = rec[pnt+10]
+             putRAD$M2Polar$C
+ 
+             pnt = pnt + 11
+            }
+ 
+         else if (n == 3)
+            {
+             RAD$Mode3$I = rec[pnt+1]
+             putRAD$Mode3$I
+ 
+             RAD$M3Enote$C = rec[pnt+2]
+             putRAD$M3Enote$C
+ 
+             RAD$M3Fcode$C = rec[pnt+3]
+             putRAD$M3Fcode$C
+ 
+             RAD$M3Xcntd$I = rec[pnt+4]
+             putRAD$M3Xcntd$I
+ 
+             RAD$M3FREQ$F = rec[pnt+5]
+             putRAD$M3FREQ$F
+ 
+             RAD$M3PW$F = rec[pnt+6]
+             putRAD$M3PW$F
+ 
+             RAD$M3PRR$F = rec[pnt+7]
+             putRAD$M3PRR$F
+ 
+             RAD$M3SRATE$F = rec[pnt+8]
+             putRAD$M3SRATE$F
+ 
+             RAD$M3Stype$C = rec[pnt+9]
+             putRAD$M3Stype$C
+ 
+             RAD$M3Polar$C = rec[pnt+10]
+             putRAD$M3Polar$C
+ 
+             pnt = pnt + 11
+            }
+        }
+ 
+     #$% else if array word is none of the above
+     else
+        {
+         #$% display invalid field message to user
+         call badfld('Radar     ',rec[3],rec[pnt])
+ 
+         #$% increment pointer
+         pnt = pnt + 1
+        }
+ 
+    }                                           #end for each word in record
+ 
+ 
+FOR (RAD$CH$Index = 1; RAD$CH$Index$OK; RAD$CH$Index = RAD$CH$Index + 1)
+    {
+    #$% is the radar operating frequency is less than 2650 MHz, set
+    #$% system loss at 2.5, otherwise set it at 5.0
+    if (xrad$CH$frequency$F < 2650) syslos = 2.5
+    else syslos = 5.0
+ 
+    #$% compute radar signal strength and save
+    rad$CH$signalstrength$i = power [ RAD$CH$Index ] +
+                 rad$antennagain$i +
+                2.0*wavlen [ RAD$CH$Index ] + .5
+    putRAD$CH$signalstrength$i
+ 
+    #$% compute radar performance factor and save
+    rad$CH$PerformanceFactor$i = power [ RAD$CH$Index ] +
+             2*rad$antennagain$i +
+        2.0*wavlen [ RAD$CH$Index ] _
+                - ibandw [ RAD$CH$Index ] - syslos + .5   # jb Ibandw    8/31/88
+    rad$CH$performancefactor$i = max( 0, rad$CH$performancefactor$i )   #       5/9/84
+    putrad$CH$performancefactor$i
+ 
+    # computation of signal excess mean, for each mode 10/26/89
+ 
+    #$% compute number of sweeps
+    nsweep = (sw [ RAD$CH$Index ] * srate [ RAD$CH$Index ])
+ 
+    if (nsweep > 0.0)
+        {
+        #npx = 60. * prr [ RAD$CH$Index ] * bw / nsweep  #  commented out 4/91
+ 
+        #$% modified 4/91 to handle possible integer overflow, reh
+        #$% BUILD "PRR" field significantly increased, 4/91
+ 
+        #$% compute number of pulses illuminating a target per sweep
+        temp_npx = 60. * prr [ RAD$CH$Index ] * bw / nsweep
+ 
+        if (temp_npx > $MaxIlluminatingPulses)
+            {
+            temp_npx = $MaxIlluminatingPulses
+            }
+ 
+        npx = temp_npx
+        }
+    else
+        {
+        npx = 0
+        }
+ 
+    #$% if number of pulses is less than ten (see data table above)
+    #$% set i to 1 (minimum value)
+    if (npx < np[1])  i = 1
+ 
+    #$% otherwise loop through 15 data elements and find the one
+    #$% nearest to npx then break from loop
+    else
+         do i = 1, 15
+            {
+             if (npx <= np[i]) break        #                       1/12/83
+            }
+    if ( i > 15 ) i = 15                   # prevent bug           1/8/86
+ 
+    #$% get mean signal excess distribution as a function of
+    #$% probability of detection (j) and number of pulses on the
+    #$% target per scan (i) - see data table above - then save results
+    rad$CH$signalexcessmean$f = semu[j,i]
+    putrad$CH$signalexcessmean$f
+    }
+ 
+ return
+ end
+ 
+ 
+ 
+ Subroutine wglesm(rec)
+ 
+ ###############################################################
+ #$%
+ #$% Purpose:   WGLESM loads in the ESM scenario file data.
+ #$%
+ #$% Called By: WGLSEN
+ #$%
+ #$% Calls:     ECHOH      ECHOR      BADFLD
+ #$%            GSLOTM
+ #$%
+ #$% Tables:    ESM
+ #$%
+ #$% Date:      OCT 80
+ #$%
+ #$% Author:    Ron Williams, Dana Wills
+ #$%
+ ###############################################################
+ 
+ BBcommon
+ 
+ integer pnt
+ 
+ literal rec[1500]
+ 
+ integer LEN, ISTAT, IBANDW,
+         KK, J, NSFIG, IGAIN, LOSS,
+         ESM$Pointer, ESM$Mtbf$I,
+         ESM$Ifbandwidth$I,
+         ESM$Oscillatorfreq$I,
+         ESM$Intermediatefreq$I,
+         ESM$Bandwidth$I, ESM$Gain$I,
+         ESM$Sensitivity$I,
+         ESM$Selectivitycode$I,
+         ESM$Burnout$I, ESM$Highfreq$I,
+         ESM$Lowfreq$I, ESM$Maxrange$I,
+         ESM$Performfactor$I                    # MJC 4/28/2000
+ real    ESM$Stdevbrgerr$F, XBANDW              # MJC 4/28/2000
+ literal ESM$Type$C                             # MJC 4/28/2000
+ BBdeclare (ESM$FullName$V)
+ 
+ #$% get length
+ len = rec[1]
+ 
+ #$% get slots from ESM table
+ call gslotm(esm$pointer,$$esm,esm$entry,istat)
+ 
+ #$% if table is full
+ if (istat == $no)
+    {
+     #$% send warning message to user and return
+     call echov("ESMs from ")
+     call echohn(rec[3],$$MaxLit)
+     call echov(" and on are not loaded.")
+     call echor
+     return
+    }
+ 
+ #$% get ESM type and save
+ esm$type$c = rec[3]
+ putesm$type$c
+ 
+ putESM$Burnout$I (127)
+ 
+ putESM$HighFreq$I (-1)
+ 
+ ESM$StDevBrgErr$F = 2.0                #<<<>>> temp default!   10/10/85
+ putESM$StDevBrgErr$F                   #<<<>>> temp default!   9/30/85
+ 
+ putESM$MaxRange$I (ESM$DefaultMaxRange) # set default max range (E1110)
+ 
+ #$% for each word in ESM record
+ for (pnt = 6; pnt <= len; )
+    {
+     #$% if word is MNFAL
+     if      (rec[pnt] == 'MNFAL')
+        {
+         #$% get equipment mean time between failure and save
+         esm$mtbf$i = rec[pnt+1]
+         putesm$mtbf$i
+ 
+         #$% increment counter
+         pnt = pnt + 2
+        }
+ 
+#     #$% else if word is MNRPR
+#     else if (rec[pnt] == 'MNRPR')
+#       {
+#         #$% get equipment mean time to repair and save
+#        esm$timetorepair$i = rec[pnt+1]
+##       putesm$timetorepair$i                  #       9/30/85
+#
+#         #$% increment counter
+#        pnt = pnt + 2
+#       }
+ 
+     #$% else if word means "Std. Dev. of Bearing Error"
+     else if (rec[pnt] == 'BRERR')              #       9/30/85
+        {
+         esm$StDevBrgErr$F = rec[pnt+1]         #       9/30/85
+         if ( esm$StDevBrgErr$F >12.7 )         #<<<>>> 1/22/86
+                esm$StDevBrgErr$F = 12.7        #<<<>>> 1/22/86
+ 
+         putesm$StDevBrgErr$F                   #       9/30/85
+ 
+         #$% increment counter
+         pnt = pnt + 2
+        }
+ 
+     #$% else if array word is IFBW
+     else if (rec[pnt] == 'IFBW')
+        {
+         esm$IFBandWidth$i = rec[pnt+1]
+         PUTesm$IFBandWidth$i
+ 
+         #$% increment pointer
+         pnt = pnt + 2
+        }
+     #$% else if array word is ESM Local oscillator freq.
+     else if (rec[pnt] == 'LOFRQ')
+        {
+        ESM$OscillatorFreq$i = rec [ pnt + 1 ]
+ 
+        PUTESM$OscillatorFreq$i
+ 
+        #$% increment pointer
+        pnt = pnt + 2
+        }
+ 
+     #$% else if array word is ESM Receiver intermed. freq
+     else if (rec[pnt] == 'IFREQ')
+        {
+        ESM$IntermediateFreq$i = rec [ pnt + 1 ]
+ 
+        PUTESM$IntermediateFreq$i
+ 
+        #$% increment pointer
+        pnt = pnt + 2
+        }
+ 
+     #$% else if word is BDWTH
+     else if (rec[pnt] == 'BDWTH')
+        {
+         ESM$Bandwidth$i = rec[pnt+1]             # save it in MHz
+         putESM$Bandwidth$i
+ 
+         #$% compute bandwith and save
+###      ibandw = qkdb(rec[pnt+1]*1000000) + .5   # older way      5/10/84
+ 
+         Xbandw = rec[pnt+1]*1000000              #                8/24/88
+         if( Xbandw <= 1.0 ) ibandw = 0           # jb              9/2/88
+         else ibandw = 10.0 * log10(Xbandw) +0.5  #jb replace QKDB  9/2/88
+ 
+         #$% increment pointer
+         pnt = pnt + 2
+        }
+ 
+     #$% else if array word is ESM antenna GAIN
+     else if (rec[pnt] == 'GAIN')            # 6/27/89 reh
+        {
+         #$% get antenna gain and save
+         ESM$Gain$i = rec[pnt+1]
+         igain = rec[pnt+1]
+ 
+         putESM$Gain$i
+ 
+         #$% increment pointer
+         pnt = pnt + 2
+        }
+ 
+     #$% else if array word is ESM sensitivity
+     else if (rec[pnt] == 'SENSI')            # 6/27/89 reh
+        {
+        ESM$Sensitivity$i = rec [ pnt + 1 ]
+ 
+        PUTESM$Sensitivity$i
+ 
+         #$% increment pointer
+         pnt = pnt + 2
+        }
+     #$% else if array word is SELCT
+     else if (rec[pnt] == 'SELCT')
+        {
+         if      (rec[pnt+1] == 'POOR')
+             ESM$SelectivityCode$i = $Poor_Selectivity$Code
+         else if (rec[pnt+1] == 'AVG')
+             ESM$SelectivityCode$i = $Average_Selectivity$Code
+         else if (rec[pnt+1] == 'GOOD')
+             ESM$SelectivityCode$i = $Good_Selectivity$Code
+         else if (rec[pnt+1] == 'EXCEL')
+             ESM$SelectivityCode$i = $Excellent_Selectivity$Code
+         else
+             ESM$SelectivityCode$i = $Average_Selectivity$Code
+ 
+         PUTESM$SelectivityCode$i
+ 
+         #$% increment pointer
+         pnt = pnt + 2
+        }
+ 
+     else if (rec[pnt] == 'MODUL')    # jb            9/13/89
+        {
+         call TypeModul (rec[pnt + 1],rec[pnt + 2], J)
+ 
+         PUTESM$ModulationType$i (J)
+         #$% increment pointer
+         pnt = pnt + 3
+        }
+     #$% else if word is Burnout Threshold
+     else if (rec[pnt] == 'BURNO')
+        {
+         esm$Burnout$i = rec[pnt+1]
+         putesm$burnout$i
+ 
+         #$% increment counter
+         pnt = pnt + 2
+        }
+     #$% else if word is Saturation threshold, 10/90
+     else if (rec[pnt] == 'SATUR')
+        {
+#         ESM$Saturation$i = rec[pnt+1]
+#         putESM$Saturation$i
+ 
+         #$% increment counter
+         pnt = pnt + 2
+        }
+ 
+     #$% else if word is NSFIG
+     else if (rec[pnt] == 'NSFIG')
+        {
+         #$% get receiver noise figure
+         nsfig = rec[pnt+1]
+ 
+         #$% increment pointer
+         pnt = pnt + 2
+        }
+ 
+     #$% else if word is HFREQ
+     else if (rec[pnt] == 'HFREQ')              ## 5/17/83 TPA
+        {
+         #$% get High  frequency figure
+         ESM$HighFreq$I = rec[pnt+1]
+         putESM$HighFreq$I
+ 
+         #$% increment pointer
+         pnt = pnt + 2
+        }
+ 
+     #$% else if word is LFREQ
+     else if (rec[pnt] == 'LFREQ')              ## 5/17/83 TPA
+        {
+        #$% 4/91, "if" added to handle new floating point LFREQ, reh
+        if ( rec[pnt+1] < 1.0 )
+            {
+            ESM$LowFreq$I = 1
+            }
+        else
+            {
+            #$% get LOW frequency figure
+            ESM$LowFreq$I = rec[pnt+1]          # was not within 'else', 4/91
+            }
+ 
+         putESM$LowFreq$I
+ 
+         #$% increment pointer
+         pnt = pnt + 2
+        }
+ 
+     #$% else if word is LOSS
+     else if (rec[pnt] == 'LOSS')
+        {
+         #$% get system loss
+         loss = rec[pnt+1]
+ 
+         #$% increment pointer
+         pnt = pnt + 2
+        }
+ 
+     #$% else if array word is RANGE    # CLK 12/8/92
+     else if (rec[pnt] == 'RANGE')      # (E1110)
+        {
+         ESM$MaxRange$i = rec[pnt+1]    # get esm maximum
+         putESM$MaxRange$i              # detection range and save
+ 
+         pnt = pnt + 2                  # increment pointer
+        }
+    else if(rec[pnt] == 'NOMEN')
+        {
+        ESM$Fullname$V = ""
+        kk = 0
+        call vmovh (rec[pnt+1], 24, ESM$Fullname$V, kk)
+        putESM$Fullname$V
+        pnt = pnt + 4
+        }
+    else if(rec[pnt] == 'UDB')
+        {
+        if      (rec[pnt+1] == 'YES') putESM$UDB$i ($YES)
+        else if (rec[pnt+1] != 'NO')  putESM$UDB$i (!$NO)
+        pnt = pnt + 2
+        }
+     #$% else if word is none of the above
+     else
+        {
+         #$% display invalid field to user
+         call badfld('ESM       ',rec[3],rec[pnt])
+ 
+         #$% increment pointer
+         pnt = pnt + 1
+        }
+ 
+    }                                           #end for each word in record
+ 
+ #$% compute ESM performance factor and save
+ ESM$PerformFactor$I = igain - ibandw - nsfig - loss + 77
+ 
+ if (ESM$PerformFactor$I > 2040)  ESM$PerformFactor$I = 2040 #vice 4095 5/9/84
+ if (ESM$PerformFactor$I < -2040) ESM$PerformFactor$I = -2040
+ 
+ putesm$performfactor$i
+ 
+ return
+ end
+ 
+ 
+ 
+ Subroutine wglirc(rec)
+ 
+ ###############################################################
+ #$%
+ #$% Purpose:   WGLirc loads in the irc scenario file data.
+ #$%
+ #$% Called By: WGLSEN
+ #$%
+ #$% Calls:     ECHOH      ECHOR      BADFLD
+ #$%            GSLOTM
+ #$%
+ #$% Tables:    IRC
+ #$%
+ #$% Date:      Aug 92
+ #$%
+ #$% Author:    C. Farbstein, J. Strauch
+ #$%
+ ###############################################################
+ 
+ BBcommon
+ 
+ integer pnt, KK
+ BBdeclare (IRC$FullName$V)
+ 
+ literal rec[1500]
+ 
+ integer LEN, ISTAT,
+         IRC$Pointer,
+         IRC$Fieldsofview$I,
+         IRC$FOV$Index,
+         IRC$FOV$maxrelspd$I,
+         IRC$Horizpixels$I,
+         IRC$Vertpixels$I                   # MJC 4/28/2000
+ literal IRC$Type$C                         # MJC 4/28/2000
+ 
+ #$% get length
+ len = rec[1]
+ 
+ #$% get slots from IRC table
+ call gslotm(irc$pointer,$$irc,irc$entry,istat)
+ 
+ #$% if table is full
+ if (istat == $no)
+    {
+     #$% send warning message to user and return
+     call echov("IRCs from ")
+     call echohn(rec[3],$$MaxLit)
+     call echov(" and on are not loaded.")
+     call echor
+     return
+    }
+ 
+ #$% get IRC type and save
+ IRC$type$c = rec[3]
+ putIRC$type$c
+ 
+ #$% for each word in IRC record
+ for (pnt = 6; pnt <= len; )
+    {
+     #$% if word is MNFAL
+     if      (rec[pnt] == 'MNFAL')
+        {
+         #$% get equipment mean time between failure and save
+         putIRC$mtbf$i (rec[pnt+1])
+         #$% increment counter
+         pnt = pnt + 2
+        }
+ 
+     #$% else if word is MNRPR
+     else if (rec[pnt] == 'MNRPR')
+        {
+         #$% get equipment mean time to repair and save
+         putIRC$timetorepair$i (rec[pnt+1])
+         #$% increment counter
+         pnt = pnt + 2
+        }
+ 
+    else if(rec[pnt] == 'NOMEN')
+        {
+        IRC$Fullname$V = ""
+        kk = 0
+        call vmovh (rec[pnt+1], 24, IRC$Fullname$V, kk)
+        putIRC$Fullname$V
+        pnt = pnt + 4
+        }
+    else if(rec[pnt] == 'UDB')
+        {
+        if      (rec[pnt+1] == 'YES') putIRC$UDB$i ($YES)
+        else if (rec[pnt+1] != 'NO')  putIRC$UDB$i (!$NO)
+        pnt = pnt + 2
+        }
+ 
+     #$% else if word means "Home azimuth"
+     else if (rec[pnt] == 'HAZIM')
+        {
+         putIRC$Azimuth$F (rec[pnt+1]*$Pi/180)
+         #$% increment counter
+         pnt = pnt + 2
+        }
+ 
+     #$% else if word means "Home elevation"
+     else if (rec[pnt] == 'HELEV')
+        {
+         putIRC$Elevation$F (rec[pnt+1]*$Pi/180)
+         #$% increment counter
+         pnt = pnt + 2
+        }
+ 
+     #$% else if array word is NFOV
+     else if (rec[pnt] == 'NFOV')
+        {
+         IRC$FieldsOfView$i = rec[pnt+1]
+         putIRC$FieldsOfView$i
+         #$% increment pointer
+         pnt = pnt + 2
+        }
+ 
+     #$% else if array word is Temperature time Factors.
+     else if (rec[pnt] == 'TEMPF')
+        {
+        putIRC$NightFactor$F (rec[pnt+1])
+        putIRC$DayFactor$F   (rec[pnt+2])
+        putIRC$DawnFactor$F  (rec[pnt+3])
+        #$% increment pointer
+        pnt = pnt + 4
+        }
+ 
+     #$% else if array word is angle limits
+     else if (rec[pnt] == 'ALIMS')
+        {
+        putIRC$LeftAng$F  (rec[pnt+1] * $Pi/180)
+        putIRC$RightAng$F (rec[pnt+2] * $Pi/180)
+        putIRC$UpAng$F    (rec[pnt+3] * $Pi/180)
+        putIRC$DownAng$F  (rec[pnt+4] * $Pi/180)
+        #$% increment pointer
+        pnt = pnt + 5
+        }
+ 
+     #$% else if word means "Relative Speed Minimum Probability Factor"
+     else if (rec[pnt] == 'RSMIN')
+        {
+         putIRC$RelSpMinProb$F (rec[pnt+1])
+         #$% increment counter
+         pnt = pnt + 2
+        }
+ 
+     #$% else if word means "Scan rate Minimum Probability Factor"
+     else if (rec[pnt] == 'SRMIN')
+        {
+         putIRC$ScanRtMinProb$F (rec[pnt+1])
+         #$% increment counter
+         pnt = pnt + 2
+        }
+ 
+     #$% else if word means "Scan rate breakpoint"
+     else if (rec[pnt] == 'SRBP')
+        {
+         putIRC$ScanRtBrk$F (rec[pnt+1])
+         #$% increment counter
+         pnt = pnt + 2
+        }
+ 
+     #$% else if array word is Field of view 1 angles
+     else if (rec[pnt] == 'F1ANG')
+        {
+        IRC$FOV$index = 1
+        putIRC$FOV$AzHfAng$F  (rec[pnt+1] * $Pi/180)
+        putIRC$FOV$ElHfAng$F  (rec[pnt+2] * $Pi/180)
+        #$% increment pointer
+        pnt = pnt + 3
+        }
+ 
+     #$% else if array word is Field of view 1 probabilities
+     else if (rec[pnt] == 'F1PRB')
+        {
+        IRC$FOV$index = 1
+        putIRC$FOV$RelProb$F (rec[pnt+1])
+        #$% increment pointer
+        pnt = pnt + 2
+        }
+ 
+     #$% else if array word is Field of view 1 parameters
+     else if (rec[pnt] == 'F1PRM')
+        {
+        IRC$FOV$index = 1
+        putIRC$FOV$MaxRange$F  (rec[pnt+1])
+        IRC$FOV$MaxRelSpd$I = rec[pnt+2]
+        putIRC$FOV$MaxRelSpd$I
+        #$% increment pointer
+        pnt = pnt + 3
+        }
+ 
+     #$% else if array word is Field of view 2 angles
+     else if (rec[pnt] == 'F2ANG')
+        {
+        IRC$FOV$index = 2
+        putIRC$FOV$AzHfAng$F  (rec[pnt+1] * $Pi/180)
+        putIRC$FOV$ElHfAng$F  (rec[pnt+2] * $Pi/180)
+        #$% increment pointer
+        pnt = pnt + 3
+        }
+ 
+     #$% else if array word is Field of view 2 probabilities
+     else if (rec[pnt] == 'F2PRB')
+        {
+        IRC$FOV$index = 2
+        putIRC$FOV$RelProb$F (rec[pnt+1])
+        #$% increment pointer
+        pnt = pnt + 2
+        }
+ 
+     #$% else if array word is Field of view 2 parameters
+     else if (rec[pnt] == 'F2PRM')
+        {
+        IRC$FOV$index = 2
+        putIRC$FOV$MaxRange$F  (rec[pnt+1])
+        IRC$FOV$MaxRelSpd$I = rec[pnt+2]
+        putIRC$FOV$MaxRelSpd$I
+        #$% increment pointer
+        pnt = pnt + 3
+        }
+ 
+     #$% else if array word is Field of view 3 angles
+     else if (rec[pnt] == 'F3ANG')
+        {
+        IRC$FOV$index = 3
+        putIRC$FOV$AzHfAng$F  (rec[pnt+1] * $Pi/180)
+        putIRC$FOV$ElHfAng$F  (rec[pnt+2] * $Pi/180)
+        #$% increment pointer
+        pnt = pnt + 3
+        }
+ 
+     #$% else if array word is Field of view 3 probabilities
+     else if (rec[pnt] == 'F3PRB')
+        {
+        IRC$FOV$index = 3
+        putIRC$FOV$RelProb$F (rec[pnt+1])
+        #$% increment pointer
+        pnt = pnt + 2
+        }
+ 
+     #$% else if array word is Field of view 3 parameters
+     else if (rec[pnt] == 'F3PRM')
+        {
+        IRC$FOV$index = 3
+        putIRC$FOV$MaxRange$F  (rec[pnt+1])
+        IRC$FOV$MaxRelSpd$I = rec[pnt+2]
+        putIRC$FOV$MaxRelSpd$I
+        #$% increment pointer
+        pnt = pnt + 3
+        }
+ 
+     #$% else if array word is HPIXL
+     else if (rec[pnt] == 'HPIXL')
+        {
+         IRC$HorizPixels$I = rec[pnt+1]
+         putIRC$HorizPixels$I
+         #$% increment pointer
+         pnt = pnt + 2
+        }
+ 
+     #$% else if array word is VPIXL
+     else if (rec[pnt] == 'VPIXL')
+        {
+         IRC$VertPixels$I = rec[pnt+1]
+         putIRC$VertPixels$I
+         #$% increment pointer
+         pnt = pnt + 2
+        }
+ 
+     #$% else if word is none of the above
+     else
+        {
+         #$% display invalid field to user
+         call badfld('IRC       ',rec[3],rec[pnt])
+ 
+         #$% increment pointer
+         pnt = pnt + 1
+        }
+    }                                           #end for each word in record
+ 
+ return
+ end

@@ -1,0 +1,2620 @@
+         ################# WGMDSAT.RAT ##################
+######################################################################
+#$%
+#$% Information on the programs and outines located in WGMDSAT.RAT
+#$% along with those that are called is provided in DOC.WHO.
+#$%
+#$% Flowcharts illustrating the interrelationships of the programs
+#$% and subprograms for this program are contained in WGMAIN.HIR
+#$%
+#$%  NOTE:
+#$%  In process of modifying satellite programs to include a stationary
+#$%  satellite capability - jpk.
+#$%
+######################################################################
+#####   version 3.1  dated-  7apr81
+ 
+###
+### mod to version 3.0          dated 13-jan-1981
+###
+### smn prog    module  comments
+### === ====    ======  =================================================
+### 002 dew     chkrel  code is in lbcommn.rat (not wcommn.rat)
+### jb - not clear why BBREL is included;  no ref. in this module 5/3/83
+ 
+#####   version 3.0  dated- 22dec80
+ 
+# 
+ 
+# define ($debug,  $$Debug$Control)
+ define ($debug,)
+ 
+ include "bbctl.inc"                #include Blackboard defines
+ include "bbcode.inc"
+ include "bbacc.inc"
+ include "bbdeq.inc"
+ include "bbesm.inc"
+ include "bbjam.inc"
+ include "bbrad.inc"
+ include "bbrel.inc"
+ include "bbsat.inc"
+ include "bbshc.inc"
+ include "bbspr.inc"
+ include "bbssc.inc"
+ include "bbssd.inc"
+ include "bbssr.inc"
+ include "bbstr.inc"
+ include "bbunt.inc"
+ include "bbvue.inc"
+ include "bbcmc.inc"              # Alex V. 6/93 -- For ballistic missiles
+ include "bbwet.inc"              # Alex V. 6/93 -- For infrared detection types
+ include "macros.inc"
+ include "orders.inc"             # clk 12/91 - activate & silence order processing
+ 
+ define (BBimplicit, IMPLICIT NONE)     # jb  E2145     6/21/00
+ 
+ define (SScommon,common/scratch$pad/_
+                  haflen,
+                  hafwid,
+                  fcosth,
+                  fsinth,
+                  swalat,
+                  swalon,
+                  swacos,
+                  ihoriz)
+
+ 
+ Subroutine SATMOD
+ 
+ #######################################################
+ #$%
+ #$% Purpose:   SATMOD provides executive control
+ #$%            for the satellite module.
+ #$%
+ #$% Called By: WARCYC
+ #$%
+ #$% Calls:     GNDTRK     UPLINK     SSDPRG
+ #$%            SATDET     DNLINK
+ #$%
+ #$% Tables:    SAT
+ #$%
+ #$% Date:      JAN 81
+ #$%
+ #$% Author:    Ron Williams
+ #$%
+ #$%     Modified for stationary satellite - 6/86 - jpk
+ #$%
+ #######################################################
+ BBCommon                                         #include Blackboard common
+ 
+ LITERAL CSTRIP8        # jb  E2145     6/21/00
+ Integer SAT$Pointer    # jb  E2145     6/21/00
+ 
+ #$% for each satellite entry
+ for (SAT$Pointer$FIRST;SAT$Pointer$OK;SAT$Pointer$NEXT)
+    {
+$debug if (trace$survsat != $no)
+$debug    {
+$debug call echor
+$debug call echov("Satellite ")
+$debug call echohn(xsat$SatelliteName$c,$$MaxLit)
+$debug    }
+ 
+     if (xsat$orbiting$i == YES)
+         call GNDTRK(sat$pointer)                #compute ground track
+ 
+     call UPLINK(sat$pointer)                    #satellite tasking
+ 
+     call SSDPRG(sat$pointer)                    #purge old tracks from SSD
+ 
+     call SATDET(sat$pointer)                    #satellite detection
+ 
+     call DNLINK(sat$pointer)                    #satellite reporting
+    }
+ 
+ Return
+ End                                             #end SATMOD
+ 
+
+ 
+ 
+ Subroutine SSDPRG(sat$pointer)
+ 
+ #######################################################
+ #$%
+ #$% Purpose:   SSDPRG purges old tracks from
+ #$%            surveillance satellite detec-
+ #$%            tion data table.
+ #$%
+ #$% Called By: SATMOD
+ #$%
+ #$% Calls:     None
+ #$%
+ #$% Tables:    SAT        SSD
+ #$%
+ #$% Date:      JAN 81
+ #$%
+ #$% Author:    Ron Williams
+ #$%
+ #######################################################
+ BBCommon
+ 
+ REAL*4 ERLST                           # jb E2145  6/21/00
+ Integer ISAT, SAT$Pointer, SSD$Pointer # jb E2145  6/21/00
+ 
+ #$% get satellite pointer index number
+ isat = sat$pointer$index
+ 
+ #$% get time of previous orbit
+ erlst = game$time - xsat$OrbitalPeriod$f  # For VTS
+ 
+ #$% for each search satellite detection entry
+ for (ssd$pointer$first;ssd$pointer$Valid;ssd$pointer$next)
+    {
+     #$% if detector is not the satellite in question, get next entry
+     if (xssd$DetectorIndx$i != isat)  next
+ 
+     #$% if the detection is current, get next entry
+     if (xssd$DetectTime$f > erlst)  next
+ 
+     #$% if the satellite detection is old, zero the satellite
+     #$% detection entry
+     ssd$zero
+    }
+ 
+ Return
+ End
+ 
+
+ 
+ Subroutine UPLINK(sat$pointer)                 #UPLINK Routine
+ ######################################################
+ #$%
+ #$% Purpose:   UPLINK generates satellite tasking.
+ #$%
+ #$% Called By: SATMOD
+ #$%
+ #$% Calls:     PROXIM_M     SSTASK
+ #$%
+ #$% Tables:    UNT        SAT
+ #$%
+ #$% Date:      JAN 81
+ #$%
+ #$% Author:    Ron Williams
+ #$%
+ #$%    Modified for stationary satellite - jpk 6/86
+ #$%
+ #######################################################
+ BBCommon
+ 
+ REAL*4 RANGE, BRNG,                           # jb E2145  6/21/00
+    SAT$Tracklatitude$F,SAT$Tracklongitude$F,  # jb E2145  6/21/00
+    UNT$Truelatitude$F,  UNT$Truelongitude$F   # jb E2145  6/21/00
+ 
+ Integer SAT$Pointer,SAT$Grdtrkstation$I,      # jb E2145  6/21/00
+    UNT$Pointer                                # jb E2145  6/21/00
+ 
+ sat$TrackLatitude$f = xsat$TrackLatitude$f
+ sat$TrackLongitude$f = xsat$TrackLongitude$f
+ 
+ sat$grdtrkstation$i = xsat$grdtrkstation$i
+ unt$pointer$to sat$grdtrkstation$i
+ unt$truelatitude$f = xunt$truelatitude$f
+ unt$truelongitude$f = xunt$truelongitude$f
+ 
+ if (xsat$orbiting$i == YES)     # if an orbital satellite, determine if it is
+    {                            # within radar horizon of the ground station
+     call PROXIM_M (unt$Pointer$Index,     # jb Ground-Station index 8/29/89
+                 unt$truelatitude$f,       #check range to ground station
+                 unt$truelongitude$f,
+                 xunt$costruelat$f,
+                 range,
+                 brng)
+     if (range >= 0)                                #if close enough
+         call SSTASK(sat$pointer)                   #  transfer pending requests
+    }
+ else call SSTASK(sat$pointer)   # test for sat within gndsta rng bypassed
+ 
+ return
+ end
+ 
+
+ 
+ Subroutine SSTASK(sat$pointer)
+ #######################################################
+ #$%
+ #$% Purpose:   SSTASK transfers pending tasking
+ #$%            requests to satellite.
+ #$%
+ #$% Called By: UPLINK
+ #$%
+ #$% Calls:     None
+ #$%
+ #$% Tables:    SAT        SPR        UNT
+ #$%            STR
+ #$%
+ #$% Date:      JAN 81
+ #$%
+ #$% Author:    Ron Williams
+ #$%
+ #$%     Modified for stationary satellite 6/86 - jpk
+ #$%
+ #######################################################
+ BBCommon
+ 
+LITERAL CSTRIP8                                 # jb  E2145     6/22/00
+ 
+Integer JJ,IEMPTY,ISAT,                         # jb  E2145     6/22/00
+    SPR$Pointer,SPR$Satellite$I,SPR$Reportee$I, # jb  E2145     6/22/00
+    STR$Pointer,STR$Reportee$I,                 # jb  E2145     6/22/00
+    UNT$Pointer,UNT$View$I,                     # jb  E2145     6/22/00
+    UNT2$Pointer, SAT$Pointer                   # jb  E2145     6/22/00
+Character     MSG[ARB]                          # jb  E2145     6/22/00
+ 
+$debug if (trace$survsat != $no)
+$debug    {
+$debug call echor
+$debug call echov("  Uplink:")
+$debug    }
+ 
+ #$% get the satellite index number
+ isat = sat$pointer$index
+ 
+ #$% Loop through the pending tasks table looking for orders for the satellite
+ for (spr$pointer$first; spr$pointer$valid; spr$pointer$next)
+    {
+     if (xSPR$InUse$I == $no)     # if the slot is not is use - next
+       next
+ 
+     #$% Get the index of the satellite for this pending task request
+     spr$Satellite$i = xspr$Satellite$i
+     if (spr$Satellite$i != isat)     # if not the correct satellite - next
+       next
+ 
+     #$% Get the unt index and view of the reportee for this pending task request
+     spr$Reportee$i = xspr$Reportee$i
+     unt$pointer$to spr$Reportee$i
+     unt$view$i = xunt$view$i                # get requesting view
+ 
+     #$% Find a spot in the satellite tasking request table
+     iempty = 0
+     #$% Locate the satellite/view tasking slot or an empty slot for the pending request
+     for (str$pointer$first;str$pointer$valid;str$pointer$next)
+        {
+         str$Reportee$i = xstr$Reportee$i
+         if (str$Reportee$i == 0 & iempty == 0)
+           {
+            iempty = str$pointer
+            next
+           }
+ 
+         #$% if tasking satellite does not match pending satellite - next
+         if (xstr$Satellite$i != spr$Satellite$i)  next
+ 
+         #$% set unt2 pointer to reportee of the current tasking request
+         unt2$pointer$to (xstr$Reportee$i)
+ 
+         if (xunt2$view$i == unt$view$i)    # if the reportee view for the pending request matches the view of
+           break                            # the current tasking - overwrite slot, since only one tasking per view
+        }
+ 
+     if (!str$pointer$valid)                # if the str pointer is not valid, then there was no previous tasking
+       str$pointer = iempty                 # request for satellite/view - use the empty slot if it exists
+ 
+     if (str$pointer == 0)                  # if the str pointer is zero then there was no
+       {                                    # free slot available for the new tasking request
+        jj = 0
+        Call smovhn (xSAT$SatelliteName$C, $$MaxLit, msg, jj)
+        Call smovv  (" tasking request for ", msg, jj)
+        Call smovhn (xUNT$Name$C, $$MaxLit, msg, jj)
+        Call smovv  (" denied -- satellite tasking table full.", msg, jj)
+ 
+        call send_   (unt$view$i, 0, jj, msg)
+        return
+       }
+ 
+     #$% Determine if the pending task request is an ACTIVATE or a SILENCE
+     if (xSPR$OrderType$I == SPR$Activate)       # if an activate tasking request
+       {
+        putSTR$Satellite$I   (SPR$Satellite$I)   # Store the satellite SAT index
+        putSTR$Reportee$I    (SPR$Reportee$I)    # Store the reportee UNT index
+        putstr$ReportTime$f  (0)                 # Flag report time to be set
+ 
+        if (xsat$orbiting$i == YES)      # if the satellite is orbital transfer latitude coverage
+          {
+           putSTR$InitialLatitude$f  (xSPR$InitialLatitude$F)
+           putSTR$FinalLatitude$F    (xSPR$FinalLatitude$F)
+          }
+       }
+     else                # a silence tasking request
+       {
+        if (UNT$Pointer$Index == UNT2$Pointer$Index)   # The unit table index of the reportee for the pending request
+          {                                            # must match the tasking request - verifies correct satellite/reportee
+           #$% Delete the tasking order from the STR table for the satellite/reportee
+           STR$Zero
+          }
+       }
+ 
+     #$% Delete the pending tasking entry from the pending requests table
+     SPR$Zero
+ 
+$debug if (trace$survsat != $no)
+$debug    {
+$debug call echor
+$debug call echov("     Transferring request for ")
+$debug call echohn(xunt$name$c,$$MaxLit)
+$debug    }
+ 
+    }
+ 
+ Return
+ End                                            #end SSTASK
+ 
+
+ 
+ Subroutine DNLINK(sat$pointer)         #Checks if time for downlink
+ ########################################################################
+ #$%
+ #$% Purpose:   DNLINK checks if time for downlink and generates
+ #$%             satellite reporting.
+ #$%
+ #$% Called By: SATMOD
+ #$%
+ #$% Calls:     PROXIM_M     TCA        SSREPT
+ #$%
+ #$% Tables:    SAT        STR        UNT
+ #$%
+ #$% Date:      JAN 81
+ #$%
+ #$% Author:    Ron Williams
+ #$%
+ #$%     Modified for stationary satellite 7/86 - jpk
+ #$%
+ #########################################################################
+ BBCommon
+ 
+ REAL RANGE,RADHOR_RANGE,BRNG,TILIM,RMIN,
+     SAT$Orbitalperiod$F,SAT$Tracklatitude$F,
+     SAT$Tracklongitude$F,STR$Reporttime$F,
+     UNT$Truelatitude$F,UNT$Truelongitude$F
+ 
+Integer ISAT,UNT$Pointer,
+    SAT$Pointer,SAT$Orbiting$I,
+    STR$Pointer,STR$Reportee$I
+ 
+ 
+isat = sat$pointer$index
+ 
+sat$Orbiting$I = xsat$Orbiting$I
+if (sat$orbiting$i == YES)
+   {
+    sat$OrbitalPeriod$f = xsat$OrbitalPeriod$f
+    tilim = game$time - sat$OrbitalPeriod$f/2  # For VTS
+   }
+ 
+ for (str$Pointer$FIRST;str$Pointer$valid;str$Pointer$NEXT)
+    {
+     if (xstr$Satellite$i != isat)  next        #skip unless right satellite
+ 
+     if (sat$orbiting$i == YES)
+        {
+         str$ReportTime$f = xstr$ReportTime$f
+ 
+         if (str$ReportTime$f != 0 &         # When str$ReportTime$f <= tilim then at least
+             str$ReportTime$f <= tilim)     # half of the satellites orbit has been completed
+            {                                # and a new downlink time can be computed
+             str$ReportTime$f = 0            # flag tasking entry for time until
+             PUTstr$ReportTime$f             # closest approach calculation
+            }
+ 
+         if (str$ReportTime$f == 0)           # if tasking is flagged to compute report time
+            {
+             STR$REPORTEE$i = XSTR$REPORTEE$i       # get unit for downlink
+             unt$pointer$to str$reportee$i
+ 
+             call PROXIM_M (unt$Pointer$Index,  # jb Grnd Sta. Index 8/29/89
+                         xunt$truelatitude$f,   # check for los to downlink
+                         xunt$truelongitude$f,
+                         xunt$costruelat$f,
+                         RANGE,
+                         brng)
+ 
+             if (range < 0.0)  next                 # skip if too far away
+ 
+             # For VTS the dist travelled in 1 minute is adjusted by the model$interval
+             # which equals the elapsed time since the last execution
+             # of the SURVSAT model - JFR 1/29/94
+             call TCA (_           # calculate closest approach time
+                      range,                        # range to target
+                      (21600./sat$OrbitalPeriod$f)*model$interval,  # dist traveled since last SURVSAT execution - JFR 1/29/94
+                      brng-xsat$Course$f,           # approach angle
+                      rmin)                         # time until close approach
+ 
+             str$ReportTime$f = game$time + rmin  # For VTS
+             PUTstr$ReportTime$f
+            }
+ 
+         # if at closest approach time
+         if (abs(str$ReportTime$f - game$time) <= Model$Interval) # For VTS
+           call SSREPT(str$pointer,sat$pointer)     # report detections
+        }      # end of orbital satellite
+     else      # stationary satellite
+        {
+         STR$REPORTEE$i = XSTR$REPORTEE$i       #get downlink
+         unt$pointer$to str$reportee$i
+ 
+         unt$truelatitude$f = xunt$truelatitude$f
+         unt$truelongitude$f = xunt$truelongitude$f
+         sat$TrackLatitude$f = xsat$TrackLatitude$f
+         sat$TrackLongitude$f = xsat$TrackLongitude$f
+ 
+         call RLL2RB(unt$truelatitude$f,
+                     unt$truelongitude$f,
+                     COS(unt$truelatitude$f),
+                     sat$TrackLatitude$f,
+                     sat$TrackLongitude$f,
+                     COS (sat$TrackLatitude$f),
+                     range,
+                     brng)
+ 
+         radhor_range = 79.0 * SQRT(float(xsat$Altitude$i))    # radio horizon
+ 
+         if (range <= radhor_range)      # if within radio horizon range
+           call SSREPT (str$pointer, sat$pointer)
+        }     # end of stationary satellite
+    }         # end of loop through tasking requests
+ 
+ return
+ end
+ 
+
+ 
+ 
+ Subroutine TCA(range,
+                dist,    #dist traveled in minutes durning interval since last execution of model
+                gamma,   #approach angle
+                rmin)    #minutes until close approach
+ #######################################################
+ #$%
+ #$% Purpose:   TCA computes closest approach time.t approach time.
+ #$%
+ #$% Called By: DNLINK
+ #$%
+ #$% Calls:     ANGPI
+ #$%
+ #$% Tables:    None
+ #$%
+ #$% Date:      JAN 81
+ #$%
+ #$% Author:    Ron Williams
+ #$%
+ #######################################################
+BBimplicit                    # jb    E2145   6/21/00
+ 
+REAL*4 THETA,GAMMA,DPCA,RANGE # jb    E2145   6/21/00
+real rmin   # make it real for VTS - JFR 1/29/94
+real dist   # make it real for VTS - JFR 1/29/94
+ 
+ theta = gamma
+ $angpi(theta)
+ theta = abs(theta)                             #insure between 0 and pi
+ 
+ dpca = range * COS(theta)                     #distance to pca
+ 
+ 
+ if (dist == 0.0)        # if distance is zero, minutes to closest approach is also zero
+   rmin = 0
+ else                    # divide distance to pca by disatnce traveled since
+   rmin =( dpca / dist)  # the model was last executed --- JFR 1/29/94
+ 
+ #$% make nsec zero if the value gets below zero
+ rmin = max(rmin,0.) # For VTS use max not max0 - JFR 1/29/94
+ 
+ return
+ end
+
+ 
+ Subroutine SSREPT(str$pointer,sat$pointer)
+ #######################################################
+ #$%
+ #$% Purpose:   SSREPT reports detections per
+ #$%            tasking request
+ #$%
+ #$% Called By: DNLINK
+ #$%
+ #$% Calls:     SSRGET     SATTN
+ #$%
+ #$% Tables:    UNT        SAT        SSD
+ #$%            STR        SSR
+ #$%
+ #$% Date:      JAN 81
+ #$%
+ #$% Author:    Ron Williams
+ #$%
+ #$%     Modified for stationary satellite 7/86 - jpk
+ #$%
+ #######################################################
+ BBcommon
+ 
+ 
+ LITERAL CSTRIP8                            # jb E2145  6/22/00
+ REAL  SSR$Detecttime$F,                    # jb E2145  6/22/00
+    SSR$Offlatcenter$F,SSR$Offloncenter$F   # jb E2145  6/22/00
+ 
+ Integer    JJ, ITRACKOLD,                  # jb E2145  6/22/00
+    UNT$Pointer,UNT$View$I,                 # jb E2145  6/22/00
+    SAT$Pointer, STR$Pointer,               # jb E2145  6/22/00
+    SSD$Pointer,SSD$Detectorindx$I,         # jb E2145  6/22/00
+    SSR$Pointer,SSR$Detecteeindx$I,         # jb E2145  6/22/00
+    SSR$Reporteeview$I,SSR$Semimajoraxis$I, # jb E2145  6/22/00
+    SSR$Semiminoraxis$I,SSR$Orientation$I,  # jb E2145  6/22/00
+    SSR$Emitterindx$I,SSR$Fingerprinted$I,  # jb E2145  6/22/00
+    SSR$Dettype$I, SSR$Irdetectofbm$I,      # jb E2145  6/22/00
+    SSR$Orbitnumber$I,SSR$Tracknumber$I     # jb E2145  6/22/00
+ 
+ character msg[ARB]
+ 
+ #$% get unit to report
+ unt$pointer$to xstr$Reportee$i
+ 
+if (trace$survsat != $no)
+    {
+    call echor
+    call echov("  Downlink to ")
+    call echohn(xunt$name$c,$$MaxLit)
+    }
+ 
+ #$% Locate detections for the satellite in the satellite detection (SSD) table
+ for (ssd$pointer$first;ssd$pointer$Valid;ssd$pointer$next)
+    {
+     ssd$DetectorIndx$i = xssd$DetectorIndx$i
+     if (ssd$DetectorIndx$i != sat$pointer$index)   # if not the satellite
+       next                                         # in question - next
+ 
+     if (xsat$orbiting$i == YES)     # if an orbital satellite, check the detected latitude
+       {                             # with the latitude coverage limits for this tasking
+        if (XSSD$OFFLATCENTER$F < xstr$InitialLatitude$f |      # if the latitude position is
+            XSSD$OFFLATCENTER$F > xstr$FinalLatitude$f)         # not with the boundaries - next
+          next
+       }
+ 
+     itrackold = NO              # indicates if unit was detected before by the satellite tasking
+ 
+     unt$view$i = xunt$view$I    # get the view of the reportee
+     call SSRGET (ssr$pointer, ssd$pointer, unt$view$i, itrackold)
+ 
+     if (ssr$pointer == 0)  next
+ 
+     #$% Transfer detection information into satellite report (SSR) table
+     putssr$detectorindx$i  (ssd$detectorindx$i)
+ 
+     ssr$detecteeindx$i = xssd$detecteeindx$i
+     putssr$detecteeindx$i
+ 
+     ssr$reporteeview$i = unt$view$i
+     putssr$reporteeview$i
+ 
+     ssr$DetectTime$f = xssd$DetectTime$f
+     putssr$DetectTime$f
+ 
+     PUTssr$DownLinkTime$f (game$time)  # For VTS
+ 
+     ssr$semimajoraxis$i = xssd$semimajoraxis$i
+     putssr$semimajoraxis$i
+ 
+     ssr$semiminoraxis$i = xssd$semiminoraxis$i
+     putssr$semiminoraxis$i
+ 
+     ssr$orientation$i = xssd$orientation$i
+     putssr$orientation$i
+ 
+     ssr$offlatcenter$f = xssd$offlatcenter$f
+     putssr$offlatcenter$f
+ 
+     ssr$offloncenter$f = xssd$offloncenter$f
+     putssr$offloncenter$f
+ 
+     ssr$EmitterIndx$i = xssd$EmitterIndx$i
+     PUTssr$EmitterIndx$i
+ 
+     ssr$Fingerprinted$i = xssd$Fingerprinted$i
+     PUTssr$Fingerprinted$i
+ 
+     ssr$dettype$i = xssd$dettype$i
+     putssr$dettype$i
+ 
+     ssr$IRdetectOfBM$i = Xssd$IRdetectOfBM$i     #indicates infrared detection av 6/93
+     PUTssr$IRdetectOfBM$i
+ 
+     if (xsat$orbiting$i == YES)
+        {
+         ssr$orbitnumber$i = xssd$orbitnumber$i
+         putssr$orbitnumber$i
+        }
+ 
+     if (itrackold == NO)          # if a new track
+       {
+         call SATTN (ssr$DetType$i,  # get a new track number
+                     ssr$reporteeview$i,
+                     SSR$TRACKNUMBER$I)
+ 
+         PUTSSR$TRACKNUMBER$I
+ 
+         #$% if there is an infrared detection, alert the user
+         if (ssr$IRdetectOfBM$i == 1)
+          {
+           jj = 0
+           Call smovv  (" IR SURVSAT ", msg, jj)
+           Call smovhn (xSAT$SatelliteName$C, $$MaxLit, msg, jj)
+           Call smovv  (" detects missile at position ", msg, jj)
+           Call smovll (ssr$offlatcenter$f,"NS",msg,jj)
+           Call smovv  (" ", msg, jj)
+           Call smovll (ssr$offloncenter$f,"EW",msg,jj)
+ 
+           call send_   (unt$view$i, 0, jj, msg)
+          }
+ 
+       } #end if new track
+ 
+    }
+ 
+ return
+ end                                            #end SSREPT
+
+ 
+ Subroutine SSRGET (ssr$pointer, ssd$pointer, iview, itrackold)
+ #####################################################################
+ #$%
+ #$% Purpose:   SSRGET gets SSR pointer.  If an old track, the old
+ #$%            pointer will be return.  Otherwise a new, unused pointer
+ #$%            will be returned.
+ #$%
+ #$% Called By: SSREPT
+ #$%
+ #$% Calls:     ECHOR      SCHOH
+ #$%
+ #$% Tables:    SSR
+ #$%
+ #$% Date:      JAN 81
+ #$%
+ #$% Author:    Ron Williams
+ #$%
+ #$% Modified:  Carol Kropp - 3/99 (E2060)
+ #$%            Included the SSD$EmitterIndx$I (detected radar reference)
+ #$%            to the uniqueness conditions of the satellite, reportee view,
+ #$%            detected unit trio.
+ #$%
+ ########################################################################
+ BBcommon
+ 
+ real     oldest_time, SSR$Detecttime$F     # jb  E2145  6/22/00
+ 
+ integer  empty_ssr_index, oldest_ssr_index
+ Integer ITRACKOLD, IVIEW, SSD$Pointer,     # jb  E2145  6/22/00
+    SSR$Pointer, SSR$Detecteeindx$I         # jb  E2145  6/22/00
+ 
+ empty_ssr_index = 0
+ oldest_ssr_index = 0
+ oldest_time = 999999.
+ 
+ #$% clk 12/91
+ #$% Locate the satellite report entry for the
+ #$% satellite/reportee view/detected unit trio
+ #$% or an empty slot for a new detection.
+ #$% Note:  If it is a new detection and there are
+ #$%        no free slots, then the oldest detection
+ #$%        slot will be overwritten.
+ #$% clk 3/99
+ #$% Included the SSD$EmitterIndx$I in the check for a match
+ for (ssr$pointer$first; ssr$pointer$valid; ssr$pointer$next)
+    {
+     ssr$DetecteeIndx$I = xssr$DetecteeIndx$I
+     if (ssr$DetecteeIndx$I == 0)     # if this slot is not in use
+       {
+        if (empty_ssr_index == 0)     # if no empty slot has been found
+          empty_ssr_index = SSR$Pointer$Index
+       }
+     else if (xssd$DetectorIndx$i == xssr$detectorindx$i &   # if the correct
+              iview ==  xssr$ReporteeView$i &                # satellite/view/
+              xssd$DetecteeIndx$i == ssr$DetecteeIndx$i &    # detected unit/
+              xSSD$EmitterIndx$I == xSSR$EmitterIndx$I)      # emitter match
+       {
+        itrackold = YES
+        return
+       }
+     else    # check to see if this the oldest track so far
+       {
+        ssr$DetectTime$f = xssr$DetectTime$f
+        if (ssr$DetectTime$f < oldest_time)  # if the older than the oldest detection so far
+          {
+           oldest_ssr_index = SSR$Pointer$Index
+           oldest_time = ssr$DetectTime$f
+          }
+       }
+    }          # end loop through ssr table
+ 
+ if (!ssr$pointer$valid)        # if the pointer is not valid then
+    {                           # no previous detection found
+     if (empty_ssr_index != 0)  # if an empty slot was found
+       SSR$Pointer$To  (empty_ssr_index)
+     else                       # overwrite the oldest detection slot
+       SSR$Pointer$To  (oldest_ssr_index)
+    }
+ 
+ #$% if the suveillance satellite report pointer is beyond last active
+ #$% entry, set last to last active entry (cuts down on processing)
+ if (ssr$pointer > ssr$last)  ssr$last$to ssr$pointer + ssr$entry - 1
+ 
+ return
+ end
+ 
+
+ 
+ Subroutine SATTN(IDTYPE,
+                  iview,
+                  SSR$TRACKNUMBER$I)
+ #######################################################
+ #$%
+ #$% Purpose:   SATTN processes surveillance
+ #$%            satellite track numbers.
+ #$%
+ #$% Called By: SSREPT
+ #$%
+ #$% Calls:     None
+ #$%
+ #$% Tables:    SSR        VUE
+ #$%
+ #$% Date:      JAN 81
+ #$%
+ #$% Author:    Ron Williams
+ #$%
+ #######################################################
+ BBCommon
+ 
+ Integer    IVIEW, IDTYPE,                  # jb E2145  6/22/00
+    VUE$Pointer,VUE$Nextairtrack$I,         # jb E2145  6/22/00
+    SSR$Tracknumber$I,VUE$Nextsurftrack$I,  # jb E2145  6/22/00
+    VUE$Nextirtrack$I,VUE$Nextesmnbr$I      # jb E2145  6/22/00
+ 
+ 
+ #$% set the pointer to the view
+ vue$pointer$to iview
+ 
+ #$% if ID is aircraft
+ if (IDTYPE == $air$code)
+    {
+     #$% get next air track
+     vue$NextAirTrack$i = xvue$NextAirTrack$i
+ 
+     #$% set SSR track number
+     SSR$TRACKNUMBER$I = vue$NextAirTrack$i
+ 
+     #$% increment counter
+     vue$NextAirTrack$i = vue$NextAirTrack$i + 1
+ 
+     #$% if next aircraft exceeds maximum, set next air track to one
+     if (vue$NextAirTrack$i > 999)  vue$NextAirTrack$i = 1
+     putvue$NextAirTrack$i
+    }
+ 
+ #$% else if ID is ship
+ else if (IDTYPE == $surface$code)
+    {
+     #$% get next surface track
+     vue$NextSurfTrack$i = xvue$NextSurfTrack$i
+ 
+     #$% set track number
+     SSR$TRACKNUMBER$I = vue$NextSurfTrack$i
+ 
+     #$% increment counter
+     vue$NextSurfTrack$i = vue$NextSurfTrack$i + 1
+ 
+     #$% if next surface track exceeds maximum, set next surface track to one
+     if (vue$NextSurfTrack$i > 999)  vue$NextSurfTrack$i = 1
+     putvue$NextSurfTrack$i
+    }
+ 
+ else if (IDTYPE == $SatIr$code)
+    {
+     #$% get next Infra red track
+     vue$NextIrTrack$i = Xvue$NextIrTrack$i
+ 
+     #$% set SSR track number
+     SSR$TRACKNUMBER$I = vue$NextIrTrack$i
+ 
+     #$% increment counter
+     vue$NextIrTrack$i = vue$NextIrTrack$i + 1
+ 
+     #$% if next infrared exceeds maximum, set next infrared track to one
+     if (vue$NextIrTrack$i > 999)  vue$NextIrTrack$i = 1
+     putvue$NextIrTrack$i
+ 
+    }
+ 
+ else
+    {
+     vue$NextEsmNbr$i = xvue$NextEsmNbr$i
+ 
+     SSR$TRACKNUMBER$I = vue$NextEsmNbr$i
+ 
+     vue$NextEsmNbr$i = vue$NextEsmNbr$i + 1
+ 
+     if (vue$NextEsmNbr$i > 999)  vue$NextEsmNbr$i = 1
+     putvue$NextEsmNbr$i
+    }
+ 
+ Return
+ End
+ 
+
+ 
+ 
+ Subroutine OPSSAT(nord,
+                   iview,
+                   nlex,
+                   ilex)
+ 
+ #######################################################
+ #$%
+ #$% Purpose:   OPSSAT processes plot-survsat orders.
+ #$%
+ #$% Called By: EXEORD <WGORDP.RAT>
+ #$%
+ #$% Calls:     SEND
+ #$%
+ #$% Tables:    None
+ #$%
+ #$% Date:      JAN 81
+ #$%
+ #$% Author:    Ron Williams
+ #$%
+ #######################################################
+ BBCommon
+ 
+ Integer nlex           # jb E2145  6/22/00
+ literal ilex[nlex] ## (unused ARGUMENT)
+ 
+ Integer IVIEW,
+         NORD      ## (unused ARGUMENT)
+ 
+ 
+ String msg1 "PLOT SURVSAT order is not implemented yet.   "
+ 
+ #$% display string msg1 to user
+ call send_(iview,0,45,msg1)
+ 
+ return
+ end
+ 
+
+ 
+ Subroutine OASSAT(nord,
+                   unt$pointer,         #ground station
+                   nlex,
+                   ilex)
+ #######################################################
+ #$%
+ #$% Purpose:   OASSAT processes active and silence
+ #$%             survsat orders.
+ #$%
+ #$% Called By: EXEORD <WGORDP.RAT>
+ #$%
+ #$% Calls:     SEND       SSDUTY
+ #$%
+ #$% Tables:    UNT        SAT        SPR
+ #$%
+ #$% Date:      JAN 81
+ #$%
+ #$% Author:    Ron Williams
+ #$%
+ #$%     Modified for stationary satellite - jpk
+ #$%     Modified to process silence orders - clk 12/91
+ #$%
+ #######################################################
+ BBCommon
+ 
+ LITERAL SAT$Satellitename$C, CSTRIP8, # jb  E2145 6/22/00
+         UNT$Name$C                 # jb  E2145 6/22/00
+ Integer nlex, nord                 # jb  E2145 6/22/00
+ literal ilex[nlex],namsat,namrep
+ REAL RLAT1,RLAT2, RTEMP,           # jb  E2145 6/22/00
+    DMS2RAD,SPR$Initiallatitude$F,  # jb  E2145 6/22/00
+    SPR$Finallatitude$F             # jb  E2145 6/22/00
+ Integer JJ,IEMPTY,IUNIT,           # jb  E2145 6/22/00
+    UNT$Pointer,UNT$View$I,         # jb  E2145 6/22/00
+    UNT2$Pointer,UNT2$Status$I,     # jb  E2145 6/22/00
+    SAT$Pointer,SAT$Grdtrkstation$I, # jb  E2145 6/22/00
+    SAT$Orbiting$I,                  # jb  E2145 6/22/00
+    SPR$Pointer,SPR$Ordertype$I      # jb  E2145 6/22/00
+Integer LCOMP   # jb AAI01/LCOMP           E2145 2/14/01
+ Character msg[ARB]
+ 
+# String MSGER1 "         does not task satellite         "
+# String MSGER2 "Satellite          can't report to non-existent unit         "
+# String MSGER3 "         task request for         denied -- duty cycle exceeded"
+ 
+ NAMSAT = ilex[3]                               #satellite name
+ NAMREP = ilex[4]                               #reportee name
+ 
+ unt$view$i = xunt$view$i             # View of the entered ground station
+ iunit = unt$pointer$index            # UNT rable index of the entered ground station
+ 
+ #$% Locate the satellite and determine if the ground station is correct
+ for (sat$pointer$first;sat$pointer$ok;sat$pointer$next) #for all satellites
+    {
+     sat$satellitename$c = xsat$satellitename$c
+     sat$grdtrkstation$I = xsat$grdtrkstation$I
+                                     # jb \/ AAI01/LCOMP 2/14/01
+     if (LCOMP(sat$satellitename$c,NamSat) == 0 &  # if the satellite name and the unt index
+         sat$grdtrkstation$I == iunit)  break      # mathes, this is the correct entry
+    }
+ 
+ if (!sat$pointer$ok)                           # if sat/base pair is invalid
+    {
+     #$% Send an error message and return
+     Unt$Name$C = XUnt$Name$C
+ 
+     jj = 0
+     Call SMOVHN (Unt$Name$C,$$MaxLit,msg,jj)
+     Call smovv(" does not task satellite ",msg,jj)
+     Call SMOVHn (NamSat,$$MaxLit,msg,jj)
+ 
+     #$% send message to the view of the entered gorund station
+     call send_(unt$view$i,0,jj,msg) # msger1
+     return
+    }
+ 
+ #$% Locate the unit to which the satellite is to report
+ for (unt2$pointer$first;unt2$pointer$ok;unt2$pointer$next)
+    {
+     unt2$status$i = xunt2$status$i
+ 
+     #$% if being deleted or sinking
+     if (unt2$status$i == $beingdeleted$code |
+         unt2$status$i == $sinking$code)   next
+ 
+     #$% skip ghosted units 6/10/92 SMM
+     if (xUNT$GhostedUnit$I == $YES) next
+ 
+     #$% if name report, break loop
+     if (LCOMP(xunt2$name$c,namrep) == 0) BREAK     # jb AAI01/LCOMP  2/14/01
+    }
+ 
+ if (!unt2$pointer$ok)                           #if reportee invalid
+    {
+     #$% move satellite name and invalid reportee name into msger2 array
+     jj = 0
+     Call smovv("Satellite ",msg,jj)
+     Call SMOVHN (namsat,$$MaxLit,msg,jj)
+     call smovv(" can't report to non-existent unit ",msg,jj)
+     Call SMOVHN (namrep,$$MaxLit,msg,jj)
+ 
+     #$% send message to the view of the entered ground station
+     call send_(UNT$VIEW$I,0,jj,MSG) # msger2
+     return
+    }
+ 
+ #$% Determine if the order to be processed is an ACTIVATE or a SILENCE command
+ if (ilex[1] == $lex$Activate$)    # if an ACTIVATE SURVSAT command
+   {
+    SAT$Orbiting$I = xSAT$Orbiting$I
+    if (sat$orbiting$i == YES)
+      {
+       rlat1 = DMS2rad (ilex[6])       # Convert the entered
+       rlat2 = DMS2rad (ilex[7])       # latitudes to radians
+ 
+       if (rlat1 > rlat2)              # Insure that rlat1 <= rlat2
+         {
+          rtemp = rlat1
+          rlat1 = rlat2
+          rlat2 = rtemp
+         }
+ 
+       call SSDUTY(sat$pointer,                 #$% see if duty cycle is exceeded
+                   unt$view$i,
+                   rlat1,
+                   rlat2,
+                   spr$pointer)
+ 
+       if (spr$pointer == 0)                          #if duty cycle exceeded
+         {
+          jj = 0
+          Call SMOVHN (namsat,$$MaxLit,msg,jj)
+          Call SMOVV(" task request for ",msg,jj)
+          Call SMOVHN (namrep,$$MaxLit,msg,jj)
+          Call SMOVV(" denied -- duty cycle exceeded",msg,jj)
+ 
+          call send_(unt$view$i,0,jj,msg) # msger3
+          return
+         }
+ 
+       spr$initiallatitude$f = rlat1                  # store initial latitude of search area
+       putspr$initiallatitude$f
+ 
+       spr$finallatitude$f = rlat2                    # store final latitude of search area
+       putspr$finallatitude$f
+      }
+    else                                              # stationary satellite
+      {
+       #$% Locate a free slot for the pending order
+       call SPRSLOT (SAT$Pointer$Index, UNT2$Pointer$Index, iempty)
+ 
+       if (iempty == 0)              # if all the slots are full
+         {
+          jj = 0
+          Call SMOVHN (namsat,$$MaxLit,msg,jj)
+          Call SMOVV(" task request for ",msg,jj)
+          Call SMOVHN (namrep,$$MaxLit,msg,jj)
+          Call SMOVV(" denied -- duty cycle exceeded",msg,jj)
+ 
+          call send_(unt$view$i,0,jj,msg) # msger3
+          return
+         }
+ 
+       SPR$Pointer$To  (iempty)
+      }
+ 
+    SPR$OrderType$I = SPR$Activate
+   }      # end of  if (ilex[1] == $lex$Activate$)
+ 
+ else     # SILENCE SURVSAT command            clk 12/91
+  {
+   #$% Locate a free slot for the pending order
+   call SPRSLOT (SAT$Pointer$Index, UNT2$Pointer$Index, iempty)
+ 
+   if (iempty == 0)              # if all the slots are full
+     {
+      jj = 0
+      Call SMOVHN (namsat,$$MaxLit,msg,jj)
+      Call SMOVV(" task request for ",msg,jj)
+      Call SMOVHN (namrep,$$MaxLit,msg,jj)
+      Call SMOVV(" denied -- duty cycle exceeded",msg,jj)
+ 
+      call send_(unt$view$i,0,jj,msg) # msger3
+      return
+     }
+ 
+   SPR$Pointer$To  (iempty)
+   SPR$OrderType$I = SPR$Silence
+  }
+ 
+ putspr$reportee$I  (unt2$pointer$index)   # Store reportee index in pending requests table
+ putspr$Satellite$i  (sat$pointer$index)   # Store satellite index
+ putspr$OrderType$I                        # Store the type of order Activate/Silence
+ 
+ Return
+ End                                            #end OASSAT
+ 
+
+ 
+Subroutine SPRSLOT (SAT_index,            # input - SAT table index of the satellite
+                    Reportee_view,        # input - view of unit to which the satellite is to report
+                    SPR_pointer_index)    # output - SPR table index
+ #######################################################
+ #$%
+ #$% Purpose:   SPRSLOT gets the index to the slot of
+ #$%            the SPR table for the satellite/view
+ #$%            pair, or a free slot if no previous
+ #$%            entry existed.  Note: If no free slot
+ #$%            is available, then 0 is returned.
+ #$%
+ #$% Called By: OASSAT
+ #$%
+ #$% Calls:     None
+ #$%
+ #$% Tables:    SPR
+ #$%
+ #$% Date:      December 1991
+ #$%
+ #$% Author:    Carol Kropp
+ #$%
+ #######################################################
+ BBcommon
+ 
+ integer  SPR$Pointer, empty_slot_index, UNT$Pointer
+ Integer SPR$Reportee$I,SPR$Satellite$I,    # jb  E2145 6/22/00
+        UNT$View$I                          # jb  E2145 6/22/00
+ integer  SAT_index, Reportee_view, SPR_Pointer_index
+ 
+  SPR_Pointer_index = 0
+  empty_slot_index = 0
+ 
+  for (SPR$Pointer$First; SPR$Pointer$Valid; SPR$Pointer$Next)
+     {
+      SPR$Reportee$I = xSPR$Reportee$I
+      if (SPR$Reportee$I == 0 & empty_slot_index == 0)
+        {
+         empty_slot_index = SPR$Pointer$Index
+         next
+        }
+ 
+      SPR$Satellite$I = xSPR$Satellite$I     # Get the SAT table index
+      if (SPR$Satellite$I != SAT_index)      # If the index does not match the desired satellite - next
+        next
+ 
+      UNT$Pointer$To  (SPR$Reportee$I)
+      UNT$View$I = xUNT$View$I               # Get the view of the reportee for the satellite
+      if (UNT$View$I == Reportee_view)       # If the view does not match the desired reportee view - next
+         {
+          SPR_pointer_index = SPR$Pointer$Index
+          break
+         }
+     }
+ 
+   if (SPR_pointer_index == 0)                # If no entry for satellite/view pair, use empty slot
+     SPR_pointer_index = empty_slot_index
+ 
+return
+end
+
+ 
+ Subroutine SSDUTY(sat$pointer,
+                   iview,
+                   rlat1,
+                   rlat2,
+                   ipntr)
+ #######################################################
+ #$%
+ #$% Purpose:   SSDUTY computes surveillance
+ #$%            satellite duty cycle.
+ #$%
+ #$% Called By: OASSAT
+ #$%
+ #$% Calls:     UNION
+ #$%
+ #$% Tables:    SAT        SSC        SPR
+ #$%            UNT
+ #$%
+ #$% Date:      JAN 81
+ #$%
+ #$% Author:    Ron Williams
+ #$%
+ #######################################################
+ BBcommon
+ 
+ REAL TOTLEN,RLAT1,RLAT2,DUTCYC          # jb E2145  6/22/00
+ 
+ Integer ISAT,IPNTR,IEMPTY,IVIEW,NINTVL, # jb E2145  6/22/00
+    SSC$Pointer,  SAT$Pointer,           # jb E2145  6/22/00
+    SPR$Pointer,SPR$Reportee$I,          # jb E2145  6/22/00
+    SPR$Satellite$I,                     # jb E2145  6/22/00
+    UNT$Pointer,UNT$View$I               # jb E2145  6/22/00
+ 
+ 
+ ssc$pointer$to xsat$SscIndx$i
+ 
+ #$% compute duty cycle
+ dutcyc = xsat$DutyCycleFraction$f * xssc$DutyCycle$i * ($pi/180.)
+ 
+ isat = sat$pointer$index
+ 
+ #$% zero pointer
+ ipntr = 0
+ iempty = 0
+ nintvl = 0
+ 
+ #$% for each pending request entry
+ for (spr$pointer$first;spr$pointer$valid;spr$pointer$next)
+    {
+     spr$Reportee$i = xspr$Reportee$i
+ 
+     if (spr$Reportee$i == 0 & iempty == 0)
+        {
+         iempty = spr$pointer                   #save pointer to empty slot
+         next
+        }
+ 
+     unt$pointer$to spr$Reportee$i
+ 
+     unt$view$i = xunt$view$i                   #get requesting view
+ 
+     spr$Satellite$i = xspr$Satellite$i         #get satellite addressed to
+ 
+     if (spr$Satellite$i != isat)  next
+ 
+     if (unt$view$i == iview)                   #find entry for given view
+         ipntr = spr$pointer
+ 
+     else
+        {
+         call UNION(nintvl,                     #compute union of this
+                    xspr$InitialLatitude$f,     # interval with previous ones
+                    xspr$FinalLatitude$f,
+                    totlen)
+        }
+    }
+ 
+ if (ipntr == 0)  ipntr = iempty         #if no entry for view, use empty slot
+ 
+ call UNION(nintvl,rlat1,rlat2,totlen)          #compute union with others
+ 
+ if (totlen > dutcyc + .0001)                   #if greater than duty cycle
+     ipntr = 0
+ 
+ return
+ end
+ 
+
+ 
+ 
+ Subroutine UNION(nintvl,
+                  x1,                    #nintvl = nmbr of disjoint intervals
+                  x2,                    #x1 = left endpt of new interval
+                  totlen)                #x2 = right endpt of new interval
+                                         #totlen = total length of union
+ #######################################################
+ #$%
+ #$% Purpose:   UNION computes union of intervals.
+ #$%
+ #$% Called By: SSDUTY
+ #$%
+ #$% Calls:     None
+ #$%
+ #$% Tables:    None
+ #$%
+ #$% Date:      JAN 81
+ #$%
+ #$% Author:    Ron Williams
+ #$%
+ #######################################################
+ BBimplicit  # jb    E2145   6/21/00
+ 
+ real a[10],b[10],TOTLEN, # jb E2145 (TOTLENgth of union)        6/22/00
+    W1, X1,      # jb E2145 (X1 =left endpoint of new interval)  9/27/00
+    W2, X2       # jb E2145 (X2=rignt endpoint of new interval)  9/27/00
+ 
+ Integer NINTVL, # jb E2145 (nbr of disjoint intervals)  6/22/00
+    I            # jb E2145 (loop index)                         6/22/00
+ 
+ #$% if the interval is zero, the total lenght of duty cycle is also zero
+ if (nintvl == 0)  totlen = 0.0
+ 
+ w1 = x1
+ w2 = x2
+ 
+ for (i=1;i<=nintvl;i=i+1)                      #for each original interval
+    {
+     if (w1 > a[i] & w1 < b[i])  w1 = b[i]      #if left endpt inside
+     if (w2 > a[i] & w1 < b[i])  w2 = a[i]      #if right endpt inside
+ 
+     if (w1 > w2)                               #if both were inside
+        {
+         w2 = w1
+         break
+        }
+    }
+ #$% increment interval counter
+ nintvl = nintvl + 1
+ 
+ a[nintvl] = w1                                 #copy adjusted pts to array
+ b[nintvl] = w2
+ 
+ #$% compute total length
+ totlen = totlen + w2 - w1
+ 
+ return
+ end
+
+ 
+ Subroutine SATDET(sat$pointer)
+ #######################################################
+ #$%
+ #$% Purpose:   SATDET generates satellite
+ #$%            detection data.
+ #$%
+ #$% Called By: SATMOD
+ #$%
+ #$% Calls:     SATRAD      SATESM
+ #$%
+ #$% Tables:    SAT         STR        SSC
+ #$%
+ #$% Date:      JAN 81
+ #$%
+ #$% Author:    Ron Williams
+ #$%
+ #$% Modified:  To accept infrared sensor       Alex Vagus  July 1993
+ #$%
+ #######################################################
+ BBcommon
+ 
+ REAL*4 SAT$Tracklatitude$F         # jb E2145  6/22/00
+ 
+ integer  sat_index,
+    STR$Pointer,STR$Satellite$I,    # jb E2145  6/22/00
+    SAT$Pointer, SSC$Pointer        # jb E2145  6/22/00
+ 
+ 
+ sat_index = SAT$Pointer$Index
+ sat$tracklatitude$f = xsat$tracklatitude$f       #get gndtrk lat
+ 
+ for (str$pointer$first;str$pointer$valid;str$pointer$next)
+    {
+     STR$Satellite$I = xSTR$Satellite$I
+     if (STR$Satellite$I == sat_index)   # if the correct satellite
+       {
+        if (xsat$orbiting$i == YES)    # jb    This IF restored  8/22/91
+          {
+           if (SAT$TRACKLATITUDE$F >= XSTR$INITIALLATITUDE$F & #if sat
+            SAT$TRACKLATITUDE$F <= XSTR$FINALLATITUDE$F)    # within task lats
+            break                                           # or within swat
+           }                                                 # (stationary) sat
+        else break                     # jb  This ELSE restored  8/22/91
+       }
+    }
+ 
+ if (str$pointer$valid)                         #if tasked to detect
+    {
+     #$% set satellite characteristics pointer to satellite index
+     ssc$pointer$to xsat$SscIndx$i
+ 
+     #$% if satellite sensor is radar
+     if (XSSC$RADARSENSOR$I == $RADAR$SENSOR)
+ 
+         #$% get satellite radar detection data
+         call satrad(sat$pointer,ssc$pointer)
+ 
+     #$% else if not radar, maybe ESM
+     else if (XSSC$RADARSENSOR$I == $ESM$SENSOR)
+ 
+         #$% get satellite ESM detection data
+         call satesm(sat$pointer,ssc$pointer)
+ 
+     #$% else if not esm, must be IR
+     else if (XSSC$RADARSENSOR$I == $IR$SENSOR)
+ 
+         #$% get satellite Infra Red detection data
+         call satInfraRed(sat$pointer)
+ 
+     else
+       {
+        # oops, big time here
+        # satellite sensor is not recognized
+        # the odds of being eaten alive by a Lion in Central Park New York
+        # are far better than this piece of code been executed.
+        # So, no intructions are needed here.    Alex V.  July 1993
+       }
+ 
+    }
+ 
+ return
+ end
+
+ 
+ Subroutine SATRAD(SAT$Pointer,
+                   SSC$Pointer)
+ 
+ ######################################################
+ #$%
+ #$% Purpose:   SATRAD generates satellite radar
+ #$%            detection data.
+ #$%
+ #$% Called By: SATDET
+ #$%
+ #$% Calls:     SATTGT     CKSWAT     RADSAT
+ #$%            BLDSAT
+ #$%
+ #$% Tables:    SAT        SSC        RAD
+ #$%            UNT
+ #$%
+ #$% Date:      JAN 81
+ #$%
+ #$% Author:     Ron Williams
+ #$%
+ #######################################################
+ BBCommon
+ 
+ REAL*4 RNG,RANGE,SLRANG               # jb E2145  6/22/00
+ 
+ Integer IDETEC,IDTYPE,ITARGT,INSWAT,  # jb E2145  6/22/00
+    RAD$Pointer,RAD$CH$Index,          # jb E2145  6/22/00
+    SAT$Pointer,SAT$Orderedchan$I,     # jb E2145  6/22/00
+    SSC$Pointer,UNT2$Pointer           # jb E2145  6/22/00
+ 
+ 
+ #$% set radar pointer to sensor table
+ rad$pointer$to xssc$SensorIndx$i
+ 
+ #$% for all detected units
+ for (unt2$pointer$first;unt2$pointer$ok;unt2$pointer$next)
+    {
+      #$% if unit is being deleted, get next one
+      if (xunt2$status$i == $beingdeleted$code)  next
+ 
+      #$% if unit is hiding, get next one
+      if (xUNT2$HideStatus$I == $CurrentlyHiding) NEXT       #KHC 6/92
+ 
+      #$% if unit is a Hide Site, get next one
+      IF (xUNT2$Subtype$I == $HideSite$Subcode & xUNT2$type$I == $Site$code)
+          NEXT       #KHC 6/92
+ 
+      #$% see if a valid sattelite target
+      call SATTGT(sat$pointer,unt2$pointer,itargt,rng)
+ 
+      #$% if not, get next detected unit
+      if (itargt == $no)  next
+ 
+      #$% check if target is in swath limits of satellite
+      call CKSWAT(sat$pointer,
+                  xunt2$TrueLatitude$f,
+                  xunt2$TrueLongitude$f,
+                  inswat,
+                  range)
+ 
+      if (inswat == $no)  next                  #skip if outside swath box
+ 
+## NEED??: Set up (orders?) to put value in new field SAT$OrderedCHAN$i
+##  --as of 11/1/89 there's no provision for doing so.. #  jb    11/1/89
+      SAT$OrderedCHAN$i = xSAT$OrderedCHAN$i    # For RADSAT call:
+      RAD$CH$Index = max(SAT$OrderedCHAN$i, 1)  # Default to 1; don't
+      RAD$CH$Index = min(RAD$CH$Index, 10)      #    exceed 10.
+ 
+      #$% see if radar in range to detect the target
+      slrang = SQRT(range**2 + xsat$Altitude$i**2)
+      call RADSAT(UNT2$Pointer,      #call radar detection
+                  RAD$Pointer,       #UNT2$Pointer = ptr to target
+                  RAD$CH$Index,      #Channel SubTbl Index jb    11/1/89
+                  slrang,            #RAD$Pointer = ptr into radar table
+                  idetec,            #slrang = range to target
+                  IDTYPE)            #idetec = return detection flag
+                                     #IDTYPE = return type of det
+ 
+      if (idetec == $no)  next                  #skip if not detected
+ 
+      call BLDSAT(SAT$Pointer,       #build a new detection
+                  UNT2$Pointer,      #SAT$Pointer = ptr to sat table
+                  slrang,            #UNT2$Pointer = ptr to target
+                  inswat,
+                  idtype,
+                  0)
+     }
+ 
+ Return
+ End                                              #end SATRAD
+
+ 
+ Subroutine RADSAT(UNT2$Pointer,         #Satellite Radar Detection
+                   RAD$Pointer,          #UNT2$Pointer = ptr to target (In)
+                   RAD$CH$Index,         #Channel SubTbl Index (In) jb 11/1/89
+                   RANGE,                #RAD$Pointer = ptr into radar tbl (In)
+                   DETFLG,               #RANGE = range to target (In)
+                   IDTYPE)               #DETFLG = detection flag (Out)
+                                         #IDTYPE = type of det (Out)
+ ##################################################################
+ #$%
+ #$% Purpose:   RADSAT gets valid satellite radar detections.
+ #$%
+ #$% Called By: SATRAD
+ #$%
+ #$% Calls:     None
+ #$%
+ #$% Tables:    UNT        RAD
+ #$%            ACC        SHC
+ #$%
+ #$% Date:      JAN 81
+ #$%
+ #$% Author:    Ron Williams
+ #$%
+ ########################################################################
+ BBCommon                                         #include Blackboard common
+ 
+ real*4  DCBLS                                    # jb; for decibels 8/22/88
+ REAL  R,RANGE,SE,SIGXCS           # jb  E2145 6/22/00
+ 
+ Integer  IDTYPE,IUPI,NLTEST,TCS,  # jb  E2145 6/22/00
+    UNT2$Type$I,UNT2$Pointer,      # jb  E2145 6/22/00
+    ACC$Pointer,ACC$CRS$Index,     # jb  E2145 6/22/00
+    RAD$Pointer,RAD$CH$Index,      # jb  E2145 6/22/00
+    SHC$Pointer, DEQ$Pointer       # jb  E2145 6/22/00
+ Integer DETFLG                                   #real detection flag
+ 
+ UNT2$TYPE$I = XUNT2$TYPE$I                       #get target type
+ 
+if (UNT2$TYPE$I == $AIR$CODE)                # ELSE on  1/12/83
+    {
+     if (Xunt2$ASMDactive$i == 1)       # ASMD added  jms 4/20/93
+        {
+        iUPI = unt2$pointer$index
+        for_deq_chain (iUPI)
+           {
+           if (Xdeq$ident$i == $ASMD$code) tcs = xDEQ$CrossSect$i
+           }
+        }
+     else
+        {
+        ACC$Pointer = XUNT2$ACCPNTR$I                 #get ptr into char table
+ 
+ 
+##--------Start  2/7/90 Insertion for mulitple cross-sections ----- jb
+##     TCS = XACC$CROSSSECT$I         # Superseded by CRS subtable
+        If(Xacc$VrblXS$i == $NO)
+           acc$CRS$Index = 1             # Cross-section is single-valued
+        Else                             # For satellite looking DOWN,
+           acc$CRS$Index = 4             # Select the 90-degree value
+        TCS = XACC$CRS$SECT$I            # get target cross section
+##----------End of 2/7/90 Insertion for mulitple cross-sections -----
+ 
+        IDTYPE = $air$code                           #det type = air
+        }
+    }                                             #end if type = air
+ 
+ else if (UNT2$TYPE$I == $SURFACE$CODE       |    #if type = ship
+#         UNT2$TYPE$I == $SURFACEWITHAC$CODE |    #    or  = ship with AC
+          UNT2$TYPE$I == $SUB$CODE            )   #    or  = submarine
+    {
+     SHC$Pointer = XUNT2$SHCPNTR$I                 #get ptr into char table
+     TCS = XSHC$CROSSSECT$I                       #get target cross section
+     IDTYPE = $surface$code                       #det type = surface
+ 
+     if (unt2$type$i == $sub$code )               # if detectEE sub, 4/8/83
+      {
+       if (Xunt2$truealtdepth$i > Xshc$KEELDEPTH$i)
+        {
+         IDTYPE = $sub$code             # det type = sub        1/12/83
+         TCS    = 0                     # NO CROSS-SECT!        1/12/83
+        }
+      }
+    }                                             #end if type = ship
+ 
+##########################################################################
+#### Rold = 4. * QKDB(RANGE)  #compute intermediate term (superseded) 8/22/88
+if(RANGE < 1.0) RANGE = 1.0    # jb - Protect LOG10 function    9/1/88
+DCBLS = 10 * log10(RANGE)        #jb -         replace QKDB     8/22/88
+R = 4. * DCBLS                   #compute intermediate term     8/22/88
+#######################################################################
+ 
+ SE = XRAD$CH$PERFORMANCEFACTOR$I + TCS + CLUTTER$FACTOR #get intermediate sum
+ 
+ SIGXCS = SE - R - XRAD$NOISEFIGURE$I             #compute signal excess
+ 
+ detflg = nltest(xrad$CH$signalexcessmean$f,7.,sigxcs) # jb    CH$    10/31/89
+ 
+ Return
+ End                                              #end RADSAT
+
+ 
+ Subroutine SATESM(SAT$Pointer,     #Satellite ESM Processing
+                   SSC$Pointer)     #SAT$Pointer = ptr to satellite table (Out)
+                                    #SSC$Pointer = ptr to satellite table (Out)
+ #######################################################
+ #$%
+ #$% Purpose:   SATESM processes satellite ESM data.
+ #$%
+ #$% Called By: SATDET
+ #$%
+ #$% Calls:     RADTST     CKSWAT     ESMSAT
+ #$%            BLDSAT     SATTGT
+ #$%
+ #$% Tables:    SAT        SSC        ESM
+ #$%            UNT        RAD
+ #$%
+ #$% Date:      JAN 81
+ #$%
+ #$% Author:    Ron Williams
+ #$%
+ #$% Modified:  Carol Kropp - 3/99 (E2060)
+ #$%            Change to accomodate multiple radar
+ #$%            hits on a single unit for ESM Satellites.
+ #$%            Added variables nbr_of_active_radars
+ #$%            and radar_list.  Changed calls to RADTST
+ #$%            and added loop around the ESMSAT + BLDSAT
+ #$%            to accomodate possibility of additional
+ #$%            radars.
+ #$%
+ #######################################################
+BBCommon                                         #include Blackboard common
+ 
+integer nbr_of_active_radars, radar_list[10], i
+ 
+REAL    RNG,RANGE,SLRANG        # jb  E2145 6/22/00
+ 
+Integer IDETEC,INSWAT,ITARGT,   # jb  E2145 6/22/00
+    ESM$Pointer, SSC$Pointer,   # jb  E2145 6/22/00
+    UNT2$Pointer,SAT$Pointer    # jb  E2145 6/22/00
+ 
+ 
+  esm$pointer$to xssc$SensorIndx$i
+ 
+  #$% for all detected units
+  for (unt2$pointer$first;unt2$pointer$ok;unt2$pointer$next)
+     {
+      #$% if detected unit is being deleted, get next unit
+      if (xunt2$status$i == $beingdeleted$code)  next
+ 
+      #$% see if a valid satellite target
+      call SATTGT(sat$pointer,unt2$pointer,itargt,rng)
+ 
+      #$% if not, get the next detected unit
+      if (itargt == $no)  next
+ 
+      call RADTST(UNT2$Pointer, nbr_of_active_radars, radar_list)
+ 
+      if (nbr_of_active_radars == 0)  next
+ 
+      #$% is the target in the swath limits of the satellite
+      call CKSWAT(sat$pointer,
+                  xunt2$TrueLatitude$f,
+                  xunt2$TrueLongitude$f,
+                  inswat,
+                  range)
+ 
+      if (inswat == $no)  next         # range = rng # chngd to have no ESM
+                                       # detections outside the swath width
+      #$% convert to slant range
+      slrang = SQRT(range**2 + xsat$Altitude$i**2)
+ 
+      for (i = 1; i <= nbr_of_active_radars; i = i + 1)  # loop through each
+        {                                                # of the active radars
+         call ESMSAT (radar_list[i], ESM$Pointer, slrang, idetec)
+         if (idetec == $no) next     #skip if not detected
+         call BLDSAT (SAT$Pointer, UNT2$Pointer, slrang,
+                      inswat, 0, radar_list[i])
+        }
+     }
+ 
+ return
+ end
+
+ 
+subroutine SATINFRARED(sat$pointer)
+##############################################################################
+#  Purpose:     SATINFRARED generates satellite infra red detection data
+#
+#  Called by:   SATDET
+#
+#  Date:        JUNE 1993
+#
+#  Author:      Alex Vagus
+##
+#############################################################################
+BBCommon
+ 
+REAL    RNG,RANGE,SLRANGE       # jb  E2145 6/22/00
+ 
+Integer IDETECT,INSWAT,ITARGT,  # jb  E2145 6/22/00
+    UNT2$Pointer,               # jb  E2145 6/22/00
+    CMC$Pointer, SAT$Pointer    # jb  E2145 6/22/00
+ 
+ 
+#$search unit table
+for(unt2$pointer$first;unt2$pointer$ok;unt2$pointer$next)
+  {
+    #$% take only ballistic missiles (cruise missile category)
+    if(Xunt2$type$i != $cruisemissile$code) next
+ 
+    #$% get cmc pointer
+    cmc$pointer = Xunt2$CMCpntr$i
+ 
+    #$% make sure just ballistic
+    if(Xcmc$cat$i != $ball$code) next
+ 
+    #$% just missiles below the speed thereshold
+    if (Xcmc$avgspeed$i < IR$THRESHOLD) next
+ 
+    #$% Check if satellite target is valid
+    call SATIRTGT(sat$pointer, unt2$pointer, itargt, rng)
+ 
+    if(itargt == $no) next
+ 
+    #$% check if unit is within satellite swath limits
+    call CKSWAT(sat$pointer,
+                Xunt2$Truelatitude$f,
+                Xunt2$Truelongitude$f,
+                inswat,
+                range)
+ 
+    if (inswat == $no) next
+ 
+    #$% convert to slant range
+    slrange = SQRT(range**2 + Xsat$Altitude$i**2)
+ 
+    #$% Well, do have a detection?
+    call IFSAT(unt2$pointer, idetect)
+ 
+    if(idetect == $no)   next
+ 
+    #$% Voila, we have a detection.
+    call BLDSAT(sat$pointer,
+                unt2$pointer,
+                slrange,
+                inswat,
+                $SatIr$code,
+                0)
+ 
+ 
+  }
+ 
+return
+end
+
+ 
+ 
+subroutine IFSAT(unt2$pointer, idetect)
+ 
+##############################################################################
+#
+#  Purpose:     IFSAT get valid satellite infra red detection
+#
+#  Called by:   SATINFRARED
+#
+#  Date:        JUNE 1993
+#
+#  Author:      Alex Vagus
+##
+#############################################################################
+BBCommon
+ 
+real rnd, pd
+REAL RANDOM, x
+data x/0.0/		# Get next random number in sequence
+ 
+Integer ITOPS,IDETECT,                  # jb E2145  9/27/00
+    WET$Pointer,WET$Category$I,         # jb E2145  6/22/00
+    WET$Clouddepth$I,WET$Cloudcover$I,  # jb E2145  6/22/00
+    WET$Ceiling$I,  UNT2$Pointer        # jb E2145  6/22/00
+ 
+ 
+#$% Que onda, como esta el clima?
+call fndwet(Xunt2$Truelatitude$f, Xunt2$Truelongitude$f, wet$pointer)
+ 
+#$%collect the information
+wet$category$i     = Xwet$category$i
+wet$cloudDepth$i   = Xwet$cloudDepth$i
+wet$cloudcover$i   = Xwet$cloudcover$i
+wet$ceiling$i      = Xwet$ceiling$i
+ 
+#$% if no clear skies
+if( wet$category$i != $clear$code)
+ {
+  #$% compute cloud tops
+  itops = wet$ceiling$i + wet$cloudDepth$i
+ 
+  #$% Is missile's altitude above cloud tops
+  if(Xunt2$truealtdepth$i > itops)
+   pd = 1.0
+  else
+   pd = 1.0 - float(wet$cloudcover$i)/100.0
+ }
+ 
+else        # the sky is clear
+  pd = 1.0
+ 
+#$% invoke our lousy pseudo random number generator
+ rnd = random(x)
+ 
+#$% if a detection occurs set up the flag
+ if(rnd <= pd)
+   idetect = $yes
+ else
+   idetect = $no
+ 
+return
+end
+
+ 
+Subroutine SATIRTGT(sat$pointer,unt2$pointer,itargt,rng)
+#####################################################################
+#$%
+#$% Purpose:   SATIRTGT determines the identification of satellite target
+#$%            to see if it is a valid target.
+#$%
+#$% Called By: SATINFRARED
+#$%
+#$% Calls:     PROXIM_M
+#$%
+#$% Tables:    UNT
+#$%
+#$% Date:      JUN 1993
+#$%
+#$% Author:    Alex Vagus
+#$%
+#$%
+##############################################################################
+BBcommon
+ 
+LITERAL CSTRIP8                                # jb E2145  6/26/00
+REAL   RNG,BRG,BRNG,                           # jb E2145  6/22/00
+    SAT$Tracklongitude$F, SAT$Tracklatitude$F, # jb E2145  6/22/00               # jb E2145  6/22/00
+    UNT2$Truelatitude$F, UNT2$Truelongitude$F  # jb E2145  6/22/00
+ 
+Integer IRADHOR,IRANGE,ITARGT,          # jb E2145  6/22/00
+    SAT$Pointer, UNT2$Pointer           # jb E2145  6/22/00
+ 
+ 
+#$% set flag to NO
+itargt = $no
+ 
+if (Xunt2$SuperType$i ==$FALSEcontact$SuperCode) # 2/12/91
+    RETURN
+ 
+if (xsat$orbiting$i == YES)
+    {
+     call PROXIM_M (unt2$Pointer$Index,    # jb Target Index    8/29/89
+                 xunt2$TrueLatitude$f,
+                 xunt2$TrueLongitude$f,
+                 xunt2$CosTrueLat$f,
+                 rng,brg)
+ 
+     if (rng < 0.0)  return                          #skip if too far away
+    }
+ else
+    {
+     sat$TrackLatitude$f = xsat$TrackLatitude$f
+     sat$TrackLongitude$f = xsat$TrackLongitude$f
+     unt2$truelatitude$f = xunt2$truelatitude$f
+     unt2$truelongitude$f = xunt2$truelongitude$f
+ 
+     call RLL2RB(unt2$truelatitude$f,
+                 unt2$truelongitude$f,
+                 COS(unt2$truelatitude$f),
+                 sat$TrackLatitude$f,
+                 sat$TrackLongitude$f,
+                 COS (sat$TrackLatitude$f),
+                 rng,
+                 brng)
+ 
+     iradhor = 79.* SQRT(float(xsat$Altitude$i))            #radio horizon
+     irange = INT(rng)
+ 
+     if (irange >= iradhor) return
+    }
+ 
+$debug if (trace$survsat != $no)
+$debug    {
+$debug     call echor
+$debug     call echov("   ")
+$debug     call echohn(xunt2$name$c,$$MaxLit)
+$debug     call echov(" within radio horizon...")
+$debug    }
+ 
+#$% set target flag to YES
+itargt = $yes
+ 
+return
+end
+ 
+ 
+Subroutine RADTST (_              # Active Radar Test
+            UNT2$Pointer,         # in:  UNT table pointer of potential target
+            nbr_of_active_radars, # out: number of activated radars on the unit
+            radar_list)           # out: RAD table points for activated radars
+#######################################################
+#$%
+#$% Purpose:   RADTST executes active radar testing.
+#$%            The routine was modified to return
+#$%            multiple activated radar characteristic
+#$%            pointers.  Cannot say "all", since the
+#$%            unit could have more than the max number
+#$%            allowed in the array.
+#$%
+#$% Called By: SATESM
+#$%
+#$% Calls:     None
+#$%
+#$% Tables:    UNT     RAD     DEQ     SHC
+#$%
+#$% Date:      JAN 81
+#$%
+#$% Author:    Ron Williams
+#$%
+#$% Modified:  Carol Kropp - 3/99 (E2060)
+#$%            Change to accomodate multiple radar
+#$%            hits on a single unit for ESM Satellites.
+#$%
+#######################################################
+BBCommon
+ 
+integer  UNT2$Pointer, nbr_of_active_radars, radar_list[10]
+Integer  UNT2$Type$I,SHC$Pointer,DEQ2$Pointer   # jb E2145  6/22/00
+ 
+ 
+  nbr_of_active_radars = 0
+  UNT2$Type$I = xUNT2$Type$I
+  if (UNT2$Type$I == $Air$Code |     # only detect aircraft, ships and subs
+      UNT2$Type$I == $Sub$Code | UNT2$Type$I == $Surface$Code)
+    {
+     #$% if target is submarine below peris.depth, zero rad$pointer      1/12/83
+     if (UNT2$Type$I == $Sub$Code)
+       {
+        SHC$Pointer = xUNT2$SHCPntr$I
+        if (xUNT2$TrueAltDepth$I > xSHC$SCopeDepth$I)
+          return
+       }
+ 
+     FOR_DEQ2_CHAIN
+       {
+        if (nbr_of_active_radars < 10)
+          {
+           if (xDEQ2$Ident$I == $Radar$Code & xDEQ2$On$I == $yes)
+             {
+              nbr_of_active_radars = nbr_of_active_radars + 1
+              radar_list [nbr_of_active_radars] = xDEQ2$Pntr$I
+             }   # end of if it is a radar that is on
+          }   # end of if there is more room in the radar array
+       }   # end of loop through the units equipment
+    }   # end of if an aircraft, ship or sub
+ 
+return
+end        # end RADTST
+
+ 
+ Subroutine ESMSAT(RAD$Pointer,       #ESM Detection Model
+                   ESM$Pointer,       #RAD$Pointer = ptr into radar tbl (In)
+                   RANGE,             #ESM$Pointer = ptr into esm table (In)
+                   DETFLG)            #RANGE = range to target (In)
+                                      #DETFLG = detection flag (In)
+ 
+ #######################################################
+ #$%
+ #$% Purpose:   ESMSAT executes ESM detection data.
+ #$%
+ #$% Called By: SATESM
+ #$%
+ #$% Calls:     None
+ #$%
+ #$% Tables:    RAD        ESM
+ #$%
+ #$% Date:      JAN 81
+ #$%
+ #$% Author:    Ron Williams
+ #$%
+ #######################################################
+ BBCommon                                         #include Blackboard common
+ 
+ real*4  DCBLS,                                   # jb; for decibels 8/22/88
+         SIGXCS,                # jb E2145  6/22/00
+         RANGE,R,               # jb E2145  6/22/00
+         RAD$CH$frequency$F     # jb E2145  6/22/00
+ Integer DETFLG, IFREQ, NLTEST, # jb E2145  6/22/00
+    ESM$Pointer,ESM$Lowfreq$I,  # jb E2145  6/22/00
+    ESM$Highfreq$I,             # jb E2145  6/22/00
+    RAD$Pointer,RAD$CH$Index    # jb E2145  6/22/00
+ 
+ 
+ esm$HIGHfreq$i = Xesm$HIGHfreq$i               # Freq's for    2/6/85
+ esm$LOWfreq$i   = Xesm$LOWfreq$i               #   comparisons 2/6/85
+ 
+ # find active operating freq using DEQ EM$Band field
+ #$% get operating frequency
+##xx temp 5/89
+ RAD$CH$Index = 1
+ 
+ RAD$CH$Frequency$F = XRAD$CH$Frequency$F     # jb $F           1/18/91
+ Ifreq = NINT(RAD$CH$Frequency$F)             # jb near integer 1/18/91
+ if( Ifreq > esm$HIGHfreq$i |      # Insure Freq. is 2/6/85     1/18/91
+        Ifreq < esm$LOWfreq$i )    #   within range 2/6/85      1/18/91
+  {
+   DETFLG = $NO                                 # ..Else no de- 2/6/85
+   RETURN                                       #    tection..  2/6/85
+  }
+ 
+ ## R = 2. * QKDB(RANGE) #compute intermediate term (superseded) 8/22/88
+ if(RANGE < 1.0) RANGE = 1.0    # jb - Protect LOG10 function    9/1/88
+ DCBLS = 10 * log10(RANGE)        # jb -        replace QKDB     8/22/88
+ R = 2. * DCBLS                   #compute intermediate term     8/22/88
+ 
+ sigxcs = xesm$performfactor$i + xrad$CH$signalstrength$i - r #compute signal xcs
+ 
+ DETFLG = NLTEST(0.,6.,SIGXCS)                    #set detection flag
+ 
+ Return
+ End                                              #end ESMSAT
+ 
+
+ 
+Subroutine SATTGT(sat$pointer,unt2$pointer,itargt,rng)
+#####################################################################
+#$%
+#$% Purpose:   SATTGT determines the identification of satellite target
+#$%            to see if it is a valid target.
+#$%
+#$% Called By: SATESM     SATRAD
+#$%
+#$% Calls:     PROXIM_M
+#$%
+#$% Tables:    UNT
+#$%
+#$% Date:      JAN 81
+#$%
+#$% Author:    Ron Williams
+#$%
+#$%        Modified for stationary satellite 6/86 - jpk
+#$%
+##############################################################################
+BBcommon
+ 
+LITERAL CSTRIP8                                 # jb E2145  6/26/00
+REAL*4  RNG,BRG,BRNG,                           # jb E2145 6/22/00
+    UNT2$Truelatitude$F,UNT2$Truelongitude$F,   # jb E2145 6/22/00
+    SAT$Tracklatitude$F,SAT$Tracklongitude$F    # jb E2145 6/22/00
+ 
+Integer IRADHOR,IRANGE,ITARGT,                 # jb E2145 6/22/00
+    UNT2$Pointer,UNT2$Type$I,                  # jb E2145 6/22/00
+    SAT$Pointer,SHC$Pointer                    # jb E2145 6/22/00
+ 
+ 
+#$% set flag to NO
+itargt = $no
+ 
+if (Xunt2$SuperType$i ==$FALSEcontact$SuperCode) # 2/12/91
+    RETURN
+ 
+#$% get target type
+unt2$type$i = xunt2$type$i
+ 
+#$% if target is submarine and submerged
+ if (unt2$type$i == $sub$code )                 # if detectEE sub, 4/8/83
+  {
+                                                # Chase-down whether
+   SHC$Pointer = xUNT2$SHCpntr$i                #  below Periscope-depth..
+   if (Xunt2$truealtdepth$i > Xshc$SCOPEDEPTH$i)
+        return
+  }
+ 
+#$% if target is cruise missile
+if (UNT2$TYPE$I == $CRUISEMISSILE$CODE)  return #skip cruise missiles
+ 
+#$% if target is shorebase
+if (UNT2$TYPE$I == $shorebase$CODE)  return     #skip shorebases
+ 
+if (xsat$orbiting$i == YES)
+    {
+     call PROXIM_M (unt2$Pointer$Index,    # jb Target Index    8/29/89
+                 xunt2$TrueLatitude$f,
+                 xunt2$TrueLongitude$f,
+                 xunt2$CosTrueLat$f,
+                 rng,brg)
+ 
+     if (rng < 0.0)  return                          #skip if too far away
+    }
+ else
+    {
+     sat$TrackLatitude$f = xsat$TrackLatitude$f
+     sat$TrackLongitude$f = xsat$TrackLongitude$f
+     unt2$truelatitude$f = xunt2$truelatitude$f
+     unt2$truelongitude$f = xunt2$truelongitude$f
+ 
+     call RLL2RB(unt2$truelatitude$f,
+                 unt2$truelongitude$f,
+                 COS(unt2$truelatitude$f),
+                 sat$TrackLatitude$f,
+                 sat$TrackLongitude$f,
+                 COS (sat$TrackLatitude$f),
+                 rng,
+                 brng)
+ 
+     iradhor = 79.* SQRT(float(xsat$Altitude$i))            #radio horizon
+     irange = INT(rng)
+ 
+     if (irange >= iradhor) return
+    }
+ 
+$debug if (trace$survsat != $no)
+$debug    {
+$debug     call echor
+$debug     call echov("   ")
+$debug     call echohn(xunt2$name$c,$$MaxLit)
+$debug     call echov(" within radio horizon...")
+$debug    }
+ 
+#$% set target flag to YES
+itargt = $yes
+ 
+return
+end
+ 
+
+ 
+ 
+ Subroutine BLDSAT(SAT$Pointer,
+                   UNT2$Pointer,
+                   slrang,
+                   inswat,
+                   idtype,
+                   rad$pointer)
+ #######################################################
+ #$%
+ #$% Purpose:   BLDSAT builds satellite detection entry.
+ #$%
+ #$% Called By: SATESM     SATRAD
+ #$%
+ #$% Calls:     SSSLOT     CHKREL     SSELPS
+ #$%
+ #$% Tables:    SAT        UNT        SSD
+ #$%            RAD
+ #$%
+ #$% Date:      JAN 81
+ #$%
+ #$% Author:    Ron Williams
+ #$%
+ #$% Modified:  Carol Kropp - 3/99 (E2060)
+ #$%            Modified the call to SSSLOT to include
+ #$%            the radar reference...For ESM sats more
+ #$%            than one radar per unit can be detected.
+ #$%
+ #######################################################
+ BBcommon
+ SScommon
+Integer ihoriz                    # jb One integer and
+REAL haflen,hafwid,fcosth,fsinth,  # seven  REALS for:
+     swalat,swalon,swacos       # SScommon,common/scratch$pad/_
+ 
+REAL SLRANG, SSD$Detecttime$F                # jb E2145  6/22/00
+ 
+Integer IDTYPE,IEXIST,INSWAT,                # jb E2145  6/22/00
+    SSD$Pointer,SSD$Orbitnumber$I,           # jb E2145  6/22/00
+    SSD$Detectorindx$I,SSD$Detecteeindx$I,   # jb E2145  6/22/00
+    SSD$Irdetectofbm$I,SSD$Dettype$I,        # jb E2145  6/22/00
+    SSD$Emitterindx$I,SSD$Fingerprinted$I,   # jb E2145  6/22/00
+    SAT$Pointer,UNT2$Pointer,RAD$Pointer     # jb E2145  6/22/00
+ 
+ 
+ call SSSLOT (SAT$Pointer, UNT2$Pointer, RAD$Pointer,
+              iexist, SSD$Pointer)
+ 
+ if (ssd$pointer == 0)  return
+ 
+ if (iexist != $no & xssd$SemiMinorAxis$i == (.10 * ihoriz))  #jpk 7/7/86
+     iexist = $no
+ 
+ if (idtype != 0 | iexist == $no)       #if radar track or if new track
+    {
+     ssd$DetectTime$f = game$time  # For VTS
+     PUTssd$DetectTime$f
+ 
+     #$% get orbit number
+     ssd$orbitnumber$i = xsat$orbitnumber$i
+     putssd$orbitnumber$i
+    }
+ 
+ if (iexist == $NO)                         #if new entry
+    {
+     #$% set detector index to satellite
+     ssd$detectorindx$i = sat$pointer$index
+     putssd$detectorindx$i
+ 
+     #$% set detector index to target
+     ssd$detecteeindx$i = unt2$pointer$index
+     putssd$detecteeindx$i
+ 
+     if (idtype == $SatIr$code)
+       {
+        ssd$IRdetectOfBM$i = 1    #indicates an infrared detection   AV 6/20/93
+        PUTssd$IRdetectOfBM$i
+       }
+ 
+        #$% set detector type is radar
+        ssd$DetType$i = idtype
+        PUTssd$DetType$i
+ 
+     #$% if not radar
+     if (idtype == 0)                           #if esm
+        {
+         #$% set emitter index
+         ssd$EmitterIndx$i = rad$pointer$index
+         PUTssd$EmitterIndx$i
+ 
+         #$% call check fingerprint
+         call CHKREL(rad$pointer,unt2$pointer,ssd$Fingerprinted$i)
+         PUTssd$Fingerprinted$i
+        }
+ 
+     #$% call containment ellipse
+     call SSELPS(UNT2$Pointer,
+                 SAT$Pointer,
+                 SSD$Pointer,
+                 slrang,
+                 inswat)
+    }
+ 
+ Return
+ End
+ 
+
+ 
+ 
+ Subroutine SSSLOT (_             #Find slot for data
+                   SAT$Pointer,       # SAT$Pointer = ptr to satellite (In)
+                   UNT2$Pointer,      # UNT2$Pointer = ptr to target (In)
+                   RAD$Pointer,       # Detected radar (may be 0) (in)
+                   iexist,            # does an entry already exist
+                   ssd$pointer)       #return pntr to entry
+ #######################################################
+ #$%
+ #$% Purpose:   SSSLOT finds a slot to insert
+ #$%            surveillance satellite data.
+ #$%
+ #$% Called By: BLDSAT
+ #$%
+ #$% Calls:     ECHOR      ECHOH      ECHOHN
+ #$%
+ #$% Tables:    SAT        UNT        SSD
+ #$%
+ #$% Date:      JAN 81
+ #$%
+ #$% Author:    Ron Williams
+ #$%
+ #$% Modified:  Carol Kropp - 3/99 (E2060)
+ #$%            Added the detected radar reference to
+ #$%            the argument list.  If the reference is
+ #$%            non-zero then the radar in addition to
+ #$%            satellite/reportee view/detected unit
+ #$%            trio defines the uniqueness.
+ #$%
+ #######################################################
+ BBCommon                                         #include Blackboard common
+ 
+ real     oldest_time,
+        SSD$Detecttime$F                # jb E2145  6/22/00
+ integer  empty_ssd_index, oldest_ssd_index
+ integer  radar_table_index
+ Integer IEXIST,UNT2$Pointer,           # jb E2145  6/22/00
+    SSD$Pointer,SSD$Detectorindx$I,     # jb E2145  6/22/00
+    RAD$Pointer, SAT$Pointer            # jb E2145  6/22/00
+ 
+ 
+ iexist = 0
+ empty_ssd_index = 0
+ oldest_ssd_index = 0
+ oldest_time = 99999999.
+ 
+ if (RAD$Pointer$Valid)
+   radar_table_index = RAD$Pointer$Index
+ else
+   radar_table_index = 0
+ 
+ #$% clk 12/91
+ #$% Locate the satellite report entry for the
+ #$% satellite/reportee view/detected unit trio
+ #$% or an empty slot for a new detection.
+ #$% Note:  If it is a new detection and there are
+ #$%        no free slots, then the oldest detection
+ #$%        slot will be overwritten.
+ for (ssd$pointer$first; ssd$pointer$valid; ssd$pointer$next)
+    {
+     ssd$DetectorIndx$I = xssd$DetectorIndx$I
+     if (SSD$DetectorIndx$I == 0)     # if this slot is not in use
+       {
+        if (empty_ssd_index == 0)     # if no empty slot has been found
+          empty_ssd_index = SSD$Pointer$Index
+       }
+     else if (SSD$DetectorIndx$I == SAT$Pointer$Index  &   # if the correct
+              xSSD$DetecteeIndx$I == UNT2$Pointer$Index)   # satellite/detected unit
+       {
+        # check to determine if it is a detection of a radar that it is the
+        # correct radar (E2060 calls for detecting each activated radar)
+        if ((radar_table_index == 0) |
+            (radar_table_index != 0 & radar_table_index == xSSD$EmitterIndx$I))
+          {
+           iexist = ssd$pointer
+           return
+          }
+       }
+     else    # check to see if this the oldest track so far
+       {
+        ssd$DetectTime$f = xssd$DetectTime$f
+        if (ssd$DetectTime$f < oldest_time)  # if the older than the oldest detection so far
+          {
+           oldest_ssd_index = SSD$Pointer$Index
+           oldest_time = ssd$DetectTime$f
+          }
+       }
+    }          # end loop through ssd table
+ 
+ if (!ssd$pointer$valid)        # if the pointer is not valid then
+    {                           # no previous detection found
+     if (empty_ssd_index != 0)  # if an empty slot was found
+       SSD$Pointer$To  (empty_ssd_index)
+     else                       # overwrite the oldest detection slot
+       SSD$Pointer$To  (oldest_ssd_index)
+    }
+ 
+ #$% if the pending report pointer is beyond last active
+ #$% entry, set last to last active entry (cuts down on processing)
+ if (ssd$pointer > ssd$last)
+   ssd$last$to ssd$pointer + ssd$entry - 1
+ 
+ return
+ end
+ 
+
+ 
+Subroutine CKSWAT(sat$pointer,    #Check whether target in swath
+                  flat,
+                  flon,
+                  inswat,
+                  range)
+########################################################
+#$%
+#$% Purpose:   CKSWAT checks to see if target
+#$%            is in swath.
+#$%
+#$% Called By: SATESM     SATRAD
+#$%
+#$% Calls:     ANGPI
+#$%
+#$% Tables:    None
+#$%
+#$% Date:      JAN 81
+#$%
+#$% Author:    Ron Williams
+#$%
+#$%   Note:  Changed to include stationary satellite JPK 6/28/86
+#$%
+########################################################
+BBcommon
+SScommon
+Integer ihoriz                    # jb One integer and
+REAL haflen,hafwid,fcosth,fsinth,  # seven  REALS for:
+     swalat,swalon,swacos       # SScommon,common/scratch$pad/_
+ 
+REAL TWALAT,TWALON,TWACOS,TAFLEN,TAFWID,DELLON, # jb E2145  6/22/00
+    FLAT,FLON,U,V,X,Y,VDIST,HDIST,RANGE,        # jb E2145  6/22/00
+    SAT$Tracklatitude$F                         # jb E2145  6/22/00
+ 
+Integer INSWAT,SSC$Pointer,                     # jb E2145  6/22/00
+    SAT$Pointer,SAT$Orbiting$I                  # jb E2145  6/22/00
+ 
+ 
+sat$orbiting$i = xsat$orbiting$i
+if (sat$orbiting$i == YES)
+    {
+     twalat = swalat
+     twalon = swalon
+     twacos = swacos
+     taflen = haflen
+     tafwid = hafwid
+    }
+else
+    {
+     sat$TrackLatitude$f = Xsat$TrackLatitude$f
+     ssc$pointer$to xsat$SscIndx$i
+ 
+     twalat = sat$TrackLatitude$f
+     twalon = Xsat$TrackLongitude$f
+     twacos = COS(sat$TrackLatitude$f)
+     taflen = .5 * Xssc$SwathWidth$i
+     tafwid = .5 * Xssc$SwathWidth$i
+    }
+ 
+x = (flat - twalat) * (60.*180./$pi)
+ 
+dellon = flon - twalon
+$angpi(dellon)
+ 
+y = dellon * twacos * (60.*180./$pi)
+ 
+if (sat$orbiting$i == YES)              # orient delta x & y to satellite cse
+   {
+    u =  fcosth * x + fsinth * y
+    v = -fsinth * x + fcosth * y
+    vdist = abs(u)
+    hdist = abs(v)
+    range = hdist                       # distance to CPA of tgt to satellite
+   }
+else
+   {
+    u = x                               # keep same orientation to North
+    v = y
+    vdist = abs(u)
+    hdist = abs(v)
+    range = SQRT(vdist**2 + hdist**2)   # distance of tgt to satellite
+   }
+ 
+if (vdist <= taflen & hdist <= tafwid)  inswat = $yes
+else                                    inswat = $no
+ 
+$debug if (trace$survsat != $no)
+$debug    {
+$debug     if (inswat == $yes)  call echov("in swath...")
+$debug    }
+ 
+return
+end
+ 
+
+ 
+ Subroutine SSELPS(UNT2$Pointer,     #Containment Ellipse
+                   SAT$Pointer,      #UNT2$Pointer = ptr to target (In)
+                   SSD$Pointer,      #SAT$Pointer = ptr to detector (In)
+                   slant,            #SSD$Pointer = ptr to det table (In)
+                   inswat)
+ #######################################################
+ #$%
+ #$% Purpose:   SSELPS executes the containment ellipse
+ #$%            for the surveillance satellite.
+ #$%
+ #$% Called By: BLDSAT
+ #$%
+ #$% Calls:     ANG2PI     ELLOFF
+ #$%
+ #$% Tables:    UNT        SAT        SSD
+ #$%            SSC
+ #$%
+ #$% Date:      JAN 81
+ #$%
+ #$% Author:    Ron Williams
+ #$%
+ #######################################################
+ BBCommon
+ SSCommon
+Integer ihoriz                    # jb One integer and
+REAL haflen,hafwid,fcosth,fsinth,  # seven  REALS for:
+     swalat,swalon,swacos       # SScommon,common/scratch$pad/_
+ 
+REAL U,V,SLANT,SMAJ,SMIN,ORIENT,                        # jb E2145 6/22/00
+    SAT$Course$F, SSD$Offlatcenter$F,SSD$Offloncenter$F # jb E2208 /27/00
+ 
+Integer    INSWAT,                                      # jb E2145 6/22/00
+    SSD$Pointer,SSD$Orientation$I,SSD$Semimajoraxis$I,  # jb E2145 6/22/00
+    SSD$Semiminoraxis$I,                                # jb E2145 6/22/00
+    SAT$Pointer, SSC$Pointer, UNT2$Pointer              # jb E2145 6/22/00
+ 
+ 
+ if (inswat == $no)                             #if target not in swath
+    {
+     ssd$Orientation$i = 0
+ 
+     ssd$SemiMajorAxis$i = (.25 * ihoriz)    # reduced axes size for   (6/28/86)
+     ssd$SemiMinorAxis$i = (.10 * ihoriz)    # out-of-swath detections jpk
+ 
+     ssd$OffLatCenter$f = xsat$TrackLatitude$f
+     ssd$OffLonCenter$f = xsat$TrackLongitude$f
+    }
+ else
+    {
+ 
+     ssc$pointer$to xsat$SscIndx$i
+ 
+                      # chngd .5 to .25 to get more accuracy jpk 5/13/87
+     u = .25 * SLANT * XSSC$VERTBEAMWIDTH$F * slant / xsat$altitude$i
+ 
+     v = .25 * SLANT * XSSC$HORIZBEAMWIDTH$F
+ 
+     if (xsat$orbiting$i == YES) sat$Course$f  = xsat$Course$f   # jpk 7/7/86
+     else                       sat$Course$f  = 0.0
+ 
+     if (u >= v)  {smaj = u ; smin = v ; orient = sat$Course$f + $pi/2.}
+     else         {smaj = v ; smin = u ; orient = sat$Course$f         }
+ 
+     ssd$SemiMajorAxis$i = smaj + 1.0
+     ssd$SemiMinorAxis$i = smin + 1.0
+ 
+     $ang2pi(orient)
+ 
+     #$% get orientation of major axis
+     ssd$Orientation$i = orient * (180./$pi)
+     #$% do not let orientation exceed 180 degrees
+     if (ssd$Orientation$i >= 180)
+         ssd$Orientation$i = ssd$Orientation$i - 180
+ 
+     call ELLOFF(smaj,                    #Ellipse Offset Routine
+                 smin,                    #smaj = semi-major axis (In)
+                 orient,                  #smin = semi-minor axis (In)
+                 xUNT2$TRUELATITUDE$F,    #orient = orientation (In)
+                 xUNT2$TRUELONGITUDE$F,   #xUNT2$TRUELATITUDE$F = tgt lat (In)
+                 xUNT2$costruelat$f,      #xUNT2$TRUELONGITUDE$F = tgt lon (In)
+                 SSD$OFFLATCENTER$F, #xUNT2$costruelat$f = cos of tgt lat (In)
+                 SSD$OFFLONCENTER$F) #SSD$OFFLATCENTER$F = off center lat (Out)
+                                     #SSD$OFFLONCENTER$F = off center lon (Out)
+    }
+ 
+if (xsat$orbiting$i == YES) ssd$Orientation$i = 0.0     # jpk 5/13/87
+ 
+ #$% save values
+ PUTssd$OffLatCenter$f
+ PUTssd$OffLonCenter$f
+ PUTssd$SemiMajorAxis$i
+ PUTssd$SemiMinorAxis$i
+ PUTssd$Orientation$i
+ 
+ Return
+ End
+ 
+
+ 
+ Subroutine GNDTRK(SAT$Pointer)
+ 
+ #######################################################
+ #$%
+ #$% Purpose:   GNDTRK computes ground track position.
+ #$%
+ #$% Called By: SATMOD
+ #$%
+ #$% Calls:     SATTRK     RLL2RB     QTRIG
+ #$%            PREPRX_M
+ #$%
+ #$% Tables:    SAT        SSC
+ #$%
+ #$% Date:      JAN 81
+ #$%
+ #$% Author:     Ron Williams
+ #$%
+ #######################################################
+ BBCommon
+ SSCommon
+Integer ihoriz                    # jb One integer and
+REAL haflen,hafwid,fcosth,fsinth,  # seven  REALS for:
+     swalat,swalon,swacos       # SScommon,common/scratch$pad/_
+ 
+REAL FCOS,OLDLAT,OLDLON,PER,                # jb E2145  6/22/00
+    TIME,RADHOR,BOXLEN,SAT$Tracklatitude$F, # jb E2145  6/22/00
+    SAT$Course$F,SAT$Tracklongitude$F       # jb E2145  6/22/00
+ 
+Integer ILEN,  SSC$Pointer,                # jb E2145  6/22/00
+    SAT$Pointer,SAT$Orbitnumber$I          # jb E2145  6/22/00
+ 
+$debug  integer msg[12]
+ 
+ #$% get initial position
+ oldlat = xsat$TrackLatitude$f
+ oldlon = xsat$TrackLongitude$f
+ 
+ time = game$time - Xsat$NorthCrossTime$f  # For VTS
+ 
+ per = Xsat$OrbitalPeriod$f
+ 
+ if (time < 0) sat$orbitnumber$i = 0
+ else           sat$orbitnumber$i = time/per + 1
+ PUTsat$orbitnumber$i
+ 
+ call SATTRK(time,
+             Xsat$AscendingLongitude$f,
+             Xsat$OrbitalInclination$f,
+             per,
+             sat$TrackLatitude$f,
+             sat$TrackLongitude$f)
+ 
+ PUTsat$TrackLatitude$f
+ PUTsat$TrackLongitude$f
+ 
+ #$% set track latitude
+ fcos = COS(sat$TrackLatitude$f)
+ 
+ #$% call rhumb line latitude and longitude to range and bearing
+ call RLL2RB(oldlat,oldlon,COS(oldlat),
+             sat$TrackLatitude$f,sat$TrackLongitude$f,fcos,
+             boxlen,sat$Course$f)
+ $ANG2PI (sat$Course$F)                 #               8/1/84
+ #$% save course
+ PUTsat$Course$f
+ 
+$debug if (trace$survsat != $no)
+$debug    {
+$debug     ilen = 0
+$debug     call smovv (":  ", msg, ilen)
+$debug     call smovll(sat$tracklatitude$f,"NS",msg,ilen)
+$debug     call smovv("  ",msg,ilen)
+$debug     call smovll(sat$tracklongitude$f,"EW",msg,ilen)
+$debug     call smovv("  ",msg,ilen)
+$debug     call smovv("Crs ",msg,ilen)
+$debug     call smovi(int(sat$course$f*180./$pi),msg,ilen)
+$debug     call echoh(msg,ilen)
+$debug    }
+ 
+ ssc$pointer$to xsat$SscIndx$i
+ 
+ hafwid = .5 * Xssc$SwathWidth$i
+ 
+ haflen = .5 * boxlen + hafwid
+ 
+## call qktrig(sat$Course$f,fcosth,fsinth)    # jb    Replaced    6/26/89
+ fsinth = SIN(sat$Course$f)                   # jb                6/26/89
+ fcosth = COS(sat$Course$f)                   # jb                6/26/89
+ 
+ swalat = .5 * (oldlat + sat$TrackLatitude$f)
+ swalon = .5 * (oldlon + sat$TrackLongitude$f)
+ swacos = COS(swalat)
+ 
+ radhor = 79.* SQRT(float(xsat$Altitude$i))            #radio horizon
+ ihoriz = radhor
+ 
+ #$% call initialize proximity parameters
+ call PREPRX_M ( 0,                        # jb    _M            8/30/89
+             sat$TrackLatitude$f,
+             sat$TrackLongitude$f,
+             fcos,
+             radhor)
+ 
+ Return
+ End                                              #end GNDTRK
+ 

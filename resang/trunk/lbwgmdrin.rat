@@ -1,0 +1,1131 @@
+include "macros.inc"
+include "bbctl.inc"
+include "bbcode.inc"
+include "bbacc.inc"
+include "bbaml.inc"
+include "bbdeq.inc"
+include "bbown.inc"
+include "bbpat.inc"
+include "bbshc.inc"
+include "bbinv.inc"
+include "bbunt.inc"
+include "bbbml.inc"                     # Added 5/31/89        AM.
+include "wgmdrot.inc"                   # Added 4/9/90         CL.
+ 
+define(BBimplicit,IMPLICIT NONE)        # jb E2145  7/10/00
+define ($Max_AC_Types_Per_Unit, 40)     # clk 7/27/94 (E1315)
+define ($Nbr_AC_Inventory_Codes, 8)     # clk 7/27/94 (E1315)
+
+Subroutine FNDOWN(own$pointer,iunit,idummy,noroom)
+ 
+#######################################################
+#$%
+#$% Purpose:   FNDOWN finds an available OWN entry,
+#$%            or an entry previously assigned to
+#$%            the same unit.
+#$%
+#$% Called By: RPPOS2 <REPOUT>
+#$%
+#$% Calls:     None
+#$%
+#$% Tables:    OWN
+#$%
+#$% Date:      DEC 80
+#$%
+#$% Author:    Ron Williams
+#$%
+#$% Modified:  Carol Kropp - 4/5/94
+#$%            Have the Unit's UNT entry remember which
+#$%            OWN entry it used last, looking there
+#$%            before doing a sequential search.  Hopefully
+#$%            this will result in a speed improvement.
+#$%
+#######################################################
+BBcommon
+ 
+integer  OWN$Pointer, iunit,  noroom
+Integer  idummy # (E2145: UNUSED ARGUMENT)
+integer  UNT$Pointer, UNT$OWNIndx$I
+integer  found_flag, empty_slot
+integer  OWN$Unit$I
+ 
+found_flag = $no
+noroom = $no
+empty_slot = 0
+ 
+UNT$Pointer$To  (iunit)
+ 
+#$% First retrieve the last known location of the OWN slot
+UNT$OWNIndx$I = xUNT$OWNIndx$I
+if ( (UNT$OWNIndx$I > 0) & (UNT$OWNIndx$I <= OWN$Slots) )
+  {
+   OWN$Pointer$To  (UNT$OWNIndx$I)
+   OWN$Unit$I = xOWN$Unit$I
+   if (OWN$Unit$I == iunit)
+     found_flag = $yes
+  }
+ 
+if (found_flag == $no)   # if the OWN slot wasn't located,
+  {                      # search for it
+   for (own$pointer$first; own$pointer$ok; own$pointer$next)
+     {
+      OWN$Unit$I = xOWN$Unit$I
+ 
+      if (OWN$Unit$I == iunit)
+        {
+         found_flag = $yes
+         UNT$OWNIndx$I = OWN$Pointer$Index  # store the OWN slot in the UNT entry
+         putUNT$OWNIndx$I
+ 
+         break
+        } # end of match, unit's own entry found
+      else if (OWN$Unit$I == 0 & empty_slot == 0)   # if this is the first empty slot,
+         empty_slot = OWN$Pointer                   # remember it
+     }    # end of sequential search
+ 
+   if (found_flag == $no)   # if the OWN slot wasn't located,
+     {                      # use the empty slot if available
+       if (empty_slot != 0)
+         {
+          OWN$Pointer = empty_slot
+ 
+          UNT$OWNIndx$I = OWN$Pointer$Index  # store the OWN slot in the UNT entry
+          putUNT$OWNIndx$I
+         }    # end of an available OWN entry
+       else
+          noroom = $yes
+      }    # end of OWN entry not found from searching
+  }       # end of OWN slot wasn't stored in the UNT table
+ 
+return
+end
+ 
+
+ 
+Subroutine RPPOS1(unt$pointer,SUBROU,own$pointer,ifirst,noroom)
+ 
+#######################################################
+#$%
+#$% Purpose:   RPPOS1 generates OWN table entry from
+#$%            UNT and DEQ table information.
+#$%            The subroutine call to SUBROU is act-
+#$%            ually a call to ADDPND if called by
+#$%            RPOWN1.  And it calls ANDOWN if called
+#$%            by WGLOWN.
+#$%
+#$% Called By: RPOWN1     WGLOWN
+#$%
+#$% Calls:     UNTSTA     UDDET      CMEAS
+#$%            SUBROU    (ADDPND)   (FNDOWN)
+#$%
+#$% Tables:    OWN        UNT
+#$%            DEQ        PAT        PND
+#$%
+#$% Date:      DEC 80
+#$%
+#$% Author:    Ron Williams
+#$%
+#$% Modified:  James Allen - 2/96 (E1467)
+#$%            Replaced UNT$FuelRemaining$I references
+#$%            with the new dual tank variables.
+#$%
+#$% Modified:  James Allen - 7/03 (E2350)
+#$%            Changed guide range to yards if under 1 nm
+#$%
+#######################################################
+BBcommon
+ 
+real*4 UNT$BatteryCharge$F,
+    OWN$Latitude$F, OWN$Longitude$F,      # jb E2145  7/10/00
+    OWN$Launchtime$F,OWN$Recoverytime$F   # jb E2145  7/10/00
+Integer  IFIRST,NOROOM,PAT$Pointer,       # jb E2145  7/10/00
+    INDX_UNT,UNT$Pointer,UNT$Attackindx$I # jb E2145  7/10/00
+Integer OWN$Pointer,OWN$Emconindx$I,OWN$Unit$I,      # jb E2145  7/10/00
+    OWN$View$I,OWN$Guide$I,OWN$Roe$I,OWN$Type$I,     # jb E2145  7/10/00
+    OWN$Subtype$I,OWN$Aircapable$I,OWN$Status$I,     # jb E2145  7/10/00
+    OWN$Speed$I,OWN$Guiderange$I,OWN$Guidebearing$I, # jb E2145  7/10/00
+    OWN$Course$I,OWN$Nucfree$I,OWN$Owninterval$I,    # jb E2145  7/10/00
+    OWN$Shiptrackinterval$I,OWN$Airtrackinterval$I,  # jb E2145  7/10/00
+    OWN$Esmtrackinterval$I,OWN$Violateemcon$I,       # jb E2145  7/10/00
+    OWN$Circuit1$I,OWN$Circuit2$I,OWN$Altitude$I,    # jb E2145  7/10/00
+    OWN$Nbrac$I,OWN$Nbractot$I,ACC$Pointer,          # jb E2145  7/10/00
+    OWN$Accpntr$I,UNT$TNK$Index,OWN$Percentfuel$I,   # jb E2145  7/10/00
+    OWN$Fuelwarning$I,OWN$Mission$I,OWN$TNK$Index,   # jb E2145  7/10/00
+    OWN$Assignedtarget$I,OWN$Blipcm$I,OWN$Jamcm$I,   # jb E2145  7/10/00
+    OWN$Rboccm$I,OWN$Deceptioncm$I,OWN$Mast$I,       # jb E2145  7/10/00
+    OWN$Wire$I,OWN$Wirebuoy$I,OWN$Depth$I,           # jb E2145  7/10/00
+    OWN$Timeovertarget$F                             # jb E2145  7/10/00
+BBdeclare (unt$GuideRange$f)
+ 
+call SUBROU(own$pointer,ifirst,$posit$code,noroom)
+if (noroom != $no)  return
+ 
+#$% set OWN unit
+ 
+Indx_UNT             = unt$pointer$index       # 3/30/89
+own$unit$i           = Indx_unt
+putown$unit$i
+ 
+#$% get own view
+own$view$i           = xunt$view$i
+putown$view$i
+ 
+#$% get EMCON index
+own$emconindx$i      = xunt$emconindx$i
+putown$emconindx$i
+ 
+#$% get guide index
+own$guide$i          = xunt$guideindx$i
+putown$guide$i
+ 
+#$% get OWN type
+own$type$i           = xunt$type$i
+putown$type$i
+ 
+own$subtype$i        = xunt$subtype$i
+putown$subtype$i
+ 
+own$aircapable$i     = xunt$AirCapable$i
+putown$AirCapable$i
+ 
+#$% call get unit status
+call UNTSTA (unt$pointer,own$Status$i)
+putown$status$i
+ 
+#$% get rules of engagement
+own$roe$i            = xunt$rulesofengage$i
+putown$roe$i
+OWN$NucFree$I        = xUNT$NucFree$I                           # 4/24/85
+putOWN$NucFree$I                                                # 4/24/85
+ 
+#$% get assumed latitude
+own$latitude$f       = xunt$assumedlatitude$f
+putown$latitude$f
+ 
+#$% get assumed longitude
+own$longitude$f      = xunt$assumedlongitude$f
+putown$longitude$f
+ 
+#$% get guide range
+unt$guiderange$f = xunt$guiderange$f
+if (unt$guiderange$f < 1.0)                 #assume yards
+    own$guiderange$i     = unt$guiderange$f * $yds$per$mile + .5
+else
+    own$guiderange$i     = unt$guiderange$f + .5
+ 
+putown$guiderange$i
+ 
+#$% get guide bearing
+own$guidebearing$i   = xunt$guidebearing$f * 180./$pi + .5
+putown$guidebearing$i
+ 
+#$% get assumed course
+own$course$i         = xunt$assumedcourse$f * 180./$pi + .5
+putown$course$i
+ 
+#$% get OWN speed
+own$speed$i          = xunt$assumedspeed$f + .5
+putown$speed$i
+ 
+own$OwnInterval$i       = xunt$OwnInterval$i
+PUTown$OwnInterval$i
+ 
+own$ShipTrackInterval$i = xunt$ShipTrackInterval$i
+PUTown$ShipTrackInterval$i
+ 
+own$AirTrackInterval$i  = xunt$AirTrackInterval$i
+PUTown$AirTrackInterval$i
+ 
+own$EsmTrackInterval$i  = xunt$EsmTrackInterval$i
+PUTown$EsmTrackInterval$i
+ 
+#$% get violate EMCON
+own$ViolateEmcon$i      = xunt$ViolateEmcon$i
+PUTown$ViolateEmcon$i
+ 
+#$% if no COMM bypass and making report
+if (xunt$CommBypass$i == $no & xunt$MakeReports$i == $yes)
+   {
+    #$% get first path pointer
+    pat$pointer = xunt$Path1Pntr$i
+ 
+    #$% get first circuit
+    own$Circuit1$i          = xpat$Circuit$i
+ 
+    #$% get second path pointer
+    pat$pointer = xunt$Path2Pntr$i
+ 
+    #$% get second circuit
+    own$Circuit2$i          = xpat$Circuit$i
+   }
+else
+   {
+    #$% clear first and second circuits
+    own$Circuit1$i = 0
+    own$Circuit2$i = 0
+   }
+ 
+#$% store both circuits
+PUTown$Circuit1$i
+PUTown$Circuit2$i
+ 
+ 
+#$% type is aircraft            # $sub$code moved down  1/8/86
+if (own$type$i == $AIR$code)
+   {
+    #$% get altitude
+    own$altitude$i   = (xunt$truealtdepth$i + 50) / 100
+    putown$altitude$i
+ 
+    #$% get number of aircraft
+    own$nbrac$i         = xunt$nbrac$i            # 3/30/89
+    putown$nbrac$i
+ 
+    #$% get total number of aircraft in flight
+    own$nbractot$i      = xunt$nbractot$i         # 3/30/89
+    putown$nbractot$i
+ 
+    #$% get ACC pointer
+    acc$pointer         = xunt$accpntr$i          # 3/30/89
+ 
+    #$% set ACC pointer
+    own$accpntr$i       = acc$pointer
+    putown$accpntr$i
+ 
+    #$% get percent fuel remaining
+    unt$TNK$index = AviationFuelTank$Index    # joa 2/96 (E1467)
+    own$percentfuel$i   = xunt$TNK$fuelremaining$f * 100. / xacc$maxfuel$i + .5
+    own$percentfuel$i   = min(own$percentfuel$i, 255) # bmb 6/93 - 255 v. 101
+    putown$percentfuel$i
+ 
+    #$% get fuel warning flag
+    own$fuelwarning$i   = xunt$fuelwarning$i
+    putown$fuelwarning$i
+ 
+    #$% get mission
+    own$mission$i       = xunt$mission$i
+    putown$mission$i
+ 
+    #$% get launch time
+    own$LaunchTime$f    = xunt$TimeLaunched$f
+    putown$LaunchTime$f
+ 
+    #$% get recovery time to bingo
+    own$RecoveryTime$f  = xunt$TimeBingo$f
+    putown$RecoveryTime$f
+ 
+    #$% get assigned target
+    own$AssignedTarget$i = xunt$AssignedTarget$i
+    PUTown$AssignedTarget$i
+ 
+    #$% get attack index
+    unt$AttackIndx$i    = xunt$AttackIndx$i
+ 
+    #$% if attack index is zero
+    if (unt$AttackIndx$i == $NO)                ##tpa 9/15/83
+        #$% clear time over target
+        own$TimeOverTarget$f  = 0
+    #$% else if assigned target
+    else if (unt$AttackIndx$i == own$AssignedTarget$i)
+        #$% set time over target to intercept
+        own$TimeOverTarget$f  = xunt$InterceptTime$f
+    else
+        #$% clear time over target
+        own$TimeOverTarget$f = 0
+ 
+    PUTown$TimeOverTarget$f
+   }    # End if AIRCRAFT..
+ 
+#$% else if type is cruise missle                       ### tpa 3/7/83
+else if (OWN$Type$I == $CruiseMissile$code)
+   {
+    #$% get altitude
+    OWN$Altitude$I   = (xUNT$TrueAltDepth$I + 50) / 100
+    putOWN$Altitude$I
+ 
+    #$% get launch time
+    PUTown$LaunchTime$f (Xunt$TimeLaunched$f)
+ 
+    #$% set INV and COR index to ZERO
+    PUTown$FirstInvIndx$I (0)
+    PUTown$FirstCorIndx$I (0)
+   }
+ 
+#$% else if type is shorebase
+else if (own$type$i == $shorebase$code)
+   {
+    own$tnk$index = ShipFuelTank$Index                # joa 2/96 (E1467)
+    unt$tnk$index = ShipFuelTank$Index
+    OwnTank$Duplicate$UntTank
+ 
+    own$tnk$index = AviationFuelTank$Index            # joa 2/96 (E1467)
+    unt$tnk$index = AviationFuelTank$Index
+    OwnTank$Duplicate$UntTank
+ 
+    PUTown$HosesAvailable$i(Xunt$HosesAvailable$i)    # joa 2/96 (E1467)
+ 
+    PUTown$LaunchTime$f   (Xunt$FltsOkTime$f)
+    PUTown$RecoveryTime$f (Xunt$TimeBingo$f)
+   }
+ 
+else            # SHIP or SUB....                               1/8/86
+   {
+    #$% which countermeasures are on/off? # Applied to SUBs     1/8/86
+    call CMEAS(indx_unt,own$BlipCm$i,own$JamCm$i,
+                           own$RbocCm$i,own$DeceptionCm$i)
+    #$% store countermeasure data
+    PUTown$BlipCm$i
+    PUTown$JamCm$i
+    PUTown$RbocCm$i
+    PUTown$DeceptionCm$i
+ 
+    #$% if type is submarine    # Moved down from above $Air$code 1/8/86
+    if (own$type$i == $SUB$code)
+     {
+      #$% call to check mast deployment status
+      call UDDET (xunt$deploymast$i,xunt$TimeMast$f,own$mast$i)
+      putown$mast$i
+ 
+      #$% call to check wire deployment status
+      call UDDET (xunt$deploywire$i,xunt$TimeWire$f,own$wire$i)
+      putown$wire$i
+ 
+      #$% call to check buoy deployment status
+      call UDDET (xunt$deploybuoy$i,xunt$TimeBuoy$f,own$wirebuoy$i)
+      putown$wirebuoy$i
+ 
+      #$% get percent fuel remaining
+      UNT$BatteryCharge$F = xUNT$BatteryCharge$F
+      OWN$PercentFuel$I = INT(UNT$BatteryCharge$F)
+      putOWN$PercentFuel$I
+ 
+      #$% get fuel warning flag
+      OWN$FuelWarning$I = xUNT$FuelWarning$I
+      putOWN$FuelWarning$I
+ 
+      #$% set depth
+      own$depth$i      = xunt$truealtdepth$i
+      putown$depth$i
+     }
+ 
+    else                        # SHIP but not SUB      1/8/86
+     {
+      # joa 2/96 (E1467) - All ships/boats now have fuel stores
+      own$tnk$index = ShipFuelTank$Index                # joa 2/96 (E1467)
+      unt$tnk$index = ShipFuelTank$Index
+      OwnTank$Duplicate$UntTank
+ 
+      own$tnk$index = AviationFuelTank$Index            # joa 2/96 (E1467)
+      unt$tnk$index = AviationFuelTank$Index
+      OwnTank$Duplicate$UntTank
+ 
+      PUTown$HosesAvailable$i(Xunt$HosesAvailable$i)    # joa 2/96 (E1467)
+ 
+      if (xUNT$SuperType$i != $SmallBoat$SuperCode)    # joa 2/96 (E1467)
+        {
+        PUTown$LaunchTime$f   (Xunt$FltsOkTime$f)
+        PUTown$RecoveryTime$f (Xunt$TimeBingo$f)
+        }
+     }
+   }    # End if sub or ship..
+ 
+return
+end
+ 
+
+Subroutine ADDINV(inv$pointer,ifirst,idummy,noroom)
+ 
+#######################################################
+#$%
+#$% Purpose:   ADDINV allocates one additional INV
+#$%            slot and connects it to the end of the
+#$%            INV chain.
+#$%
+#$% Called By: RPINV2 <RPOUT>
+#$%
+#$% Calls:     None
+#$%
+#$% Tables:    INV
+#$%
+#$% Date:      DEC 80
+#$%
+#$% Author:    Ron Williams
+#$%
+#######################################################
+BBcommon
+ 
+Integer  IDUMMY,    # jb E2145 (Unused ARGUMENT) 7/10/00
+    IFIRST, INDEXX, NOROOM,          # jb E2145  7/10/00
+    INV$Pointer,INV$Nextindx$I       # jb E2145  7/10/00
+ 
+noroom = $no
+ 
+index = Inventory$First$Free                    #get first free slot
+ 
+if (index == 0)                                 #if none free
+   {
+    noroom = $yes
+    return
+   }
+ 
+if (ifirst == 0)                                #if chain currently empty
+   {
+    ifirst = index                              #begin at first free slot
+   }
+else                                            #otherwise
+   {
+    inv$NextIndx$i = index                      #connect free slot to previous
+    putinv$NextIndx$i
+   }
+ 
+inv$pointer$to index                            # set to Inventory$First$Free
+ 
+Inventory$First$Free = xinv$NextIndx$i          #update first free slot
+ 
+inv$NextIndx$i = 0                              #new slot is end of chain
+putinv$NextIndx$i
+ 
+return
+end
+ 
+
+ 
+Subroutine RPINV1(unt$pointer,SUBROU,inv$pointer,ifirst,noroom)
+ 
+#######################################################
+#$%
+#$% Purpose:   RPINV1 processes all of a units deployable
+#$%            equipment along with Aircraft and Boat
+#$%            Availability information and generates
+#$%            INV entries.
+#$%
+#$% Called By: RPOWN1
+#$%
+#$% Calls:     EXPTST     WRTINV     BLDAVA
+#$%
+#$% Tables:    UNT        INV        DEQ
+#$%            PND
+#$%
+#$% Date:      DEC 80
+#$%
+#$% Author:    Ron Williams
+#$%
+#$% Modified:  Carol Kropp - 7/27/94 (E1315)
+#$%            Use constants to specifiy array sizes
+#$%
+#######################################################
+BBcommon
+ 
+REAL TIME, BML$Timelaunch$F       # jb E2145  7/10/00
+Integer  I,J,IFIRST,ITIME,ICODE2, # jb E2145  7/10/00
+    ICNT,ISEXP,NOROOM,            # jb E2145  7/10/00
+    DEQ$Pointer,DEQ$Ident$I,      # jb E2145  7/10/00
+    DEQ$Pntr$I,DEQ$Remaining$I,   # jb E2145  7/10/00
+    INV$Pointer,INV$EXP$Index,    # jb E2145  7/10/00
+    INV$EXP$type$I,               # jb E2145  7/10/00
+    UNT$Pointer,UNT$Bmlindx$I,    # jb E2145  7/10/00
+    UNT$Type$I,UNT$Supertype$I,   # jb E2145  7/10/00
+    BML$Pointer, BML$Status$I     # jb E2145  7/10/00
+integer  iacpnt [$Max_AC_Types_Per_Unit]
+integer  iquant [$Nbr_AC_Inventory_Codes, $Max_AC_Types_Per_Unit]
+integer  icode  [$Nbr_AC_Inventory_Codes]
+ 
+external subrou
+data icode/$AcNow$code, $AcIn4$code,  $AcIn8$code,    $AcIn12$code,
+           $Maint$Code, $AcIn16$code, $AcFlying$Code, $AcDestroyed$Code/
+ 
+inv$exp$index = 0                               #initialize
+ 
+#$% for each equipment entry
+for_DEQ_Chain
+    {
+    #$% call to return a YES if equipment deployable
+    DEQ$ident$i = xDEQ$ident$i
+    call EXPTST (DEQ$ident$i, isexp)
+ 
+    #$% if not expendable, get next entry
+    if (isexp == $no)  next
+ 
+    #$% call to add equipment item to the current INV entry
+    DEQ$Pntr$I      = xDEQ$Pntr$I                       ## tpa 4/10/85
+    DEQ$Remaining$I = xDEQ$Remaining$I
+    INV$Exp$Type$I  = $Expendable$code
+ 
+    # The following lines allow Ground Equipment to be identified differently
+    if (DEQ$ident$i == $GND$Code)                        # DEW 3/30/90
+        {
+#??
+       INV$Exp$Type$I = $GroundObject$code             # DEW 3/30/90
+        }
+ 
+    call WRTINV(SUBROU,inv$pointer,inv$exp$index,ifirst,noroom,
+                INV$exp$type$I, DEQ$pntr$i, DEQ$remaining$i)
+   }
+ 
+unt$type$i = xunt$type$i
+unt$bmlindx$i = xunt$bmlindx$i
+#unt$smallboat$i = xunt$smallboat$i
+UNT$SuperType$i = xUNT$SuperType$i
+ 
+if (unt$BMLIndx$i != 0 &
+    UNT$SuperType$i != $SmallBoat$SuperCode)        # DEW 6/6/89
+    {
+    #$% add boat availibitity data for the unit
+    for_BML_CHAIN (UNT$BMLIndx$i)
+        {
+        BML$Status$i = xBML$Status$i
+        if (BML$Status$i != $OnDeck$Code) next
+ 
+        bml$TimeLaunch$f = xbml$TimeLaunch$f
+ 
+        Time = bml$TimeLaunch$f - game$time
+ 
+        if (Time <= 0.)
+            {
+            itime = 0
+            icode2 = $BoatAvailable$Code
+            }
+        else
+            {
+            icode2 = $BoatResupply$Code
+            }
+ 
+        call WRTINV_BML (SUBROU,inv$pointer,inv$exp$index,ifirst,noroom,
+                icode2,BML$Pointer,int(Time))
+        }
+    }
+ 
+if (Xunt$AirCapable$i == $NO) return                   # DEW 6/6/89
+ 
+#$% call build aircraft availibility data
+call BLDAVA(unt$pointer$index,iacpnt,iquant,icnt)
+ 
+#$% for each entry
+for (i=1 ; i<=icnt ; i=i+1)
+   {
+    for (j=1 ; j<=$Nbr_AC_Inventory_Codes; j=j+1)
+       {
+        call WRTINV(SUBROU,inv$pointer,inv$exp$index,ifirst,noroom,
+                    icode[j],iacpnt[i],iquant[j,i])
+       }
+   }
+ 
+return
+end
+ 
+
+ 
+Subroutine WRTINV_bml(SUBROU,inv$pointer,inv$exp$index,ifirst,noroom,
+                  inv$exp$Type$i,inv$exp$BMLpntr$i,inv$exp$TimeRemaining$i)
+ 
+#######################################################
+#$%
+#$% Purpose:   WRTINV_bml adds an entry for a boat to
+#$%            the current INV (or PND) entry.
+#$%            Allocates an INV (or PND) entry as
+#$%            needed.
+#$%
+#$% Called By: RPINV1
+#$%
+#$% Calls:     SUBROU (ADDPND or ADDINV)
+#$%
+#$% Tables:    INV        PND
+#$%
+#$% Date:      DEC 80
+#$%
+#$% Author:    Ron Williams
+#$%
+#######################################################
+BBcommon
+ 
+Integer IFIRST, NOROOM, INV$Pointer,        # jb E2145  7/10/00
+    INV$EXP$timeremaining$I,INV$EXP$Index,  # jb E2145  7/10/00
+    INV$EXP$type$I,INV$EXP$bmlpntr$I        # jb E2145  7/10/00
+ 
+#$% increment expendables (EXP) counter
+inv$exp$index = inv$exp$index + 1
+#$% if EXP counter greater than slots, set EXP counter to one
+if (inv$exp$index > inv$exp$slots) inv$exp$index = 1
+ 
+#$% if EXP counter is one
+if (inv$exp$index == 1)
+   {
+    call SUBROU(inv$pointer,ifirst,$Inventory$code,noroom)
+    if (noroom != $no)  return
+   }
+ 
+#$% store BML data
+ 
+PUTinv$exp$Type$i
+PUTinv$exp$BMLpntr$i
+PUTinv$exp$TimeRemaining$i
+ 
+return
+end
+
+ 
+Subroutine BLDAVA(iunit,iacpnt,iquant,icnt)
+ 
+#######################################################
+#$%
+#$% Purpose:   BLDAVA determines the number of
+#$%            available aircraft for a given
+#$%            unit in each of 4 TEN-MINUTE     7/24/84
+#$%            time periods.
+#$%
+#$% Called By: RPINV1
+#$%
+#$% Calls:     None
+#$%
+#$% Tables:    AML
+#$%
+#$% Date:      DEC 80
+#$%
+#$% Author:    Ron Williams
+#$%  Modified  July 84 - ts/jb
+#$%  Modified  April 1993 ------->  Alex Vagus
+#$%            comment:
+#$%                  Three arrays are used to collect info about aircraft
+#$%                  an aircraft can be either on deck, or flying
+#$%                  or destroyed. Then merged into iquant as follows
+#$%
+#$%                  iacpnt[N]  ---->  aircraft on deck
+#$%                                     iquant[L,N] ---> quantity on deck
+#$%                                       when L=1 -- available now
+#$%                                            L=2 -- available in 5
+#$%                                            L=3 -- available in 10
+#$%                                            L=4 -- available in 15
+#$%                                            L=5 -- in maintanance
+#$%                                            L=6 -- available in 30
+#$%                                            L=7 -- quantity flying
+#$%                                            L=8 -- quantity destroyed
+#$%
+#$% Modified:  Carol Kropp - 7/27/94 (E1315)
+#$%            Replaced hard coded array boundaries with
+#$%            constants.
+#$%
+#######################################################
+BBcommon
+ 
+   real     ldly,
+    AML$Timemaint$F, AML$Timelaunch$F    # jb E2145  7/10/00
+Integer LAST, AML$Pointer,AML$Status$I,  # jb E2145  7/10/00
+        AML$Ownerindx$I,AML$Accpntr$I    # jb E2145  7/10/00
+   integer  iunit
+   integer  iacpnt[$Max_AC_Types_Per_Unit]
+   integer  iquant[$Nbr_AC_Inventory_Codes, $Max_AC_Types_Per_Unit]
+   integer  icnt         # number of AC Types in Unit's Inventory
+   integer  j, j2        # loop counter variables
+   integer  k            # launch delay code temp variable
+   integer  l            # loop counter variable
+   integer  i            # loop counter through current inventory list
+ 
+icnt = 0                                                # clear counter
+for (j2=1; j2<=$Max_AC_Types_Per_Unit; j2=j2+1)         ## clear iquant array
+  {                                                     ## tpa 4/16/85
+   iacpnt[j2] = 0
+   for (j=1; j<=$Nbr_AC_Inventory_Codes; j=j+1)
+      iquant[j,j2] = 0
+  }
+ 
+last = AML$base+AML$used
+ 
+for (AML$pointer$first; AML$pointer<last; AML$pointer$next)
+    {
+    AML$OwnerIndx$i = xAML$OwnerIndx$i                  ## tpa 4/15/85
+ 
+    if (AML$OwnerIndx$i != iunit) NEXT                  # if owner is not unit,
+                                                        # get next entry
+    AML$Status$i = xAML$Status$i                        ## tpa 4/15/85
+ 
+     if (AML$Status$i == $OnDeck$code)
+      {
+       AML$TimeLaunch$F = xAML$TimeLaunch$F                ## tpa 4/15/85
+ 
+       LDLY = AML$TimeLaunch$F - game$time       # Delay before launch   8/8/84
+ 
+       aml$TimeMaint$f = Xaml$TimeMaint$f                  #               4/30/87
+       if(LDLY >30. & aml$TimeMaint$f <=game$time)        # jb            4/29/87
+                          k=5                             # jb            4/29/87
+       else if (LDLY >30.) k=6                             # jb            4/29/87
+       else if (LDLY >15.) k=4                                     #       8/10/84
+       else if (LDLY > 5.) k=3                                     #       8/10/84
+       else if (LDLY > 0.) k=2                                     #       8/8/84
+       else               k=1                                     #       8/8/84
+ 
+       # E2289 JOA UFL02 - Don't throw away ac with a launch delay over 30 min
+ 
+       AML$AccPntr$i = xAML$AccPntr$i                      # aircraft char.
+ 
+       for (i=1 ; i<=icnt ; i=i+1)      # loop through current inventory list
+         {                              # for the aircraft type
+          if (AML$AccPntr$i == iacpnt[i])
+            {
+             if ( k==5  )                           #       4/30/87
+                iquant[5,i] = iquant[5,i] + 1
+             else
+               {
+                for ( L =K; L<=6; L =L +1 )         #  L<=6  AV  5/19/93
+                  {
+                   if (L==5)                        # skip maint$code    AV 5/19/93
+                     next
+                   iquant[L,i] = iquant[L,i] + 1    #       7/24/84
+                  }
+                }
+             NEXT 2  # break out of the loop through the current inventory list
+                     # and proceed to the next AML entry in the outer loop
+            }      # end of Aircraft type matched inventory entry
+         }         # end of loop through current AC Type inventory
+ 
+       if (i > $Max_AC_Types_Per_Unit)    # clk 7/27/94 (E1315):  The AC type was
+         next                             # not in the list and the max number of
+                                          # AC types was reached for this unit.
+ 
+       icnt = i                           # increment entry count
+ 
+       iacpnt[i] = AML$AccPntr$i          # save ACC pointer
+       for ( L =K; L<=6; L =L +1 )        # initialize the appropriate delays
+         {
+           if (L==5) next                 # skip maint$code    AV 5/19/93
+           iquant[L,i] = 1                #       7/24/84
+         }
+      }          # end if Aircraft Status is OndeckCode
+    else if (AML$Status$i == $InFlight$Code)
+      {
+       AML$Accpntr$i = xAML$AccPntr$i
+ 
+       for(i=1; i<=icnt; i=i+1)           # loop through current inventory list
+         {                                # for the aircraft type
+          if (AML$AccPntr$i == iacpnt[i])
+            {
+             iquant[7,i] = iquant[7,i] + 1
+             NEXT 2  # break out of the loop through the current inventory list
+                     # and proceed to the next AML entry in the outer loop
+            }      # end of Aircraft type matched inventory entry
+         }         # end of loop through current AC Type inventory
+ 
+       if (i > $Max_AC_Types_Per_Unit)    # clk 7/27/94 (E1315):  The AC type was
+         next                             # not in the list and the max number of
+                                          # AC types was reached for this unit.
+       icnt = i
+       iacpnt[i] = AML$AccPntr$i
+       iquant[7,i] = 1
+      }          # end if Aircraft Status is InFlightCode
+    else if (AML$Status$i == $Destroyed$Code)
+      {
+       AML$Accpntr$i = xAML$AccPntr$i
+ 
+       for(i=1; i<=icnt; i=i+1)           # loop through current inventory list
+         {                                # for the aircraft type
+          if (AML$AccPntr$i == iacpnt[i])
+            {
+             iquant[8,i] = iquant[8,i] + 1
+             NEXT 2  # break out of the loop through the current inventory list
+                     # and proceed to the next AML entry in the outer loop
+            }      # end of Aircraft type matched inventory entry
+         }         # end of loop through current AC Type inventory
+ 
+       if (i > $Max_AC_Types_Per_Unit)    # clk 7/27/94 (E1315):  The AC type was
+         next                             # not in the list and the max number of
+                                          # AC types was reached for this unit.
+       icnt = i
+       iacpnt[i] = AML$AccPntr$i
+       iquant[8,i] = 1
+      }          # end if Aircraft Status is Destroyed
+  }  # end of loop through the AML table
+ 
+return
+end
+ 
+
+
+ 
+Subroutine WRTINV(SUBROU,inv$pointer,inv$exp$index,ifirst,noroom,
+                  inv$exp$Type$i,inv$exp$pntr$i,inv$exp$remaining$i)
+ 
+#######################################################
+#$%
+#$% Purpose:   WRTINV adds an item of equipment to
+#$%            the current INV (or PND) entry.
+#$%            Allocates an INV (or PND) entry as
+#$%            needed.
+#$%
+#$% Called By: RPINV1
+#$%
+#$% Calls:     SUBROU (ADDPND or ADDINV)
+#$%
+#$% Tables:    INV        PND
+#$%
+#$% Date:      DEC 80
+#$%
+#$% Author:    Ron Williams
+#$%
+#######################################################
+BBcommon
+ 
+Integer  IFIRST,NOROOM,                            # jb E2145  7/10/00
+    INV$Pointer,INV$EXP$remaining$I,               # jb E2145  7/10/00
+    INV$EXP$Index,INV$EXP$type$I,INV$EXP$pntr$I    # jb E2145  7/10/00
+ 
+#$% increment expendables (EXP) counter
+inv$exp$index = inv$exp$index + 1
+#$% if EXP counter greater than slots, set EXP counter to one
+if (inv$exp$index > inv$exp$slots) inv$exp$index = 1
+ 
+#$% if EXP counter is one
+if (inv$exp$index == 1)
+   {
+    call SUBROU(inv$pointer,ifirst,$Inventory$code,noroom)
+    if (noroom != $no)  return
+   }
+ 
+#$% store expendable equipment data
+putinv$exp$Type$i
+putinv$exp$pntr$i
+putinv$exp$remaining$i
+ 
+if (inv$exp$remaining$i != Xinv$exp$remaining$i)    # check for truncation
+    {
+    putinv$exp$remaining$i (-1)                     # set to maximum value
+    }
+ 
+return
+end
+ 
+
+Subroutine UNTSTA(unt$pointer,istat)
+ 
+#######################################################
+#$%
+#$% Purpose:   UNTSTA determines appropriate STATUS
+#$%            for a given unit.
+#$%
+#$% Called By: RPPOS1
+#$%
+#$% Calls:     None
+#$%
+#$% Tables:    UNT
+#$%
+#$% Date:      DEC 80
+#$%
+#$% Author:    Ron Williams
+#$%
+#$% Modified:  James Allen - 2/96 (E1467)
+#$%            Added check for if the unit is a
+#$%            surface ship, new status codes for
+#$%            ship refueling operations.
+#$%
+#######################################################
+BBcommon
+ 
+REAL    UNT$Timebingo$F                 # jb E2145  7/10/00
+Integer ISTAT, UNT$Pointer, UNT$Type$I, # jb E2145  7/10/00
+    UNT$Status$I,UNT$Engagestatus$I,    # jb E2145  7/10/00
+    UNT$Marshallstatus$I,UNT$Aswindx$I, # jb E2145  7/10/00
+    UNT$Attackindx$I,UNT$Sysfailtype$I  # jb E2145  7/10/00
+ 
+#$% get unit status data
+unt$type$i           = xunt$type$i
+unt$status$i         = xunt$status$i
+unt$engagestatus$i   = xunt$engagestatus$i
+unt$attackindx$i     = xunt$attackindx$i
+ 
+ 
+#$% if type is aircraft
+if (unt$type$i == $air$code)
+   {
+    unt$marshallstatus$i = xunt$marshallstatus$i
+    unt$SysFailType$i    = xunt$SysFailType$i
+    unt$ASWindx$i        = Xunt$ASWindx$i
+ 
+    #$% determine aircraft flight status and set status
+    if      (unt$SysFailType$i  != $NoSystemFailure$code ) istat = $FAIL$status
+    else if (unt$marshallstatus$i == $recovering$code    ) istat = $BING$status
+    else if (unt$marshallstatus$i == $awaitlaunch$code   ) istat = $LNCH$status
+    else if (unt$marshallstatus$i == $launching$code     ) istat = $LNCH$status
+    else if (unt$engagestatus$i   == $engaging$code      ) istat = $ENG$status
+    else if (unt$ASWindx$i        != $NO                 ) istat = $SRCH$status
+    else if (unt$status$i       == $awaitinglaunch$code  ) istat = $LNCH$status
+    else if (unt$status$i       == $acrefuel$code        ) istat = $FUEL$status
+    else if (unt$status$i       == $recovery$code        ) istat = $BING$status
+    else if (unt$status$i       == $bingo$code           ) istat = $BING$status
+    else if (unt$attackindx$i   != $no                  &
+             unt$status$i       != $LayingBarrier$code  & # jb          7/28/87
+             unt$status$i       != $acrefuel$code        ) istat = $INT$status
+    else if (unt$status$i       == $onstation$code       ) istat = $STA$status
+    else if (unt$status$i       == $onguide$code         ) istat = $STA$status
+    else if (unt$status$i       == $proceeding$code      ) istat = $ENR$status
+    else                                                   istat = $ENR$status
+ 
+    if (istat == $BING$Status )
+        {
+        unt$TimeBingo$f = xunt$TimeBingo$f
+        if(unt$TimeBingo$f >  0                 &
+           unt$TimeBingo$f <= (game$time + time$step)  ) istat = $MSHL$status # replaced game minutes with game seconds - JFR 10/26/93
+        }
+ 
+   }
+else if (unt$type$i == $Surface$code | unt$type$i == $SurfaceWithAC$code)
+  {                           # joa 2/96 (E1467) - Additional ship status codes
+   if      (UNT$EngageStatus$I   == $Engaging$Code        ) istat = $ENG$Status
+   else if (UNT$Status$I         == $Beingdeleted$Code    ) istat = $SINK$Status
+   else if (UNT$Status$I         == $Towing$Code          ) istat = $TOW$Status
+   else if (UNT$Status$I         == $UnderTow$Code        ) istat = $UTOW$Status
+   else if (UNT$Status$I         == $DeadInWater$Code     ) istat = $DIW$Status
+   else if (UNT$Status$I         == $AwaitingLaunch$Code  ) istat = $LNCH$Status
+   else if (UNT$Status$I         == $ReturningToBase$Code ) istat = $MOOR$Status
+   else if (UNT$Status$I         == $InPort$Code          ) istat = $IPT$Status
+   else if (UNT$Status$I         == $ReadyToRecover$Code  ) istat = $UTOW$Status
+   else if (UNT$Status$I         == $Sinking$Code         ) istat = $SINK$Status
+   else if (UNT$Status$I         == $ShipRefuel$Code      ) istat = $FUEL$Status
+   else if (UNT$AttackIndx$I     != $no                   ) istat = $INT$Status
+   else if (UNT$Status$I         == $OnStation$Code       ) istat = $STA$Status
+   else if (UNT$Status$I         == $OnGuide$Code         ) istat = $STA$Status
+   else if (UNT$Status$I         == $FltOps$Code          ) istat = $FLT$Status
+   else if (UNT$Status$I         == $Hiding$Code          ) istat = $HIDE$Status
+   else                                                     istat = $ENR$Status
+  }
+#$% otherwise
+else if (unt$engagestatus$i   == $engaging$code        ) istat = $ENG$status
+else if (unt$status$i         == $beingdeleted$code    ) istat = $SINK$status
+else if (unt$status$i         == $Towing$code          ) istat = $TOW$status
+else if (unt$status$i         == $UnderTow$code        ) istat = $UTOW$status
+else if (unt$status$i         == $DeadInWater$code     ) istat = $DIW$status
+else if (unt$status$i         == $awaitinglaunch$code  ) istat = $LNCH$status
+else if (unt$status$i         == $returningtobase$code ) istat = $ENR$status
+else if (unt$status$i         == $readytorecover$code  ) istat = $UTOW$status
+else if (unt$status$i         == $sinking$code         ) istat = $SINK$status
+else if (unt$attackindx$i     != $no                   ) istat = $INT$status
+else if (unt$status$i         == $onstation$code       ) istat = $STA$status
+else if (unt$status$i         == $onguide$code         ) istat = $STA$status
+else if (unt$status$i         == $fltops$code          ) istat = $FLT$status
+else if (unt$status$i         == $Hiding$code          ) istat = $HIDE$status          # khc 7/92
+else                                                     istat = $ENR$status
+ 
+return
+end
+ 
+
+ 
+ 
+Subroutine UDDET(ideply,dtime,istat)
+ 
+#######################################################
+#$%
+#$% Purpose:   UDDET determines status of deployable
+#$%            devices as being in a particular
+#$%            stage of deployment or withdrawal.
+#$%
+#$% Called By: RPPOS1
+#$%
+#$% Calls:     None
+#$%
+#$% Tables:    None
+#$%
+#$% Date:      DEC 80
+#$%
+#$% Author:    Ron Williams
+#$%
+#######################################################
+BBcommon
+ 
+real dtime
+Integer  IDEPLY,ISTAT    # jb E2145  7/10/00
+ 
+#$% if deployed
+if(ideply == $yes)                      # check if deployed
+   {
+    #$% if deployment time is not later than game minute, set status all up
+    if(dtime <= game$time)  istat = $allup$code # replaced game minutes with game seconds - JFR 10/26/93
+    #$% else set status half up
+    else                       istat = $halfup$code
+   }
+else
+   {
+    #$% if deployment time is not later than game minute, set status all down
+    if(dtime <= game$time)  istat = $alldown$code # replaced game minutes with game seconds - JFR 10/26/93
+    #$% else set status half down
+    else                       istat = $halfdown$code
+   }
+ 
+return
+end
+ 
+
+ 
+Subroutine CMEAS(Indx_UNT,iblip,ijam,irboc,idecm)
+ 
+#######################################################
+#$%
+#$% Purpose:   CMEAS determines which countermeasures
+#$%            are ON/OFF for a given ship.
+#$%
+#$% Called By: RPPOS1
+#$%
+#$% Calls:     None
+#$%
+#$% Tables:    DEQ
+#$%
+#$% Date:      DEC 80
+#$%
+#$% Author:    Ron Williams
+#$%
+#######################################################
+BBcommon
+ 
+Integer INDX_UNT,IBLIP,        # jb E2145  7/10/00
+    IJAM,IDECM,IRBOC,          # jb E2145  7/10/00
+    DEQ$Pointer,DEQ$Ident$I,   # jb E2145  7/10/00
+    DEQ$EM$Index               # jb E2145  7/10/00
+ 
+#$% initialize countermeasure flags
+iblip = $no
+ijam  = $no
+irboc = $no
+idecm = $no
+ 
+#$% for each equipment entry                # 3/30/89
+for_DEQ_Chain (indx_unt)
+    {
+    #$% get equipment ID
+    DEQ$Ident$I = xDEQ$Ident$I
+ 
+    #$% if equipment ID is blip
+    if      (DEQ$ident$i == $blip$code)
+       {
+        #$% if equipment is on set blip
+        if (xDEQ$on$i != $no)  iblip = $yes
+       }
+    #$% else if equipment ID is deception
+    else if (DEQ$ident$i == $decm$code)
+       {
+        #$% if equipment is on, set to YES
+        if (xDEQ$on$i != $no)  idecm = $yes
+       }
+    #$% else if equipment ID is RBOC
+    else if (DEQ$ident$i == $rboc$code)
+       {
+        #$% if equipment is on and quantity remaining, set to RBOC
+        if (xDEQ$on$i != $no     &
+            xDEQ$remaining$i > 0 )  irboc = $yes
+       }
+    #$% else if equipment ID is jammer
+    else if (DEQ$ident$i == $jammer$code)
+       {
+        #$% for each jamming band
+        for (DEQ$EM$index=1;DEQ$EM$index$ok;
+                DEQ$EM$index=DEQ$EM$index+1)
+           {
+            #$% if any jamming band is on, set JAM
+            if (xDEQ$EM$band$i != $no)
+               {
+                ijam = $yes
+                break
+               }
+           }
+       }
+  }
+ 
+return
+end
+ 

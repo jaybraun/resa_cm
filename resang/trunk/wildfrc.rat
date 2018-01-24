@@ -1,0 +1,1132 @@
+define($DEBUG,#)
+define($DEBUGL,#)
+include "bbctl.inc"
+include "bbcode.inc"
+include "bbvue.inc"
+ 
+include "bbboy.inc"                              # These
+include "bbunt.inc"                              #   Tables
+include "bbaml.inc"                              #   Tables
+include "bbbml.inc"                              #   Tables
+include "bbdeq.inc"                              #   Tables
+include "bbson.inc"                              #   Tables
+include "bbshc.inc"                              #      Initialized
+include "bbnav.inc"                              #           Here
+include "bbiff.inc"                              # cml 3/91
+include "bbshn.inc"                              # clk 1/94 - to determine if a ZZ marker sub
+include "wimain_eq.inc"                                     # E2145 - dew 10/99
+include "ascii.inc"
+ 
+define(BBimplicit,Implicit NONE)                            # E2145 - dew 10/99
+ 
+undefine write
+undefine read
+undefine err
+ 
+
+ 
+subroutine wglfrc (reccnt, recsz, idumm,
+                   aml_entries, bml_entries,  # load in the scenario files
+                   number_of_AEGIS,nPlanCM)
+########################################################
+#$%
+#$% Purpose:   WGLFRC loads the scenario files to
+#$%            initialize the UNT, DUP
+#$%
+#$%
+#$% Called By: WGLOAD
+#$%
+#$% Calls:     BBALOC     BBLOD1     BBLODM
+#$%            BBTRIM     BBZAPT     ECHOH
+#$%            ECHOI      ECHOR      GETSR
+#$%            GSLOTM     WGCAT      WGLSHP
+#$%            WGLSHR
+#$%
+########################################################
+ 
+BBcommon
+ 
+integer    reccnt,recsz,shpcnt,shrcnt,sitcnt                #KHC 6/11/92 - added sitcnt
+integer    aml_entries, bml_entries, success, nPlanCM
+logical    tship,tshore,tsite                                          #KHC 6/11/92 - added tsite
+literal    rec[1500],task,name,class,lat,long,cours,speed,guide
+literal    range,bear,depth,fclass
+literal    indicator                                                   #KHC 6/11/92 - added indicator
+ 
+common /scratch$pad/ rec                                    # common scratch area
+EqErr$Common                                                # E2145 - dew 10/99
+integer     number_of_AEGIS
+ 
+literal     cstrip8
+integer     ilen, loop, iloop, iforce, iview, jview, kstat, istat, len,
+            iuntslots, maxhgt, maxac, maxsb, maxcm, maxGh, iDEQslots, idumm
+real        dms2rad
+BBdeclare  (vue$pointer)
+BBdeclare  (unt$pointer, unt$view$i, unt$name$c, unt$type$i, unt$hierarchyid$i,
+            unt$shcpntr$i, unt$jtidscapable$i)
+BBdeclare  (unt$assumedcourse$f, unt$assumedlatitude$f, unt$assumedlongitude$f,
+            unt$assumedspeed$f, unt$costruelat$f, unt$guidebearing$f,
+            unt$guideindx$i, unt$guiderange$f, unt$guidetrue$i)
+BBdeclare  (unt$orderedaltdepth$i, unt$orderedcourse$f, unt$orderedlatitude$f,
+            unt$rangetonext$f, unt$status$i, unt$subtype$i, unt$truealtdepth$i,
+            unt$truecourse$f, unt$truelatitude$f, unt$truelongitude$f)
+BBdeclare  (unt$truespeed$f, unt$speed$i, unt$orderedspeed$f)
+BBdeclare  (unt2$pointer, unt2$costruelat$f, unt2$truelatitude$f,
+            unt2$truelongitude$f)
+BBdeclare  (shc$pointer, shc$keeldepth$i, shc$maxspeed$i, shc$scopedepth$i,
+            shc$MaxDepth$i)
+BBdeclare  (shn$pointer, shn$spd$index)
+BBdeclare  (deq$pointer)
+ 
+ 
+$DEBUG call echov("<wglfrc:")
+ 
+# initialize to zero, increment whenever a ship type is AEGIS
+# variable used in allocating the AEG table
+number_of_AEGIS = 0
+ 
+#$% if file empty
+if (reccnt <= 1)
+   {
+    #$% send warning message to user
+    call echov ("Force File Empty")
+    call echor
+    return
+   }
+ 
+ 
+#$% set length for smovh
+ilen = 0
+ 
+#$% move ship headings to cfile for eventual display
+call smovhn (Scenario$name,$$MaxName,cfile,ilen) # SMM 8/99 E2141
+call smovv ("s.shp",cfile,ilen)
+call smov ($null,cfile,ilen)
+ 
+Main$BattleUnit = 0        # Initial'z to flag "not yet set"
+#$% open ship file
+open(   unit               = 32,
+        access             = 'direct',
+        form               = 'unformatted',
+        file               = v_cfile,
+        recl               = 32,  #longwords
+#        carriage control   = 'none',
+        status             = 'unknown')
+ 
+read (32,rec=1,err=8011) shpcnt       # read current record count
+goto 8012
+8011 shpcnt = 1                       # new file (why?)
+write (32,rec=1) shpcnt               # so generate count = 1
+ 
+8012 continue                       # continue
+ 
+#$% set ilen for smovh
+ilen = 0
+ 
+#$% move shorebase headings to cfile for display
+call smovhn (Scenario$name,$$MaxName,cfile,ilen) # SMM 8/99 E2141
+call smovv ("s.shr",cfile,ilen)
+call smov ($null,cfile,ilen)
+ 
+#$% open shorebase file
+open(   unit               = 33,
+        access             = 'direct',
+        form               = 'unformatted',
+        file               = v_cfile,
+        recl               = 32,   #longwords
+#        carriage control   = 'none',
+        status             = 'unknown')
+ 
+read (33,rec=1,err=8021) shrcnt       # read current record count
+goto 8022
+8021 shrcnt = 1                            # new file (why?)
+write (33,rec=1) shrcnt               # so generate count = 1
+ 
+8022 continue                              # continue
+ 
+#$% set ilen for smovh
+ilen = 0
+ 
+#$% move site headings to cfile for display                 # KHC 6/11/92
+call smovhn (Scenario$name,$$MaxName,cfile,ilen) # SMM 8/99 E2141
+call smovv ("s.sit",cfile,ilen)
+call smov ($null,cfile,ilen)
+ 
+#$% open site file
+open(   unit               = 34,
+        access             = 'direct',
+        form               = 'unformatted',
+        file               = v_cfile,
+        recl               = 32,  #longwords
+#        carriage control   = 'none',
+        status             = 'unknown')
+ 
+read (34,rec=1,err=8031) sitcnt       # read current record count
+goto 8032
+8031 sitcnt = 1                            # new file (why?)
+write (34,rec=1) sitcnt               # so generate count = 1
+ 
+8032 continue                              # continue
+ 
+ 
+# for each entry in *s.frc
+# this preliminary loop counts number of ship/shore for table trimming
+FOR (loop = 2; loop <= reccnt; loop=loop+1)
+    {
+    #$% read force data
+    read (31,rec=loop,err=8030) task,name,class,lat,long,cours,
+                                speed,guide,range,bear,depth,indicator          #KHC 6/11/92 - added indicator
+ 
+    if (task <= 9999) task = task * 10 # convert from 4 to 5-digit task numbers
+ 
+    # if shore base
+    #if (class == 0)
+    if (indicator == 0)                                   #KHC 6/11/92
+        {
+        #$% call to get shorebase scenerio record
+        call getsrS (33,name,16,shrcnt,rec)
+ 
+        # if record is empty
+        IF ( Rec [ 1 ] == 0 ) next
+        }
+    #$% if site                                            KHC 6/11/92
+    ELSE if (indicator == 1)
+        {
+        #$% call to get site scenerio record
+        call getsrS (34,class,16,sitcnt,rec)
+ 
+        # if record is empty
+        IF ( Rec [ 1 ] == 0 ) next
+ 
+        }
+    #$% ELSE if class given, ship   (no longer true, KHC 6/11/92)
+    ELSE
+        {
+        #$% call to get ship scenario record
+        call getsrS (32,class,16,shpcnt,rec)
+ 
+        IF ( Rec [ 1 ] == 0 ) next
+        }
+ 
+    Sh$Loaded = Sh$Loaded + 1            # one UNT slots per ship/shore/site
+ 
+    } # FOR (loop = 2; loop <= reccnt; loop=loop+1)
+ 
+#xxx
+CM$Loaded = Simultaneous$cruise
+ 
+if (ALSP$Game == $NO & DIS$Game == $NO)                     # DEW 10/99 (E2160)
+    Simultaneous$Ghosts = 0
+ 
+Iuntslots = Sh$Loaded + Simultaneous$ghosts +               # DEW 10/99 (E2160)
+            MIN(Simultaneous$cruise, CM$Loaded ) +
+            Simultaneous$boats +                            # JHM 4/03
+            Simultaneous$flights                            # not min for boats
+                                                            # flights
+# This next line should reduce (UNT$SLOTS) by the number of UNT slots
+# allocated for PLAN FIRE.  If the value were available here....
+ 
+Iuntslots = MIN(UNT$Slots-nPlanCM, Iuntslots)
+ 
+UNT$USED = Iuntslots * unt$ENTRY
+ 
+#$% trim tables of excess
+call bbtrim ($$UNT)
+ 
+# reset for high-water mark
+UNT$USED = 0
+ 
+call init_deq
+ 
+ 
+# read entire .frc file twice, first to load shore, then to load ship
+# this results in a UNT table with contiguous ships and shore base types
+#FOR (iloop = 1; iloop <= 2; iloop = iloop + 1)
+FOR (iloop = 1; iloop <= 3; iloop = iloop + 1)                      # KHC 6/11/92
+    {
+ 
+# for each entry in *s.frc
+FOR (loop = 2; loop <= reccnt; loop=loop+1)
+    {
+    #$% read force data
+    read (31,rec=loop,err=8030) task,name,class,lat,long,cours,
+                                speed,guide,range,bear,depth,indicator   # KHC 6/11/92 - indicator added
+ 
+    if (task <= 9999) task = task * 10 # convert from 4 to 5-digit task numbers
+ 
+    #$% initialize flags
+    tshore = .false.
+    tship = .false.
+    tsite = .false.                                                #KHC 6/11/92
+ 
+    #$% if class not given (has to be shorebase)
+    #if (class == 0)
+    if (indicator == 0)
+        {
+        # if this pass thru .frc file is intended to load ships in $$UNT
+        #IF (iloop == 2) next
+        IF (iloop == 2 | iloop == 3) next               #KHC 6/11/92
+ 
+        #$% set flag to indicate shorebase
+        tshore = .true.
+        #$% display message to user
+        call echov ("Loading Base ")
+        }
+    #$% ELSE if site                                    KHC 6/11/92
+    ELSE if (indicator == 1)
+        {
+        IF (iloop == 1 | iloop == 2) next
+ 
+        #$% set flag to indicate site
+        tsite = .true.
+        #$% display message to user
+        call echov ("Loading Site ")
+        }
+    #$% ELSE if class given   (KHC, no longer true for ship, because site also has class)
+    ELSE
+        {
+        # if this pass thru .frc file is intended to load shore in $$UNT
+        #IF (iloop == 1) next
+        IF (iloop == 1 | iloop == 3) next                  #KHC 6/11/92
+ 
+        #$% set flag to indicate ship
+        tship  = .true.
+        #$% display message to user
+        call echov ("Loading Ship ")
+        }
+ 
+    #$% display ship/shorebase/site data
+    call echohn (name,$$MaxLit)
+    call echov (", Task number ")
+    call echoi (int(task))
+    call echor
+ 
+    #$% if shorebase, make class same as base name
+    if (tshore)
+    {
+        class = name
+        call sbfind(class,SHC$POINTER)
+        if (shc$pointer == 0)
+        {
+            #$% display warning message to user
+            call echov (" has duplicate or no characteristics")
+            call echor
+            call echov ("The force is not loaded.")
+            call echor
+            next
+        }
+    }
+ 
+    #$% set force number
+    iforce = (int(task)/1000)
+ 
+    #$% initialize value
+    iview = 0
+ 
+    #$% for each view
+    for (jview = $first$view; jview <= $last$view; jview=jview+1)
+        {
+        #$% set vue pointer to each view
+        vue$pointer$to jview
+ 
+        #$% find view being processed
+        if (Xvue$ForceCode$i != iforce) next
+ 
+        #$% if view found, reset iview
+        iview = jview
+        break
+        }
+ 
+    #$% if view not found
+    if (iview == 0)
+        {
+        #$% display warning message to user
+        call echov ("Task number ")
+        call echoi (int(Task))
+        call echov (" is not associated with any view")
+        call echor
+        call echov ("The force is not loaded.")
+        call echor
+        next
+        }
+ 
+    #$% initialize value
+    kstat = $yes
+ 
+    #$% for each unit
+    for (unt$pointer$first; unt$pointer$ok; unt$pointer$next)
+        {
+        #$% find view being processed
+        if (xunt$view$i != iview) next
+ 
+        #$% if task number already designated
+        if (xUNT$HierarchyId$i == task)
+           {
+            #$% send warning message to user
+            call echov ("WARNING.  ")
+            call echohn (name,$$MaxLit)
+            call echov (" has the same task hierarchy as ")
+            call echohn (xunt$name$c,$$MaxLit)
+            call echor
+           }
+ 
+        #$% if name already designated
+        if (xunt$name$c == name)
+           {
+            #$% display warning message to user
+            call echov ("The name ")
+            call echohn (name,$$MaxLit)
+            call echov (" is already used for that view. ")
+            call echor
+            call echov ("The force is not loaded.")
+            call echor
+ 
+            #$% reset flag
+            kstat = $no
+            break
+            }
+        }
+ 
+    #$% if name already in use, skip it
+    if (kstat == $no) next
+ 
+    #$% if a ship (vice shorebase)
+    if (tship)
+        {
+         #$% call to get ship scenario record
+         call getsrS (32,class,16,shpcnt,rec)
+        }
+    #$% if a shorebase
+    if (tshore)
+        {
+         #$% call to get shorebase scenerio record
+         call getsrS (33,class,16,shrcnt,rec)
+        }
+    #$% if a site                                         #KHC 6/11/92
+    if (tsite)
+        {
+         #$% call to get site scenerio record
+         call getsrS (34,class,16,sitcnt,rec)
+        }
+ 
+    #$% if record is empty
+    if (rec[1] == 0)
+       {
+        #$% send warning message to user
+        call echov ("The object ")
+        call echohn (class,$$MaxLit)
+        call echov (" is not in the file.")
+        call echor
+        call echov ("The force is not loaded.")
+        call echor
+        next
+       }
+ 
+    #$% get slot from unit table
+    call gslotm (unt$pointer,$$unt,unt$entry,istat)
+ 
+    #$% if unit table already full
+    if (istat == $no)
+       {
+        #$% send warning message to user
+        call echov ("Items from ")
+        call echoh (name,$$MAXname)     # jb E2141 ($$MAXname)  1/26/00
+        call echov (" and on can not be loaded.")
+        call echor
+        break
+       }
+ 
+ 
+    #$% get view and save
+    unt$view$i = iview
+    PUTunt$view$i
+ 
+    #$% get ship/shorebase/site name and save               KHC 6/15/92
+    unt$name$c = name
+    PUTunt$name$c
+ 
+    #$% get task number and save
+    UNT$HierarchyId$i = task
+    PUTUNT$HierarchyId$i
+ 
+    #$% if a ship
+    if (tship)
+        {
+        #$% load ship data
+#*****
+ 
+        #$% get ship scenario record length
+        len = rec[1]
+ 
+        #$% set ilen for smov
+        ilen = 0
+        #$% move "Ship" header for eventual display
+        call smovv ("Ship      ",cfile,ilen)
+ 
+        #$% get ship name
+        cname = rec[3]
+ 
+        #$% initialize flag to default value
+        cflg = $yes
+ 
+        #$% get unit view
+        UNT$VIEW$I = XUNT$VIEW$I
+ 
+#        need to find correct $SHC entry
+#        *** need to find "surf" in $SHC table to replace following
+ 
+        #$% if array word is SURF set unit type as surface
+        IF (rec[5] == 'SURF')
+            {
+            UNT$TYPE$I = $SURFACE$CODE
+            }
+        ELSE IF (rec[5] == 'NSUB')
+            {
+            UNT$TYPE$I = $SUB$CODE
+            }
+        ELSE # IF (rec[5] == 'DSUB') else it's a diesel sub
+            {
+            UNT$TYPE$I = $SUB$CODE
+            putUNT$PropulsionMode$I ($Electric$Code) # default to electric
+            putUNT$BatteryCharge$F (100.0) # default to fully charged
+            }
+ 
+        if(Main$BattleUnit == 0 & UNT$VIEW$I >= $FIRSTBLUE$VIEW &
+                  UNT$VIEW$I <= $LASTBLUE$VIEW) # jb  5/6/91
+            Main$BattleUnit = UNT$POINTER$INDEX # jb  5/6/91
+ 
+        #$% if the unit is designated as having a guide
+        if(guide != 0)
+            {
+            #$% get guide data
+            call UNTFND(_
+                UNT$VIEW$I,
+                GUIDE,
+                UNT2$POINTER)
+ 
+            #$% if no guide named
+            if(UNT2$POINTER == 0)
+                {
+                #$% display warning message to the user and skip
+                call echov("guide for ")
+                call echohn(name,$$MaxLit)
+                call echov(" does not exist")
+                call echor
+                next            # reh 2/26/90
+#                return              comment out, reh 2/26/90
+                }
+            }
+ 
+        #$% get ship class
+        Fclass = class
+ 
+        # find shc slot and update pointer in UNT
+        cflg = $YES
+ 
+        #$% look for ship/shorebase class (shorebase class same as name)
+        call eqfind($$SHC,0,fclass,SHC$POINTER)
+ 
+        #$% if class found
+        if(SHC$POINTER != 0)
+            {
+            UNT$SHCPntr$i = SHC$Pointer
+            PUTUNT$SHCPntr$i
+ 
+            if (xSHC$AEGISType$I == $yes)   # SMM 2/94
+                {
+                 PUTunt$SAMcapable$I ($YES)
+                 number_of_AEGIS = number_of_AEGIS + 1
+                }
+ 
+            UNT$JTIDSCapable$I = xSHC$JTIDSCapable$I   # clk 12/95 (E1469)
+            putUNT$JTIDSCapable$I
+ 
+            if (xSHC$SAMorCIWSCapable$I == $yes) # SMM 7/6/94 per #E1311
+              PUTunt$SAMcapable$I ($YES)
+ 
+            if (xSHC$LFAEquipped$I == $yes)
+              Nmbr$Bistatic$Sources = Nmbr$Bistatic$Sources + 1
+ 
+            if (UNT$TYPE$I == $SUB$CODE)
+                {
+                SHC$KeelDepth$i  = XSHC$KeelDepth$i
+                SHC$ScopeDepth$i = XSHC$ScopeDepth$i
+                SHC$MaxDepth$i = XSHC$MaxDepth$i    #joa 5/05 per_mxdpt
+ 
+                IF (depth < SHC$KeelDepth$i)
+                    UNT$OrderedAltDepth$I = SHC$KeelDepth$i
+                ELSE IF (depth < SHC$ScopeDepth$i)
+                    UNT$OrderedAltDepth$I = SHC$ScopeDepth$i
+                ELSE IF (depth > SHC$MaxDepth$i)
+                    UNT$OrderedAltDepth$I = SHC$MaxDepth$i
+                ELSE
+                    UNT$OrderedAltDepth$I = depth
+ 
+                PUTUNT$OrderedAltDepth$I
+ 
+                #$% clk 1/94:  Determine if a ZZ marker sub - no noise inputs
+                SHN$Pointer$To  (xSHC$NoiseIndx$I)
+                for (SHN$SPD$Index = 1; SHN$SPD$Index <= SHN$SPD$Slots;
+                                     SHN$SPD$Index = SHN$SPD$Index + 1)
+                   {
+                    if (xSHN$SPD$BbNoise$F != 0)
+                      break
+                   }
+                if (SHN$SPD$Index > SHN$SPD$slots)  # if true then all the BBN
+                   {                                # values were 0
+                    UNT$SubType$I = $MarkerSub$SubCode
+                    putUNT$SubType$I
+                   }
+                }
+            else if (UNT$TYPE$I == $SURFACE$CODE)     # joa 2/96 (E1467)
+                {
+                call InitUNTFuel (UNT$Pointer)
+                }
+            call Set_UNT_AntennaHeight(_
+                              SHC$Pointer,     # ship characteristics pointer
+                              UNT$Pointer,     # unit pointer
+                              success)         # flag whether height found
+ 
+            if (success != YES)
+                {
+                call echov("Using default max antenna height ")
+                call echoi(Xunt$AntennaHeight$i)
+                call echor
+                }
+            } # if(SHC$POINTER != 0)
+ 
+ 
+        #$% get unit name and save
+        UNT$NAME$C = name
+        PUTUNT$NAME$C
+ 
+        #$% if the unit is designated as having a guide
+        if(guide != 0)
+            {
+            #$% set unit's status as having a guide and save
+            unt$Status$i = $OnGuide$code
+            PUTunt$Status$i
+ 
+            #$% get range to guide and save
+            UNT$GUIDERANGE$F = range
+            PUTUNT$GUIDERANGE$F
+ 
+            #$% compute bearing to guide and save
+            UNT$GUIDEBEARING$F = bear/180.*$PI
+            PUTUNT$GUIDEBEARING$F
+ 
+            #$% set guide index to unit pointer index of the guide & save
+            UNT$GUIDEINDX$I = UNT2$POINTER$INDEX
+            PUTUNT$GUIDEINDX$I
+ 
+            #$% get actual guide speed
+            UNT$TRUESPEED$F = XUNT2$TRUESPEED$F
+ 
+            #$% get actual guide course
+            UNT$TRUECOURSE$F = XUNT2$TRUECOURSE$F
+ 
+            #$% get actual UNTition of guide
+            UNT2$TRUELATITUDE$F = XUNT2$TRUELATITUDE$F
+            UNT2$TRUELONGITUDE$F = XUNT2$TRUELONGITUDE$F
+            UNT2$COSTRUELAT$F = XUNT2$COSTRUELAT$F
+ 
+            #$% determine ship position from relationship to guide
+            call RRB2LL(_
+                        UNT2$TRUELATITUDE$F,
+                        UNT2$TRUELONGITUDE$F,
+                        UNT$GUIDERANGE$F,
+                        UNT$GUIDEBEARING$F,
+                        0.0,
+                        UNT2$COSTRUELAT$F)
+ 
+            #$% get actual UNTition of ship that has a guide
+            UNT$TRUELATITUDE$F = UNT2$TRUELATITUDE$F
+            UNT$TRUELONGITUDE$F = UNT2$TRUELONGITUDE$F
+            UNT$COSTRUELAT$F = UNT2$COSTRUELAT$F
+ 
+            #$% indicate station guide bearing is true
+            UNT$GuideTrue$I = $yes
+            }
+        #$% ELSE if no guide is designated
+        ELSE
+            {
+            #$% set unit's status as proceeding and save
+            unt$Status$i = $Proceeding$code
+            PUTunt$Status$i
+ 
+            #$% get unit's actual position
+            UNT$TRUELATITUDE$F = DMS2rad(lat)
+            UNT$TRUELONGITUDE$F = DMS2rad(long)
+            UNT$COSTRUELAT$F = COS(UNT$TRUELATITUDE$F)
+ 
+            #$% get unit's course
+            UNT$TRUECOURSE$F = cours/180. *$PI
+ 
+            if (SHC$Pointer != 0)       # clk 2/22/93 (E1131)
+              {
+                SHC$MaxSpeed$I = xSHC$MaxSpeed$I
+                if (speed > SHC$MaxSpeed$I)
+                  UNT$TrueSpeed$F = SHC$MaxSpeed$I
+                else
+                  UNT$TrueSpeed$F = speed
+              }
+            else
+              UNT$TrueSpeed$F = speed
+ 
+            #$% set a value of range to go to next manuever and save
+            UNT$RANGETONEXT$F = 2000.0
+            PUTUNT$RANGETONEXT$F
+ 
+            #$% indicate unit does not have a guide
+            UNT$GuideTrue$I = $no
+            }
+ 
+        #$% save unit's position data
+        PUTUNT$TRUELATITUDE$F
+        PUTUNT$TRUELONGITUDE$F
+        PUTUNT$COSTRUELAT$F
+        #$% save indication of whether unit has a guide of not
+        PUTUNT$GuideTrue$I
+ 
+        if (UNT$TYPE$I != $SUB$CODE)            # jb    IF    10/12/90
+           {
+            #$% get ordered depth and save
+            UNT$ORDEREDALTDEPTH$I = depth
+            PUTUNT$ORDEREDALTDEPTH$I
+           }
+        #$% get actual depth and save
+        if (UNT$TYPE$I == $SUB$CODE)
+           {
+            #$% get ordered depth and save
+            UNT$TRUEALTDEPTH$I = unt$OrderedAltDepth$i
+            PUTUNT$ORDEREDALTDEPTH$I
+           }
+        else
+           {
+            UNT$TRUEALTDEPTH$I = depth
+            PUTUNT$TRUEALTDEPTH$I
+           }
+ 
+        #$% get assumed position and save
+        UNT$ASSUMEDLATITUDE$F = UNT$TRUELATITUDE$F
+        PUTUNT$ASSUMEDLATITUDE$F
+        UNT$ASSUMEDLONGITUDE$F = UNT$TRUELONGITUDE$F
+        PUTUNT$ASSUMEDLONGITUDE$F
+ 
+        #$% get ordered latitude and save
+        UNT$ORDEREDLATITUDE$F = $PI
+        PUTUNT$ORDEREDLATITUDE$F
+ 
+        #$% save true course
+        PUTUNT$TRUECOURSE$F
+ 
+        #$% set indicated course to actual course
+        UNT$ASSUMEDCOURSE$F = UNT$TRUECOURSE$F
+        PUTUNT$ASSUMEDCOURSE$F
+ 
+        #$% set ordered course to indicated course and save
+        UNT$ORDEREDCOURSE$F = UNT$ASSUMEDCOURSE$F
+        PUTUNT$ORDEREDCOURSE$F
+ 
+        #$% save true speed
+        PUTUNT$TRUESPEED$F
+ 
+        #$% set indicated speed to actual speed and save
+        UNT$ASSUMEDSPEED$F = UNT$TRUESPEED$F
+        PUTUNT$ASSUMEDSPEED$F
+ 
+        #$% set orderd speed to indicated speed and save
+        UNT$ORDEREDSPEED$F = UNT$ASSUMEDSPEED$F
+        PUTUNT$ORDEREDSPEED$F
+ 
+ 
+        } # if (tship)
+ 
+    #$% if a shorebase
+    if (tshore)
+        {
+ 
+        $DEBUG call echov("shorebase")
+ 
+        #$% get record length
+        len = rec[1]
+ 
+        #$% set ilen for header in smovh to start in first column
+        ilen = 0
+ 
+        #$% move "Base" header to cfile for eventual display
+        call smovv ("Base      ", cfile, ilen)
+ 
+        #$% get base name
+        cname = rec[3]
+ 
+        #$% initialize flag to default value
+        cflg = $yes
+ 
+        #$% set unit type to shorebase
+        UNT$TYPE$I = $SHOREBASE$CODE
+        PUTunt$AirCapable$i ($YES)
+ 
+        #$% get base name and save
+        UNT$NAME$C = REC[3]
+        PUTUNT$NAME$C
+ 
+        #$% for base, class is same as name
+        Fclass = REC[3]
+ 
+        # find shc slot and update pointer in UNT
+        cflg = $YES         # make no message if NOT found in EQFIND
+ 
+        #$% look for shorebase class (shorebase class same as name)
+        call eqfind($$SHC,0,fclass,SHC$POINTER)
+ 
+        #$% if class found
+        if(SHC$POINTER != 0)
+            {
+            UNT$SHCPntr$i = SHC$Pointer
+            PUTUNT$SHCPntr$i
+            call InitUNTFuel (UNT$Pointer)     # joa 2/96 (E1467)
+            }
+ 
+        #$% set unit status as on station and save
+        UNT$STATUS$I = $ONSTATION$CODE
+        PUTUNT$STATUS$I
+ 
+        #$% get actual position and save
+        UNT$TRUELATITUDE$F = DMS2rad(REC[5])
+        PUTUNT$TRUELATITUDE$F
+        UNT$TRUELONGITUDE$F = DMS2rad(REC[7])
+        PUTUNT$TRUELONGITUDE$F
+        UNT$COSTRUELAT$F = COS(UNT$TRUELATITUDE$F)
+        PUTUNT$COSTRUELAT$F
+ 
+        #$% set indicated position to actual position and save
+        PutUNT$ASSUMEDLATITUDE$F  (UNT$TRUELATITUDE$F)
+        PutUNT$ASSUMEDLONGITUDE$F (UNT$TRUELONGITUDE$F)
+ 
+        #$% indicate type as a shorebase
+        UNT$TYPE$I = $SHOREBASE$CODE
+        PUTunt$AirCapable$i ($YES)
+ 
+        } # if shore base
+ 
+    #$% if a site                                         KHC   6/15/92
+    if (tsite)
+       {
+        $DEBUG call echov("site")
+ 
+        len = rec[1]        #$% get record length
+ 
+        ilen = 0            #$% set ilen for header in smovh to start in first column
+ 
+        #$% move "Site" header to cfile for eventual display
+        call smovv ("Site      ", cfile, ilen)
+ 
+        cname = rec[3]      #$% get site name
+ 
+        cflg = $yes         #$% initialize flag to default value
+ 
+ 
+        UNT$TYPE$I = $SITE$CODE          #$% set unit type to site
+        PUTUNT$SUBTYPE$I  ($HIDESITE$SUBCODE)
+ 
+        UNT$NAME$C = name   #$% get site name
+        PUTUNT$NAME$C       #$% and save
+ 
+        Fclass = class
+ 
+        # find shc slot and update pointer in UNT
+        cflg = $YES         # make no message if NOT found in EQFIND
+ 
+        #$% look for ship/shorebase/site class (shorebase class same as name)
+        call eqfind($$SHC,0,fclass,SHC$POINTER)
+ 
+        if(SHC$POINTER != 0)           #$% if class found
+           {
+            UNT$SHCPntr$i = SHC$Pointer
+            PUTUNT$SHCPntr$i
+           }
+ 
+        PUTUNT$STATUS$I ($ONSTATION$CODE)
+        PUTUNT$ORDEREDLATITUDE$F  ($pi)
+ 
+        #$% get actual position and save
+        UNT$TRUELATITUDE$F = DMS2rad(lat)
+        PUTUNT$TRUELATITUDE$F
+        UNT$TRUELONGITUDE$F = DMS2rad(long)
+        PUTUNT$TRUELONGITUDE$F
+        UNT$COSTRUELAT$F = COS(UNT$TRUELATITUDE$F)
+        PUTUNT$COSTRUELAT$F
+ 
+        #$% set indicated position to actual position and save
+        PutUNT$ASSUMEDLATITUDE$F  (UNT$TRUELATITUDE$F)
+        PutUNT$ASSUMEDLONGITUDE$F (UNT$TRUELONGITUDE$F)
+       } # if site
+ 
+    PUTunt$Type$i
+ 
+    }  # for (loop = 2; loop <= reccnt; loop=loop+1)  #  loop for next record
+ 
+    } # FOR (iloop = 1, iloop <= 3, iloop = iloop + 1)
+ 
+ 
+#$% for each unit entered
+FOR (unt$pointer$first; unt$pointer$ok; unt$pointer$next)
+    {
+    SHC$Pointer = XUNT$ShcPntr$i
+ 
+    maxhgt = 0
+ 
+    UNT$Speed$i = XSHC$MaxSpeed$i
+ 
+    PUTUNT$Speed$i
+ 
+    call Load_SHC_Equipment(unt$name$c,     # new unit name
+                            SHC$Pointer,    # ship characteristics pointer
+                            UNT$Pointer,    # unit pointer
+                            success)        # flag whether all equipment loaded
+ 
+    if (success != YES)
+        {
+        call echov("Insufficient dynamic equipment table.")
+        call echor
+ 
+        # This is not sufficient - it should terminate the program (WIMAIN)
+        # at this point... Not all UNT slots have any DEQ
+ 
+        return
+        }
+ 
+    } # FOR (unt$pointer$first; unt$pointer$ok; unt$pointer$next)
+ 
+8030 continue
+ 
+MAXAC = MIN ( Simultaneous$Flights, Aml_entries )
+MAXSB = MIN ( Simultaneous$Boats, Bml_Entries )
+MAXCM = Simultaneous$Cruise
+MAXGh = Simultaneous$Ghosts                                 # DEW 10/99 (E2160)
+ 
+IDEQslots =  (DEQ$First$Free - 1) +         # ship/shore    # DEW 10/99 (E2160)
+              DEQ$Slots_per_AC(maxAC) +     # Aircraft
+              DEQ$Slots_per_Boat(maxsb) +   # boats
+              DEQ$Slots_per_CM(maxCM) +     # cruise missiles
+              DEQ$Slots_per_Ghost(maxGh)    # Ghost Units
+ 
+IDEQslots = MIN ( DEQ$Slots, IDEQslots )    # number of slots DEQ
+ 
+DEQ$used = DEQ$entry * IDEQslots
+call bbtrim ($$DEQ)
+ 
+DEQ$Pointer$TO IDEQSlots
+ 
+PUTDEQ$NextDEQ$i ( 0 )
+ 
+#$% close files
+close (unit=32)
+close (unit=33)
+close (unit=34)                     # KHC 6/15/92
+ 
+return
+end
+ 
+ 
+
+ 
+ 
+Subroutine init_DEQ
+ 
+###    Name: init_deq
+###
+###    Usage:
+###
+###    Purpose: initialize DEQ table pointers, table size, and DEQ free list
+###
+###    Arguments:
+###
+###        Input: N/A
+###
+###        Input/Output: N/A
+###
+###        Output: N/A
+###
+###        Function Result: N/A
+###
+###        COMMON:
+###
+###            Name            Source                   Use
+###
+###    Limitations:
+###
+###    Warnings: This routine must be executed after UNT, AML, CMC and SBL
+###            tables are sized.
+###
+###    Notes: the DEQ table size depends on size of UNT, AML, CMC and
+###            SBL.
+###
+###    Author: R. Hundt / Jumpin' Joe Bryant
+###
+###        G. G. Gustafson
+###        Computer Sciences Corporation
+###        4045 Hancock Street
+###        San Diego CA 92110
+###
+###        (619) 225-8401
+###
+###    Customer:
+###
+###        Naval Ocean Systems Center
+###        Code 413
+###        San Diego CA 92152-5000
+###
+###        (619) 553-3972
+###
+###    Subprograms Required:
+###
+###    Tables Required:
+###
+###    Algorithm:
+###
+###    Date Developed:
+###
+###    Record of Modifications:
+###
+###        Programmer          Date        Modification
+###
+###    Waivers:
+ 
+BBcommon
+ 
+integer     iUNTslots, i, nUNT, iDEQslots
+BBdeclare  (deq$pointer, deq$nextdeq$i)
+ 
+IUNTslots = (UNT$size / UNT$entry)
+ 
+DEQ$first$free = 1 + IUNTslots
+ 
+# Need to 'guess' at a good number for allocating DEQ.
+# DEQ$SLOTS may be way too many for the game being loaded.
+# Use the actual allocation size of UNT
+#
+# The DEQ table will be trimmed later, at the end of WGLFRC.
+ 
+nUNT = UNT$Size / UNT$Entry
+iDEQslots =   DEQ$Slots_per_UNT(nUNT)       # E2160 - DEW 11/99
+ 
+IDEQslots = MIN ( DEQ$Slots, IDEQslots )    # number of slots DEQ
+ 
+call bbaloc ($$DEQ,"DEQ",$yes,iDEQslots,DEQ$entry)
+call bbzapt ($$DEQ)
+ 
+#$% for each slot in the DEQ table
+for (i = DEQ$first$free; i < DEQ$slots; i=i+1)
+    {
+    DEQ$pointer$to i
+ 
+    #$% set DEQ "next index" pointer to next DEQ entry
+    DEQ$nextDEQ$i = i + 1
+    putDEQ$nextDEQ$i
+    }
+ 
+#$% set nextDEQ of last DEQ slot to 0 (indicating NO MORE FREE slots)
+DEQ$pointer$to (DEQ$slots)
+putDEQ$nextDEQ$i ( 0 )
+ 
+end
+ 
+ 
+
+ 
+Subroutine Wgltowed
+ 
+BBCommon
+BBdeclare  (unt$pointer, deq$pointer, deq$ident$i, son$pointer)
+ 
+#$% for each unit entered
+FOR (unt$pointer$first; unt$pointer$ok; unt$pointer$next)
+    {
+    # for every DEQ entry for this UNT
+    FOR_DEQ_Chain
+        {
+        DEQ$Ident$i = XDEQ$Ident$i
+ 
+        IF ( DEQ$Ident$i == $PasSonar$Code )
+            {
+            SON$Pointer = XDEQ$Pntr$i
+ 
+            IF ( SON$Pointer != 0 )
+                {
+                if ( xSON$TowedArray$i != $no )         # 10/22/90 reh
+                    {
+                    call deplta( UNT$Pointer, SON$Pointer )
+                    }
+                }
+            }
+ 
+        } # FOR ( SHC$EQ$Index;SHC$EQ$Index$OK; SHC$EQ$Index = SHC$EQ$Index+1)
+ 
+    } # FOR (unt$pointer$first; unt$pointer$ok; unt$pointer$next)
+ 
+end
+ 
+
+ 
+Subroutine sbfind(name,shc$pointer)  #find the passed 'name'
+########################################################
+#$%
+#$% Purpose:   SBFIND searches ship and shorebase
+#$%            characteristics table for a specific
+#$%            named item.
+#$%
+#$% Called By:
+#$%            WGLSHP
+#$%
+#$% Calls:     ECHOH      ECHOR
+#$%
+#$% Tables:    Variable
+#$%
+#$% Date:      AUG 08
+#$%
+#$% Author:    James O. Allen
+#$%
+########################################################
+ 
+BBcommon                                             # in the blackboard
+EqErr$common
+ 
+literal name
+literal     CSTRIP8
+integer     LCOMP, litcmp
+BBDeclare    (SHC$Pointer)
+ 
+#$% for each ship/shore entry
+for (SHC$pointer$first;SHC$pointer$ok; SHC$pointer$next)
+{
+    if (Xshc$Category$i != $Shorebase$Code) next
+ 
+    if(litcmp(XSHC$type$c, name) == 0) return
+}
+ 
+#$% initialize table pointer
+shc$pointer = 0
+ 
+#$% if item not found
+if (cflg != $no)
+    {
+    #$% display error message to user
+     call echov ("File: ")
+     call echoh (cFile,10)
+     call echov ("  Record: ")
+     call echoh (Cname,5)
+     call echov ("  ")
+     call echoh ("SHC",3)
+     call echov (" device ")
+     call echohn (name,$$MaxLit)
+     call echov (" was not found")
+     call echor
+    }
+ 
+#$% reset flag
+cflg = $yes
+ 
+return
+end

@@ -1,0 +1,2700 @@
+#$%   File:  WGMDBISTATIC.RAT - Bistatic Sonar Model
+ 
+#$%   FLOWCHART FOR FILE BISTATICMOD
+#$%   ==============================
+#$%
+#$%   Can be found in WGMAIN.HIR
+ 
+ 
+#$%
+#$% Modified:  Carol Kropp - 10/93
+#$%            Create routine to check the last known sonar region for the
+#$%            unit before calling nvregn (hopefully to improve run time).
+#$%            Changed when the sonar regions are checked, so that the unit
+#$%            is not processed multiple times for the same situation.
+#$%            Also changed the ping time computations to floating point minutes,
+#$%            and ping processing to the first recurrance at or after the
+#$%            computed ping.
+
+ 
+include "bbano.inc"
+include "bbbis.inc"
+include "bbboy.inc"
+include "bbbsd.inc"
+include "bbcode.inc"
+include "bbctl.inc"
+include "bbdeq.inc"
+include "bbldt.inc"
+include "bbpng.inc"
+include "bbprl.inc"
+include "bbser.inc"
+include "bbshc.inc"
+include "bbshn.inc"
+include "bbson.inc"
+include "bbunt.inc"
+ 
+include "ascii.inc"
+include "macros.inc"
+include "orders.inc"
+include "plplay.inc"
+ 
+define (BBImplicit,Implicit None)
+define ($debug,)
+ 
+ 
+define (BISCommon,
+        integer  number_of_receivers
+        integer  number_of_detectors
+        integer  number_of_detectees
+        integer  number_of_towed_arrays
+        integer  Receiver_list [SON$Slots/2]
+        integer  Detector_list [UNT$Half_per, SON$Slots/2 + 2]
+        integer  Detectee_list [UNT$Half_per]
+        integer  Towed_array_list [BOY$Slots/2]
+ 
+        common/BIS_common/number_of_receivers, number_of_detectors,
+                          number_of_detectees, number_of_towed_arrays,
+                          Receiver_list, Detector_list,
+                          Detectee_list, Towed_array_list
+       )
+ 
+# joa 8/96 (E1651) - Added transmitter_CosTrueLat, sub_CosTrueLat,
+# and receiver_CosTrueLat for use when determining is terrain
+# prevents detections from occuring.
+define (PositionCommon,
+        real*4  transmitter_lat
+        real*4  transmitter_long
+        real*4  transmitter_CosTrueLat
+        integer transmitter_env_num     # clk 10/93 - added so that it wouldn't be
+                                        #             computed multiple times
+        real*4  sub_latitude
+        real*4  sub_longitude
+        real*4  sub_CosTrueLat
+        integer sub_env_num          # clk 10/93 - "
+        real*4  receiver_lat
+        real*4  receiver_long
+        real*4  receiver_CosTrueLat
+        integer receiver_env_num     # clk 10/93 - "
+        real*4  transmitter_to_sub_range
+        real*4  from_sub_to_transmitter_bearing
+        real*4  receiver_to_sub_range
+        real*4  from_receiver_to_sub_bearing
+        real*4  from_sub_to_receiver_bearing
+ 
+        common/Position_common/transmitter_lat, transmitter_long, transmitter_CosTrueLat,
+                               transmitter_env_num, sub_latitude, sub_longitude,
+                               sub_CosTrueLat, sub_env_num, receiver_lat, receiver_long,
+                               receiver_CosTrueLat, receiver_env_num,
+                               transmitter_to_sub_range,
+                               from_sub_to_transmitter_bearing,
+                               receiver_to_sub_range,
+                               from_receiver_to_sub_bearing,
+                               from_sub_to_receiver_bearing
+       )
+ 
+define (ReceiverCommon,
+        real*4  receiver_depth
+        real*4  receiver_speed
+        real*4  receiver_course
+        real*4  heading_error
+        real*4  assumed_receiver_lat
+        real*4  assumed_receiver_long
+        real*4  std_dev_brg_error
+        integer transmitted_freq
+        integer report_time_delay_mins
+        integer freq_index
+ 
+        common/Receiver_common/receiver_depth, receiver_speed, receiver_course,
+                               heading_error, assumed_receiver_lat,
+                               assumed_receiver_long, std_dev_brg_error,
+                               transmitted_freq, report_time_delay_mins, freq_index
+       )
+ 
+define (Sonar_common,
+        integer  recognition_differential
+        integer  SonarTrueDepth
+        real*4   SonarTrueSpeed
+        real*4   SonarTrueCourse
+        real*4   stand_dev
+        real*4   slope
+        real*4   halfhb     # half of the horizonal beam width (radians)
+ 
+        common/Sonarcommon/recognition_differential,
+                           SonarTrueDepth, SonarTrueSpeed,
+                           SonarTrueCourse, stand_dev, slope, halfhb)
+ 
+ 
+
+Subroutine BISMOD
+############################################################
+#$%
+#$% Purpose:   BISMOD determines bistatic detections
+#$%
+#$% Called By: WARCYC
+#$%
+#$% Calls:     Determine_Receivers
+#$%            Initialize_unit_lists
+#$%            Determine_Ping_Time
+#$%            Determine_Sonar_Env
+#$%            Ping_detection
+#$%            Detection_routine
+#$%            Update_LDT_detections
+#$%            Update_BSD_reports
+#$%
+#$% Tables:    UNT        DEQ         SON
+#$%            BOY
+#$%
+#$% Date:      July 1991
+#$%
+#$% Author:    Carol Kropp
+#$%
+#$% Modified:  Carol Kropp - 10/93
+#$%            Relocated the setting of the transmitter
+#$%            position and environment data from
+#$%            Ping_detection and Detection_routine
+#$%
+############################################################
+BBcommon
+PositionCommon    # clk 10/93 - added so that the sonar environment
+                  #             for the ping source is not computed multiple times
+ 
+integer  time_to_ping        # boolean
+integer  pulse_length        # in seconds
+ 
+integer  UNT$Pointer, UNT$Status$I
+integer  PNG$Pointer, PNG$DeqIndx$I, PNG$UntIndx$I
+integer  DEQ$Pointer, sonar_region
+ 
+  call Determine_receivers
+ 
+  call Initialize_unit_lists
+ 
+  #$% loop through the PNG table - each entry that is in use is
+  #$% associated with a ship which has an LFA source
+  for (PNG$Pointer$First; PNG$Pointer$Valid; PNG$Pointer$Next)
+    {
+     if (xPNG$InUse$I == $no)     # if the slot is not in use - next
+       next
+ 
+     PNG$DEQIndx$I = xPNG$DEQIndx$I
+     DEQ$Pointer$To  PNG$DEQIndx$I
+     if (xDEQ$On$I == $no)        # if the LFA has not been activated
+       next
+ 
+     PNG$UNTIndx$I = xPNG$UNTIndx$I
+     UNT$Pointer$To  PNG$UNTIndx$I
+ 
+     #$% get unit status
+     UNT$Status$I = xUNT$Status$I
+ 
+     #$% if being deleted or sinking, get next entry
+     if (UNT$Status$I == $BeingDeleted$Code |        # skip if kaput
+         UNT$Status$I == $Sinking$Code)              # skip if sinking
+       next
+ 
+     call Determine_Ping_Time (time_to_ping, pulse_length,
+                               PNG$Pointer)
+ 
+     if (time_to_ping != $yes)
+       next
+ 
+     transmitter_lat = xUNT$TrueLatitude$F
+     transmitter_long = xUNT$TrueLongitude$F
+     transmitter_CosTrueLat = COS (transmitter_lat)
+     call Determine_Sonar_Env (transmitter_lat, transmitter_long,
+                               xUNT$SerIndx$I, sonar_region,
+                               transmitter_env_num)
+     putUNT$SerIndx$I (sonar_region)
+ 
+ 
+     call Ping_detection(UNT$Pointer,     # process sub ping stealing
+                         DEQ$Pointer)     # pinger DEQ entry
+ 
+     if (Bistatic$Ops$Level != 0)         # & Level$ActiveSonar != 0)
+       call Detection_routine (UNT$Pointer, DEQ$Pointer, pulse_length)
+    }
+ 
+  call Update_LDT_detections
+  call Update_BSD_reports
+ 
+return
+end
+
+ 
+ 
+Subroutine Determine_receivers
+############################################################
+#$%
+#$% Purpose:   Determine_receivers determines all of the
+#$%            different type of receivers paired with active
+#$%            sources in the BIS table.
+#$%
+#$% Called By: BISMOD
+#$%
+#$% Calls:     none
+#$%
+#$% Tables:    BIS
+#$%
+#$% Date:      July 1991
+#$%
+#$% Author:    Carol Kropp
+#$%
+############################################################
+BBcommon
+BIScommon
+ 
+integer  BIS$Pointer
+integer  i, receiver_index
+integer  already_in_list      # boolean
+ 
+  number_of_receivers = 0
+  receiver_index = 0
+ 
+  for (BIS$Pointer$First; BIS$Pointer$Valid; BIS$Pointer$Next)
+    {
+     already_in_list = $no
+     receiver_index = xBIS$PassiveIndx$I
+     for (i = 1; i <= number_of_receivers; i = i + 1)
+       {
+        if (receiver_index == Receiver_list [i] | receiver_index == 0)
+          {
+           already_in_list = $yes
+           break
+          }
+       }
+     if (already_in_list == $no)
+       {
+        number_of_receivers = number_of_receivers + 1
+        Receiver_list [number_of_receivers] = receiver_index
+       }
+    }
+ 
+return
+end
+
+ 
+ 
+Subroutine Initialize_unit_lists
+############################################################
+#$%
+#$% Purpose:   Initialize_unit_lists determines all of the
+#$%            possible receiver ship units and all
+#$%            possible submarine targets.
+#$%
+#$% Called By: BISMOD
+#$%
+#$% Tables:    UNT       BOY
+#$%
+#$% Date:      July 1991
+#$%
+#$% Author:    Carol Kropp
+#$%
+############################################################
+BBcommon
+BIScommon
+ 
+integer  BOY$Pointer, DEQ$Pointer, SON$Pointer, UNT$Pointer
+integer  DEQ$Ident$I, UNT$SuperType$I
+integer  receiver_index
+integer  receiver_found       # boolean
+integer  position
+ 
+  number_of_detectees = 0
+  number_of_detectors = 0
+  number_of_towed_arrays = 0
+ 
+  for (UNT$Pointer$First; UNT$Pointer$OK; UNT$Pointer$Next)
+    {
+     if (xUNT$Status$I == $BeingDeleted$Code)          # if being deleted
+       next
+ 
+     UNT$SuperType$I = xUNT$SuperType$I
+     if (UNT$SuperType$I == $Submarine$SuperCode &      # if a submarine
+         Xunt$NeverDetect$i == NO)                      # joa 3/05 per_never
+       {
+        number_of_detectees = number_of_detectees + 1
+        Detectee_list [number_of_detectees] = UNT$Pointer$Index
+       }
+     else if (UNT$SuperType$I == $Surface$SuperCode)   # if a surface ship
+       {
+        receiver_found = $no
+        position = 2
+        FOR_DEQ_CHAIN         # find receiver sonars in the equipment list
+          {
+           DEQ$Ident$I = xDEQ$Ident$I
+           if (DEQ$Ident$I != $Sonar$Code & DEQ$Ident$I != $PasSonar$Code)
+             next
+ 
+           SON$Pointer = xDEQ$Pntr$I
+ 
+           for (receiver_index = 1; receiver_index <= number_of_receivers;
+                                    receiver_index = receiver_index + 1)
+             {
+              if (SON$Pointer$Index != Receiver_list [receiver_index])
+                next
+ 
+              if (receiver_found == $no)  # if first receiver found
+                {
+                 receiver_found = $yes
+                 number_of_detectors = number_of_detectors + 1
+                 Detector_list [number_of_detectors, 1] = UNT$Pointer$Index
+                }
+ 
+              position = position + 1
+              Detector_list [number_of_detectors, position] =
+                                                  Receiver_list [receiver_index]
+             }
+          }
+        if (receiver_found != $no)
+          Detector_list [number_of_detectors, 2] = position - 2
+       }
+    }
+ 
+  for (BOY$Pointer$First; BOY$Pointer$OK; BOY$Pointer$Next)
+    {
+     if (xBOY$Type$I != $TowedArray$Code)         # if not towed array
+       next
+     number_of_towed_arrays = number_of_towed_arrays + 1
+     Towed_array_list [number_of_towed_arrays] = BOY$Pointer$Index
+    }
+ 
+return
+end
+
+ 
+ 
+integer function ping_offset (ping_length)
+ 
+Integer     ping_length  # jb E2145 7/20/00
+ 
+  if (ping_length < 61)
+    ping_offset = 1
+  else  ping_offset = 2
+return
+end
+
+ 
+ 
+ 
+Subroutine Determine_Ping_Time  (time_to_ping, pulse_length,
+                                 PNG$Pointer)
+############################################################
+#$%
+#$% Purpose:   Determine_Ping_Time determines if it is time
+#$%            for the activated LFA source transmitter to
+#$%            ping.  If the game has reached or exceeded the
+#$%            time for the LFA to ping, then the table
+#$%            information will be updated.
+#$%
+#$% Called By: BISMOD
+#$%
+#$% Tables:    PNG
+#$%
+#$% Date:      July 1991
+#$%
+#$% Author:    Carol Kropp and Susan Miller
+#$%
+#$% Modified:  Carol Kropp - 10/93 (Variable Cycle Time)
+#$%            PNG$TimeOfNextPing$F is now computed as floating
+#$%            point minutes and pings occur the first recurrance
+#$%            at or after the scheduled ping time.  Dropped
+#$%            argument DEQ$Pointer - not needed.
+#$%
+############################################################
+BBcommon
+ 
+integer  time_to_ping, pulse_length, PNG$Pointer
+ 
+integer  PNG$DTA$Index, PNG$NextScheduledPing$I, PNG$NmbrRemainingPings$I
+real     PNG$TimeOfNextPing$F
+integer  ping_number
+real     ping_time
+integer  remaining_pings
+ 
+  time_to_ping = $no
+  ping_time = xpng$TimeOfNextPing$f
+ 
+  if (xPNG$PingSchedule$I != $yes)    # if there is no ping schedule
+    {
+     if (ping_time <= Game$time)
+       {
+        time_to_ping = $yes
+        pulse_length = xPNG$PulseLength$I
+        PNG$TimeOfNextPing$F = ping_time + xPNG$PulseLengthMin$F +
+                               xPNG$PingInterval$I
+        putPNG$TimeOfNextPing$F
+       }
+    }
+  else         # there is a ping schedule
+    {
+     if (ping_time <= Game$Time)
+       {
+        time_to_ping = $yes
+        remaining_pings = xPNG$NmbrRemainingPings$I
+        ping_number = xPNG$NextScheduledPing$I
+        PNG$DTA$Index = ping_number
+        pulse_length = xPNG$DTA$PulseLength$I
+        if (remaining_pings > 1)
+          {
+           PNG$DTA$Index = PNG$DTA$Index + 1
+ 
+           PNG$NextScheduledPing$I = PNG$DTA$Index
+           putPNG$NextScheduledPing$I
+           PNG$NmbrRemainingPings$I = remaining_pings - 1
+           putPNG$NmbrRemainingPings$I
+ 
+           PNG$TimeOfNextPing$F = ping_time + xPNG$DTA$PulseLengthMin$F +
+                                  xPNG$DTA$PingDelay$I
+ 
+           putPNG$TimeOfNextPing$F
+          }
+        else     # the ping schedule is complete
+          {
+           PNG$TimeOfNextPing$F = ping_time + xPNG$DTA$PulseLengthMin$F +
+                                  xPNG$PingInterval$I
+           putPNG$TimeOfNextPing$F
+           putPNG$NextScheduledPing$I (0)
+           putPNG$NmbrRemainingPings$I (0)
+           putPNG$PingSchedule$I ($no)
+          }
+       }
+    }
+ 
+return
+end
+
+ 
+ 
+Subroutine Detection_routine (_
+                     UNT$Pointer,        # pointer to ship with LFA transmitter
+                     DEQ$Pointer,        # pointer to LFA equipment in DEQ table
+                     pulse_length)       # the length of the pulse in seconds
+############################################################
+#$%
+#$% Purpose:   Detection_routine determines if
+#$%            submarines are within range of the
+#$%            activated LFA source transmitter.
+#$%            If so, the LFA_routine and the
+#$%            Bistatic_routine are called to
+#$%            determine if there is a possible
+#$%            detection.
+#$%
+#$% Called By: BISMOD
+#$%
+#$% Calls:     RLL2RB         COS
+#$%            LFA_routine
+#$%            Bistatic_routine
+#$%
+#$% Tables:    UNT        DEQ
+#$%
+#$% Date:
+#$%
+#$% Author:    Carol Kropp and Susan Miller
+#$%
+#$% Modified:  James Allen - 8/96 (E1651)
+#$%            Store the values of transmitter_CosTrueLat and
+#$%            sub_CosTrueLat, using the variables in the call
+#$%            to RLL2RB (rather than calling COS).
+#$%
+############################################################
+BBcommon
+BIScommon
+PositionCommon
+ReceiverCommon
+ 
+integer  UNT$Pointer, DEQ$Pointer, pulse_length
+ 
+integer  SON$Pointer, SON$MXR$Index, UNT2$Pointer
+integer  detectee_index
+integer  sonar_region          # SER index of transmitter
+integer  max_detection_range   # nautical miles
+ 
+  SON$Pointer = xDEQ$Pntr$I
+  report_time_delay_mins = xSON$ReportTimeDelayMin$I
+ 
+  SON$MXR$Index = transmitter_env_num
+  max_detection_range = xSON$MXR$Range$I   # max bistatic range for environment
+  if (max_detection_range <= 0)
+    max_detection_range = Max$Bistatic$Range
+ 
+  for (detectee_index = 1; detectee_index <= number_of_detectees;
+                           detectee_index = detectee_index + 1)
+    {
+     UNT2$Pointer$To  Detectee_list [detectee_index]
+     sub_latitude = xUNT2$TrueLatitude$F
+     sub_longitude = xUNT2$TrueLongitude$F
+     sub_CosTrueLat = xUNT2$CosTrueLat$F
+ 
+     Call RLL2RB(_    # Rhumb line Lat/Lon to Range/Bearing
+                 sub_latitude,
+                 sub_longitude,
+                 sub_CosTrueLat,
+                 transmitter_lat,
+                 transmitter_long,
+                 transmitter_CosTrueLat,
+                 transmitter_to_sub_range,        # range in nmi (output)
+                 from_sub_to_transmitter_bearing) # bearing in radians (output)
+ 
+     if (transmitter_to_sub_range > max_detection_range)   # if out of range
+       next
+ 
+     call Determine_Sonar_Env (sub_latitude, sub_longitude,
+                               xUNT2$SerIndx$I, sonar_region, sub_env_num)
+     putUNT2$SerIndx$I (sonar_region)
+ 
+     call LFA_routine (UNT$Pointer, DEQ$Pointer,
+                       UNT2$Pointer, pulse_length, max_detection_range)
+ 
+     call Bistatic_routine (UNT$Pointer, UNT2$Pointer,
+                            SON$Pointer$Index, pulse_length, max_detection_range)
+    }
+ 
+return
+end
+
+ 
+ 
+Subroutine LFA_routine  (UNT$Pointer,   # pointer to ship with LFA transmitter
+                         DEQ$Pointer,   # pointer to LFA equipment in DEQ table
+                         UNT2$Pointer,  # pointer to possible sub target
+                         pulse_length,  # length of the pulse in seconds
+                         max_range)     # maximum detection range
+############################################################
+#$%
+#$% Purpose:   LFA_routine determines if the submarine
+#$%            is not pulse blanked.  If so, the time of
+#$%            detection will be calculated and the
+#$%            information placed in the LDT table.
+#$%            NOTE: If bistatic level of operations is
+#$%                  set to 1, time_delay = 0.
+#$%
+#$% Called By:  Detection_routine
+#$%
+#$% Calls:      Locate_bistatic_receiver
+#$%             RLL2RB
+#$%             Calculate_SE
+#$%             Add_detection
+#$%
+#$% Tables:    UNT
+#$%
+#$% Date:      July 1991
+#$%
+#$% Author:    Carol Kropp and Susan Miller
+#$%
+#$% Modified:  James Allen 8/96 (E1651)
+#$%            Use the stored values of the new variables
+#$%            receiver_CosTrueLat and sub_CosTrueLat rather
+#$%            than calling COS.
+#$%
+############################################################
+BBcommon
+BIScommon
+PositionCommon
+ReceiverCommon
+ 
+integer  Unt$Pointer, DEQ$Pointer, UNT2$Pointer, pulse_length, max_range
+ 
+integer  SON$Pointer, DEQ2$Pointer, DEQ2$Ident$I
+real*4   blanking_radius_nmi
+integer  detector_index
+integer  receiver_found
+integer  passive_receiver_index
+real*4   signal_excess
+integer  detect_flag     # boolean flag returned by function NLTEST
+integer  NLTEST          # Function NLTEST
+real     time_delay
+integer  transmitter_index
+real*4   halfvb, halfhb, slope, relative_bearing
+ 
+  if (xUNT2$View$i == xUNT$View$i)                      # if in the same view
+    return
+ 
+  blanking_radius_nmi = $SonarTravelNM$Per$Sec * pulse_length / 2.0
+ 
+  if (blanking_radius_nmi > transmitter_to_sub_range)   # if sub is within the
+    return                                              # pulse blanking circle
+ 
+# Locate the Transmitter in the detector_list
+  for (detector_index = 1; detector_index <= number_of_detectors;
+                           detector_index = detector_index + 1)
+    {
+     if (Detector_list [detector_index, 1] != UNT$Pointer$Index)
+       next            # if not the same unit
+     else
+       break
+    }
+ 
+  if (detector_index > number_of_detectors)   # if not located in the list
+    return                                    # of possible receiver units
+ 
+  SON$Pointer = xDEQ$Pntr$I
+  transmitter_index = SON$Pointer$Index
+  call Locate_bistatic_receiver (transmitter_index, detector_index,
+                                 receiver_found, passive_receiver_index,
+                                 receiver_lat, receiver_long, receiver_CosTrueLat)
+ 
+  if (receiver_found == $no)    # if the transmitter does not have one of the
+    return                      # pair receivers, then it cannot detect
+ 
+# Determine if the receiver and sub are within the passive sonar range
+  Call RLL2RB(_    # Rhumb line Lat/Lon to Range/Bearing
+              receiver_lat,
+              receiver_long,
+              receiver_CosTrueLat,
+              sub_latitude,
+              sub_longitude,
+              sub_CosTrueLat,
+              receiver_to_sub_range,         # range in nmi (output)
+              from_receiver_to_sub_bearing)  # bearing in radians (output)
+ 
+  if (receiver_to_sub_range > Passive$MaxRange |  # is the sub outside passive range
+      receiver_to_sub_range > max_range)          # or the bistatic max range
+    return
+ 
+  SON$Pointer$To passive_receiver_index
+  halfhb = xSON$HorizBeam$I * ($pi/360.)
+  halfvb = xSON$VertBeam$I * ($pi/360.)
+  slope = $Feet$Per$Nmi * SIN (halfvb) / COS (halfvb)
+ 
+  # is the target within the sonar vertical beam width of the detector
+  if (ABS (receiver_depth - xUNT2$TrueAltDepth$I) >
+          (receiver_to_sub_range * slope))
+     return
+ 
+  # is the target within the sonar horizontal beam width of the detector
+  relative_bearing = from_receiver_to_sub_bearing - receiver_course
+  $angpi (relative_bearing)
+  if (ABS (relative_bearing) > halfhb)
+      return
+ 
+# Detection is still possible, at this point, and
+# the signal excess must be calculated
+  call Calculate_SE (transmitter_index, passive_receiver_index,
+                     pulse_length, UNT2$Pointer, xUNT2$TrueAltDepth$I,
+                     xUNT2$TrueCourse$F, signal_excess)
+ 
+  detect_flag = NLTEST (0., Sonar$Sigma, signal_excess)
+ 
+  if (detect_flag == $no)
+    return
+ 
+  if (Bistatic$Ops$Level == 1)
+     time_delay = 0
+  else
+    # time_delay = ((Dist(LFA to sub) + Dist(sub to receiver)) / $SonarTravelNM$Per$Sec)
+    time_delay =
+    ((transmitter_to_sub_range+receiver_to_sub_range)/$SonarTravelNM$Per$Sec) *
+         $Minutes$Per$Second
+ 
+# Locate the receiver sonar in the units equipment list
+  for (DEQ2$Pointer$To  UNT$Pointer$Index;  DEQ2$Pointer >= DEQ$Base;
+       DEQ2$Pointer$To  xDEQ2$NextDeq$I)
+    {
+     DEQ2$Ident$I = xDEQ2$Ident$I
+     if (DEQ2$Ident$I != $Sonar$Code & DEQ2$Ident$I != $PasSonar$Code)
+       next
+     SON$Pointer = xDEQ2$Pntr$I
+     if (SON$Pointer$Index == passive_receiver_index)
+       break
+    }
+ 
+  call Add_detection (UNT$Pointer, UNT$Pointer, UNT2$Pointer,
+                      DEQ2$Pointer, time_delay, signal_excess)
+return
+end
+
+ 
+ 
+Subroutine Bistatic_routine (_
+                   UNT$Pointer,         # pointer to ship with LFA transmitter
+                   UNT2$Pointer,        # pointer to possible sub target
+                   active_index,        # SON index to active LFA transmitter
+                   pulse_length,        # length of the pulse in seconds
+                   max_range)           # max bistatic range
+############################################################
+#$%
+#$% Purpose:   Bistatic_routine determines if the submarine
+#$%            is not pulse blanked.  If so, bistatic
+#$%            receivers are located and the time of
+#$%            detection is calculated and the
+#$%            information placed in the LDT table.
+#$%            NOTE: If bistatic level of operations is
+#$%                  set to 1, time_delay = 0.
+#$%
+#$% Called By: Detection_routine
+#$%
+#$% Calls:     RLL2RB
+#$%            Locate_bistatic_receiver
+#$%            RRB2LL
+#$%            In_ellipse
+#$%            Calculate_SE
+#$%            Add_detection
+#$%
+#$% Tables:    UNT
+#$%
+#$% Date:      July 1991
+#$%
+#$% Author:    Carol Kropp and Susan Miller
+#$%
+#$% Modified:  James Allen - 8/96 (E1651)
+#$%            Use the stored values of the new variables
+#$%            transmitter_CosTrueLat, receiver_CosTrueLat
+#$%            and sub_CosTrueLat rather than calling COS.
+#$%
+############################################################
+BBcommon
+BIScommon
+PositionCommon
+ReceiverCommon
+ 
+integer  UNT$Pointer, UNT2$Pointer, active_index, pulse_length, max_range
+ 
+integer  DEQ$Pointer, SON$Pointer, UNT3$Pointer
+integer  DEQ$Ident$I
+integer  passive_index, detector_index
+integer  receiver_found                   # boolean
+real*4   pair_range_nmi, orientation
+real*4   ellipse_center_lat, ellipse_center_long, ellipse_lat_cosine
+real*4   semi_major_axis, semi_minor_axis
+integer  sub_within_ellipse
+real*4   signal_excess
+integer  detect_flag     # boolean flag returned by function NLTEST
+integer  NLTEST          # Function NLTEST
+real     time_delay
+real*4   halfvb, halfhb, slope, relative_bearing
+ 
+  for (detector_index = 1; detector_index <= number_of_detectors;
+                           detector_index = detector_index + 1)
+    {
+     UNT3$Pointer$To  Detector_list [detector_index, 1]
+     if (UNT3$Pointer$Index == UNT$Pointer$Index)        # if the same unit
+       next
+ 
+     if (xUNT3$View$i == xUNT2$View$i)             # if receiver unit and sub
+       next                                        # are in the same view
+ 
+#    Determine if the possible detector is within range of the transmitter
+     Call RLL2RB(_    # Rhumb line Lat/Lon to Range/Bearing
+                 transmitter_lat,
+                 transmitter_long,
+                 transmitter_CosTrueLat,
+                 xUNT3$TrueLatitude$F,
+                 xUNT3$TrueLongitude$F,
+                 xUNT3$CosTrueLat$F,
+                 pair_range_nmi,         # range in nmi (output)
+                 orientation)            # bearing in radians (output)
+ 
+     if (pair_range_nmi > max_range)   # if the receiver unit is out
+       next                            # of range, it cannot detect
+ 
+     call Locate_bistatic_receiver (active_index, detector_index,
+                                    receiver_found, passive_index,
+                                    receiver_lat, receiver_long, receiver_CosTrueLat)
+ 
+     if (receiver_found != $yes)          # if the ship doesn't have one of the
+       next                               # bistatic pair receivers
+ 
+#    Locate the passive sonar in the equipment list
+     for (DEQ$Pointer$To  UNT3$Pointer$Index;  DEQ$Pointer >= DEQ$Base;
+          DEQ$Pointer$To  xDEQ$NextDeq$I)
+       {
+        DEQ$Ident$I = xDEQ$Ident$I
+        if (DEQ$Ident$I != $Sonar$Code & DEQ$Ident$I != $PasSonar$Code)
+          next
+        SON$Pointer = xDEQ$Pntr$I
+        if (SON$Pointer$Index == passive_index)
+          break
+       }
+ 
+     if (xDEQ$On$I == $no)      # if the sonar is not on - next
+       next
+ 
+#    Determine if the receiver and sub are within max passive sonar range
+     Call RLL2RB(_    # Rhumb line Lat/Lon to Range/Bearing
+                 receiver_lat,
+                 receiver_long,
+                 receiver_CosTrueLat,
+                 sub_latitude,
+                 sub_longitude,
+                 sub_CosTrueLat,
+                 receiver_to_sub_range,          # range in nmi (output)
+                 from_receiver_to_sub_bearing)   # bearing in radians (output)
+ 
+     if (receiver_to_sub_range > Max$Bistatic$Range)   # if out of range
+       next
+ 
+     halfhb = xSON$HorizBeam$I * ($pi/360.)
+     halfvb = xSON$VertBeam$I * ($pi/360.)
+     slope = $Feet$Per$Nmi * SIN (halfvb) / COS (halfvb)
+ 
+#    is the target within the sonar vertical beam width of the detector
+     if (ABS (receiver_depth - xUNT2$TrueAltDepth$I) >
+             (receiver_to_sub_range * slope))
+        next
+ 
+#    is the target within the sonar horizontal beam width of the detector
+     relative_bearing = from_receiver_to_sub_bearing - receiver_course
+     $angpi (relative_bearing)
+     if (ABS (relative_bearing) > halfhb)
+         next
+ 
+#    Calculate the pulse blanking ellipse
+     ellipse_center_lat = transmitter_lat
+     ellipse_center_long = transmitter_long
+     ellipse_lat_cosine = transmitter_CosTrueLat
+ 
+     call RRB2LL (_      #Rhumb line Range/Bearing to Lat/Lon
+                  ellipse_center_lat,    # latitude (input & output)
+                  ellipse_center_long,   # longitude (input & output)
+                  pair_range_nmi / 2,    # range (input)
+                  orientation,           # relative bearing (input)
+                  0.0,              # course (input)  # jb E2145 (0.0) 9/27/00
+                  ellipse_lat_cosine)    # cosine of latitude (input & output)
+ 
+ 
+#    semi_major_axis = (R + (0.8 * t)) / 2
+#    semi_minor_axis = SQRT ((1.6 * R * t) + (0.64 * t**2)) / 2
+#         where:  R = pair_range_nmi  and  t = pulse_length
+     semi_major_axis = (0.5 * pair_range_nmi) + (0.4 * pulse_length)
+     semi_minor_axis = SQRT ((1.6 * pair_range_nmi * pulse_length) +
+                             (0.64 * pulse_length * pulse_length)) * 0.5
+ 
+#    Determine if the target is within the pulse blanking ellipse
+     call In_ellipse (_    # Determine if point is within (or on) the ellipse
+                      ellipse_center_lat,     # Lat of ellipse enter (radians)
+                      ellipse_center_long,    # Long of ellipse center (radians)
+                      orientation,            # Orientation of ellipse (radians)
+                      semi_major_axis,        # Semi-Major Axis (nmi)
+                      semi_minor_axis,        # Semi-Minor Axis (nmi)
+                      sub_latitude,           # Latatitude of target (radians)
+                      sub_longitude,          # Longitude of target (radians)
+                      sub_within_ellipse)     # (output): $yes if inside ellipse
+ 
+     if (sub_within_ellipse == $yes)          # if the sub is within the ellipse
+       next                                   # then receiver cannot detect it
+ 
+     # Detection is still possible, at this point, and
+     # the signal excess must be calculated
+     call Calculate_SE (active_index, passive_index,
+                        pulse_length, UNT2$Pointer, xUNT2$TrueAltDepth$I,
+                        xUNT2$TrueCourse$F, signal_excess)
+ 
+     detect_flag = NLTEST (0., Sonar$Sigma, signal_excess)
+ 
+     if (detect_flag == $no)
+       next
+ 
+     if (Bistatic$Ops$Level == 1)
+       time_delay = 0
+     else
+       # time_delay = ((Dist(LFA to sub) + Dist(sub to receiver)) / 0.83) (removed /60 to get to seconds)
+       time_delay =
+       ((transmitter_to_sub_range+receiver_to_sub_range)/$SonarTravelNM$Per$Sec) *
+              $Minutes$Per$Second
+ 
+     call Add_detection (UNT$Pointer, UNT3$Pointer, UNT2$Pointer,
+                         DEQ$Pointer, time_delay, signal_excess)
+    }
+ 
+return
+end
+
+ 
+ 
+Subroutine Locate_Bistatic_receiver (_
+                   active_index,          # SON index to active LFA transmitter
+                   detector_index,        # the index into the Detector_list
+                   receiver_found,        # boolean for receiver found (output)
+                   sonar_index,           # index into the SON table (output)
+                   receiver_latitude,     # latitude of the receiver (output)
+                   receiver_longitude,    # longitude of the receiver (output)
+                   receiver_costruelat)   # cos lat of receiver (output)
+############################################################
+#$%
+#$% Purpose:   Locate_Bistatic_receiver determines if the
+#$%            possible detector ship has one of the
+#$%            pair bistatic receivers.  If so, the
+#$%            index and location of the receiver are
+#$%            returned.
+#$%
+#$% Called By: Bistatic_routine
+#$%
+#$% Calls:     Determine_Freq_Index
+#$%            NVREGN
+#$%            Determine_Sonar_Env
+#$%
+#$% Tables:    BOY       SON       UNT
+#$%
+#$% Date:      July 1991
+#$%
+#$% Author:    Carol Kropp and Susan Miller
+#$%
+#$% Modified:  James Allen - 8/96 (E1651)
+#$%            Added output parameter receiver_costruelat
+#$%            and setting its value.
+#$%
+############################################################
+BBcommon
+BIScommon
+ReceiverCommon
+ 
+integer  active_index, detector_index, receiver_found, sonar_index
+real     receiver_latitude, receiver_longitude, receiver_costruelat
+ 
+integer  BIS$Pointer, BIS$PassiveIndx$I, BOY$Pointer, SON$Pointer, UNT$Pointer
+integer  loop1, loop2, freq_found, sonar_region
+integer  receiver_environment  # SMM 2/98 (E1930)
+ 
+  receiver_found = $no
+  UNT$Pointer$To  Detector_list [detector_index, 1]
+  SON$Pointer$To  active_index
+  transmitted_freq = xSON$CenterFreq$I
+ 
+  # find the bistatic pair
+  for (BIS$Pointer$First; BIS$Pointer$Valid; BIS$Pointer$Next)
+    {
+     if (xBIS$ActiveIndx$I == active_index)     # if the transmitter type
+       {
+        BIS$PassiveIndx$I = xBIS$PassiveIndx$I
+        # determine if ship has the passive receiver
+        for (loop1 = 1; loop1 <= Detector_list [detector_index, 2];
+                        loop1 = loop1 + 1)
+          {
+           if (BIS$PassiveIndx$I == Detector_list [detector_index, loop1+2])
+             {
+              SON$Pointer$To  BIS$PassiveIndx$I
+ 
+              # determine if the passive receiver can detect the frequency
+              freq_found = $no
+              if (transmitted_freq >= xSON$LoEndFreq$I &
+                  transmitted_freq <= xSON$HiEndFreq$I)
+                {
+                 call Determine_freq_index (transmitted_freq, freq_index)
+                 if (freq_index != 0)
+                   freq_found = $yes
+                }
+ 
+              if (freq_found == $yes)
+                {
+                 receiver_found = $yes
+                 sonar_index = SON$Pointer$Index
+                 std_dev_brg_error = xSON$StDevBrgErr$F
+                 if (xSON$TowedArray$I == $yes)
+                   {
+                    # find the towed array entry
+                    for (loop2 = 1; loop2 <= number_of_towed_arrays;
+                                    loop2 = loop2 + 1)
+                      {
+                       BOY$Pointer$To  Towed_array_list [loop2]
+                       if (xBOY$OwnerIndx$I == UNT$Pointer$Index &
+                           xBOY$EqPntr$I == SON$Pointer)
+                         {
+                          receiver_latitude = xBOY$TrueLatitude$F
+                          receiver_longitude = xBOY$TrueLongitude$F
+                          receiver_CosTrueLat = xBOY$CosTrueLat$F
+                          receiver_depth = xBOY$TrueDepth$I
+                          receiver_speed = xBOY$TrueSpeed$F
+                          receiver_course = xBOY$TrueHeading$F
+                          heading_error = xBOY$HeadingError$F
+                          assumed_receiver_lat = xBOY$AssumedLatitude$F
+                          assumed_receiver_long = xBOY$AssumedLongitude$F
+                          call NVREGN (receiver_latitude, receiver_longitude,
+                                       sonar_region, receiver_environment)
+                          break
+                         }
+                      }
+                   }
+                 else
+                   {
+                    receiver_latitude = xUNT$TrueLatitude$F
+                    receiver_longitude = xUNT$TrueLongitude$F
+                    receiver_CosTrueLat = xUNT$CosTrueLat$F
+                    receiver_depth = xUNT$TrueAltDepth$I
+                    receiver_speed = xUNT$TrueSpeed$F
+                    receiver_course = xUNT$TrueCourse$F
+                    heading_error = xUNT$HeadingError$F
+                    assumed_receiver_lat = xUNT$AssumedLatitude$F
+                    assumed_receiver_long = xUNT$AssumedLongitude$F
+                    call Determine_Sonar_Env (_
+                               receiver_latitude, receiver_longitude,
+                               xUNT$SerIndx$I, sonar_region,
+                               receiver_environment)
+                    putUNT$SerIndx$I (sonar_region)
+                   }
+                }    # end of if (freq_found == $yes)
+             }
+           if (receiver_found == $yes)
+             break
+          }
+       }
+     if (receiver_found == $yes)
+       break
+    }
+ 
+return
+end
+
+ 
+ 
+Subroutine Calculate_SE (transmitter_index,   # SON table index (input)
+                         receiver_index,      # SON table index (input)
+                         pulse_length,        # length of pulse in sec. (input)
+                         UNT$Pointer,         # target UNT table pointer (input)
+                         sub_depth,           # depth of the sub (input)
+                         sub_course,          # course of the sub (input)
+                         sig_excess)          # signal excess (output)
+#######################################################
+#$%
+#$% Purpose:   Calculate_SE calculates the signal
+#$%            excess.
+#$%
+#$% Called By: LFA_Routine
+#$%            Bistatic_Routine
+#$%
+#$% Calls:     NVREGN
+#$%            INV_Worse
+#$%            Get_proploss
+#$%            Calculate_TS
+#$%            Get_BroadBand_noise
+#$%            $angpi
+#$%            Calculate_RD_Mod
+#$%
+#$% Tables:    SON
+#$%
+#$% Date:      July 1991
+#$%
+#$% Author:    Carol Kropp and Susan Miller
+#$%
+#######################################################
+BBcommon
+PositionCommon
+ReceiverCommon
+ 
+integer  transmitter_index, receiver_index, pulse_length, UNT$Pointer,
+         sub_depth
+real*4   sub_course, sig_excess
+ 
+integer  SON$Pointer, SON$SEC$Index
+integer  transmitter_sub_worst_env, receiver_sub_worst_env
+integer  source_lev          # active sonar source level from build (db4)
+real*4   trans_loss_1        # source/target transmission loss (prop loss) (db)
+real*4   trans_loss_2        # target/receiver transmission loss (prop loss) (db)
+real*4   target_strength     # adjusted target strength  (dbX)
+real*4   amb_noise           # ambient noise from env table for receiver (db)
+real*4   relative_bearing    # relative bearing (radians)
+integer  DI_index            # table index for SON$SEC$Index
+integer  directivity_index   # directivity index of receiving sonar (db2)
+integer  rd_modifier         # recognition differential modifier (db)
+integer  SON$RecognitionDiff$I  # recognition diff. for receiver (db1)
+ 
+# Determine the worst environments
+  call INV_Worse (transmitter_env_num, sub_env_num, transmitter_sub_worst_env)
+  call INV_Worse (receiver_env_num, sub_env_num, receiver_sub_worst_env)
+ 
+# Get the active sonar source level
+  SON$Pointer$To  transmitter_index
+  source_lev = xSON$SourceLevel$I
+ 
+# Determine the transmission loss for source/target # jb E2145 (INT) 9/27/00
+  call Get_proploss (Layer$Depth + 1, INT(sub_depth), transmitter_to_sub_range,
+                     transmitter_sub_worst_env, freq_index, trans_loss_1)
+ 
+# Determine the transmission loss for target/receiver # jb E2145 (INT) 9/27/00
+  call Get_proploss (INT(sub_depth), INT(receiver_depth), receiver_to_sub_range,
+                     receiver_sub_worst_env, freq_index, trans_loss_2)
+ 
+# Determine the adjusted target strength
+  call Calculate_TS (UNT$Pointer, sub_course, target_strength)
+ 
+# Determine ambient noise level (ambient & self noise) of receiver
+  SON$Pointer$To  receiver_index
+  call Get_BroadBand_noise (receiver_speed, SON$Pointer,
+                            receiver_sub_worst_env, freq_index, amb_noise)
+ 
+# Determine directivity index for receiving sonar
+  relative_bearing = from_receiver_to_sub_bearing - receiver_course
+  $angpi (relative_bearing)
+  DI_index = ABS (relative_bearing) * (18.0 / $pi) + 1
+  if (DI_index > 18)
+    DI_index = 18
+  SON$SEC$Index = DI_index
+  directivity_index = xSON$SEC$DI$I
+ 
+# Determine the recognition differential modifier
+  call Calculate_RD_Mod (pulse_length, rd_modifier)
+  SON$RecognitionDiff$I = xSON$RecognitionDiff$I
+ 
+# SE = LS - T1 - T2 + TS - (LN - NDI) - RDA - L + A    (L and A = 0)
+  sig_excess = float(source_lev) - trans_loss_1 - trans_loss_2 +
+               target_strength - (amb_noise - float(directivity_index)) -
+               float(SON$RecognitionDiff$I + rd_modifier)
+ 
+return
+end
+
+ 
+ 
+Subroutine Calculate_TS (UNT$Pointer,    # target unit pointer (input)
+                         sc,             # course of the sub (input)
+                         ts)             # target strength (output)
+#######################################################
+#$%
+#$% Purpose:   Calculate_TS calculates the adjusted
+#$%            target strength.
+#$%
+#$% Called By: Calculate_SE
+#$%
+#$% Calls:     RLL2RB
+#$%            Ang2pi
+#$%
+#$% Tables:    LDT
+#$%
+#$% Date:      July 1991
+#$%
+#$% Author:    Carol Kropp and Susan Miller
+#$%
+#$% Modified:  James Allen - 8/96 (E1651)
+#$%            Use the values in the new variables
+#$%            sub_CosTrueLat and received_CosTrueLat
+#$%            rather than calling COS.
+#$%
+#######################################################
+BBcommon
+PositionCommon
+ReceiverCommon
+ 
+integer  UNT$Pointer
+real*4   sc, ts
+ 
+integer  SHC$Pointer
+integer  SHC$ASP$Index
+real*4   rho          # bearing from sub to source
+real*4   phi          # bearing from sub to receiver
+real*4   normalized_rho, normalized_phi
+real*4   ptr_angle, theta, beta, plus_minus_range
+integer  index
+ 
+# Determine angle PTR
+  Call RLL2RB(_    # Rhumb line Lat/Lon to Range/Bearing
+              sub_latitude,
+              sub_longitude,
+              sub_CosTrueLat,
+              receiver_lat,
+              receiver_long,
+              receiver_CosTrueLat,
+              receiver_to_sub_range,          # range in nmi (output)
+              from_sub_to_receiver_bearing)   # bearing in radians (output)
+ 
+  rho = from_sub_to_transmitter_bearing
+  phi = from_sub_to_receiver_bearing
+ 
+  if (phi >= rho)
+    ptr_angle = phi - rho
+  else  ptr_angle = rho - phi
+  if (ptr_angle > $pi)
+    ptr_angle = (2 * $pi) - ptr_angle
+ 
+  if (ptr_angle == $pi)    # if the angle = 180 degrees, the units form a line
+    {
+     ts = 10.0
+     return
+    }
+ 
+  if (ptr_angle < ($pi/6.0))   # if the angle < 30 degrees, get aspect
+    {                          # dependent target strength from build
+     SHC$Pointer = xUNT$SHCPntr$I
+     call BRG_aspect_index (from_sub_to_receiver_bearing, sc, index)
+     SHC$ASP$Index = index
+     ts = xSHC$ASP$TgtStrength$I
+     return
+    }
+ 
+# At this point the PTR angle is >= 30 degrees and < 180 degrees
+  normalized_rho = rho - sc
+  if (normalized_rho < 0)
+    normalized_rho = normalized_rho + (2 * $pi)
+  normalized_phi = phi - sc
+  if (normalized_phi < 0)
+    normalized_phi = normalized_phi + (2 * $pi)
+ 
+  if (normalized_rho <= $pi & normalized_phi <= $pi) # if both off starboard
+    {
+     if (normalized_rho <= normalized_phi)
+       {
+        theta = normalized_rho
+        beta  = $pi - normalized_phi
+       }
+     else
+       {
+        theta = $pi - normalized_rho
+        beta  = normalized_phi
+       }
+    }
+  else    # both angles are not <= 180 degress
+    {
+     if (normalized_rho > $pi & normalized_phi > $pi) # if both off port
+       {
+        if (normalized_rho >= normalized_phi)
+          {
+           theta = (2 * $pi) - normalized_rho
+           beta  = normalized_phi - $pi
+          }
+        else
+          {
+           theta = normalized_rho - $pi
+           beta  = (2 * $pi) - normalized_phi
+          }
+       }
+     else   # one off port side and one off starboard side
+       {
+        ts = 10.0
+        return
+       }
+    }
+ 
+  plus_minus_range = 15.0
+  call ANG2PI (plus_minus_range)
+  if (theta >= beta - plus_minus_range  &  theta <= beta + plus_minus_range)
+    ts = 22.0
+  else  ts = 10.0
+ 
+return
+end
+
+ 
+ 
+Subroutine Calculate_RD_Mod (pulse_length,  # length of pulse in seconds (input)
+                             rd)            # recognition differential (output)
+#######################################################
+#$%
+#$% Purpose:   Calculate_RD_Mod calculates the
+#$%            recognition differential modifier.
+#$%
+#$% Called By: Update_LDT_detections
+#$%
+#$% Calls:     None
+#$%
+#$% Tables:    None
+#$%
+#$% Date:      July 1991
+#$%
+#$% Author:    Carol Kropp and Susan Miller
+#$%
+#######################################################
+BBcommon
+ 
+integer  pulse_length, rd
+ 
+  if (pulse_length < 10)
+    rd = 8
+  else if (pulse_length >= 10  &  pulse_length < 20)
+    rd = 4
+  else if (pulse_length >= 20  &  pulse_length < 30)
+    rd = 3
+  else if (pulse_length >= 30  &  pulse_length < 40)
+    rd = 2
+  else if (pulse_length >= 40  &  pulse_length < 50)
+    rd = 1
+  else    # pulse_length >= 50
+    rd = 0
+ 
+return
+end
+
+ 
+Subroutine Add_detection  (UNT$Pointer,     # ptr to ship with LFA transmitter
+                           UNT2$Pointer,    # ptr to ship receiving ping
+                           UNT3$Pointer,    # ptr to detected sub target
+                           DEQ$Pointer,     # ptr to DEQ entry for receiver
+                           time_delay,      # delay until detection is processed (seconds)
+                           signal_excess)   # calculated signal excess
+############################################################
+#$%
+#$% Purpose:   Add_detection will add the LFA detection
+#$%            to the LDT table, space permitting.
+#$%
+#$% Called By: LFA_routine
+#$%            Bistatic_routine
+#$%
+#$% Calls:     LDT_new
+#$%            $ang2PI
+#$%
+#$% Tables:    UNT       LDT
+#$%
+#$% Date:
+#$%
+#$% Author:    Carol Kropp and Susan Miller
+#$%
+#$% Modified:  Jim Allen - 8/96 (E1651)
+#$%            Sonar should not detect through land mass
+#$%
+############################################################
+BBcommon
+PositionCommon
+ReceiverCommon
+ 
+integer  UNT$Pointer, UNT2$Pointer, UNT3$Pointer, DEQ$Pointer
+real     time_delay
+real*4   signal_excess
+ 
+integer  LDT_table_index, LDT$Pointer
+integer  LDT$DetectedUnit$I, LDT$EqIndx$I
+real     LDT$DetectionTime$F
+integer  LDT$ReceivingUnit$I, LDT$TransmittingUnit$I
+real*4   apparent_bearing
+ 
+integer  land_between_points   # function to check for land -
+integer  is_land               #             joa 8/96 (E1651)
+ 
+  # Check for land between transmitter and sub - joa (E1651)
+  is_land = land_between_points (transmitter_lat, transmitter_long,
+                                 transmitter_cosTruelat,
+                                 sub_latitude, sub_longitude,
+                                 sub_CosTrueLat)
+  if (is_land == $YES)
+      return
+ 
+  # Check for land between sub and receiver - joa (E1651)
+  is_land = land_between_points (receiver_lat, receiver_long,
+                                 receiver_cosTruelat,
+                                 sub_latitude, sub_longitude,
+                                 sub_CosTrueLat)
+  if (is_land == $YES)
+      return
+ 
+  call LDT_new (LDT_table_index)
+ 
+  if (LDT_table_index != 0)                 # if the LDT pointer is valid
+    {
+     LDT$Pointer$To  LDT_table_index
+ 
+     LDT$DetectionTime$F = Game$Time + time_delay
+     putLDT$DetectionTime$F
+ 
+     putLDT$SignalExcess$F (signal_excess)
+ 
+     LDT$TransmittingUnit$I = UNT$Pointer$Index
+     putLDT$TransmittingUnit$I
+     LDT$ReceivingUnit$I = UNT2$Pointer$Index
+     putLDT$ReceivingUnit$I
+     LDT$DetectedUnit$I = UNT3$Pointer$Index
+     putLDT$DetectedUnit$I
+     LDT$EqIndx$I = DEQ$Pointer$Index
+     putLDT$EqIndx$I
+     putLDT$ReportDelay$I (report_time_delay_mins)
+ 
+     putLDT$TrueLat$F (sub_latitude)
+     putLDT$TrueLon$F (sub_longitude)
+     putLDT$Range$F (receiver_to_sub_range)
+ 
+     apparent_bearing = from_receiver_to_sub_bearing + heading_error
+     $ang2PI (apparent_bearing)        # insure apparent bearing in (0,2*pi)
+ 
+     putLDT$AppBearing$F (apparent_bearing)
+     putLDT$AssumedReceiverLat$F  (assumed_receiver_lat)
+     putLDT$AssumedReceiverLong$F  (assumed_receiver_long)
+     putLDT$TransmittedFreq$I  (transmitted_freq)
+     putLDT$StDevBrgErr$F (std_dev_brg_error)
+    }
+ 
+return
+end
+
+ 
+ 
+Subroutine LDT_new (LDT_pointer_index)      # get and pass new track index
+#######################################################
+#$%
+#$% Purpose:   LDT_new gets the index to an unused
+#$%            slot of the LDT table.  If there are no
+#$%            free slots, then 0 is returned.
+#$%
+#$% Called By: Add_detection
+#$%
+#$% Calls:     None
+#$%
+#$% Tables:    LDT
+#$%
+#$% Date:      July 1991
+#$%
+#$% Author:    Carol Kropp and Susan Miller
+#$%
+#######################################################
+BBcommon
+ 
+integer LDT_Pointer_index
+ 
+integer  LDT$Pointer
+ 
+  LDT_Pointer_index = 0
+  for (LDT$Pointer$First; LDT$Pointer$Valid; LDT$Pointer$Next)
+    {
+     if (xLDT$InUse$I == $no)
+       break
+    }
+  if (LDT$Pointer$Valid)
+    LDT_pointer_index = LDT$Pointer$Index
+ 
+return
+end
+
+ 
+ 
+Subroutine Update_LDT_detections
+#######################################################
+#$%
+#$% Purpose:   Update_LDT_detections loops through the
+#$%            LDT table (calculated detections) to
+#$%            determine if the time of detection has
+#$%            been reached.  If the time of detection
+#$%            has been reached and the receiver sonar
+#$%            is still on, the detection report is
+#$%            generated with the appropriate report
+#$%            delay interval.
+#$%
+#$% Called By: BISMOD
+#$%
+#$% Calls:     Generate_LDT_reports
+#$%
+#$% Tables:    LDT
+#$%
+#$% Date:      July 1991
+#$%
+#$% Author:    Carol Kropp and Susan Miller
+#$%
+#$% Modified:  Carol Kropp - 10/93 (Variable Cycle Time)
+#$%            The detection report is generated at the
+#$%            first recurrance at or after the calculated
+#$%            detection time.
+#$%
+#######################################################
+BBcommon
+ 
+integer  DEQ$Pointer, LDT$Pointer
+ 
+  for (LDT$Pointer$First; LDT$Pointer$Valid; LDT$Pointer$Next)
+    {
+     if (xLDT$InUse$I == $no)
+       next
+ 
+     # Determine if the calculated time of detection has been reached
+     if (xLDT$DetectionTime$F <= Game$Time)
+       {
+        # Determine if the receiver sonar is activated
+        DEQ$Pointer$To  xLDT$EqIndx$I
+        if (xDEQ$On$I == $yes)
+          call Generate_LDT_reports (LDT$Pointer)
+ 
+        # Delete the detection information
+        LDT$Zero
+       }
+    }
+ 
+return
+end
+
+ 
+ 
+Subroutine BSD_new (BSD_pointer_index)      # get and pass new track index
+#######################################################
+#$%
+#$% Purpose:   BSD_new gets the index to an unused
+#$%            slot of the BSD table.  If there are no
+#$%            free slots, then 0 is returned.
+#$%
+#$% Called By: Generate_LDT_reports
+#$%
+#$% Calls:     None
+#$%
+#$% Tables:    BSD
+#$%
+#$% Date:      July 1991
+#$%
+#$% Author:    Carol Kropp and Susan Miller
+#$%
+#######################################################
+BBcommon
+ 
+integer BSD_Pointer_index
+ 
+integer  BSD$Pointer
+ 
+  BSD_Pointer_index = 0
+  for (BSD$Pointer$First; BSD$Pointer$Valid; BSD$Pointer$Next)
+    {
+     if (xBSD$InUse$I == $no)
+       break
+    }
+  if (BSD$Pointer$Valid)
+    BSD_pointer_index = BSD$Pointer$Index
+ 
+return
+end
+
+ 
+ 
+Subroutine Generate_LDT_reports (LDT$Pointer)  # pointer to LDT track
+#######################################################
+#$%
+#$% Purpose:   Generate_LDT_reports will determine if
+#$%            the transmitter/receiver pair is
+#$%            blue/blue or blue/orange.  If the pair
+#$%            is blue/blue then the containment ellipse
+#$%            and report delay time is calculated and
+#$%            the information stored in the BSD table.
+#$%            If the pair is blue/orange then the
+#$%            detection is reported to the passive
+#$%            astab of the receiver.
+#$%
+#$% Called By: Update_LDT_detections
+#$%
+#$% Calls:     Containment_ellipse
+#$%            BSD_new
+#$%            Bistatic_LCLPSN
+#$%
+#$% Tables:    LDT
+#$%
+#$% Date:      July 1991
+#$%
+#$% Author:    Carol Kropp and Susan Miller
+#$%
+#$% Modified:  Carol Kropp - 10/93 (Variable Cycle Time)
+#$%            BSD$TimeToReport$F is now computed in
+#$%            floating point minutes.
+#$%
+#######################################################
+BBcommon
+ 
+integer  LDT$Pointer
+ 
+integer  UNT$Pointer, UNT2$Pointer, UNT3$Pointer
+integer  DEQ$Pointer, SON$Pointer
+integer  BSD$Pointer, BSD_index
+integer  transmitter_view, receiver_view
+integer  sonobouy_number, freq_array [6], bearing_error
+integer  BSD$TimeToReport$F
+real*4   LDT$AppBearing$F, RANDN
+ 
+  UNT$Pointer$To   xLDT$TransmittingUnit$I
+  UNT2$Pointer$To  xLDT$DetectedUnit$I
+  UNT3$Pointer$To  xLDT$ReceivingUnit$I
+ 
+  transmitter_view = xUNT$View$I
+  receiver_view = xUNT3$View$I
+ 
+  if (transmitter_view <= $LastBlue$View  &  receiver_view <= $LastBlue$View)
+    {                        # receiver and transmitter are both blue
+     call BSD_new (BSD_index)
+     if (BSD_index != 0)
+       {
+        BSD$Pointer$To  BSD_index
+        BSD$TimeToReport$F = xLDT$ReportDelay$I + Game$Time
+        putBSD$TimeToReport$F
+        putBSD$Detector$I  (UNT3$Pointer$Index)
+        putBSD$Detectee$I  (UNT2$Pointer$Index)
+        if (UNT$Pointer == UNT3$Pointer)
+          putBSD$ActiveDetection$I  ($yes)
+        else putBSD$ActiveDetection$I  ($no)
+        putBSD$SignalExcess$F  (xLDT$SignalExcess$F)
+        call Containment_ellipse (LDT$Pointer, BSD$Pointer)
+       }
+    }
+  else      # blue / orange pair
+    {
+     DEQ$Pointer$To  (xLDT$EqIndx$I)
+     SON$Pointer = xDEQ$Pntr$I
+     if (xSON$TowedArray$I == $yes)
+       sonobouy_number = 511                          # indicates towed array
+     else
+       sonobouy_number = 0                            # sonobuoy number N/A
+ 
+     LDT$AppBearing$F = xLDT$AppBearing$F
+     LDT$AppBearing$F = LDT$AppBearing$F * (180./$PI) + .5
+ 
+     bearing_error = INT ( RANDN (0.0,  xLDT$StDevBrgErr$F) + 0.5)
+ 
+     call Bistatic_LCLPSN (_
+                  UNT3$Pointer,            # UNT pointer for receiver unit
+                  UNT2$Pointer,            # UNT pointer for detected target
+                  INT(LDT$AppBearing$F),        # apparent bearing
+                  xLDT$AssumedReceiverLat$F,    # assumed lat of receiver
+                  xLDT$AssumedReceiverLong$F,   # assumed long of receiver
+                  freq_array,                   # signature lines
+                  $no,                     # acoustic comm detection flag
+                  $no,                     # broadband detect flag
+                  xLDT$TransmittedFreq$I,  # detected act son frq
+                  sonobouy_number,         # Sonobouy number
+                  bearing_error,           # bearing error
+                  xLDT$SignalExcess$F,     # Signal Excess
+                  $no,                     # buoy OMNIflag
+                  $LFASteal$type,          # type of detection
+                  0,0,0)                   # ellipse info., not applicable
+    }
+ 
+return
+end
+
+ 
+ 
+Subroutine Containment_ellipse (LDT$Pointer,  # pointer to LDT information
+                                BSD$Pointer)  # pointer to BSD information
+#######################################################
+#$%
+#$% Purpose:   Containment_ellipse calculates the
+#$%            containment ellipse and stores the
+#$%            information in the BSD table.  The
+#$%            range and bearing from the receiver
+#$%            to the center of the ellipse is also
+#$%            calculated.
+#$%
+#$% Called By: Generate_LDT_reports
+#$%
+#$% Calls:     RANDN
+#$%            ELLOFF
+#$%            RLL2RB
+#$%
+#$% Tables:    LDT      SON      BSD
+#$%
+#$% Date:      July 1991
+#$%
+#$% Author:    Carol Kropp and Susan Miller
+#$%
+#######################################################
+BBcommon
+ 
+integer  LDT$Pointer, BSD$Pointer
+ 
+real*4   loc_error, std_dev
+integer  BSD$MajorAxis$I, BSD$MinorAxis$I, BSD$Orientation$I
+real*4   orientation
+real*4   LDT$AppBearing$F
+real*4   RNOne, RNTwo, RANDN
+real*4   ellipse_lat, ellipse_long, ellipse_lat_cosine
+integer  BSD$Bearing$I, Bearing_error
+ 
+  loc_error = xLDT$Range$F * 0.1
+  std_dev = loc_error * 0.5
+ 
+  repeat
+    RNOne = RANDN (loc_error, std_dev)
+  until (RNOne > 0.0)
+ 
+  repeat
+    RNTwo = RANDN (loc_error, std_dev)
+  until (RNTwo > 0.0)
+ 
+  RNOne = RNOne + 1.0
+  RNTwo = RNTwo + 1.0
+ 
+  if (RNOne >= RNTwo)
+    {
+     BSD$MajorAxis$I = INT (RNOne)
+     BSD$MinorAxis$I = INT (RNTwo)
+    }
+  else
+    {
+     BSD$MajorAxis$I = INT (RNTwo)
+     BSD$MinorAxis$I = INT (RNOne)
+    }
+ 
+  putBSD$MajorAxis$I
+  putBSD$MinorAxis$I
+ 
+  putBSD$Range$F (xLDT$Range$F)
+ 
+  LDT$AppBearing$F = xLDT$AppBearing$F
+  BSD$Bearing$I = INT (LDT$AppBearing$F * (180.0/$PI) + 0.5)
+  putBSD$Bearing$I
+ 
+  Bearing_error = INT (RANDN (0.0, xLDT$StDevBrgErr$F) + 0.5)
+  putBSD$BrgError$I  (Bearing_error)
+ 
+  LDT$AppBearing$F = LDT$AppBearing$F + (Bearing_error * $pi / 180.0)
+  $ang2pi (LDT$AppBearing$F)
+ 
+  orientation = LDT$AppBearing$F
+  if (orientation > $pi)
+    orientation = orientation - $pi
+ 
+  BSD$Orientation$I = INT (orientation * 180.0/$pi + 0.5)
+  putBSD$Orientation$I
+ 
+  ellipse_lat = xLDT$AssumedReceiverLat$F
+  ellipse_long = xLDT$AssumedReceiverLong$F
+  ellipse_lat_cosine = COS (ellipse_lat)
+ 
+  call RRB2LL (_      #Rhumb line Range/Bearing to Lat/Lon
+               ellipse_lat,           # latitude (input & output)
+               ellipse_long,          # longitude (input & output)
+               xLDT$Range$F,          # range (input)
+               LDT$AppBearing$F,      # relative bearing (input)
+               0.0,                 # course (input) # jb E2145 (0.0) 9/27/00
+               ellipse_lat_cosine)    # cosine of latitude (input & output)
+ 
+  putBSD$OffsetLat$F (ellipse_lat)
+  putBSD$OffsetLon$F (ellipse_long)
+ 
+return
+end
+
+ 
+ 
+Subroutine Update_BSD_reports
+#######################################################
+#$%
+#$% Purpose:   Update_BSD_reports loops through the
+#$%            BSD table (delayed reports) to
+#$%            determine if the time of report has
+#$%            been reached.  If the time of report
+#$%            has been reached, the detection report
+#$%            is sent to the active or passive astab.
+#$%
+#$% Called By: BISMOD
+#$%
+#$% Calls:
+#$%
+#$% Tables:    BSD
+#$%
+#$% Date:      August 1991
+#$%
+#$% Author:    Carol Kropp and Susan Miller
+#$%
+#######################################################
+BBcommon
+ 
+integer  BSD$Pointer, UNT$Pointer, UNT2$Pointer
+integer  freq_array [6]
+ 
+  for (BSD$Pointer$First; BSD$Pointer$Valid; BSD$Pointer$Next)
+    {
+     if (xBSD$InUse$I == $no)
+       next
+ 
+     # Determine if the calculated time of detection has been reached
+     if (xBSD$TimeToReport$F <= Game$Time)
+       {
+        UNT$Pointer$To (xBSD$Detector$I)
+        UNT2$Pointer$To (xBSD$Detectee$I)
+ 
+        if (xBSD$ActiveDetection$I == $yes)
+          {  # send information to active status board
+           call LFA_LCLRAS (_
+                   UNT$Pointer,          # UNT pointer for receiver unit
+                   UNT2$Pointer,         # UNT pointer for detected target
+                   xBSD$Bearing$I,       # apparent bearing
+                   xBSD$OffSetLat$F,     # assumed lat of receiver
+                   xBSD$OffSetLon$F,     # assumed long of receiver
+                   INT (xBSD$Range$F),   # rng from receiver to ellipse ctr
+                   $sub$code,            # target type
+                   $sonar$code,          # receiver type
+                   xBSD$BrgError$I,      # brg err of receiver (degrees)
+                   xBSD$MinorAxis$I,
+                   xBSD$MajorAxis$I,
+                   xBSD$Orientation$I)
+          }
+        else  # send information to passive status board
+          {
+           call Bistatic_LCLPSN (_
+                        UNT$Pointer,          # UNT pointer for receiver unit
+                        UNT2$Pointer,         # UNT pointer for detected target
+                        xBSD$Bearing$I,       # apparent bearing
+                        xBSD$OffSetLat$F,     # assumed lat of receiver
+                        xBSD$OffSetLon$F,     # assumed long of receiver
+                        freq_array,           # signature lines
+                        $no,                  # acoustic comm detection flag
+                        $no,                  # broadband detect flag
+                        xBSD$TransmittedFreq$I,   # detected act son frq
+                        0,                    # Sonobouy number
+                        xBSD$BrgError$I,      # brg err of receiver (degrees)
+                        xBSD$SignalExcess$F,  # Signal Excess
+                        $no,                  # buoy OMNIflag
+                        $Bistatic$type,       # type of detection
+                        xBSD$MinorAxis$I,
+                        xBSD$MajorAxis$I,
+                        xBSD$Orientation$I)
+          }
+        # Delete the detection information
+        BSD$Zero
+       }
+    }
+ 
+return
+end
+
+ 
+Subroutine Ping_detection (UNT2$Pointer,  #target UNT pointer
+                           DEQ2$Pointer)  #target DEQ pointer
+####################################################
+#$%
+#$% Purpose:   Ping_detection checks for submarines
+#$%            within range (1.5 * maximum bistatic
+#$%            range) of the ping source and determines
+#$%            if the submarine will detect the ping.
+#$%
+#$% Called By:  BISMOD
+#$%
+#$% Calls:     RLL2RB
+#$%            Determine_Sonar_Env
+#$%            INV_worse
+#$%            Get_sonar_data
+#$%            Get_BroadBand_Noise
+#$%            Calculate_RDI
+#$%            Get_Proploss
+#$%            Get_Target_Noise
+#$%            Determine_freq_index
+#$%
+#$% Tables:    DEQ  PNG  SON  UNT
+#$%
+#$% Date:      July 29, 1991
+#$%
+#$% Author:    Susan Miller and Carol Kropp
+#$%
+#$% Modified:  Jim Allen - 8/96 (E1651)
+#$%            Sonar should not detect through land mass
+#$%
+##################################################
+BBCommon
+BISCommon
+PositionCommon
+Sonar_common
+ 
+integer  DEQ$Pointer, DEQ2$Pointer, SON$Pointer
+integer  SON$MXR$index, UNT$Pointer, UNT2$Pointer
+integer  freq_array [6]                 # nothing entered
+integer  env_number
+integer  max_range_nmi, RDI
+integer  detectee_index, freq_index, sonar_region
+integer  target_source_level, target_center_freq
+integer  its_detected
+integer  tonal_detected, GN_detected, NLTEST
+integer  display_bear, pinger_index
+real*4   pinger_range_nmi, bearing_from_sub_to_pinger
+real*4   relative_bearing
+real*4   proploss, BBSelfNoise      # jb E2145 (noise) 9/27/00
+real*4   total_target_noise, target_general_noise
+real*4   Tonal_SE, General_Noise_SE
+real*4   heading_error
+real     pinger_latitude, pinger_longitude  # SMM 2/98 (E1930)
+ 
+integer  land_between_points          # function to check for land -
+integer  is_land                      #             joa 8/96 (E1651)
+ 
+     SON$Pointer = xDEQ2$Pntr$I
+     pinger_index = SON$Pointer$Index
+ 
+     #$% get target ping characteristics
+     target_source_level = xSON$SourceLevel$I
+     target_center_freq = xSON$CenterFreq$I
+ 
+     SON$MXR$Index = transmitter_env_num     #env number pinger is located
+     max_range_nmi = xSON$MXR$Range$I        #max bistatic range for environment
+     if (max_range_nmi <= 0.0)
+        max_range_nmi = Max$Bistatic$Range
+ 
+     #$% loop through detectee list and find a sub receiver within
+     #$% detection range
+     for (detectee_index = 1; detectee_index <= number_of_detectees;
+                               detectee_index = detectee_index + 1)
+       {
+        UNT$Pointer$To  Detectee_list [detectee_index]
+        sub_latitude = xUNT$TrueLatitude$F              # get the latitude and
+        sub_longitude = xUNT$TrueLongitude$F            # longitude of sub
+ 
+        #$% calculate the range between ping source & possible sub receiver
+        call RLL2RB(sub_latitude,
+                    sub_longitude,
+                    xUNT$CosTrueLat$F,         #cosine of sub latitude
+                    transmitter_lat,           #pass ping source latitude
+                    transmitter_long,          #pass ping source longitude
+                    transmitter_CosTrueLat,       #pass cosine of ping source lat
+                    pinger_range_nmi,          #range from pinger to test sub
+                    bearing_from_sub_to_pinger)#output
+ 
+        #$% if the range is > 1.5 times the max defined for that region - next
+        if (pinger_range_nmi > (1.5 * max_range_nmi))
+          next
+ 
+        #$% get sonar region number for sub
+        call Determine_Sonar_Env (sub_latitude, sub_longitude, xUNT$SerIndx$I,
+                                  sonar_region, sub_env_num)
+        putUNT$SerIndx$I (sonar_region)
+ 
+        #$% get the worst region of the two
+        call INV_Worse (transmitter_env_num, #environment number of detector
+                        sub_env_num,         #environment number of target
+                        Env_number)          #return worst environment
+ 
+        FOR_DEQ_CHAIN     # determine if the sub has an actived passive sonar
+          {               # which can detect the ping
+           #$% if the equipment is not a passive sonar or it's not on - next
+           if (xDEQ$Ident$I != $PasSonar$Code | xDEQ$On$I != $yes)
+             next
+ 
+           SON$Pointer = xDEQ$Pntr$I
+ 
+           #$% if the passive sonar cannot detect the frequency - next
+           if (target_center_freq < xSON$LoEndFreq$I |
+               target_center_freq > xSON$HiEndFreq$I)
+             next
+ 
+           #$% get submarine sonar information for SE calculations
+           #$% data is put in a common block called sonar_common
+           call Get_sonar_data (SON$Pointer,      #input, sonar pointer
+                                UNT$Pointer)      #input, sub UNT pointer
+ 
+           #$% is the ping source within the sonar's vertical beam width
+           if (ABS (SonarTrueDepth - xUNT2$TrueAltDepth$I) >
+                   (pinger_range_nmi * slope))
+             next
+ 
+           #$% is the ping source within the sonar's horitontal beam width
+           relative_bearing = bearing_from_sub_to_pinger - xUNT$TrueCourse$F
+           $angpi (relative_bearing)
+ 
+           if (ABS (relative_bearing) > halfhb)
+             next
+ 
+           #$% calculate directivity index - recognition_differential
+           #$% for detecting sub sonar
+           call Calculate_RDI(UNT$Pointer,     #sub detector pointer
+                              SON$Pointer,     #sonar
+                              recognition_differential,   #input
+                              bearing_from_sub_to_pinger, #input
+                              RDI)             #output
+ 
+           #$% determine which frequency index to use for the source level
+           call Determine_Freq_Index(target_center_freq,   #input
+                                     freq_index)           #output
+ 
+           #$% get submarine self noise and environment ambient noise
+           call Get_BroadBand_Noise (SonarTrueSpeed,   #input
+                                     SON$Pointer,      #input
+                                     Env_number,       #input
+                                     freq_index,       #input
+                                     BBSelfNoise)      #output
+ 
+           #$% get narrowband proploss data for the target
+           call Get_proploss(xUNT2$TrueAltDepth$I, #pinger source depth
+                             SonarTrueDepth,       #ship or sub receiver
+                             pinger_range_nmi,     #range between source & receiver
+                             Env_number,           #worst environment number
+                             freq_index,           #tabulated freq index
+                             proploss)             #output
+ 
+           #$% get target ship noise
+           call Get_target_noise(UNT2$Pointer,        #pinger source pointer
+                                 pinger_index,        #pinger sonar
+                                 env_number,          #input
+                                 freq_index,          #input
+                                 target_general_noise,#output
+                                 total_target_noise)  #output
+ 
+           #$% calculate signal excess for target ping
+           Tonal_SE = target_source_level - total_target_noise + RDI - proploss
+           Tonal_SE = MAX(-987.6,Tonal_SE)
+ 
+           #$% is it within the normal random dist. compared with a
+           #$% random number
+           tonal_detected = nltest (0.0, Sonar$SIGMA, Tonal_SE)
+ 
+           #$% calculate signal excess for general noise
+           General_Noise_SE = target_general_noise - BBSelfNoise + RDI - proploss
+           GN_detected = nltest (0.0, Sonar$SIGMA, General_Noise_SE)
+ 
+           its_detected = $no
+           if (tonal_detected != $no | GN_detected != $no)
+              {
+               if (Tonal_SE > General_Noise_SE)
+                 its_detected = $yes
+              }
+ 
+           if (its_detected != $no)    # add extra cehck for land mass -
+             {                         #                joa 8/96 (E1651)
+              is_land = land_between_points (sub_latitude, sub_longitude,
+                                             xUNT$CosTrueLat$F,
+                                             pinger_latitude, pinger_longitude,
+                                             xUNT2$CosTrueLat$F)
+              if (is_land == $yes)
+                its_detected = $NO
+             }
+ 
+           if (its_detected != $no)
+             {
+              heading_error = xUNT$HeadingError$F
+              display_bear = INT((bearing_from_sub_to_pinger +
+                                  heading_error) * 180.0 / $pi)
+              call LCLPSN(_
+                          UNT$Pointer,    # UNT Pointer for detector
+                          UNT2$Pointer,   # UNT2 Pointer for detectee
+                          display_bear,   # apparent bearing of the target
+                          sub_latitude,   # receiver latitude
+                          sub_longitude,  # receiver longitude
+                          freq_array,     # up to six tonals
+                          $no,            # AcousticComm-detection flag
+                          $no,            # Broadband detection flag
+                          target_center_freq,# for lcl$EchoFreq$i
+                          0,              # for lcl$SonobuoyNbr$i
+                          xSON$StDevBrgErr$F,# Std. Dev. of Brg.-Error
+                          Tonal_SE,       # signal excess
+                          0)              # Sonobuoy OMNI-flag
+              break  # ping was detected & reported break out of the DEQ loop
+             } # end of if it's detected
+          } # end of loop through the sub's equipment list
+       } # end of loop through detectee_list
+ 
+return
+end
+
+ 
+Subroutine Get_sonar_data(SON$Pointer,
+                          UNT$Pointer)
+#######################################################
+#$%
+#$% Purpose:   Get_sonar_data gets the sonar data required
+#$%            to test for a detection.
+#$%
+#$% Called By:  Ping_detection
+#$%
+#$% Tables:  SON  UNT
+#$%
+#$% Date:    30 July 1991
+#$%
+#$% Author:  Code reused from WGMDSNR
+#$%
+#######################################################
+BBcommon
+Sonar_common
+ 
+integer  SON$Pointer, UNT$Pointer
+real*4   halfvb     # half of the vertical beam width (radians)
+ 
+ stand_dev = xSON$StDevBrgErr$F         #standard deviation
+ recognition_differential = xSON$RecognitionDiff$I   #recognition differential
+ 
+ halfhb = xSON$HorizBeam$I * ($pi/360.)
+ halfvb = xSON$VertBeam$I * ($pi/360.)
+ slope = $Feet$Per$Nmi * SIN (halfvb) / COS (halfvb)
+ SonarTrueSpeed = xUNT$TrueSpeed$F
+ SonarTrueDepth = xUNT$TrueAltDepth$I
+ SonarTrueCourse = xUNT$TrueCourse$F
+ 
+return
+end
+
+ 
+Subroutine Get_BroadBand_noise (detector_speed,  #input
+                                SON$Pointer,     #input
+                                Env_number,      #input
+                                freq_index,      #input
+                                BBNoiseLevel)    #output
+#######################################################
+#$%
+#$% Purpose:   Get_BroadBand_Noise calculates self noise
+#$%            using speed of receiver and ambient noise
+#$%            using environment number.
+#$%
+#$% Called By:  Ping_detection
+#$%
+#$% Tables:  ANO  SON
+#$%
+#$% Date:    30 July 1991
+#$%
+#$% Author:  Code reused from subroutine PASDET
+#$%          in file WGMDSNR.RAT
+#$%
+#######################################################
+BBcommon
+ 
+integer BBSelfNoise, speed_index
+integer Env_number, freq_index
+integer SON$Pointer, SON$SPD$index
+integer ANO$Pointer, ANO$NV$Index
+real*4  detector_speed
+real*4  ambient_noise, BBNoiseLevel
+ 
+ if(detector_speed < 0. )
+    {
+     BBSelfNoise = 0.               #broadband self-noise is zero
+     SON$SPD$Index = 0
+    }
+ else                               #otherwise
+    {
+     speed_index = .2 * detector_speed + .5  # determine
+     if(speed_index < 1)
+        speed_index = 1                      # detector
+     else if(speed_index > 6)
+        speed_index = 6                      # speed
+ 
+     SON$SPD$Index = speed_index             # index
+     BBSelfNoise = (xSON$SPD$BBNoise$I - 27.0)/10.     # bb selfnoise
+    } # end else if detector_speed > 0
+ 
+ ANO$Pointer$To freq_index
+ ANO$NV$Index = Env_number
+ # use ambient noise from table direct, dividing ambient_noise
+ # by 10 prepares for BBNL computation, following
+ ambient_noise = xANO$NV$Noise$F/10.
+ 
+ BBNoiseLevel = 10.*log10((1.0D+1)**BBSelfNoise + (1.0D+1)**ambient_noise)
+ 
+return
+end
+
+ 
+Subroutine Calculate_RDI(UNT$Pointer,      #in: sub detector pointer, input
+                         SON$Pointer,      #in:  sonar pointer
+                         recognition_differential, # in:
+                         bearing,          #in: bearing between units
+                         RDI)              #output
+#######################################################
+#$%
+#$% Purpose:  Calculate_RDI
+#$%
+#$% Called By:  Ping_detection
+#$%
+#$% Tables:  SON  UNT
+#$%
+#$% Date:    31 July 1991
+#$%
+#$% Author:  Most of this code was taken from the current
+#$%          WGMDSNR.RAT file, with major changes to the
+#$%          variable names.
+#$%
+#######################################################
+BBcommon
+ 
+integer  UNT$Pointer, SON$Pointer, SON$SEC$Index
+integer  recognition_differential, RDI, directivity_index
+integer  index_DI_table
+real     bearing, relative_bearing
+ 
+ relative_bearing = bearing - xUNT$TrueCourse$F    #find bearing relative to
+ $angpi(relative_bearing)                          #sub detector
+ 
+ index_DI_table = ABS(relative_bearing) * (18./$PI) + 1  #compute index into
+ if (index_DI_table > 18)                                #DI table
+    index_DI_table = 18
+ SON$SEC$Index = index_DI_table                     #set sector index
+ directivity_index = xSON$SEC$DI$I                  #get directivity index
+ 
+ RDI = directivity_index - recognition_differential #combine these variables
+ 
+return
+end
+
+ 
+Subroutine Get_proploss(source_depth,    #pinger
+                        detector_depth,  #ship or sub
+                        range,           #range between pinger and sub
+                        Env_number,      #worst environment number
+                        PRL$NV$FQ$Index, #index of freq, input
+                        proploss)        #output
+#######################################################
+#$%
+#$% Purpose:  Get_proploss computes proploss level based on
+#$%           environment and reciever speed
+#$%
+#$% Called By:  Calc_active_se      Ping_detection
+#$%
+#$% Tables:  PRL
+#$%
+#$% Date:    31 July 1991
+#$%
+#$% Author:  Code reused from subroutine NBPRPL
+#$%          in file WGMDSNR.RAT
+#$%
+#######################################################
+BBcommon
+ 
+logical detector_below_depth, source_below_depth
+integer PRL$Pointer, PRL$NV$Index, PRL$NV$FQ$Index
+integer detector_depth, source_depth
+integer int_range, Env_number
+real*4  range, proploss
+ 
+ int_range = INT(range + .5)
+ if (int_range < 1)             #determine range index
+    int_range = 1               #for PRL table
+ else if (int_range > 120)
+    int_range = 120
+ PRL$Pointer$To int_range       #set PRL pointer
+ 
+ PRL$NV$Index = Env_number      #set index to current environment
+ 
+ detector_below_depth = (detector_depth >= LAYER$DEPTH)  #is sub below layer
+ source_below_depth = (source_depth >= LAYER$DEPTH) #is pinger below layer
+ 
+ if (detector_below_depth & source_below_depth)          #if both are deep
+    Proploss = xPRL$NV$FQ$ProplossDeep$F
+ else if (!detector_below_depth & !source_below_depth)   #if both in layer
+    Proploss = xPRL$NV$FQ$ProplossIn$F
+ else                                               #if cross layer
+    Proploss = xPRL$NV$FQ$ProplossCross$F
+ 
+return
+end
+
+ 
+Subroutine Get_target_noise(UNT2$Pointer,        #pinger source pointer
+                            sonar_table_index, #input
+                            Env_number,          #input
+                            freq_index,          #input
+                            target_general_noise,#output
+                            total_target_noise)  #output
+#######################################################
+#$%
+#$% Purpose:  Get_target_noise created by ship moving
+#$%           water
+#$%
+#$% Called By:  Ping_detection
+#$%
+#$% Tables:  ANO  DEQ  SHC  SHN  SON  UNT
+#$%
+#$% Date:    9 August 1991
+#$%
+#$% Author:  Code reused from subroutine FRQDET
+#$%          in file WGMDSNR.RAT
+#$%
+#######################################################
+BBcommon
+ 
+integer UNT2$Pointer, SHC$Pointer
+integer SHN$Pointer, SHN$SPD$Index
+integer SON$Pointer, SON$SPD$Index, SON$SPD$TN$Index
+integer sonar_table_index
+integer ANO$Pointer, ANO$NV$Index
+integer env_number, freq_index
+real*4  ambient_noise, total_target_noise
+real*4  target_speed, target_ship_noise
+real*4  target_general_noise
+ 
+ SHC$Pointer = xUNT2$SHCPntr$I      #SHC pointer for target
+ SHN$Pointer$To xSHC$NoiseIndx$I     #SHN pointer for target
+ 
+ SON$Pointer$To sonar_table_index
+ 
+ target_speed = xUNT2$TrueSpeed$F
+ 
+ if (target_speed <= 0)     # if target is not moving, no noise
+   {
+    target_ship_noise = 0
+    target_general_noise = 0
+   }
+ else
+   {
+    SHN$SPD$Index = target_speed
+    target_general_noise = xSHN$SPD$BBNoise$F - 27.
+ 
+    SON$SPD$Index = INT(target_speed)
+    SON$SPD$TN$Index = freq_index
+    target_ship_noise = xSON$SPD$TN$Level$I/10.
+   }
+ 
+ #$% set the ambient_noise_pointer for the target
+ ANO$Pointer$To freq_index
+ ANO$NV$Index = Env_number
+ ambient_noise = xANO$NV$Noise$F/10.
+ 
+ total_target_noise = 10.*log10((1.0D+1)**target_ship_noise +
+                                (1.0D+1)**ambient_noise)
+ 
+return
+end
+
+ 
+Subroutine Determine_Freq_Index (target_center_freq,   #input
+                                 freq_index)           #output
+#######################################################
+#$%
+#$% Purpose:  Determine_Freq_Index determines
+#$%           appropriate indices into self-noise
+#$%           tables as well as into the proploss
+#$%           and ambient noise tables.
+#$%
+#$% Called By:  Ping_detection
+#$%             Locate_bistatic_receiver
+#$%
+#$% Date:    9 August 1991
+#$%
+#$% Author:  Code reused from subroutine FRQDET
+#$%          and INDFRQ in file WGMDSNR.RAT
+#$%
+#######################################################
+BBcommon
+ 
+integer freq_options(20)
+integer index_below, index_above, freq_index
+integer freq_above, freq_below
+integer I, target_center_freq
+real*4  MTH$ALOG2, temp
+ 
+data (freq_options(I),I=1,20) / 10,  15,  20,  30,   40,
+                                60,  80, 100, 125,  250,
+                               315, 630, 900,1250, 1600,
+                              2000,2500,3500,5000,10000 /
+ 
+ index_below = 1
+ index_above = 20
+ 
+ temp = float(target_center_freq)
+ temp = MTH$ALOG2(temp)
+ I = INT(1.9 * temp - 5.3)  #compute a close starting index
+ 
+ if (I < 1) I = 1           #point, but make sure it's
+ else if (I > 20) I = 20    #within correct limits
+ 
+ repeat                     #loop through the frequencies
+    {
+     if (target_center_freq < freq_options(I))  #if target freq is lower
+        {                                       #than freq at current index,
+         index_above = I                        #adjust the ceiling and
+         I = I - 1                              #decrease the index and
+        }                                       #try again
+     else if (target_center_freq > freq_options(I)) #if target freq is higher
+        {                                          #than freq at current index,
+         index_below = I                           #adjust the floor,
+         I = I + 1                                 #increase the index and
+        }                                          #try again
+     else                                       #else the frequencies match
+        {
+         index_below = I                        #set the ceiling
+         index_above = I                        #and the floor
+        }
+    }   #end of repeat loop
+ until (index_above <= index_below + 1)     #done when frequency pinched
+ 
+ freq_below = freq_options(index_below)     #get freq below
+ freq_above = freq_options(index_above)     #get freq above
+ 
+ if ((freq_above - target_center_freq) <
+      (target_center_freq - freq_below))
+      freq_index = index_above
+ else freq_index = index_below
+ 
+return
+end
+
+ 
+Subroutine Determine_Sonar_Env (_
+               latitude,       # in: lat to determine region of
+               longitude,      # in: long to determine region of
+               last_region,    # in: last known region of unit
+               SER_Index,      # out: SER$Pointer$Index for region
+               env_type)       # out: environment type (0-3)
+#######################################################
+#$%
+#$% Purpose:  Determine_Sonar_Env determines which sonar
+#$%           environment the input position is in and
+#$%           return the environment number and the
+#$%           environment type.  The last known region is
+#$%           checked first.
+#$%
+#$% Called By:  BISMOD
+#$%             Detection_Routine
+#$%             Locate_Bistatic_Receiver
+#$%             Ping_Detection
+#$%
+#$% Calls:   INOUT   NVREGN
+#$%
+#$% Date:    October 1993
+#$%
+#$% Author:  Carol Kropp
+#$%
+#######################################################
+BBcommon
+ 
+real     latitude, longitude
+integer  last_region, SER_Index, env_type
+ 
+integer   SER$Pointer, number_verticies, SER$VER$Index, inflag
+real      x[6], y[6]
+ 
+  inflag = $no
+  SER$Pointer$To  (last_region)
+  if (SER$Pointer$OK)
+    {
+     number_verticies = xSER$NbrVertices$I
+     for (SER$VER$Index = 1; SER$VER$Index <= number_verticies;
+                             SER$VER$Index = SER$VER$Index + 1)
+       {
+        x[SER$VER$Index] = xSER$VER$Longitude$F
+        y[SER$VER$Index] = xSER$VER$Latitude$F
+       }
+     call inout (longitude, latitude, number_verticies, x, y, inflag)
+     if (inflag == $yes)
+       {
+        SER_Index = last_region
+        env_type = xSER$EnvNum$I
+       }
+    }
+ 
+  if (inflag != $yes)  # if not in last known region
+    {
+     call NVREGN (latitude, longitude, SER_Index, env_type)
+    }
+ 
+return
+end
+
+ 
+ 
+################################################################################
+ 
+ 
+Subroutine OPING (IONUM,                        # order number (input)
+                  UNT$POINTER,                  # addressee pointer (input)
+                  IWORD,                        # # of args in ilex (input)
+                  ILEX)                         # command string (input(
+ 
+########################################################
+#$%
+#$% Purpose:   OPING processes LFA PING commands to
+#$%            display the time until the next ping
+#$%            and the ping schedule of an active
+#$%            LFA source transmitter and the order
+#$%            to set a ping schedule for an LFA
+#$%            source.
+#$%
+#$% Called By: EXEORD
+#$%
+#$% Calls:     None
+#$%
+#$% Tables:    UNT        SON         PNG
+#$%            DEQ
+#$%
+#$% Date:      July 12, 1991
+#$%
+#$% Author:    Carol Kropp
+#$%
+########################################################
+BBcommon
+ 
+integer    ionum, UNT$Pointer, iword
+literal    ilex[$max$args]
+ 
+literal    cstrip8     # macro function from lbecho.rat
+integer    Game_time
+integer    UNT$View$I
+integer    DEQ$Pointer, DEQ$Pntr$I, DEQ$LFAPingIndex$I
+integer    SON$Pointer, SON$PulseIntervalMin$I, SON$PulseLengthSecs$I
+integer    PNG$Pointer, PNG$NextScheduledPing$I
+real       png$TimeOfNextPing$f
+integer    PNG$DTA$Index, PNG$DTA$PulseLength$I, PNG$DTA$PingDelay$I
+integer    PNG$NmbrRemainingPings$I
+integer    LFA_found
+integer    msg_len, ping_offset, previous_ping_offset
+real       ping_time
+Character  msg[530]
+ 
+  UNT$View$I = xUNT$View$I
+  msg_len = 0
+  LFA_found = $no
+  FOR_DEQ_CHAIN
+    {
+     DEQ$Pntr$I = xDEQ$Pntr$I
+     if (xDEQ$Ident$I == $sonar$code)
+       {
+        SON$Pointer = DEQ$Pntr$I
+        if (xSON$ActiveLFA$I == $yes)
+          {
+           LFA_found = $yes
+           break
+          }
+       }
+    }
+ 
+  if (LFA_found != $yes)                   # if LFA source was not located
+    {
+     call smovhn (XUNT$NAME$C, $$MaxLit, msg, msg_len)
+     call smovv  (" is not equipped with an active LFA source.", msg, msg_len)
+     call send_   (UNT$View$i, 0, msg_len, msg)
+     return
+    }
+ 
+  if (xDEQ$On$I != $yes)                  # if its not activated
+    {
+     call smovv ("LFA source has not been activated.", msg, msg_len)
+     call send_  (UNT$View$I, 0, msg_len, msg)
+     return
+    }
+ 
+  if (ILEX[1] == $lex$ORDERS$)               # if ORDERS PING order
+    {
+     DEQ$LFAPingIndex$I = xDEQ$LFAPingIndex$I
+     PNG$Pointer$To DEQ$LFAPingIndex$I
+     ping_time = xpng$TimeOfNextPing$f - Game$Minute
+ 
+     if (ILEX[3] == $lex$INTERVAL$)              # if ORDERS PING INTERVAL order
+       {
+        call smovv ("Next ping is in ", msg, msg_len)
+        call smovib (INT(ping_time), 3, msg, msg_len)   # jb E2145 (INT) 9/27/00
+        call smovv (" game minutes.", msg, msg_len)
+        call send_  (unt$view$i, 0, msg_len, msg)
+       }
+     else if (ILEX[3] == $lex$SCHEDULE$)     # if ORDERS PING SCHEDULE order
+       {
+        if (xPNG$PingSchedule$I != $yes)     # if there is no ping schedule
+          {
+           call smovhn (XUNT$NAME$C, $$MaxLit, msg, msg_len)
+           call smovv  (" does not have a ping schedule set for ", msg, msg_len)
+           call smovv  ("its active LFA source, next ping is in ", msg, msg_len)
+           call smovib (INT(ping_time), 3, msg,msg_len) # jb E2145 (INT) 9/27/00
+           call smovv  (" game minutes.", msg, msg_len)
+           call send_   (unt$view$i, 0, msg_len, msg)
+          }
+        else
+          {
+           call smovhn (XUNT$NAME$C, $$MaxLit, msg, msg_len)
+           call smov  ($return, msg, msg_len)
+           call smovv ("--- Game Time -- Pulse Length ---", msg, msg_len)
+           call smov  ($tab, msg, msg_len)
+           call smov  (7, msg, msg_len)
+           call smov  ($return, msg, msg_len)
+ 
+           PNG$NextScheduledPing$I = xPNG$NextScheduledPing$I
+           PNG$DTA$Index = PNG$NextScheduledPing$I
+           ping_time = xpng$TimeOfNextPing$f - xPNG$DTA$PingDelay$I
+           previous_ping_offset = 0
+ 
+           for (PNG$DTA$Index = PNG$NextScheduledPing$I;
+                PNG$DTA$Index <= xPNG$NmbrRemainingPings$I +
+                                 PNG$NextScheduledPing$I - 1;
+                PNG$DTA$Index = PNG$DTA$Index + 1)
+             {
+              ping_time = ping_time +
+                            xPNG$DTA$PingDelay$I + previous_ping_offset
+              PNG$DTA$PulseLength$I = xPNG$DTA$PulseLength$I
+              call smoviz (Game_Time(ping_time), 5, msg, msg_len)
+              call smovv (" - - - - - ", msg, msg_len)
+              call smoviz (PNG$DTA$PulseLength$I, 3, msg, msg_len)
+              call smov  ($return, msg, msg_len)
+              previous_ping_offset = ping_offset (PNG$DTA$PulseLength$I)
+             }
+           call send_  (UNT$View$I, 0, msg_len, msg)
+          }
+       }
+    }
+  else if (ILEX[1] == $LEX$SET$)             # if SET PING order
+    {
+     DEQ$LFAPingIndex$I = xDEQ$LFAPingIndex$I
+     PNG$Pointer$To DEQ$LFAPingIndex$I
+ 
+     if (xPNG$PingSchedule$I == $yes)
+       {
+        call smovv  ("Resetting ping schedule for ", msg, msg_len)
+        call smovhn (XUNT$NAME$C, $$MaxLit, msg, msg_len)
+        call smov  ($return, msg, msg_len)
+       }
+ 
+     SON$PulseIntervalMin$I = xSON$PulseIntervalMin$I
+     SON$PulseLengthSecs$I = xSON$PulseLengthSecs$I
+ 
+     if (SON$PulseIntervalMin$I <= ilex [3])
+       png$TimeOfNextPing$f = Game$Time + ilex [3]
+     else  png$TimeOfNextPing$f = Game$Time + SON$PulseIntervalMin$I
+     putpng$TimeOfNextPing$f
+ 
+     putPNG$PingSchedule$I ($yes)
+     putPNG$NextScheduledPing$I (1)
+     PNG$NmbrRemainingPings$I = (iword / 2) - 1
+     putPNG$NmbrRemainingPings$I
+ 
+     for (PNG$DTA$Index = 1; PNG$DTA$Index <= PNG$NmbrRemainingPings$I;
+                             PNG$DTA$Index = PNG$DTA$Index + 1)
+       {
+        if (SON$PulseIntervalMin$I <= ilex [(2 * PNG$DTA$Index) + 1])
+          PNG$DTA$PingDelay$I = ilex [(2 * PNG$DTA$Index) + 1]
+        else
+          {
+           call smovv ("Delay #", msg, msg_len)
+           call smovib (PNG$DTA$Index, 1, msg, msg_len)
+           call smovv (" < minimum:  Delay set to ", msg, msg_len)
+           call smovib (SON$PulseIntervalMin$I, 3, msg, msg_len)
+           call smov  ($return, msg, msg_len)
+           PNG$DTA$PingDelay$I = SON$PulseIntervalMin$I
+          }
+        putPNG$DTA$PingDelay$I
+ 
+        if (SON$PulseLengthSecs$I >=  ilex [2 * (PNG$DTA$Index + 1)])
+          PNG$DTA$PulseLength$I = ilex [2 * (PNG$DTA$Index + 1)]
+        else
+          {
+           call smovv ("Pulse length #", msg, msg_len)
+           call smovib (PNG$DTA$Index, 1, msg, msg_len)
+           call smovv (" > maximum:  Length set to ", msg, msg_len)
+           call smovib (SON$PulseLengthSecs$I, 3, msg, msg_len)
+           call smov  ($return, msg, msg_len)
+           PNG$DTA$PulseLength$I = SON$PulseLengthSecs$I
+          }
+        putPNG$DTA$PulseLength$I
+       }
+     if (msg_len > 0)
+       call send_  (UNT$View$I, 0, msg_len, msg)
+    }
+  else if (ILEX[1] == $LEX$EXTEND$)             # if EXTEND PING order
+    {
+     DEQ$LFAPingIndex$I = xDEQ$LFAPingIndex$I
+     PNG$Pointer$To DEQ$LFAPingIndex$I
+ 
+     if (xPNG$PingSchedule$I != $yes)
+       {
+        call smovv ("Cannot extend ping schedule, as ", msg, msg_len)
+        call smovv ("no initial schedule has been set.", msg, msg_len)
+        call send_  (UNT$View$I, 0, msg_len, msg)
+        return
+       }
+     if ((xPNG$NextScheduledPing$I + xPNG$NmbrRemainingPings$I) > 6)
+       {
+        call smovv ("Cannot extend ping schedule, as the ", msg, msg_len)
+        call smovv ("schedule has already been extended.", msg, msg_len)
+        call send_  (UNT$View$I, 0, msg_len, msg)
+        return
+       }
+     if ((xPNG$NextScheduledPing$I + xPNG$NmbrRemainingPings$I) < 6)
+       {
+        call smovv ("Cannot extend ping schedule, as the ", msg, msg_len)
+        call smovv ("original schedule is not complete.", msg, msg_len)
+        call send_  (UNT$View$I, 0, msg_len, msg)
+        return
+       }
+     PNG$NmbrRemainingPings$I = xPNG$NmbrRemainingPings$I + (iword / 2) - 1
+     putPNG$NmbrRemainingPings$I
+     SON$PulseIntervalMin$I = xSON$PulseIntervalMin$I
+     SON$PulseLengthSecs$I = xSON$PulseLengthSecs$I
+ 
+     for (PNG$DTA$Index = 6; PNG$DTA$Index <= PNG$NmbrRemainingPings$I;
+                             PNG$DTA$Index = PNG$DTA$Index + 1)
+       {
+        if (SON$PulseIntervalMin$I <= ilex [(2 * (PNG$DTA$Index-5)) + 1])
+          PNG$DTA$PingDelay$I = ilex [(2 * (PNG$DTA$Index-5)) + 1]
+        else
+          {
+           call smovv ("Delay #", msg, msg_len)
+           call smovib (PNG$DTA$Index, 2, msg, msg_len)
+           call smovv (" < minimum:  Delay set to ", msg, msg_len)
+           call smovib (SON$PulseIntervalMin$I, 3, msg, msg_len)
+           call smov  ($return, msg, msg_len)
+           PNG$DTA$PingDelay$I = SON$PulseIntervalMin$I
+          }
+        putPNG$DTA$PingDelay$I
+ 
+        if (SON$PulseLengthSecs$I >=  ilex [2 * (PNG$DTA$Index - 4)])
+          PNG$DTA$PulseLength$I = ilex [2 * (PNG$DTA$Index - 4)]
+        else
+          {
+           call smovv ("Pulse length #", msg, msg_len)
+           call smovib (PNG$DTA$Index, 2, msg, msg_len)
+           call smovv (" > maximum:  Length set to ", msg, msg_len)
+           call smovib (SON$PulseLengthSecs$I, 3, msg, msg_len)
+           call smov  ($return, msg, msg_len)
+           PNG$DTA$PulseLength$I = SON$PulseLengthSecs$I
+          }
+        putPNG$DTA$PulseLength$I
+       }
+     if (msg_len > 0)
+       call send_  (UNT$View$I, 0, msg_len, msg)
+    }
+ 
+return
+end
+ 

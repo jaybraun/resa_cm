@@ -1,0 +1,1147 @@
+ 
+#####   version 3.1  dated-  7apr81
+ 
+ 
+#####   version 3.0  dated- 22dec80
+ 
+ 
+# 
+#$%     MODULE                        UTILITY                   DATA
+#$%   SUBROUTINES                   SUBROUTINES                TABLES
+#$%   ===========                   ===========                ======
+#$%
+#$%     SOSMOD                         QTRIG                     UNT
+#$%     SOSDT1                         ANGPI
+#$%     SOPDT1                                                   SOP
+#$%     SOPSPD                                                   SOS
+#$%     SOPCLS                                                   SHC
+#$%     SOSNEW
+#$%     SOSSET
+#$%     SOSUP1
+#$%     SOSDYN
+#$%     SOSDL2
+#$%     SOSDLT
+#$%     SORDT1
+#$%     SOSELL
+#$%     ELLOFF
+#$%     INOUT
+#$%
+#$%
+#$%
+#$%   NOTES
+#$%   =====
+#$%
+#$%   1.  <FILENAME> INDICATES WHERE SUBROUTINE IS LOCATED.
+#$%
+#$%   2.  UTILITY SUBROUTINES NOT SHOWN ON FLOWCHART.
+#$%
+#$%   3.  * INDICATES NO OTHER SUBROUTINES CALLED.
+#$%
+#$%
+#$%
+#$%   FLOWCHART FOR FILE SOSMOD
+#$%   =========================
+#$%
+#$%   SOSMOD - SOSDT1 - SOSNEW*
+#$%                   - SOSCLS*
+#$%                   - SOPSPD*
+#$%                   - SOPDT1 - SORDT1*
+#$%                   - SOSSET - SOSDYN*
+#$%                            - SOSELL - ELLOFF*
+#$%                   - SOSUP1 - SOSDYN*
+#$%                            - SOSNEW*
+#$%                            - SOSELL - ELLOFF*
+#$%                            - SOSSET - SOSDYN*
+#$%                                     - SOSELL - ELLOFF*
+ 
+
+ 
+ include "bbctl.inc"
+ include "bbcode.inc"
+ include "bbunt.inc"
+ include "bbrtl.inc"                 # jb            7/19/91
+ include "bbsos.inc"
+ include "bbsop.inc"
+ include "bbshc.inc"
+ include "macros.inc"
+ define (BBImplicit, Implicit None)                 # MJC 7/13/2K (E2145)
+ Subroutine SOSMOD
+ #######################################################
+ #$%
+ #$% Purpose:   SOSMOD determines SOSUS detections
+ #$%            of orange submarines.
+ #$%
+ #$% Called By: WARCYC
+ #$%
+ #$% Calls:     SOSDT1
+ #$%
+ #$% Tables:    UNT
+ #$%
+ #$% Date:      APRIL 81
+ #$%
+ #$% Author:    Ron Williams
+ #$%
+ #######################################################
+ 
+ BBcommon
+ BBDeclare  (UNT$Pointer,
+             UNT$Type$I,
+             UNT$View$I,
+             UNT$Status$I,
+             UNT$Sosalertindx$I,
+             SOS$Pointer)                               # MJC 7/11/2K (E2145)
+ real    detection_age   # number of minutes since last time of detection
+ 
+ #$% if number of SOSUS targets are zero, return
+ if (nbr$sosus$target$types == 0)  return
+ 
+ #$% for each entry
+ for (unt$pointer$first;unt$pointer$ok;unt$pointer$next) #srch for orng subs
+    {
+     unt$type$i = xunt$type$i                   # get unit type
+ 
+     if (unt$type$i == $sub$code)               # unit must be a submarine
+        {
+         unt$view$i = xunt$view$i               # get view
+         if (unt$view$i >= $firstorange$view &  # the sub must be orange
+             unt$view$i <= $lastorange$view)
+            {
+             if (xUNT$SuperType$i == $Countermeasure$Code)      # 8/90 reh
+               next
+ 
+             unt$status$i = xunt$status$i       # get unit status
+             if (unt$status$i == $beingdeleted$code |   # skip if dead or
+                 unt$status$i == $sinking$code)         # sinking
+               next
+ 
+             #$% Determine if the sub has been detected by sosus before and if so,
+             #$% has the sosus ellipse generation interval passed
+             UNT$SosAlertIndx$I = xUNT$SosAlertIndx$I
+             if (UNT$SosAlertIndx$I != 0)   # if the index is != 0 then it has been detected before
+               {
+                SOS$Pointer$To  (UNT$SosAlertIndx$I)
+                detection_age = Game$Time - xsos$LastUpTime$f # for VTS
+                if (detection_age < Sosus$Time$Ellipse)   # if the ellipse update time
+                  next                                    # has not passed, skip this one
+               }
+ 
+             call SOSDT1(unt$pointer)   # see if submarine detected
+            }
+        }
+    }
+ 
+ 
+call Remove_old_sosus_tracks
+ 
+ return
+ end
+
+ 
+ 
+ 
+ subroutine SOSDT1(unt$pointer)
+ #######################################################
+ #$%
+ #$% Purpose:   SOSDT1 determines whether SOSUS has
+ #$%            detected the orange submarine pointed
+ #$%            to by the unit pointer.
+ #$%            If submarine has been detected get major
+ #$%            and minor axes and the orientation of the
+ #$%            major axis.
+ #$%
+ #$% Called By: SOSMOD
+ #$%
+ #$% Calls:     SOPDT1     SOPCLS     SOPSPD
+ #$%            SOSNEW     SOSSET     SOSUP1
+ #$%
+ #$% Tables:    UNT        SOP        SOS
+ #$%
+ #$% Date:      APRIL 81
+ #$%
+ #$% Author:    Ron Williams
+ #$%
+ #######################################################
+ 
+ BBcommon
+ BBDeclare  (UNT$Pointer,
+             UNT$Sosalertindx$I,
+             SOP$Pointer,
+             SOP$CLS$Index,
+             SOP$CLS$SPD$Index,
+             SOS$Pointer)                                   # MJC 7/11/2K (E2145)
+ integer IDTFLG,
+         IDXSOP,
+         INDXS2                                             # MJC 7/11/2K (E2145)
+ real SOSUS_PD,
+      X,
+      RANDOM                                                # MJC 7/11/2K (E2145)
+data x/0.0/		# Get next random number in sequence
+ real     detection_age    # amout of time since detection made in minutes
+ real     sosus_pd_cycle   # probability of detection this cycle
+data x/0.0/		# Get next random number in sequence
+ 
+ IDtFlg = $no             #initialize detection flag to no detection
+ 
+ Call SOPDT1(unt$pointer,      #determine region containing this orange sub
+             IdxSop)           #index into probability table
+ 
+ if (IdxSop == 0)  return       #if sub has not been located in any region
+ 
+ Sop$Pointer$to IdxSop
+ 
+ Call SOPCLS(unt$pointer,       #get index per class of orange sub
+             sop$cls$index)     #class index
+ 
+ if (sop$cls$index == 0)  return
+ 
+ call SOPSPD(unt$pointer,       #get index per speed of orange sub
+             sop$cls$spd$index)     #speed index
+ 
+ 
+ Unt$SosAlertIndx$I = xUnt$SosAlertIndx$I  #get index into sosus output table
+ if (Unt$SosAlertIndx$I != 0)              #has this orange sub been found before
+    {
+     sos$pointer$to Unt$SosAlertIndx$I  #point to sosus output for orange sub
+ 
+     detection_age = Game$Time - xsos$LastDetTime$f # for VTS
+ 
+     #$% if last detection time exceeds SOSUS time track
+     if (detection_age > Sosus$Time$Track)
+        {
+         #$% zero SOSUS alert index
+         Unt$SosAlertIndx$I = 0
+         putUnt$SosAlertIndx$I
+        }
+     #$% else
+     else
+        {
+         #$% if true altitude depth exceeds threshold
+         If (xUNT$TrueAltDepth$I > xSop$DepthThreshold$I)
+             sosus_pd = xSop$Cls$Spd$DeepOld$F
+         Else
+             sosus_pd = xSop$Cls$Spd$ShallowOld$F
+        }
+    }    # end of if unit has been detected before
+ 
+ #$% if SOSUS alert is zero
+ if (Unt$SosAlertIndx$I == 0)    # if ready for a fresh detection,
+    {                            # not an update
+     #$% if true altitude depth exceeds depth threshold
+     If (xUNT$TrueAltDepth$I > xSop$DepthThreshold$I)
+         sosus_pd = xSop$Cls$Spd$DeepNew$F
+     Else
+         sosus_pd = xSop$Cls$Spd$ShallowNew$F
+    }
+ 
+ sosus_pd_cycle = sosus_pd * Model$Interval # for VTS - JFR 1/28/94
+ 
+ if (sosus_pd_cycle > 1.0) sosus_pd_cycle = 1.0 # JFR 1/28/94 - probability can't be > 1
+ 
+ if (sosus_pd_cycle > random(x))
+    {
+     #$% if SOSUS alert is zero
+     if (Unt$SosAlertIndx$I == 0)
+        {
+         Call SOSNEW(Unt$SosAlertIndx$I,   #get index to new track in
+                     IndxS2)               #   sosus output table
+ 
+ 
+         putUnt$SosAlertIndx$I          #new sos pointer to unit table
+ 
+         call SOSSET(Unt$Pointer,       #go setp this new track
+                     Idxsop,
+                     Unt$SosAlertIndx$I)
+        }
+ 
+     else
+        {
+         Call SOSUP1(Unt$Pointer,       #update sosus data
+                     Idxsop,
+                     Unt$SosAlertIndx$I)
+        }
+    }
+ 
+ return
+ end
+
+ 
+ subroutine SOPDT1(unt$pointer,         #unit pointer for this orange sub
+                   unt$sopindx$i)       #index into probability table
+#######################################################
+ #$%
+ #$% Purpose:   SOPDT1 determines which region con-
+ #$%            tains the orange submarine pointed
+ #$%            to by the unit pointer.
+ #$%
+ #$% Called By: SOSDT1
+ #$%
+ #$% Calls:     SORDT1
+ #$%
+ #$% Tables:    UNT        SOP
+ #$%
+ #$% Date:      APRIL 81
+ #$%
+ #$% Author:    Ron Williams
+ #$%
+ #######################################################
+ 
+ # If IdxSop = 0 then the orange submarine cannot be
+ # located in any region.
+ 
+ BBcommon
+ BBDeclare  (UNT$Sopindx$I,
+             UNT$Pointer,
+             SOP$Pointer)               # MJC 7/13/2K (E2145)
+ integer INFLAG                         # MJC 7/13/2K (E2145)
+ real SOPSV1                            # MJC 7/13/2K (E2145)
+ Unt$SopIndx$I = xUnt$SopIndx$I         #get index into probability table
+ 
+ if (unt$sopindx$i != 0)
+    {
+     sop$pointer$to unt$SopIndx$I       #   and set pointer
+ 
+     call SORDT1(sop$pointer,           #determine if orange sub is still in
+                 unt$pointer,           #    same region
+                 inflag)                # $yes in region - $no not in region
+    }
+ #$% else
+ else
+    {
+     #$% set probability negative
+     sop$pointer = -1
+ 
+     #$% set in flag to NO
+     inflag = $no
+    }
+ 
+ #$% if region not found
+ if (inflag == $no)
+    {
+     sopsv1 = sop$pointer        #save pointer to skip old region
+ 
+     for (sop$pointer$first;sop$pointer$ok;sop$pointer$next)
+                                        #search for region containing
+                                        # orange sub
+        {
+         if (sop$pointer == SopSv1)  next   #skip old region
+ 
+         call SORDT1(sop$pointer,       #check all regions for this orange sub
+                     unt$pointer,
+                     inflag)         #$yes in region - $no not in region
+ 
+        if (inflag == $yes)  break      #get out if region located
+        }
+ 
+ 
+     if (inflag == $yes)        #if the region was found
+        {
+         unt$sopindx$i = sop$pointer$index      #if new region set probability
+        }                                       #  table index in position tbl
+     else
+        {
+         #$% zero probability index
+         unt$sopindx$i = 0
+        }
+ 
+     #$% save probability index
+     putunt$sopindx$i
+    }
+ 
+ return
+ end
+
+ 
+ 
+ 
+ subroutine SOPSPD(unt$pointer,
+                   sop$cls$spd$index)       #speed index
+#######################################################
+ #$%
+ #$% Purpose:   SOPSPD gets index into probability
+ #$%            table per speed of orange submarine.
+ #$%
+ #$% Called By: SOSDT1
+ #$%
+ #$% Calls:     None
+ #$%
+ #$% Tables:    UNT        SOP
+ #$%
+ #$% Date:      APRIL 81
+ #$%
+ #$% Author:    Ron Williams
+ #$%
+ #######################################################
+ 
+ BBcommon
+ BBDeclare  (SOP$CLS$SPD$Index,
+             UNT$Pointer)                               # MJC 7/13/2K (E2145)
+ #$% get true speed
+ sop$cls$spd$index= xunt$truespeed$f / 5.0 + .5
+ 
+ #$% if probable speed is less than one, set speed to one
+ if      (sop$cls$spd$index < 1)  sop$cls$spd$index = 1
+ #$% else if probable speed is greater than six, set speed to six
+ else if (sop$cls$spd$index > 6)  sop$cls$spd$index = 6
+ 
+ return
+ end
+
+ 
+ 
+ 
+ subroutine SOPCLS(unt$pointer,
+                   Sop$Cls$index)     #orange sub class index
+#######################################################
+ #$%
+ #$% Purpose:   SOPCLS gets index into probability
+ #$%            table per class of orange submarine.
+ #$%
+ #$% Called By: SOSDT1
+ #$%
+ #$% Calls:     None
+ #$%
+ #$% Tables:    UNT        SOP
+ #$%            SHC
+ #$%
+ #$% Date:      APRIL 81
+ #$%
+ #$% Author:    Ron Williams
+ #$%
+ #######################################################
+ 
+ BBcommon
+ BBDeclare  (SHC$Pointer,
+             UNT$Pointer,
+             SOP$CLS$Index)                             # MJC 7/13/2K (E2145)
+ Shc$Pointer = xunt$ShcPntr$i  #point to orange sub characteristics table
+ 
+ If (xunt$PropulsionMode$I == $Electric$Code)
+     Sop$Cls$Index = xShc$SopIndxElec$I
+ Else
+     Sop$Cls$Index = xShc$SopIndx$I
+ 
+ Return
+ End
+ 
+
+ 
+ 
+ 
+ 
+ Subroutine SOSNEW(IndxS1,      #get and pass new track index
+                   IndxS2)
+#######################################################
+ #$%
+ #$% Purpose:   SOSNEW updates indices when getting
+ #$%            index to a new slot.
+ #$%
+ #$% Called By: SOSDT1     SOSUP1
+ #$%
+ #$% Calls:     None
+ #$%
+ #$% Tables:    SOS
+ #$%
+ #$% Date:      APRIL 81
+ #$%
+ #$% Author:    Ron Williams
+ #$%
+ #######################################################
+ 
+ BBcommon
+ BBDeclare  (SOS$Pointer,
+             SOS$Nextindx$I)                            # MJC 7/13/2K (E2145)
+ integer INDXS1,
+         INDXS2                                         # MJC 7/13/2K (E2145)
+ indxs1 = Sosus$First$Free               #save pointer index to first
+                                        #   free slot
+ sos$pointer$to indxs1                  #point to this slot
+ 
+ sos$used = max(sos$used, sos$pointer$index * sos$entry)
+ 
+ indxs2 = xSos$NextIndx$I               #save pointer index to next free
+                                        #   slot on chain.  this is now
+                                        #   pointer index to first free slot.
+ Sos$NextIndx$I = 0                     #set the pointer index to the old
+ putSos$NextIndx$I                      #   first free slot to zero since
+                                        #   it will now become the last
+ if (Sosus$Last$Track != 0)            #if this is not the first track
+    {                                   #   ever then point to old last
+     Sos$Pointer$to Sosus$Last$Track   #  track and link old last track
+     Sos$NextIndx$I = indxs1           #   to new last track.  this new
+     putSos$NextIndx$I                 #   last track was the first free
+    }
+ 
+ else
+    {
+     Sosus$Last$Track = indxs1          #if this is the first track
+ 
+     Sosus$First$Track = indxs1         #   indicies to the first slot
+    }
+ 
+ Sosus$Last$Track = indxs1              #update last track
+ 
+ sosus$First$Free = indxs2              #update first free space
+ 
+ if (indxs1  == Sosus$Last$Free)       #if the first and last free space
+    {
+     Sosus$Last$Free = indxs2           #      pointer indicies are equal
+ 
+     if (indxs1 == Sosus$First$Track)  #if the first free space pointer
+        {
+         Sosus$First$Track = indxs2
+        }
+ 
+    }
+ 
+ Return
+ End
+ 
+
+ 
+ subroutine SOSSET(unt$pointer,
+                   IdxSop,              #probability table index
+                   index1)              #index into sos table - new
+#######################################################
+ #$%
+ #$% Purpose:   SOSSET initializes the new track.
+ #$%
+ #$% Called By: SOSDT1     SOSUP1
+ #$%
+ #$% Calls:     SOSELL     SOSDYN
+ #$%
+ #$% Tables:    UNT        SOS        SOP
+ #$%
+ #$% Date:      APRIL 81
+ #$%
+ #$% Author:    Ron Williams
+ #$%
+ #######################################################
+ 
+ BBcommon
+ BBDeclare  (SOS$Pointer,
+             SOS$Sequencenmbr$I,
+             SOS$Detectee$I,
+             SOS$Lastdettime$F,
+             SOP$Pointer,
+             UNT$Pointer)               # MJC 7/13/2K (E2145)
+ integer INDEX1,
+         NMBRTR,
+         IDXSOP                         # MJC 7/13/2K (E2145)
+ sos$pointer$to index1
+ NmbrTr = Sosus$TrackCntr               #get track number
+ 
+ #$% if track number is less than minimum or greater than maximum
+ If (NmbrTr < 1 | NmbrTr > 999)
+    {
+     #$% set track number to one
+     NmbrTr = 1
+    }
+ 
+ Sos$SequenceNmbr$I = NmbrTr            #init track
+ putSos$SequenceNmbr$I                  #   number
+ 
+ Sosus$TrackCntr = NmbrTr + 1
+ 
+ Sos$Detectee$I = Unt$pointer$Index     #initialize index back to
+ putSos$Detectee$I                      #   orange sub in unit table
+ 
+ sop$pointer$to IdxSop                  #point into probability table
+ 
+ call SOSELL(unt$pointer,               #generate SOSUS ellipse
+             sop$pointer,
+             sos$pointer)
+ 
+ sos$LastDetTime$f = Game$Time # for VTS
+ putsos$LastDetTime$f
+ 
+ #$% call get prop mode, course, speed of orange submarine
+ Call SOSDYN(Unt$Pointer,
+             Sos$Pointer)
+ 
+ Return
+ End
+
+ 
+ subroutine SOSUP1(unt$pointer,         #unit pointer
+                   IdxSop,              #index into probability table
+                   index1)              #index into sos table
+#######################################################
+ #$%
+ #$% Purpose:   SOSUP1 updates SOSUS tracks.
+ #$%
+ #$% Called By: SOSDT1
+ #$%
+ #$% Calls:     SOSELL     SOSDYN     SOSNEW
+ #$%            SOSSET
+ #$%
+ #$% Tables:    UNT        SOP        SOS
+ #$%
+ #$% Date:      APRIL 81
+ #$%
+ #$% Author:    Ron Williams
+ #$%
+ #######################################################
+ 
+ BBcommon
+ BBDeclare  (SOP$Pointer,
+             SOS$Pointer,
+             SOS$Lastdettime$F,
+             UNT$Sosalertindx$I,
+             UNT$Pointer)               # MJC 7/13/2K (E2145)
+ integer IDXSOP,
+         INDEX1,                        # MJC 7/13/2K (E2145)
+         index2 # jb E2208 (tp receive Sos$NextIndx$I) 12/12/00
+                         ## (Not used, here)
+ real DLTM1                             # MJC 7/13/2K (E2145)
+ #$% set SOP pointer
+ sop$pointer$to IdxSop
+ 
+ #$% set SOS pointer
+ sos$pointer$to index1
+ 
+ DlTm1 = Game$Time - xsos$LastDetTime$f # for VTS
+ If (DlTm1 < Sosus$Time$Track)
+    {
+     call SOSELL(unt$pointer,               #generate SOSUS ellipse
+                 sop$pointer,
+                 sos$pointer)
+ 
+     sos$LastDetTime$f = Game$Time # for VTS
+     putsos$LastDetTime$f
+ 
+     #$% call get prop mode, course, speed of orange submarine
+     Call SOSDYN(Unt$Pointer,
+                 Sos$Pointer)
+    }
+ 
+ else
+    {
+     call SOSNEW(Unt$SosAlertIndx$I, #get index to new track in
+             index2 )                # jb E2208 Sos$NextIndx$I  12/12/00
+ 
+     putunt$sosalertIndx$I              #new sos pointer to unit table
+ 
+     call SOSSET(unt$pointer,           #go setup this new track
+                 IdxSop,                #unit pointer
+                 index1)                #index into probability table
+                                        #index into sos table
+ 
+    }
+ 
+ return
+ end
+
+ 
+ 
+ 
+ Subroutine SOSDYN(Unt$Pointer,
+                   Sos$Pointer)
+#######################################################
+ #$%
+ #$% Purpose:   SOSDYN gets and stores propulsion mode,
+ #$%            course, and speed of orange submarine.
+ #$%
+ #$% Called By: SOSUP1     SOSSET
+ #$%
+ #$% Calls:     None
+ #$%
+ #$% Tables:    UNT        SOS
+ #$%            SHC
+ #$%
+ #$% Date:      APRIL 81
+ #$%
+ #$% Author:    Ron Williams
+ #$%
+ #######################################################
+ 
+ BBcommon
+ BBDeclare  (SOS$Propulsionmode$I,
+             SOS$Pointer,
+             SOS$Course$I,
+             SOS$Speed$I,
+             SOS$Class$C,
+             UNT$Rtlindx$I,
+             UNT$Pointer,
+             RTL$Pointer,
+             RTL$Classification1$C,
+             SHC$Pointer)                               # MJC 7/13/2K (E2145)
+ real FNORM,
+      RANDN,
+      FCOURSE,
+      UU,
+      X,
+      RANDOM,
+      SOSSPEED                                          # MJC 7/13/2K (E2145)
+ literal CSTRIP8                                        # MJC 7/13/2K (E2145)
+data x/0.0/		# Get next random number in sequence
+ 
+ #$% get SHC pointer
+ Shc$Pointer = xunt$ShcPntr$I
+ 
+ If (xShc$NoiseIndx$I == xShc$NoiseIndxElec$I)
+     Sos$PropulsionMode$I = $Nuclear$Code
+ Else If (xunt$PropulsionMode$I == $Diesel$Code)
+     Sos$PropulsionMode$I = $Diesel$Code
+ Else
+     Sos$PropulsionMode$I = $Electric$Code
+ 
+ #$% save prop mode
+ putSos$PropulsionMode$I
+ 
+ sos$Class$c = Xshc$Type$c
+ unt$RTLindx$I = Xunt$RTLindx$I                    # jb        7/19/91
+ if(unt$RTLindx$I != 0)                            # jb        7/19/91
+   {                                               # jb        7/19/91
+    RTL$Pointer$TO (unt$RTLindx$I)                 # jb        7/19/91
+    RTL$Classification1$C = xRTL$Classification1$C # jb        7/19/91
+    IF(RTL$Classification1$C != 0)                 # jb        7/19/91
+        sos$Class$c = RTL$Classification1$C        # jb        7/19/91
+   }                                               # jb        7/19/91
+ PUTsos$Class$c
+ 
+ FNORM = RANDN(0.0,1.0)                        # jb        7/19/91
+ #$% Modify true course and store:
+ FCOURSE = xUNT$TrueCourse$F + FNORM * $PI/2.0  # jb        7/19/91
+ $ANG2PI(FCOURSE)                               # jb        7/19/91
+ Sos$Course$I = FCOURSE*(180./$PI)              # jb        7/19/91
+ putSos$Course$I
+ 
+ #$% Modify true speed and store:
+ #Sos$Speed$I = 5*INT(xUNT$TrueSpeed$F/5. + .5)
+ UU = RANDOM(X)                                # jb        7/19/91
+ SosSpeed = xUNT$TrueSpeed$F * 0.5             # jb        7/19/91
+ SosSpeed = 2.0 *SosSpeed + UU *SIGN(SosSpeed,FNORM) +0.5 #7/19/91
+ Sos$Speed$I = SosSpeed                        # jb        7/19/91
+ putSos$Speed$I
+ 
+ Return
+ End
+ 
+ 
+ 
+ 
+ Subroutine SOSDL2(Sos$Pointer,         #pntr to item to be deleted fr sos tbl
+                   Indx1,               #index for same item
+                   MvFlag)              #see sub sosdlt
+#######################################################
+ #$%
+ #$% Purpose:   SOSDL2 puts deleted slot into free
+ #$%            chain and updates pointers.
+ #$%
+ #$% Called By: SOSDLT
+ #$%
+ #$% Calls:     None
+ #$%
+ #$% Tables:    SOS
+ #$%
+ #$% Date:      APRIL 81
+ #$%
+ #$% Author:    Ron Williams
+ #$%
+ #######################################################
+ 
+ #
+ # Update pointers
+ #
+ 
+ BBcommon
+ BBDeclare  (SOS$Nextindx$I,
+             SOS$Pointer)                       # MJC 7/13/2K (E2145)
+ integer INDX1,
+         MVFLAG                                 # MJC 7/13/2K (E2145)
+ #$% set next index to first free slot
+ Sos$NextIndx$I = Sosus$First$Free
+ putsos$nextindx$i
+ 
+ #$% set first free to index
+ Sosus$First$Free = indx1
+ 
+ #$% set MV flag to YES
+ MvFlag = $yes
+ 
+ Return
+ End
+ 
+
+ 
+ 
+ Subroutine SOSDLT(NmbrTr,      #number of track to be deleted
+                   MvFlag)      # = $no track not found, = $yes track found
+#######################################################
+ #$%
+ #$% Purpose:   SOSDLT changes the next chain index
+ #$%            so that the slot is removed from
+ #$%            the track chain and inserted into
+ #$%            the free chain.
+ #$%
+ #$% Called By: None
+ #$%
+ #$% Calls:     SOSDL2
+ #$%
+ #$% Tables:    SOS
+ #$%
+ #$% Date:      APRIL 81
+ #$%
+ #$% Author:    Ron Williams
+ #$%
+ #######################################################
+ 
+ #
+ # This routine changes the next chain index so that the slot is removed
+ #   from the track chain and inserted into the free chain.
+ #
+ 
+ BBcommon
+ BBDeclare  (SOS$Pointer,
+             SOS$Nextindx$I)                    # MJC 7/13/2K (E2145)
+ integer MVFLAG,
+         INDX1,
+         NMBRTR,
+         INDX2,
+         INDXSV                                 # MJC 7/13/2K (E2145)
+ #$% set track found to NO
+ MvFlag = $no
+ #$% set index to first track
+ Indx1 = Sosus$First$Track
+ 
+ #$% if index is zero, return
+ If (Indx1 == 0)  return
+ 
+ #$% set pointer to index
+ sos$pointer$to indx1
+ 
+ #$% if track number is sequence number
+ if (nmbrtr == xsos$sequencenmbr$i)
+    {
+     #$% get next index
+     Sosus$First$Track = xsos$nextindx$i
+ 
+     call SOSDL2(sos$pointer,        #put deleted slot into free chain
+                 indx1,
+                 mvflag)
+    }
+ 
+ else
+    {
+     repeat
+        {
+         #$% set next index to first index
+         indx2 = indx1
+ 
+         #$% get next index
+         indx1 = xsos$nextindx$i
+         #$% if first index is zero
+         if (indx1 == 0) break
+         #$% set SOS pointer
+         sos$pointer$to indx1
+ 
+         #$% if track number is sequence number
+         if (nmbrtr == xsos$sequencenmbr$i)
+            {
+             #$% save next index
+             indxsv = xsos$nextindx$i
+             sos$pointer$to indx2
+ 
+             #$% set next index to save index
+             sos$nextindx$i = indxsv
+             sos$pointer$to indx1
+             call SOSDL2(sos$pointer,   #put deleted slot into free chain
+                         indx1,
+                         mvflag)
+            }
+ 
+        }
+ 
+    }
+ 
+ Return
+ End
+ 
+
+ 
+ 
+ Subroutine SORDT1(sop$pointer,
+                   unt$pointer,
+                   inflag)
+#######################################################
+ #$%
+ #$% Purpose:   SORDT1 checks all regions for the
+ #$%            specific orange submarine.
+ #$%
+ #$% Called By: SOPDT1
+ #$%
+ #$% Calls:     INOUT
+ #$%
+ #$% Tables:    SOP        UNT
+ #$%
+ #$% Date:      APRIL 81
+ #$%
+ #$% Author:    Ron Williams
+ #$%
+ #######################################################
+ 
+ BBcommon
+ BBDeclare  (SOP$Pointer,
+             SOP$VER$Index,
+             UNT$Pointer)                       # MJC 7/13/2K (E2145)
+ integer NVERT,
+         INFLAG                                 # MJC 7/13/2K (E2145)
+ real xp[6],yp[6]
+ 
+ #$% get number of vertices
+ nvert = xsop$nbrvertices$i
+ 
+ inflag = $no
+ 
+ if (nvert > 0)
+    {
+     #$% for each entry
+     for (sop$ver$index=1;sop$ver$index<=nvert;sop$ver$index=sop$ver$index+1)
+        {
+         #$% get vertices longitude
+         xp[sop$ver$index] = xsop$ver$longitude$f
+         #$% get vertices latitude
+         yp[sop$ver$index] = xsop$ver$latitude$f
+        }
+ 
+     call inout(xunt$truelongitude$f,xunt$truelatitude$f,nvert,xp,yp,inflag)
+    }
+ 
+ return
+ end
+ 
+
+ 
+ Subroutine SOSELL(unt$pointer,
+                   sop$pointer,
+                   sos$pointer)
+#######################################################
+ #$%
+ #$% Purpose:   SOSELL generates SOSUS ellipse.
+ #$%
+ #$% Called By: SOSUP1     SOSSET
+ #$%
+ #$% Calls:     ELLOFF
+ #$%
+ #$% Tables:    UNT        SOP        SOS
+ #$%
+ #$%
+ #$% Date:      APRIL 81
+ #$%
+ #$% Author:    Ron Williams
+ #$%
+ #######################################################
+ 
+ 
+ BBcommon
+ BBDeclare  (SOS$Semimajoraxis$I,
+             SOS$Semiminoraxis$I,
+             SOS$Pointer,
+             SOS$Orientation$I,
+             SOS$Offsetlat$F,
+             SOS$Offsetlon$F,
+             SOS$Lastuptime$F,
+             SOP$Pointer,
+             UNT$Pointer)                           # MJC 7/13/2K (E2145)
+ real FMEAN,
+      STDDEV,
+      RNONE,
+      RANDN,
+      RNTWO,
+      X,
+      RANDOM                                        # MJC 7/13/2K (E2145)
+data x/0.0/		# Get next random number in sequence
+ 
+ FMean = xSop$MeanAxisLength$I
+ StdDev = xSop$StdDevLength$I
+ 
+ RNOne = abs(RANDN(FMean,StdDev))
+ RNTwo = abs(RANDN(FMean,StdDev))
+ 
+ RNone = RNone + 1.0
+ RNtwo = RNtwo + 1.0
+ 
+ if (RNOne >= RNTwo)
+    {
+     Sos$SemiMajorAxis$I = RNOne
+     Sos$SemiMinorAxis$I = RNTwo
+    }
+ 
+ else
+    {
+     Sos$SemiMajorAxis$I = RNTwo
+     Sos$SemiMinorAxis$I = RNOne
+    }
+ 
+ putSos$SemiMajorAxis$I
+ putSos$SemiMinorAxis$I
+ 
+ Sos$Orientation$I = 180*RANDOM(x)
+ putSos$Orientation$I
+ 
+ call ELLOFF(float(sos$semimajoraxis$i),     #call ellipse center offset routine
+             float(sos$semiminoraxis$i),
+             ($pi/180.)*sos$orientation$i,
+             xunt$truelatitude$f,
+             xunt$truelongitude$f,
+             xunt$costruelat$f,
+             sos$offsetlat$f,            #latitude of ellipse center
+             sos$offsetlon$f)            #longitude of ellipse center
+ 
+ putSos$OffsetLat$F
+ putSos$OffsetLon$F
+ 
+ sos$LastUpTime$f = Game$Time # for VTS
+ putsos$LastUpTime$f
+ 
+ return
+ end
+ 
+
+ 
+ define ($mi$to$rad,($pi/(180.*60.)))
+ 
+ 
+ 
+ Subroutine ELLOFF(semima,   #ellps cntr offset rout - semi-major ax lngth (in)
+                   semimi,               #semi-minor axis length (in)
+                   theta,                #orientation of major axis (in)
+                   tgtlat,               #true latitude of target (in)
+                   tgtlon,               #true longitude of target (in)
+                   tgtcos,               #cos of target latitude (in)
+                   eclat,                #latitude of ellipse center (out)
+                   eclon)                #longitude of ellipse center (out)
+ 
+#######################################################
+ #$%
+ #$% Purpose:   ELLOFF generates ellipse center offset.
+ #$%
+ #$% Called By: SOSELL
+ #$%
+ #$% Calls:     OTRIG      ANGPI
+ #$%
+ #$% Tables:    None
+ #$%
+ #$% Date:      APRIL 81
+ #$%
+ #$% Author:    Ron Williams
+ #$%
+ #######################################################
+ 
+ real FSIN,
+      THETA,
+      FCOS,
+      OFFMAJ,
+      SEMIMA,
+      SDSIZE,
+      RANDN,
+      OFFMIN,
+      SEMIMI,
+      ECLAT,
+      TGTLAT,
+      ECLON,
+      TGTLON,
+      TGTCOS                             # MJC 7/13/2K (E2145)
+ data sdsize/2.0/                        #number of std devs for ellipse
+ 
+ fsin = SIN(theta)                  # jb                    6/26/89
+ fcos = COS(theta)                  # jb                    6/26/89
+ 
+ #$% compute offset major axis
+ offmaj = randn(0.0,semima/sdsize)
+ #$% compute offset minor axis
+ offmin = randn(0.0,semimi/sdsize)
+ 
+ #$% compute latitude of ellipse center
+ eclat = tgtlat - $mi$to$rad * (offmaj * fcos + offmin * fsin)
+ #$% compute longitude of ellipse center
+ eclon = tgtlon - $mi$to$rad * (offmaj * fsin - offmin * fcos) / tgtcos
+ $angpi(eclon)
+ 
+ return
+ end
+ 
+
+ 
+subroutine Remove_old_sosus_tracks
+############################################################
+#$%
+#$% Purpose:   Remove_old_sosus_tracks loops through the SOS table
+#$%            and removes any onld tracks from the detection
+#$%            list.
+#$%
+#$% Called By: SOSMOD
+#$%
+#$% Calls:
+#$%
+#$%
+#$% Tables:    UNT        SOS
+#$%
+#$% Date:      August 2005
+#$%
+#$% Author:    James O. Allen
+#$%
+############################################################
+BBcommon
+BBDeclare  (SOS$Pointer,
+            SOS$LastDetTime$F,
+            SOS$Detectee$I,
+            UNT$Pointer)
+integer*4  curr_track_index, curr_trk_nxt
+integer*4  prev_track_index
+ 
+if (SOSUS$First$Track == 0)
+  return                       # no tracks to check
+ 
+prev_track_index = 0
+curr_track_index = SOSUS$First$Track
+ 
+while (curr_track_index != 0)
+{
+    SOS$pointer$to curr_track_index
+    curr_trk_nxt = xSOS$NextIndx$I
+ 
+    #$% get the detection time and see if track is old
+    sos$LastDetTime$f = xsos$LastDetTime$f
+    if (game$minute - sos$LastDetTime$f >= minutes$to$old) # an old track
+    {
+        # Previous track points to next track of current track
+        if (prev_track_index == 0)
+            SOSUS$First$Track = curr_trk_nxt
+        else
+        {
+            sos$pointer$to prev_track_index
+            PUTsos$NextIndx$i( curr_trk_nxt )
+        }
+ 
+        # Add current track to free list
+        sos$pointer$to curr_track_index
+        PUTsos$NextIndx$i( SOSUS$First$Free )
+        SOSUS$First$Free = curr_track_index
+ 
+        # Update last track
+        if (curr_track_index == SOSUS$Last$Track)
+            SOSUS$Last$Track = prev_track_index
+ 
+        #$% Update the UNT entry
+        SOS$Detectee$I = xSOS$Detectee$I
+        UNT$Pointer$To SOS$Detectee$I
+        putUNT$SOSAlertIndx$I (0)
+ 
+        #$% overwrite data in the old track entry
+        putSOS$SequenceNmbr$i (0)
+        putSOS$Detectee$i (0)
+ 
+        # Since current track is being deleted, previous track becomes current
+        curr_track_index = prev_track_index
+    }
+ 
+    #$% update the previous track index
+    prev_track_index = curr_track_index
+ 
+    #$% update the SWD pointer
+    curr_track_index = curr_trk_nxt
+}
+ 
+return
+end

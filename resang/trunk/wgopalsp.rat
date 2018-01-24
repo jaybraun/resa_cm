@@ -1,0 +1,689 @@
+####    FILE:   WGOPALSP.RAT
+ 
+####    DATE:   May 26, 1992
+ 
+####    This file contains the order processing routines for various ALSP
+####    related orders.
+ 
+include "alsp.inc"
+include "ascii.inc"
+include "bbcode.inc"
+include "bbctl.inc"
+include "bbagd.inc"
+include "bbboy.inc"
+include "bbmfd.inc"
+include "bblin.inc"
+include "bbown.inc"
+include "bbsta.inc"
+include "bbtat.inc"
+include "bbunt.inc"
+include "ptcolor.inc"
+include "macros.inc"
+include "orders.inc"
+
+define (BBImplicit, Implicit None)              # MJC 6/21/2K (E2145 - Implicit None)
+subroutine oalsp (nord,iview,nargs,args)
+##################################################################
+#$%
+#$% Purpose:    OALSP controls the processing of ALSP related
+#$%             orders.
+#$%
+#$% Called By:  EXEORD
+#$%
+#$% Calls:      Smovv
+#$%             Send
+#$%             Join_ALSP
+#$%             Resign_from_ALSP
+#$%             ALSP_Ping_ACM
+#$%
+#$% Tables:     None
+#$%
+#$% Date:       May 1992
+#$%
+#$% Author:     Carol Kropp
+#$%
+#$% Modified:   Carol Kropp - 1/94
+#$%             Added new command for game to PING the ACM.
+#$%
+##################################################################
+BBcommon
+ 
+integer         nord, iview, nargs
+literal         args[nargs]
+ 
+integer         msg_len
+character       msg[80]
+ 
+# msg = "Game was not identified to participate in an ALSP
+#        confederation during SINIT/GAMEINIT"
+ 
+  if (ALSP$Game == $NonALSPGame$Code)
+    {
+     msg_len = 0
+     call smovv ("Game was not identified to participate in an ", msg, msg_len)
+     call smovv ("ALSP confederation during SINIT/GAMEINIT.", msg, msg_len)
+     call send_ (iview, 0, msg_len, msg)
+     return
+    }
+ 
+  if (args[1] == $lex$JOIN$)
+    call Join_ALSP (nargs, args)
+  else if (args[1] == $lex$RESIGN$)
+    call Resign_from_ALSP (nargs, args)
+  else if (args[1] == $lex$DEFINE$ & args[3] == $lex$BOUNDARIES$)
+    call Define_ALSP_Playbox (nargs, args)
+  else if (args[1] == $lex$DEFINE$ & args[3] == $lex$TRACK$ &
+           args[4] == $lex$SHARING$)
+    call Define_ALSP_track_sharing (nargs, args)
+  else if (args[1] == $lex$ALSP$ & args[2] == $lex$PING$)
+    call ALSP_Ping_ACM ()
+ 
+return
+end
+
+ 
+subroutine Join_ALSP (nargs, args)
+##################################################################
+#$%
+#$% Purpose:    Join_ALSP removes any ghosts present in the
+#$%             blackboard, removes the ALSP id value from all
+#$%             RESA objects, initializes alsp information and
+#$%             places the call to join the confederation.
+#$%
+#$% Called By:  OALSP
+#$%
+#$% Calls:      Smovv
+#$%             Send
+#$%             ALSP_Init           <alsp_init.rat>
+#$%             Join_ALSP_Confed    <alsp_init.rat>
+#$%
+#$% Tables:     UNT
+#$%
+#$% Date:       May 1992
+#$%
+#$% Author:     Carol Kropp
+#$%
+#$% Modified:   Carol Kropp - 9/95 (E1456)
+#$%             Need to clear the ghosted ground data table.
+#$%             when joining.
+#$%
+#$%             Carol Kropp - 12/95 (E1524)
+#$%             With the Phased Join, RESA does not need to ask
+#$%             for refresh requests when the confed is put
+#$%             together.  Made it an option of the JOIN command.
+#$%
+##################################################################
+include "alsp.inc"
+BBcommon
+include "alsp_io_rat.inc"
+ 
+BBDeclare (UNT$Pointer,
+           AGD$Pointer,
+           BOY$Pointer,
+           MFD$Pointer,
+           TAT$Pointer)
+ 
+integer    nargs
+literal    args[20]
+ 
+integer    msg_len
+character  msg[80]
+real       game_time_in_hours
+integer    refresh_flag
+ 
+# msg = "Game is already joined to an ALSP confederation."
+ 
+  if (ALSP$Active != $no)
+    {
+     msg_len = 0
+     call smovv ("Game is already joined to ALSP confederation #",
+                                                       msg, msg_len)
+     call smovi (confederation, msg, msg_len)
+     call smovv (" as actor #", msg, msg_len)
+     call smovi (actor, msg, msg_len)
+     call smovv (".", msg, msg_len)
+     call send_ ($Neutral$View, 0, msg_len, msg)
+     return
+    }
+ 
+  #$% Keep the alspid values of RESA units. WIM and AWSIM remember alspids.
+  #$% Remove any ghosted units as there is a chance of duplicates.
+  #$% Since the ACM doesn't know about
+  #$% the ghosts it will send create messages when it receives update messages.
+  for (UNT$Pointer$First; UNT$Pointer$OK; UNT$Pointer$Next)
+    {
+     if (xUNT$InUse$I != $no)
+       {
+         if (xUNT$GhostedUnit$I == $yes)    # if identified as a ghost
+            putUNT$Status$I  ($BeingDeleted$Code)
+       }
+    }
+  call Remove_Units  # <wgmdrem.rat>
+ 
+  #$% Clear all the data from the ALSP Ground Data table
+  for (AGD$Pointer$First; AGD$Pointer$Valid; AGD$Pointer$Next)
+  {
+     AGD$Zero
+  }
+ 
+for (BOY$Pointer$First; BOY$Pointer$VALID; BOY$Pointer$Next)
+{
+    if (XBOY$Type$I != $null)
+    {
+        if (XBOY$GhostedUnit$I == $YES)
+        {
+            BOY$Zero
+        }
+    }
+}    # end of loop through BOY table
+ 
+for (mfd$pointer$first;mfd$pointer$valid;mfd$pointer$next)
+{
+    if (Xmfd$InUse$i != $no)
+    {
+        if (Xmfd$GhostedUnit$i == $yes)
+        {
+            mfd$Zero
+        }
+        else
+        {
+            PUTmfd$Alspid$i( 0 )        # Need to register minefield
+        }
+    }
+}
+for (tat$pointer$first;tat$pointer$valid;tat$pointer$next)
+{
+    if (Xtat$TargetIndx$i != 0)
+    {
+        PUTtat$SourceALSPId$i (0)
+    }
+}
+ 
+ 
+  if (nargs > 1)
+    {
+     if (args[2] == $lex$No$)
+       refresh_flag = $no
+     else
+       refresh_flag = $yes
+    }
+  else
+     refresh_flag = $no
+ 
+    game_time_in_hours = Game$Minute / 60.0
+    if (ALSP$Game == $NeverJoined$Code)
+      call ALSP_Init (game_time_in_hours, refresh_flag)
+    else        # == $PreviouslyJoined$Code
+      call Join_ALSP_Confed (game_time_in_hours, refresh_flag)
+ 
+    msg_len = 0
+    call smovv ("ALSP Join Phase Complete.", msg, msg_len)
+    call send_  ($Neutral$View, 0, msg_len, msg)
+ 
+return
+end
+
+ 
+subroutine Resign_from_ALSP (nargs, args)
+##################################################################
+#$%
+#$% Purpose:    Resign_from_ALSP resigns the game from the ALSP
+#$%             confederation and removes ghosts from the
+#$%             blackboard unless otherwise specified in the
+#$%             order.
+#$%
+#$% Called By:  OALSP
+#$%
+#$% Calls:      ALSP_resign         <transifsend.c>
+#$%             ALSP_Send_Del       <transifsend.c>
+#$%
+#$% Tables:     UNT
+#$%
+#$% Date:       May 1992
+#$%
+#$% Author:     Carol Kropp
+#$%
+#$% Modified:   Carol Kropp - 9/95 (E1456)
+#$%             When REMOVE is entered, need to clear the ghosted
+#$%             ground data table.
+#$%
+##################################################################
+BBcommon
+include "alsp_io_rat.inc"
+ 
+BBDeclare (UNT$Pointer,
+           AGD$Pointer)                     # MJC 6/21/2K (E2145 - Implicit None)
+ 
+integer    nargs
+literal    args[nargs]
+ 
+integer    msg_len, remove_flag, delete_flag
+integer	   err_val
+character  msg[80]
+ 
+# RESIGN [ | REMOVE ] [ | DELETE ]
+# msg = "Game is not joined to an ALSP confederation."
+ 
+  if (ALSP$Active == $no)
+    {
+     msg_len = 0
+     call smovv ("Game is not joined to an ALSP confederation.", msg, msg_len)
+     call send_  ($Neutral$View, 0, msg_len, msg)
+     return
+    }
+ 
+  remove_flag = $no
+  delete_flag = $no
+  if (nargs >= 2)       # RESIGN or DELETE or both were entered
+    {
+      if (args[2] == $lex$REMOVE$)
+        {
+         remove_flag = $yes
+         if (args[3] == $lex$DELETE$)
+            delete_flag = $yes
+        }
+      else if (args[2] == $lex$DELETE$)
+         delete_flag = $yes
+    }
+ 
+  #$% If specified in the resign command, remove ghosts from the blackboard.
+  if (remove_flag == $yes)
+    {
+     for (UNT$Pointer$First; UNT$Pointer$Valid; UNT$Pointer$Next)
+       {
+        if (xUNT$GhostedUnit$I == $yes)    # if identified as a ghost
+          putUNT$Status$I  ($BeingDeleted$Code)
+       }
+     call Remove_Units  # <wgmdrem.rat>
+ 
+     for (AGD$Pointer$First; AGD$Pointer$Valid; AGD$Pointer$Next)
+       AGD$Zero
+    }
+ 
+  #$% If specified in the resign command, send delete messges before the resign
+  if (ALSP$Review == $no)
+  {
+      if (delete_flag == $yes)
+         call alsp_resign ($alsp_resign_delete_owned)
+      else
+        call alsp_resign  ($alsp_resign_no_param)
+ 
+        ALSP$Active = $no
+        ALSP$Game   = $PreviouslyJoined$Code
+ 
+        msg_len = 0
+        call smovv ("Game has resigned from ALSP confederation #",
+                                                  msg, msg_len)
+        call smovi (confederation, msg, msg_len)
+        call smovv (" as actor #", msg, msg_len)
+        call smovi (actor, msg, msg_len)
+        call smovv (".", msg, msg_len)
+        call send_  ($Neutral$View, 0, msg_len, msg)
+    }
+ 
+return
+end
+
+ 
+subroutine Define_ALSP_playbox (nargs, args)
+##################################################################
+#$%
+#$% Purpose:    Define_ALSP_playbox processes the DEFINE ALSP
+#$%             BOUNDARIES command.  An actor-to-acm message
+#$%             is set up and sent to establish the playbox
+#$%             and a RESA polygon is created ("PBOX") for
+#$%             the control view.
+#$%
+#$% Called By:  XDefin              <wixdefin.rin>
+#$%
+#$% Calls:      DMS2rad
+#$%             ALSP_filter_attr    <transifsend.c>
+#$%             Polygon_create
+#$%
+#$% Tables:     None
+#$%
+#$% Date:       June 1992
+#$%
+#$% Author:     Carol Kropp
+#$%
+##################################################################
+BBcommon
+ 
+integer ILEN                                        # MJC 6/21/2K (E2145 - Implicit None)
+real DMS2RAD                                        # MJC 6/21/2K (E2145 - Implicit None)
+ 
+integer    nargs            # parameters
+literal    args[nargs]
+ 
+integer    msg_len
+character  msg[80]
+real       low_lat, high_lat, low_long, high_long   # positions in radians
+real       temp
+ 
+# Variables for actor-to-acm message
+integer    filter_flag [max_filters], dummy_list [max_list_len], dummy
+integer    int_dummy_two [2]
+%       character*32  dummy_string
+real       lats [2], longs [2]
+ 
+# DEFINE ALSP BOUNDARIES (for general playbox as, corner 1)
+#      <latitude> <longitude> (corner 2) <latitude> <longitude>;
+# args [1] = $lex#Define$
+# args [2] = $lex$ALSP$
+# args [3] = $lex$Boundaries$
+# args [4] = lat1
+# args [5] = long1
+# args [6] = lat2
+# args [7] = long2
+ 
+  if (ALSP$Game == $NonALSPGame$Code)
+    {
+     msg_len = 0
+     call smovv ("Game is not identified to"//" participate in an ALSP confederation.", msg, ilen)
+     call send_  ($Neutral$View, 0, msg_len, msg)
+     return
+    }
+ 
+#$%  Learned that the long boundaries will wrap around the Earth,
+#$%  so changed the command to specify SW and NE corners -
+#$%  no check is made on long to form a proper box.     clk 4/21/93
+ 
+  # Determine the low latitude and convert to radians
+  if (args[4] <= args[6])   # if lat1 is lower than lat2
+    {
+     low_lat  = DMS2rad (args [4])
+     high_lat = DMS2rad (args [6])
+    }
+  else  # lat2 is lower
+    {
+     low_lat  = DMS2rad (args [6])
+     high_lat = DMS2rad (args [4])
+ 
+     temp = args [6]        # swap the south and north
+     args [6] = args [4]    # latitudes for the polygon
+     args [4] = temp
+    }
+ 
+#$%  # Determine the low longitude and convert to radians
+#$%  if (args[5] <= args[7])   # if long1 is lower than long2
+#$%    {
+     low_long  = DMS2rad (args [5])
+     high_long = DMS2rad (args [7])
+#$%    }
+#$%  else  # long2 is lower
+#$%    {
+#$%     low_long  = DMS2rad (args [7])
+#$%     high_long = DMS2rad (args [5])
+#$%    }
+ 
+  #$% Set up the ALSP actor-to-acm message
+  filter_flag [$filter_attr_lat] = $yes
+  filter_flag [$filter_attr_long] = $yes
+ 
+  lats [1]  = low_lat * 180.0 / $pi     # put the boundaries into degrees
+  lats [2]  = high_lat * 180.0 / $pi
+  longs [1] = low_long * 180.0 / $pi
+  longs [2] = high_long * 180.0 / $pi
+ 
+  # void alsp_filter_attr(param_flag, class, num_id, id, lat, lon, alt,
+  #                      num_brnch, brnch, head, name_len, name, pct,
+  #                      num_side, side, num_size, size, spd, num_stat,
+  #                      stat)
+  call alsp_filter_attr (filter_flag, dummy, dummy, dummy_list, lats, longs,
+                         int_dummy_two, dummy, dummy_list, int_dummy_two,
+                         dummy, %%REF(dummy_string), int_dummy_two, dummy,
+                         dummy_list, dummy, dummy_list, int_dummy_two, dummy,
+                         dummy_list)
+ 
+  #$% Create a polygon named "PBOX" for the playbox area
+  call Polygon_create (nargs, args)
+ 
+return
+end
+
+ 
+subroutine Define_ALSP_track_sharing (nargs, args)
+##################################################################
+#$%
+#$% Purpose:    Define_ALSP_track_sharing processes the DEFINE ALSP
+#$%             TRACK SHARING command.  This allows RESA to detect
+#$%             using sensors on ghosted platforms
+#$%
+#$% Called By:  oalsp
+#$%
+#$% Calls:
+#$%
+#$% Tables:     None
+#$%
+#$% Date:       August 2012
+#$%
+#$% Author:     James O. Allen
+#$%
+##################################################################
+BBcommon
+ 
+integer    nargs            # parameters
+literal    args[nargs]
+ 
+BBdeclare (unt$view$i, unt$pointer)
+ 
+integer ilen
+character msg[80]
+ 
+#   1     2     3     4                                5           6
+# DEFINE ALSP TRACK SHARING (for ghosted platform) <addressee> [ON | OFF];
+ 
+if (ALSP$Game == $NonALSPGame$Code)
+{
+    ilen = 0
+    call smovv ("Game is not identified to" // _
+                " participate in an ALSP confederation.", msg, ilen)
+    call send  ($Neutral$View, 0, ilen, msg)
+    return
+}
+ 
+unt$view$i = ALSP$BlueGhost$View
+ 
+call UNTFND(UNT$VIEW$I,                         #receive view
+            args[5],                            #receive name
+            UNT$POINTER)                        #return pointer
+ 
+if (unt$pointer$ok)
+{
+    if (args[6] == $lex$ON$)  putunt$ALSPShared$i ($yes)
+    else                      putunt$ALSPShared$i ($no)
+}
+else
+{
+    ilen = 0
+    call smovv ("Platform ", msg, ilen)
+    call smovhn (args[4], $$Maxlit, msg, ilen)
+    call smovv (" not found for track sharing", msg, ilen)
+    call send  ($Neutral$View, 0, ilen, msg)
+    return
+}
+ 
+return
+end
+
+ 
+Subroutine Polygon_create (nargs,     # receive number words in command
+                           args)      # command
+##################################################################
+#$%
+#$% Purpose:    Polygon_create generates a red POLYGON of the
+#$%             ALSP playbox for plot on the control
+#$%             geo-display.
+#$%
+#$% Called by:  Define_ALSP_Playbox
+#$%
+#$% Calls:      smov..
+#$%             send
+#$%             DMS2rad
+#$%
+#$% Date:       June 1992
+#$%
+#$% Author:     Carol L. Kropp
+#$%
+####################################################################
+BBcommon
+ 
+# DEFINE ALSP BOUNDARIES (for general playbox as, corner 1)
+#      <latitude> <longitude> (corner 2) <latitude> <longitude>;
+# args [1] = $lex#Define$
+# args [2] = $lex$ALSP$
+# args [3] = $lex$Boundaries$
+# args [4] = lat1
+# args [5] = long1
+# args [6] = lat2
+# args [7] = long2
+ 
+BBDeclare (STA$Pointer,
+           LIN$Pointer,
+           LIN$Name$C,
+           LIN$PTS$Index,
+           LIN$PTS$latitude$F,
+           LIN$PTS$longitude$F)                     # MJC 6/21/2K (E2145 - Implicit None)
+real DMS2RAD                                        # MJC 6/21/2K (E2145 - Implicit None)
+literal CSTRIP8                                     # MJC 6/22/2K (E2145 - Implicit None)
+integer   nargs
+literal   args[nargs]
+ 
+integer    msg_len, free_slot, found
+character  msg[80]
+ 
+  for (STA$Pointer$First; STA$Pointer$Valid; STA$Pointer$Next)
+    {
+     if (xSTA$View$I == $Neutral$View)
+        {
+          found = $no
+          free_slot = $no
+          for (LIN$Pointer$First; LIN$Pointer$Valid; LIN$Pointer$Next)
+            {
+             if (xLIN$Station$i == 0)       # if slot not in use
+               {
+                if (free_slot == $no)
+                  free_slot = LIN$Pointer
+               }
+             else if (xLIN$Name$C == 'PBOX')
+               {
+                found = $yes
+                break
+               }
+            }    # End FOR thru LIN table
+ 
+          if (found == $no)       # if the polygon PBOX did not exist
+            {
+             if (free_slot == $no)
+               {
+                msg_len = 0
+                call smovv ("No room in LIN table for the playbox.", msg, msg_len)
+                call send_  ($Neutral$View, 0, msg_len, msg)
+                return
+               }
+             else           # there is an empty slot available
+               LIN$Pointer = free_slot
+            }
+ 
+          LIN$Name$C = 'PBOX'
+          putLIN$Name$C
+          putLIN$Color$I ($color$red)
+          putLIN$View$I  ($Neutral$View)
+          putLIN$STATION$I (STA$Pointer$Index)
+          putLIN$NumPTS$I (4)
+ 
+          LIN$PTS$Index = 1
+          LIN$PTS$Latitude$F  = DMS2rad (args [4])
+          putLIN$PTS$Latitude$F
+          LIN$PTS$Longitude$F = DMS2rad (args [5])
+          putLIN$PTS$Longitude$F
+ 
+          LIN$PTS$Index = 2
+          LIN$PTS$Latitude$F  = DMS2rad (args [4])
+          putLIN$PTS$Latitude$F
+          LIN$PTS$Longitude$F = DMS2rad (args [7])
+          putLIN$PTS$Longitude$F
+ 
+          LIN$PTS$Index = 3
+          LIN$PTS$Latitude$F  = DMS2rad (args [6])
+          putLIN$PTS$Latitude$F
+          LIN$PTS$Longitude$F = DMS2rad (args [7])
+          putLIN$PTS$Longitude$F
+ 
+          LIN$PTS$Index = 4
+          LIN$PTS$Latitude$F  = DMS2rad (args [6])
+          putLIN$PTS$Latitude$F
+          LIN$PTS$Longitude$F = DMS2rad (args [5])
+          putLIN$PTS$Longitude$F
+ 
+          #$% reset high-water mark in LIN table..
+          if (!LIN$Pointer$OK) LIN$last$to LIN$Pointer + LIN$entry - 1
+        }
+    }
+ 
+  msg_len = 0
+  call smovv ("ALSP playbox established - see polygon PBOX.", msg, msg_len)
+  call send_  ($Neutral$View, 0, msg_len, msg)
+ 
+return
+end
+
+ 
+subroutine ALSP_Ping_ACM ()
+##################################################################
+#$%
+#$% Purpose:    ALSP_Ping_ACM creates a message to send in the
+#$%             PING message and calls the routine to send the
+#$%             message to the ACM.  This is for checking
+#$%             connectivity between the ACTOR and ACM.
+#$%
+#$% Called By:  OALSP
+#$%
+#$% Calls:      Smov..
+#$%             Send
+#$%             Echo..
+#$%             Write
+#$%             ALSP_Ping           <transifsend.c>
+#$%
+#$% Tables:     None
+#$%
+#$% Date:       Jan. 24, 1994
+#$%
+#$% Author:     Carol Kropp
+#$%
+##################################################################
+BBcommon
+include "alsp_io_rat.inc"
+ 
+integer    msg_len, ping_msg_len
+character  msg[80]
+vaxcharacter*max_str_len  ping_msg
+ 
+# ALSP PING (acm)
+# ping_msg = "From actor <name> on node <node>."
+ 
+# msg = "Cannot PING ACM - Game is not joined to an ALSP confederation."
+ 
+  if (ALSP$Active == $no)
+    {
+     msg_len = 0
+     call smovv ("Cannot PING ACM - Game is not"//" joined to an ALSP confederation.", msg, msg_len)
+     call send_  ($Neutral$View, 0, msg_len, msg)
+     return
+    }
+  else
+    {
+     ping_msg_len = 5 + name_len + 9 + node_len + 1
+     ping_msg = "From"//alsp_actor_name[1:name_len]//_
+                " on node "//alsp_node_name[1:node_len]//"."
+ 
+     call echor
+     call echov ("PINGing the ACM...")
+     write (6, 100)  ping_msg (1:ping_msg_len)
+     100 format (t19, 1x, a)
+ 
+     call ALSP_Ping (ping_msg_len, %%REF(ping_msg))
+    }
+ 
+return
+end

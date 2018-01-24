@@ -1,0 +1,2480 @@
+# WSORDERS.RAT - Process FOR <addressee> [ ORDERS | SENSOR ] commands
+#                FOR <addressee> JECEWSI (factors); SMM 7/96 (E1626)
+ 
+include "bbctl.inc"
+include "bbcode.inc"
+ 
+include "ascii.inc"
+include "orders.inc"
+include "plplay.inc"
+ 
+include "bbaml.inc"
+include "bbcjc.inc"
+include "bbdeq.inc"
+include "bbiff.inc"
+include "bbirc.inc"
+include "bbjam.inc"
+include "bbord.inc"
+include "bbrad.inc"
+include "bbrmt.inc"
+include "bbshc.inc"
+include "bbsta.inc"
+include "bbsui.inc"
+include "bbtor.inc"
+include "bbunt.inc"
+include "bbvue.inc"
+include "bbjew.inc"            # jecewsi table - JFR 8/30/94
+include "bbbtt.inc"            # be & tin table - clk 6/95 (E1419)
+include "bbpim.inc"            # SMM 5/99 (E1224)
+
+define (BBImplicit, Implicit None)      # MJC 4/24/2000
+ 
+subroutine Pl_orders (nord, STA$Pointer, nargs, args)
+########################################################
+#$%
+#$% Purpose:   Pl_orders processes the ORDERS, SENSOR and
+#$%            JECEWSI commands.
+#$%
+#$% Called By: PL_EXEORD
+#$%
+#$% Calls:     smov..       send        ehoc..
+#$%            SORDER       XORDER      FGTASK
+#$%            SYNBLD       PLINE
+#$%
+#$% Tables:    ORD        UNT
+#$%
+#$% Date:      APRIL 80
+#$%
+#$% Author:    Dana Wills
+#$%
+#$% Modified:  Kirk Chang - 4/93 (E1075)
+#$%            The code was previously part of wgop.rat.
+#$%            FOR <addressee> [ ORDERS | SENSOR ] commands
+#$%            moved to the station program.
+#$%            Changed the "send" calls to "echoh" and
+#$%            removed the references to view.
+#$%
+#$%            James Allen - 2/96 (E1467)
+#$%            Added display of port arrival time for ships.
+#$%
+#$%            Susan Miller - 7/96 (E1626)
+#$%            Added display of values received from JECEWSI
+#$%
+#$%            John McCormick - 1/98 (E1926)
+#$%            Corrected Game_DTG argument to be a real.
+#$%            Made time negative (ilex[2]) rather than ilex[3].
+#$%
+########################################################
+ 
+BBcommon
+Playcommon
+ 
+BBDeclare  (UNT$Pointer, UNT$Type$I,
+            ORD$Pointer, ORD$Code$I,
+            ORD$WRD$Index, ORD$Addressee$C)             # MJC 8/7/2000
+integer KK, I, ICNT, ISNUMBER, INUM, IND,               # MJC 4/24/2000
+        ILEN, IHEAD, ITASKN, ISTAT, LEN                 # MJC 4/24/2000
+literal CSTRIP8                                         # MJC 4/24/2000
+integer nord, nargs, dest[arith($max$args,*,8)]
+integer*4 sta$pointer, iview
+literal iaddr,kadd,ilex[25]
+literal args[nargs]
+integer game_DTG, isave
+integer*4 ORD$NbrOfTracks$I
+integer stka[$Max$TaskGroup],cnta,flga
+integer bnumber
+ 
+literal addr_name
+character msg[40]
+real  rtime        # real arg to Game_DTG - jhm 1/98 (E1926)
+ 
+iaddr = curfor
+iview = Xsta$view$I
+if (iview <= $Neutral$view)
+    iview = 0
+call expord (iview,iaddr,cnta,stka,flga,nord)
+ 
+kk = 0
+call smov ($Lparen,msg,kk)
+call smoviz (Game_DTG(GAME$TIME), 6,msg,kk)
+call smov ($Rparen,msg,kk)
+call smov ($SPACE,msg,kk)
+isave = kk
+ 
+for (i = 1; i <= cnta; i = i+1)
+    {
+    icnt = 0                        # clear counter
+    unt$pointer = stka[i]
+ 
+    if (unt$pointer == 0)           # if unit pointer is zero
+        {
+        kadd = iaddr                # set addressee name and view
+        }
+    else
+        {
+        kadd = Xunt$name$c
+        }
+ 
+    if (args[1] == $lex$SENSOR$)     # 2/9/93 B. Burkhalter
+        {                               # separate sensor status command (E1066)
+        if (unt$pointer == 0)          # if unit pointer is zero
+            {
+            kk = 0
+            call smovhn (kadd, $$MaxLit, msg, kk)
+            call smovv  (" is an unknown addressee!", msg, kk)
+            call echoh  (msg, kk)
+            }
+        else
+            call xorder_sensors(unt$pointer)
+        next
+        }
+ 
+    if (args[1] == $lex$JECEWSI$) # SMM 7/96 (E1626)
+        {
+        if (xUNT$GhostedUnit$I != $yes)
+            {
+            if (unt$pointer == 0)          # if unit pointer is zero
+                {
+                kk = 0
+                call smovhn (kadd, $$MaxLit, msg, kk)
+                call smovv  (" is an unknown addressee!", msg, kk)
+                call echoh  (msg, kk)
+                call echor  # smm 11/96 (E1702) - print string
+                next        # and proceed to the next unit
+                }
+            if (jecewsi$game == $no)
+                {
+                kk = 0
+                call smovv  ("  Game not initialized as a JECEWSI game.  ", msg, kk)
+                call echoh  (msg, kk)
+                call echor  # smm 11/96 (E1702) - print string
+                return      # and return out of subroutine
+                }
+            else
+                {
+                call xorder_jecewsi(unt$pointer)
+                }
+            }
+        else # it is a ghosted unit
+            {
+            kk = 0
+            call smovhn (kadd, $$MaxLit, msg, kk)
+            call smovv (" is a ghosted unit - orders are unknown", msg, kk)
+            call echoh  (msg, kk)
+            call echor
+            }
+        next
+        }
+ 
+    if (kadd == $LEX$MISSION$) addr_name = 'Mission'  # jb            5/18/87
+    else if ($isNumeric(kadd)) Call FGtask (int(kadd),addr_name)
+    else                       addr_name = kadd
+ 
+    UNT$Type$I = xUNT$Type$I
+    if (UNT$Type$I == $Surface$Code |            # joa 2/96 (E1467)
+        UNT$Type$I == $SurfaceWithAC$Code)       # display when arrived in port
+        {                                          # if it has.
+        if (xUNT$TimePortArrival$F > 0.0)
+            {
+            kk = isave
+            call smovhn (addr_name, $$MaxLit, msg, kk)
+            call smovv  (" arrived in port at ",msg,kk)
+            call smoviz (Game_DTG(xUNT$TimePortArrival$F), 6, msg, kk)
+            call echoh  (msg, kk)
+            call echor
+            }
+        }
+ 
+    if (iview <= $Neutral$view)             # if view is CONTROL
+        {
+        #$% if address is all, set add negative, else if address is zip,
+        #$% set add to zero
+        if      (iaddr == 'ALL') kadd = -1
+        else if (iaddr == 'ZIP') kadd = 0
+        }
+ 
+    for (ord$pointer$first; still_OK (ORD) ; ord$pointer$next)       # each order
+        {
+        if (Xord$status$i == $BeingDeleted$code) next
+ 
+        call sorder (istat,kadd,ord$pointer,unt$pointer)            # select it ?
+ 
+        if (istat == $no) next                      # status NO... get next entry
+ 
+        ord$Addressee$c = Xord$Addressee$c          # get addressee and code
+        ord$Code$i = Xord$Code$i
+ 
+        icnt = icnt + 1                             # increment counter
+        if (icnt == 1)
+            {
+            kk = isave
+            call smovv ("Pending orders for ",msg,kk)
+            call smovhn (addr_name,$$MaxName,msg,kk) # SMM 8/99 E2141
+            #call send (-nview,0,kk,msg)
+            call echoh (msg,kk)
+            call echor
+            }
+ 
+        ilex[1] = ord$Addressee$c                   # set addressee
+        ilex[2] = xord$Start$i                      # set order start time
+        ilex[3] = ord$Code$i                        # set side code
+ 
+        inum = ilex[3]                              # set parameters for SYNBLD
+        ind = $no
+ 
+        if (xord$up$i == $no    &                                   # DEW E2206
+            xord$sequence$i > 1 &                                   # DEW E2206
+            xORD$DtgStart$I == $NO)                                 # DEW E2206
+            {
+            ind = $yes                                      # time is relative
+            }
+ 
+        if (xORD$DtgStart$I == $YES | ind == $no)                   # DEW E2206
+            {
+            rtime = xORD$Start$i                                    # DEW E2206
+            ilex[2] = GAME_DTG(rtime)                               # DEW E2206
+ 
+            if (xORD$PAT$I == $yes)                         # PAT or TOT specified
+                ilex[2] = - ilex[2]                                 # DEW E2206
+            }
+ 
+        len = 3                                             # for each word entry
+        for (ord$wrd$index=1; ord$wrd$index$ok;ord$wrd$index=ord$wrd$index+1)
+        {
+            ORD$NbrOfTracks$I = xORD$NbrOfTracks$I
+            # if this is an attack order and the number of tracks is less than
+            # the nbr of arguments and we just read the last track number, break
+            if ((ilex[4] == $LEX$ATTACK$) &
+                (XORD$NbrArgs$I > ORD$NbrOfTracks$I + 1) &
+                (len == (4 + ORD$NbrOfTracks$I)))  break
+ 
+            if(len > 24)    BREAK   # <<<>>> prevent overrun?  1/6/85
+            len = len + 1                   # increment length counter
+            ilex[len] = Xord$wrd$$c         # set side length
+            if (ord$wrd$index == 3)         # Decode number of boats to launch
+            {
+                if (Xord$W01$C == $LEX$LAUNCH$)         # JOA UFL04 nested if
+                    if (Xord$W02$C == $LEX$BOAT$)
+                        if (Xord$W03$C < 0.0)
+                            ilex[len] = 1.0
+            }
+        }    # jb - NOTE: for Lat/Long, this shows [ddmm.fffff/dddmm]
+ 
+        ilen = 0
+        call smovh (msg,isave,dest,ilen)
+        ihead = ilen
+ 
+        if (ilex[1] != 0)                   # if an addressee
+            {
+            call smovv ("FOR ",dest,ilen)
+            if ($isnumeric(ilex[1]))
+                {
+                call fgtask (int(ilex[1]),itaskn)
+                call smovhn (itaskn,$$MaxLit,dest,ilen) # SMM 8/99 E2141
+                }
+            else
+                {
+                call smovhn (ilex[1],$$MaxName,dest,ilen) # SMM 8/99 E2141
+                }
+            call smov ($Space,dest,ilen)
+            }
+ 
+        call synbld (int(ilex[2]),      # time of execution
+                     ind,               # search plan order
+                     inum,              # order number
+                     len-3,             # number of quad-words of lex data
+                     ilex[4],           # lex array
+                     dest,              # output array
+                     ilen)              # returned length
+ 
+        call pline (dest,ilen,ihead)        # put the line out....
+        }  # End of ORD loop
+ 
+    # if counter is zero, call to display no orders pending
+    if (icnt == 0)
+        {
+        kk = isave
+        call smovhn (addr_name,$$MaxName,msg,kk) # SMM 8/99 E2141
+        if (xUNT$GhostedUnit$I != $yes)    # clk 6/92
+            {
+            call smovv (" has no orders pending",msg,kk)
+ 
+            if (!UNT$Pointer$Valid)     # E1030:  If no unit    clk 6/92
+                call smovv (" - unknown addressee", msg, kk)
+            }
+        else       # unit is a ghost         clk 6/92
+            call smovv (" is a ghosted unit - orders are unknown", msg, kk)
+ 
+        #call send (-nview,0,kk,msg)
+        call echoh (msg,kk)
+        call echor
+        }
+ 
+    # if unit pointer valid, call to display current orders
+    if (unt$pointer != 0)
+        {
+        if (xUNT$GhostedUnit$I != $yes) # If not a ghost check current orders - clk 6/92
+            {
+            call xorder(unt$pointer)
+ 
+            call xorder_guns (unt$pointer)
+            }
+        if (nargs > 1 & args[2] == $lex$with$)
+            call xorder_sensors(unt$pointer)
+        }
+    }  # End of stka loop
+ 
+return
+end
+ 
+
+subroutine xorder_guns (unt$pointer)
+ 
+########################################################
+#$%
+#$% Purpose:   xorder_guns lists all gun assignments aboard the platform.
+#$%
+#$% Called By: oOrder
+#$%
+#$% Calls:
+#$%
+#$% Tables:    UNT  DEQ
+#$%
+#$% Date:      Jan 1990
+#$%
+#$% Author:    Dane Wills
+#$%
+#$% Modified:  Kirk Chang - 4/93 (E1075)
+#$%            The code was previously part of wgop.rat.
+#$%            FOR <addressee> [ ORDERS | SENSOR ] commands
+#$%            moved to the station program.
+#$%            Changed the "send" calls to "echoh" and
+#$%            removed the references to view.
+#$%
+#$%            Susan Miller - 2/96 (E1104)
+#$%            Fixed the message that is displayed when
+#$%            a unit has assigned guns to attack a
+#$%            particular target.
+#$%
+########################################################
+ 
+define ($maxmsgx, 240)
+ 
+BBcommon
+ 
+BBDeclare  (DEQ$Pointer,
+            DEQ$Guntarget$I,
+            DEQ$Gunflag$I,
+            UNT$Pointer,
+            TOR$Pointer)           # MJC 4/24/2000
+integer I_SWITCH_1                 # MJC 4/24/2000
+integer GAME_DTG                   # MJC 4/24/2000
+literal CSTRIP8                    # MJC 4/24/2000
+integer      ilen, isave
+literal      shootee, gun_name, target_name
+character    msgx[$maxmsgx]
+ 
+ilen = 0
+call smov ($Lparen,msgx,ilen)
+call smoviz (Game_DTG(GAME$TIME), 6,msgx,ilen)
+call smov ($Rparen,msgx,ilen)
+call smov ($SPACE,msgx,ilen)
+call smovv ("Gun Assignments are: ",msgx, ilen)
+call smov ($tab,msgx,ilen)
+call smov (6,msgx,ilen)
+ 
+isave = ilen
+ 
+for_DEQ_CHAIN
+    {
+ 
+    if (Xdeq$ident$i != $Gun$Code) next
+ 
+    deq$guntarget$i = Xdeq$guntarget$i
+ 
+    if (deq$guntarget$i == 0) next
+ 
+    tor$pointer = Xdeq$Pntr$i
+    gun_name = Xtor$type$c
+ 
+    deq$gunflag$i = xdeq$gunflag$i
+ 
+    if (deq$gunflag$i == $posit$guncode)
+        shootee = 'Position'
+    else
+        shootee = target_name(unt$pointer,deq$guntarget$i)
+ 
+#    call smov ($return,msgx,ilen)   # SMM 2/96 (E1104)
+ 
+    if (ilen+35 > $maxmsgx)         # check for overflow
+        {
+        call smovv ("  ...",msgx,ilen)
+        break
+        }
+ 
+    call smovhn(gun_name,$$MaxLit,msgx,ilen)
+    call smovv (" at ",msgx,ilen)
+    call smovhn(shootee,$$MaxLit,msgx,ilen)
+ 
+    switch (deq$gunflag$i)
+        {
+        case $posit$guncode   : continue
+        case $take$guncode    : call smovv (" (to take)",msgx,ilen)
+        case $fired$guncode   : call smovv (" (taking)",msgx,ilen)
+        case $commence$guncode: call smovv (" (commence)",msgx,ilen)
+        }
+ 
+    }
+ 
+if (ilen > isave)
+    {
+    #call send(nview,0,ilen,msgx)
+    call echoh(msgx,ilen)
+    call echor
+    }
+ 
+return
+end
+ 
+
+ 
+subroutine xorder_sensors(unt$pointer)
+ 
+########################################################
+#$%
+#$% Purpose:   xorder_SENSORS lists all sensors aboard the platform.
+#$%
+#$% Called By: oOrder
+#$%
+#$% Calls:
+#$%
+#$% Tables:    UNT  DEQ
+#$%
+#$% Date:      OCTOBER 88
+#$%
+#$% Author:    Richard Schauer
+#$%
+#$% Modified:  Kirk Chang - 4/93 (E1075)
+#$%            The code was previously part of wgop.rat.
+#$%            FOR <addressee> [ ORDERS | SENSOR ] commands
+#$%            moved to the station program.
+#$%            Changed the "send" calls to "echoh" and
+#$%            removed the references to view.
+#$%
+#$%            Susan Miller - 2/97 (E1732)
+#$%            Added display of IFF modes for units that have
+#$%            their Transponder IFF active.
+#$%
+########################################################
+ 
+BBcommon
+ 
+BBDeclare  (DEQ$Pointer, DEQ$Ident$I, DEQ$Emitterindx$I,
+            JEW$OR$Index, JEW$Pointer, JEW$BLL$Index,
+            JEW$OR$lat$F, JEW$OR$long$F, JEW$OR$bearing$F,
+            RAD$Pointer, RAD$Radartype$I,
+            IFF$Pointer, UNT$Pointer)                           # MJC 4/24/2000
+integer     GAME_DTG                                            # MJC 4/24/2000
+literal     CSTRIP8                                             # MJC 4/24/2000
+integer     JJ, ICHAN, KK, I_SWITCH_1, I_SWITCH_2
+real*4       mth$alog2, allbands
+character    msg2[ARB]
+Character msg1[ARB]
+integer   isave
+ 
+# smm 2/97 (E1732) - variables to do IFF modes/codes
+integer mode
+integer Base_10_to_Base_8
+integer UNT$View$I, only_mode3, display_modes
+
+BBDeclare  (TBL$Pointer, TBL$Name$V, TBL$FullName$V)
+VMSchar     VSTRIP*ARB
+ 
+jj = 0
+call smov ($Lparen,msg1,jj)
+call smoviz (Game_DTG(GAME$TIME), 6,msg1,jj)
+call smov ($Rparen,msg1,jj)
+call smov ($SPACE,msg1,jj)
+isave = jj
+ 
+DEQ$Pointer$To  (UNT$Pointer$Index)
+if (xDEQ$Ident$I == $Null$Code) # clk 2/9/93 (E1106)
+  {
+   Call smovv  ("No sensors aboard ", msg1, jj)
+   call smovhn (xunt$name$c,$$MaxLit, msg1, jj)
+   #call send   (nview, 0, jj, msg1)
+   call echoh (msg1,jj)
+   call echor
+   return
+  }
+ 
+Call SMOVV("Sensors aboard ",msg1,jj)
+call smovhn(xunt$name$c,$$MaxLit,msg1,jj)
+#call send (nview,0,jj,msg1)    # 29 vice 26        1/10/91
+call echoh (msg1,jj)
+call echor
+ 
+if (jecewsi$game == $yes) jew$pointer$to (Unt$Pointer$Index) # set JEW table pointer - JFR 8/10/94
+ 
+for_DEQ_CHAIN
+    {
+    deq$ident$i = Xdeq$ident$i
+ 
+    kk = 0
+    call smovh (msg1,isave,msg2,kk)
+    call smovv ("- ",msg2,kk)
+    call smovhn(xDEQ$Type$C,$$MaxLit,msg2,kk)
+ 
+    tbl$pointer = xDEQ$pntr$i
+    TBL$FullName$V = xTBL$FullName$V 
+    if (TBL$FullName$V > " ")
+		{
+   		call smovv ("-",msg2,kk)
+        call smovvt (TBL$FullName$V,msg2,kk)
+		}
+    
+   	call smovv (" ",msg2,kk)
+ 
+    deq$ident$i = Xdeq$ident$i
+    deq$EmitterIndx$I = xdeq$EmitterIndx$I # (index to OR subtable for bearing) JFR 8/10/94
+    JEW$BLL$Index = deq$EmitterIndx$I # set index to flag for position vs. bearing - JFR 8/10/94
+    switch (deq$ident$i)
+        {
+        case $Radar$Code               :
+            {
+            rad$pointer = Xdeq$Pntr$i
+            rad$RadarType$i = Xrad$RadarType$i
+            switch (rad$RadarType$i)
+                {
+                case $Air$Code         : call smovv("Air Search ",msg2,kk)
+                case $Surface$Code     : call smovv("Surface Search ",msg2,kk)
+                case $FireControl$Code : call smovv("F/C ",msg2,kk)
+                case $Approach$Code    : call smovv("Approach ",msg2,kk)
+                }
+            call smovv("Radar",msg2,kk)
+            }
+        case $Sonar$Code               : call smovv("Active Sonar",msg2,kk)
+        case $ESM$Code                 : call smovv("ESM",msg2,kk)
+        case $Jammer$Code              : call smovv("Jammer",msg2,kk)
+        case $RadarJammer$Code         : call smovv("Radar Jammer",msg2,kk) # JFR 8/10/94
+        case $RADComJammer$Code        : call smovv("Radar/Comm Jammer",msg2,kk) # JFR 8/10/94
+        case $CommunicationJammer$Code : call smovv("Comm Jammer",msg2,kk)
+        case $PasSonar$Code            : call smovv("Passive Sonar",msg2,kk)
+        case $IFF$Code                 :
+            {
+             call smovv("IFF",msg2,kk)
+             IFF$Pointer = xDEQ$Pntr$i
+             if (xIFF$Function$i == $INTERROGATOR$CODE)
+               call smovv(" Interrogate",msg2,kk)
+             else
+               call smovv(" Transponder",msg2,kk)
+            }
+        case $MAD$Code                 : continue
+        case $LIDAR$Code               : continue
+        case $EOIR$Code                :                # clf 1/26/93
+            {
+            if (level$ir == 1) call smovv("Infra-Red",msg2,kk)
+            }
+        default: NEXT
+        }
+ 
+     if (xdeq$on$i == $yes)
+        {
+         if ((jecewsi$game == $yes) &                     # JFR 9/15/94
+             (deq$ident$i == $RadarJammer$Code   |         # display the jammer bearing/position
+              deq$ident$i == $RadComJammer$Code  |
+              deq$ident$i == $CommunicationJammer$Code |
+              deq$ident$i == $Jammer$Code))
+            {
+             # display the jammer bearing/position
+             # get index to BLL subtable - JFR 8/10/94
+             JEW$BLL$INDEX = deq$EmitterIndx$I
+             if (xJEW$BLL$Flags$I == $yes) # JFR 8/10/94 (jecewsi)
+                { # activated with respect to an absolute position - JFR 8/10/94
+                 JEW$OR$INDEX = deq$EmitterIndx$I # get index to OR subtable - JFR 8/10/94
+                 JEW$OR$Lat$F = xJEW$OR$Lat$F   # get lat jammer pointer at  - JFR 8/10/94
+                 JEW$OR$Long$F = xJEW$OR$Long$F # get long jammer pointer at - JFR 8/10/94
+ 
+                 call smovv(" Lat= ",msg2,kk)
+                 call smovll(JEW$OR$Lat$F,"NS",msg2,kk)
+                 call smovv(" Long= ",msg2,kk)
+                 call smovll(JEW$OR$Long$F,"EW",msg2,kk)
+                }
+             else
+                { # activated with respect to a bearing relative to course - JFR 8/10/94
+                 JEW$OR$INDEX = deq$EmitterIndx$I # get index to OR subtable - JFR 8/10/94
+                 JEW$OR$Bearing$F = (xJEW$OR$Bearing$F)*(180.0/$PI)    # find bearing
+ 
+                 call smovv(" Bearing= ",msg2,kk)
+                 call smovf(JEW$OR$Bearing$F,702,msg2,kk)
+                }
+            }
+ 
+        call smovv(" <ON>",msg2,kk)
+ 
+        if ((DEQ$Ident$I == $IFF$Code) &   # SMM 1/97 (E1732)
+            (xIFF$Function$i != $INTERROGATOR$Code))  # IFF$Pointer set above
+            {
+             UNT$View$I = xUNT$View$I
+             only_mode3 = $no
+             display_modes = $yes
+             # if its neutral or orange and its not an aircraft return
+             if ((UNT$View$I == $Neutral$View) |
+                 (UNT$View$I >= $FirstOrange$View &
+                  UNT$View$I <= $LastOrange$View))
+               {
+                only_mode3 = $yes
+               }
+ 
+             if ((only_mode3 == $yes) & (xUNT$Type$I != $Air$Code))
+               {
+                display_modes = $no
+               }
+ 
+             if (display_modes == $yes)
+                {
+                 call echoh (msg2,kk)
+                 call echor
+                }
+ 
+             if (only_mode3 == $no)
+               {
+                kk = 9
+                call smovv ("   MODE 1:  ",msg2,kk)
+                call smovi (xDEQ$IFFMode1_Digit1$I,msg2,kk)
+                call smovi (xDEQ$IFFMode1_Digit2$I,msg2,kk)
+                call echoh (msg2,kk)
+                call echor
+                kk = 9
+                call smovv ("   MODE 2:  ",msg2,kk)
+                mode = base_10_to_Base_8(xDEQ$IFFMode2$I)
+                call smovi (mode,msg2,kk)
+                call echoh (msg2,kk)
+                call echor
+               }
+ 
+             if (((only_mode3 == $yes) &
+                  (xUNT$Type$I == $Air$Code)) |
+                  (only_mode3 == $no))
+               {
+                kk = 9
+                call smovv ("   MODE 3:  ",msg2,kk)
+                mode = base_10_to_Base_8(xDEQ$IFFMode3$I)
+                call smovi (mode,msg2,kk)
+               }
+            }
+ 
+        if (DEQ$Ident$I == $EOIR$Code & level$ir == 1 &  # clf 1/26/93
+            xUNT$GhostedUnit$I == $NO)
+            {
+#           call send (nview,0,kk,msg2)
+            call echoh (msg2,kk)
+            call echor
+            call ord_ir_status(DEQ$Pointer, msg2, kk)
+            }
+        if (EMI$Analysis == $YES           &
+            (deq$ident$i == $Radar$code |
+             deq$ident$i == $esm$code    )   )
+            {
+            allbands = xDEQ$AllBands$i
+            if (allbands != 0)
+                {
+                ichan = NINT(mth$alog2(allbands)) + 1
+ 
+                call smovv(" channel ",msg2,kk)
+                call smovi(ichan,msg2,kk)
+                }
+            }
+        } # end if device is on
+     else
+        {
+        call smovv(" <off>",msg2,kk)
+        }
+ 
+    if (xdeq$TimeWhenUse$f > Game$time )
+        {
+        call smovv(" <----DISABLED---->",msg2,kk)
+        }
+ 
+    if (EMI$ANALYSIS != $NO & xDEQ$EMIinterest$i != $NO )
+        {
+        call smovv(" [Subject to EMI] ",msg2,kk)
+        }
+ 
+    #call send (nview,0,kk,msg2)
+    call echoh (msg2,kk)
+    call echor
+    }
+ 
+return
+end
+
+subroutine sorder(istat,kadd,ord$pointer,unt$pointer)
+ 
+########################################################
+#$%
+#$% Purpose:   SORDER determines if a particular unit
+#$%            is being addressed by a specific order.
+#$%
+#$% Called By: OORDER
+#$%
+#$% Calls:     EXPORD
+#$%
+#$% Tables:    ORD        UNT
+#$%
+#$% Date:      APRIL 80
+#$%
+#$% Author:    Dana Wills
+#$%
+#$% Modified:  Kirk Chang - 4/93 (E1075)
+#$%            The code was previously part of wgop.rat.
+#$%            FOR <addressee> [ ORDERS | SENSOR ] commands
+#$%            moved to the station program.
+#$%            Changed the "send" calls to "echoh" and
+#$%            removed the references to view.
+#$%
+########################################################
+ 
+BBcommon          # I    L     I           I
+ 
+BBDeclare  (ORD$Pointer, ORD$Addindx$I,
+            ORD$Code$I, ORD$View$I,
+            ORD$Addressee$C,
+            UNT$Pointer)                                # MJC 4/24/2000
+literal CSTRIP8                                         # MJC 4/24/2000
+integer stka[$Max$TaskGroup],cnta,flga
+literal kadd
+integer ISTAT, KVIEW, J
+ 
+#$% set status to YES
+istat = $yes
+ 
+#$% if request for all orders, return
+if (kadd == -1) return
+ 
+#$% if orders code
+if (Xord$Code$i == ORDERS$order)
+   {
+    #$% set status to NO, return
+    istat = $no
+    return
+   }
+ 
+#$% get order addressee, if addressee, return
+ord$Addressee$c = Xord$Addressee$c
+if (kadd == ord$addressee$c) return
+ 
+#$% get addressee index, if valid
+ord$AddIndx$i = Xord$AddIndx$i
+if (ord$AddIndx$i != 0)
+   {
+    #$% if add index is unit pointer, return
+    if (ord$AddIndx$i == unt$pointer$index) return
+ 
+    #$% set status to NO, return
+    istat = $no
+    return
+   }
+ 
+#$% get code and view
+ord$Code$i = Xord$Code$i
+ord$View$i = Xord$View$i
+ 
+#$% set view
+kview = ord$view$i
+call expord (kview,               # generate list of addressees
+               ord$addressee$c,     # given addressee
+               cnta,                # return count of recipients
+               stka,                # array of unit pointers
+               flga,                # flag (y/n) if collective nam
+               ord$code$i)          # order number
+ 
+#$% for each entry
+for (j = 1; j <= cnta; j=j+1)
+   {
+    #$% if unit pointer, return
+    if (stka[j] == unt$pointer) return
+   }
+ 
+#$% set status to NO
+istat = $no
+ 
+return
+end
+ 
+
+ 
+subroutine xorder(unt$pointer)            # unt pointer
+ 
+########################################################
+#$%
+#$% Purpose:   XORDER generates the current orders
+#$%            to be displayed at the player station.
+#$%
+#$% Called By: OORDER
+#$%
+#$% Calls:     SEND
+#$%
+#$% Tables:    UNT         DEQ
+#$%            SHC         JAM
+#$%            RAD
+#$%
+#$% Date:      APRIL 80
+#$%
+#$% Author:    Dana Wills
+#$%
+#$% Modified:  Carol Kropp - 1/94 (E1085)
+#$%            Added COVER to be displayed.
+#$%
+#$%            Carol Kropp - 4/95 (E1355)
+#$%            Added STRIKE to be displayed.
+#$%
+#$%            Carol Kropp - 6/95 (E1419)
+#$%            Added BE and TIN info to related commands.
+#$%            Also added optional SPEED and TARGET info
+#$%            to the STRIKE command display.
+#$%
+#$%            James Allen - 3/96 (E1467)
+#$%            Display of ship fuel / replenishment
+#$%            information.
+#$%
+#$%            Carol Kropp - 4/96 (E1536 & E1561)
+#$%            Added JTMD UAV and JTMD SOF/UGS sensor
+#$%            information to display.
+#$%
+#$%            Carol Kropp - 2/97 (E1731)
+#$%            Added DROP MINE information display.
+#$%
+#$%            Carol Kropp - 2/97 (E1760)
+#$%            Added senor types after UGS active info.
+#$%
+#$%            Carol Kropp - 4/97 (E1764, E1765, E1785)
+#$%            Added information for IUGS array sensor
+#$%            and JSOF.  Also added info for ATARS/TARPS.
+#$%
+#$%            Susan Miller - 6/97 (E1819)
+#$%            If a unit is on a route, display the route
+#$%            leg number and the current order for that leg
+#$%            by calling routine xorder_process_route_display
+#$%
+#$%            Stephanie Paden - 5/99 (E1224)
+#$%            Display orbit information.
+########################################################
+ 
+define(Max_Frequencies,40)
+define(Max_Equipments,70)
+ 
+BBcommon          # I          I
+ 
+BBDeclare  (UNT$Pointer, UNT$Type$I, UNT$Attackindx$I,
+            UNT$Hidestatus$I, UNT$Assignedtarget$I,
+            UNT$Targettype$I, UNT$Bttindx$I,
+            UNT$Supertype$I, UNT$Pimindx$I,
+            UNT$Rulesofengage$I, UNT$Caplongitude$F,
+            UNT$Orderedlatitude$F, UNT$Orderedlongitude$F,
+            UNT$Orderedspeed$F, UNT$Caplatitude$F)         # MJC 4/24/2000
+BBDeclare  (DEQ$Pointer, DEQ$EM$Index, DEQ$Ident$I,
+            PIM$Pointer, PIM$PTS$Index, PIM$Orbitradius$I,
+            PIM$PTS$latitude$F, PIM$PTS$longitude$F,
+            RAD$Pointer, RAD$CH$Index, RAD$CH$frequency$F,
+            SUI$Pointer, SUI$CH$Index)                     # MJC 4/24/2000
+BBDeclare  (JAM$Pointer, JAM$FQ$Index,
+            CJC$Pointer, CJC$FQ$Index,
+            AML$Pointer, RMT$Pointer,
+            BTT$Pointer, SHC$Pointer,
+            SUI$CH$frequency$F,
+            UNT2$Pointer)                                  # MJC 4/24/2000
+real*4    mth$alog2, allbands
+real*4    MinDelay, MinGone
+integer   icatdev # jecewsi - JFR 11/18/94
+integer   I, IUNDX, IHEAD, KLEN, JLEN, ICSE, IFLAG,
+          KK, MLEN, IDEG, IMIN, K, KDEG, KMIN, ILEN,
+          IUPI, IJK, IPNT, I_SWITCH_1, ICNT, ISEND4,
+          NAIRBORNE, NLOST, NONDECKS, NTOTL,
+          IFOUND_TRACK                                     # MJC 4/24/2000
+literal   CSTRIP8, CSTRIP, CTRACK_NUMBER, CNAME,
+          ADDR_NAME                                        # MJC 4/24/2000
+literal msg[70],ival,eq[4,Max_Equipments],iroe[9,4]
+integer neq,nfreq,kfreq,freq[Max_Frequencies] #jb kfreq  1/18/91
+# (icode[2,8] vice [2,4] for jecewsi JFR 11/18/94)
+integer icode[2,8],iblip,irboc,idecm,iEOIR,iMAD, iLIDAR    # jb    2/6/90
+integer game_DTG, dest [arith($max$args,*,8)]                    # khc 5/93, E1075
+literal covered_track_num,    # track number of unit which is being COVERed      # clk 1/94 (E1085)
+        target_name           # literal function to determine the track number   # clk 1/94 (E1085)
+literal   value
+character target_string[100]
+integer   target_len
+ 
+data icode/$Radar$code                ,$lex$Radar$,
+           $ESM$code                  ,$lex$ESM$  ,
+           $PasSonar$code             ,$lex$Sonar$,
+           $Sonar$code                ,$lex$Sonar$,
+           $RadarJammer$Code          ,$lex$Jammer$, # JFR 11/18/94 (jecewsi)
+           $RadComJammer$Code         ,$lex$Jammer$, # JFR 11/18/94 (jecewsi)
+           $CommunicationJammer$Code  ,$lex$Jammer$, # JFR 11/18/94 (jecewsi)
+           $jammer$code               ,$lex$Jammer$/ # JFR 11/18/94 (jecewsi)
+ 
+data (iroe[$AllEnemy$code,i],i=1,4)/_
+                          $lex$weapons$,$lex$free$,$lex$Enemy$,$lex$All$/
+data (iroe[$AirEnemy$code,i],i=1,4)/_
+                          $lex$weapons$,$lex$free$,$lex$Enemy$,$lex$Air$/
+data (iroe[$SurfaceEnemy$code,i],i=1,4)/_
+                          $lex$weapons$,$lex$free$,$lex$Enemy$,$lex$Surface$/
+data (iroe[$SubEnemy$code,i],i=1,4)/_
+                          $lex$weapons$,$lex$free$,$lex$Enemy$,$lex$Submarine$/
+data (iroe[$SpecTarget$code,i],i=1,4)/_
+                          $lex$weapons$,$lex$Take$,$lex$$track$no$,$BLANKLIT/
+data (iroe[$AirNonFriendly$code,i],i=1,4)/_
+                          $lex$weapons$,$lex$free$,$lex$Air$,$BLANKLIT/
+data (iroe[$AllNonFriendly$code,i],i=1,4)/_
+                          $lex$weapons$,$lex$free$,$lex$All$,$BLANKLIT/
+data (iroe[$SurfaceNonFriendly$code,i],i=1,4)/_
+                          $lex$weapons$,$lex$free$,$lex$Surface$,$BLANKLIT/
+data (iroe[$SubNonFriendly$code,i],i=1,4)/_
+                          $lex$weapons$,$lex$free$,$lex$Submarine$,$BLANKLIT/
+ 
+ 
+#
+#   eq[1,n] == type code
+#   eq[2,n] == name
+#   eq[3,n] == mode (if active sonar)
+#   eq[4,n] == dyn$eq$Timewhenuse$i        # jb no longer!    3/30/89
+#
+ 
+String msg1 "Current orders for         "
+String msg2 " are available on the status boards."
+String msg3 "Seeker     ; Cse     ;          ;         " # 7/17/85
+String msg4 " Aircraft in maintenance for more than 30 minutes [min]:"
+String msg5 "                                                                      "
+#            1   5   0   5    0    5    0    5    0
+String msg6 "          aircraft now AIRBORNE."
+String msg7 "      of       aircraft are LOST."          #    9/14/88
+String msg8 "     aircraft now AVAILABLE/ON DECK."       #    9/14/88
+ 
+ 
+#            1      8     4   8     4          5
+#$% if pointer is not between the first & last entered, return
+if (! unt$pointer$ok) return
+ 
+iundx = unt$pointer$index                       # jb    5/14/87
+#$% set view and get unit type
+#iview = nview
+unt$type$i = Xunt$type$i
+ 
+ihead = 0
+call smov ($Lparen,dest,ihead)
+call smoviz (Game_DTG(GAME$TIME),6,dest,ihead)
+call smov ($Rparen,dest,ihead)
+call smov ($SPACE,dest,ihead)
+ 
+klen = 20
+#$% move message into proper format and display
+Call SMOVHN(xunt$name$c,$$MaxLit,msg1,klen)
+#call send (iview,0,klen,msg1)    # klen vice 25    1/10/91
+call echoh (dest,ihead)
+call echoh (msg1,klen)
+call echor
+ 
+if (unt$type$i    == $Air$Code &                   # DEW IL01
+    xUNT$Status$i == $AwaitingLaunch$Code)
+    {
+    call echov ("         A/C awaiting launch from ")
+    unt2$pointer$to xUNT$LaunchIndx$i
+    call echohn (Xunt2$name$c,$$maxLit)
+    call echov (" at ")
+    call echoiz (Game_DTG(xUnt$Timelaunched$F), 6)
+    call echor
+    return
+    }
+ 
+#            1      8     4   8     4          5
+#                     |         |         |         |
+#                    Off; Cse 123; Attacking; Targeted
+#                    ON           PimGuided; len
+ 
+if ( unt$type$i == $CruiseMissile$Code )        #       7/17/85 <<<>>>
+ {
+  unt$AttackIndx$i = Xunt$AttackIndx$i
+ 
+  jlen = 8
+  if (Xunt$TimeSeek$f <= Game$Time)
+   Call SMOVv(" ON",msg3,jlen)
+  else
+   Call SMOVv("Off",msg3,jlen)
+ 
+  jlen = 18
+  icse = abs(int(xunt$OrderedCourse$f * 180/$pi +.5))
+  Call SMOVIZ (icse,3,msg3,jlen)
+ 
+  jlen = 24
+  if (unt$AttackIndx$i != $NO)
+    Call SMOVv("Attacking",msg3,jlen)
+  else if (Xunt$PimIndx$i != 0)
+    Call SMOVv("PimGuided",msg3,jlen)
+  else
+    Call SMOVv("         ",msg3,jlen)
+ 
+ 
+  if (unt$AttackIndx$i == $NO)
+   {
+    jlen = 35
+    if (Xunt$AssignedTarget$i != $NO)
+      Call SMOVv("Targeted",msg3,jlen)
+    else
+      Call SMOVv("        ",msg3,jlen)
+   }
+ 
+  #call send (iview,0,43,msg3)
+  call echoh (dest,ihead)
+  call echoh (msg3,43)
+  call echor
+  RETURN        # finished with CruiseMissile
+ }
+ 
+#$% set flag
+iflag = $no
+ 
+#$% if unit's hide status is $EnrouteToHide or $CurrentlyHiding     7/92 KHC
+unt$HideStatus$I = xunt$HideStatus$I
+unt2$pointer$to xunt$HideSiteIndx$I
+addr_name = Xunt2$name$c
+if (unt$HideStatus$I == $EnrouteToHide)
+   {
+    kk = 0
+    call smovh (dest,ihead,msg,kk)
+    call smovv ("Proceeding to hide at ",msg,kk)
+    call smovhn (addr_name,$$MaxName,msg,kk) # SMM 8/99 E2141
+    #call send (-nview,0,kk,msg)
+    call echoh (msg,kk)
+    call echor
+ 
+    iflag = $yes
+   }
+else if (unt$HideStatus$I == $CurrentlyHiding)
+   {
+    kk = 0
+    call smovh (dest,ihead,msg,kk)
+    call smovv ("Hiding at ",msg,kk)
+    call smovhn (addr_name,$$MaxName,msg,kk) # SMM 8/99 E2141
+    #call send (-nview,0,kk,msg)
+    call echoh (msg,kk)
+    call echor
+ 
+    iflag = $yes
+   }
+ 
+#$% clk 1/94 (E1085) - if the unit has been assigned a COVER order
+if (xUNT$CoverFlag$I == $yes)
+  {
+    UNT$AttackIndx$I = xUNT$AttackIndx$I
+    covered_track_num = target_name (UNT$Pointer, UNT$AttackIndx$I)
+ 
+    kk = 0
+    call smovh  (dest, ihead, msg, kk)
+    call smovv  ("COVER ", msg, kk)
+    call smovhn (covered_track_num, $$MaxLit, msg, kk)
+    call echoh  (msg, kk)
+    call echor
+ 
+    iflag = $yes
+  }
+ 
+if (xUNT$DroppingMineFlag$I == $yes)    # clk 2/97 (E1731)
+  {
+    kk = 0
+    call smovh   (dest, ihead, msg, kk)
+    call smovv   ("DROP MINE (on) ", msg, kk)
+    UNT$AssignedTarget$I = xUNT$AssignedTarget$I
+    if (UNT$AssignedTarget$I == UNT$Engaging$Position)
+      {
+       call smovv ("POSITION ", msg, kk)
+       call smovlls (xUNT$OrderedLatitude$F, "NS", msg, kk)
+       call smovv   (" ", msg, kk)
+       call smovlls (xUNT$OrderedLongitude$F, "EW", msg, kk)
+      }
+    else
+      {
+       call smovv ("TRACK", msg, kk)
+       call find_active_rmt (UNT$AssignedTarget$I, RMT$Pointer,
+                             xUNT$View$I, ifound_track, ctrack_number)
+       if (ifound_track == $yes)
+         call smovhn (ctrack_number, $$MaxLit, msg, kk)
+      }
+    call echoh   (msg, kk)
+    call echor
+  }   # end of if processing a DROP MINE command
+#$% clk 4/95 (E1355) - if the unit has been assigned a STRIKE order
+else if (xUNT$AssignedTarget$I == UNT$Engaging$Position)
+  {
+    kk = 0
+    if (xUNT$AGDIndex$i == 0)
+    {
+        call smovh   (dest, ihead, msg, kk)
+        call smovv   ("STRIKE POSITION ", msg, kk)
+        call smovlls (xUNT$TargetLatitude$F, "NS", msg, kk)
+        call smovv   (" ", msg, kk)
+        call smovlls (xUNT$TargetLongitude$F, "EW", msg, kk)
+    }
+    else
+    {
+        call smovh   (dest, ihead, msg, kk)
+        call smovv   ("STRIKE GROUND ", msg, kk)
+        call smovi   (xUNT$AGDIndex$I, msg, kk)
+    }
+    UNT$OrderedSpeed$F = xUNT$OrderedSpeed$F
+    call smovv   (" SPEED ", msg, kk)
+    call smovi   (INT(UNT$OrderedSpeed$F), msg, kk)
+ 
+    UNT$TargetType$I = xUNT$TargetType$I
+    if (UNT$TargetType$I != $NoTarget$TargetCode)
+      {
+       call smovv  (" TARGET ", msg, kk)
+       call Display_Targeting (UNT$TargetType$I, target_string, target_len)
+       call smovh  (target_string, target_len, msg, kk)
+      }
+ 
+    UNT$BTTIndx$I = xUNT$BTTIndx$I
+    if (UNT$BTTIndx$I != 0)
+      {
+       if (kk >= (ARB - 30))   # if the full BE and TIN info was entered
+         {                     # the max string length of msg may be encountered
+          call echoh (msg, kk)       # write out the line and continue
+          call echor                 # information on the next line
+          kk = 0
+          call smovh (dest, ihead, msg, kk)
+          call smovv ("    ", msg, kk)
+         }
+ 
+       BTT$Pointer$To  (UNT$BTTIndx$I)
+       value = xBTT$BEnumber1$C
+       if (value != $Blank_Literal)
+         {
+          call smovv  (" BE ", msg, kk)
+          call smovhn (value, $$MaxLit, msg, kk)
+          value = xBTT$BEnumber2$C
+          call smovhn (value, $$MaxLit, msg, kk)
+         }
+       value = xBTT$TINnumber$C
+       if (value != $Blank_Literal)
+         {
+          call smovv  (" TIN ", msg, kk)
+          call smovhn (xBTT$TINnumber$C, $$MaxLit, msg, kk)
+         }
+      }
+ 
+    call echoh   (msg, kk)
+    call echor
+ 
+    iflag = $yes
+  }
+ 
+#$% initialize messages
+msg[1] = 0
+msg[2] = 0
+msg[3] = 0
+ 
+#$% set length
+mlen = 3
+ 
+#$% If the unit is an aircraft
+if (UNT$Type$I == $Air$Code)
+  {
+   if (xUNT$AssignedCap$I == $yes) # and assigned cap is $yes       clk 3/92
+      {
+       #$% increment counter & get proceed & position data
+       mlen=mlen+1; msg[mlen] = $lex$CAP$
+       mlen=mlen+1; msg[mlen] = $lex$Position$
+       UNT$CapLatitude$F = xUNT$CapLatitude$F
+       ival = int(abs(UNT$CapLatitude$f * (180.0/$pi) * 60) + 0.5)  # determine latitude
+       ideg = ival / 60
+       imin = ival - (ideg * 60)
+       ival = ideg * 100 + imin
+       if (UNT$CapLatitude$F < 0)
+         ival = -ival
+       mlen=mlen+1; msg[mlen] = ival
+ 
+       UNT$CapLongitude$F = xUNT$CapLongitude$F
+       ival = int(abs(UNT$CapLongitude$f * (180.0/$pi) * 60) + 0.5)   # determine longitude
+       ideg = ival / 60
+       imin = ival - (ideg * 60)
+       ival = ideg * 100 + imin
+       if (UNT$CapLongitude$F < 0)
+         ival = -ival
+       mlen=mlen+1; msg[mlen] = ival
+ 
+       mlen=mlen+1; msg[mlen] = $lex$Altitude$
+       mlen=mlen+1; msg[mlen] = xUNT$CapAltitude$I
+       mlen=mlen+1; msg[mlen] = $lex$Range$
+       mlen=mlen+1; msg[mlen] = xUNT$CapRange$I
+ 
+        #$% call to display view
+        #call send (iview,"LEX ",mlen,msg)
+        ilen = ihead
+ 
+        call synbld (int(msg[2]),      # time of execution
+                     $no,               # search plan order
+                     msg[3],              # order number
+                     mlen-3,             # number of quad-words of lex data
+                     msg[4],           # lex array
+                     dest,              # output array
+                     ilen)              # returned length
+ 
+        call pline (dest,ilen,ihead)        # put the line out....
+ 
+        #$% set flag
+        iflag = $yes
+        mlen = 3
+       } # end if a/c on cap
+ 
+   # is the a/c orbiting? SMP 5/99 (E1224)
+   unt$pimindx$i = xunt$pimindx$i
+   if (unt$pimindx$i != $no)
+      {
+       pim$pointer$to (unt$pimindx$i)
+ 
+       mlen=mlen+1; msg[mlen] = $lex$ORBIT$
+       mlen=mlen+1; msg[mlen] = $lex$Position$
+ 
+       #$%   The lat/lon of the orbit coords are in slots 7 & 8
+       for (pim$PTS$index=7; pim$PTS$index <9; pim$PTS$index=pim$PTS$index +1)
+          {
+           pim$PTS$latitude$f = xpim$PTS$latitude$f
+           ival = int(abs(pim$PTS$Latitude$f * (180.0/$pi) * 60) + 0.5)  # determine latitude
+           ideg = ival / 60
+           imin = ival - (ideg * 60)
+           ival = ideg * 100 + imin
+           if (pim$PTS$Latitude$f < 0)
+               ival = -ival
+           mlen=mlen+1; msg[mlen] = ival
+ 
+           pim$pts$longitude$f   = xpim$pts$longitude$f
+           ival = int(abs(pim$pts$Longitude$f * (180.0/$pi) * 60) + 0.5)   # determine longitude
+           ideg = ival / 60
+           imin = ival - (ideg * 60)
+           ival = ideg * 100 + imin
+           if (pim$pts$Longitude$f < 0)
+               ival = -ival
+           mlen=mlen+1; msg[mlen] = ival
+          }
+ 
+       #$% radius info
+       pim$orbitradius$i =  xpim$orbitradius$i    # get the radius of the orbit
+       mlen=mlen+1; msg[mlen] = $lex$radius$
+       mlen=mlen+1; msg[mlen] = PIM$orbitradius$i
+       ilen = ihead
+ 
+       call synbld (int(msg[2]),      # time of execution
+                    $no,              # search plan order
+                    Orbit$order,      # order number
+                    mlen-3,           # number of quad-words of lex data
+                    msg[4],           # lex array
+                    dest,             # output array
+                    ilen)             # returned length
+ 
+       call pline (dest,ilen,ihead)   # put the line out....
+ 
+       #$% set flag
+       iflag = $yes
+       mlen = 3
+      } # end if on a/c is orbiting
+  } # end if a/c
+ 
+# joa 3/96 (E1467)- Display fuel modeling information
+UNT$SuperType$I = xUNT$SuperType$I          # get the super type
+if (UNT$SuperType$I == $Surface$Supercode)
+  {
+   if (xUNT$HosesAllocatedFlag$I == $YES)
+     {
+      UNT2$Pointer$To  (xUNT$GuideIndx$I)
+      if (xUNT2$Type$I == $Shorebase$Code)
+        {
+         mlen = mlen + 1
+         msg[mlen] = $lex$FUEL$
+        }
+      else
+        {
+         mlen = mlen + 1
+         msg[mlen] = $lex$UNREP$
+        }
+ 
+      if (xUNT$ShipRefuelAmount$F > 0.0)
+        {
+         mlen = mlen + 1
+         msg[mlen] = $lex$ONLOAD$
+         mlen = mlen + 1
+         msg[mlen] = $lex$SHIP$
+         mlen = mlen + 1
+         msg[mlen] = xUNT$ShipRefuelAmount$F
+         mlen = mlen + 1
+         msg[mlen] = $lex$USING$
+         mlen = mlen + 1
+         msg[mlen] = xUNT$ShipHoseRequest$I
+        }
+ 
+      if (xUNT$AviationRefuelAmount$F > 0.0)
+        {
+         mlen = mlen + 1
+         msg[mlen] = $lex$ONLOAD$
+         mlen = mlen + 1
+         msg[mlen] = $lex$AVIATION$
+         mlen = mlen + 1
+         msg[mlen] = Xunt$AviationRefuelAmount$f
+         mlen = mlen + 1
+         msg[mlen] = $lex$USING$
+         mlen = mlen + 1
+         msg[mlen] = Xunt$AviationHoseRequest$i
+        }
+      ilen = ihead
+ 
+      call synbld (int(msg[2]), $no, msg[3], mlen-3,
+                   msg[4], dest, ilen)
+ 
+      call pline (dest, ilen, ihead)
+ 
+      #$% set flag
+      iflag = $yes
+      mlen = 3
+     }   # end of if unit has fueling hoses allocated
+  }   # end of if a ship
+ 
+unt$OrderedLatitude$f = Xunt$OrderedLatitude$f          #       12/1/83
+#$% if ordered latitude is within limits & the unit isn't a shorebase
+if (unt$OrderedLatitude$f < $pi/2 & unt$type$i != $ShoreBase$code) #/83
+   {
+    #$% increment counter & get proceed & position data
+    mlen=mlen+1; msg[mlen] = $lex$Proceed$
+    mlen=mlen+1; msg[mlen] = $lex$Position$
+ 
+    #$% determine ordered latitude
+    k = abs(int(unt$OrderedLatitude$f * 180/$pi*60 ))   #       12/1/83
+    kdeg = k/60
+    kmin = k- kdeg*60
+    ival = kdeg * 100 + kmin
+ 
+    if (unt$OrderedLatitude$f < 0) ival = -ival         #       12/1/83
+ 
+    mlen=mlen+1; msg[mlen] = ival
+ 
+    #$% determine ordered longitude
+    unt$OrderedLongitude$f = Xunt$OrderedLongitude$f    #       12/1/83
+    k = abs(int(unt$OrderedLongitude$f * 180/$pi*60 ))  #       12/1/83
+    kdeg = k/60
+    kmin = k- kdeg*60
+ 
+    ival = kdeg * 100 + kmin
+ 
+    if (unt$OrderedLongitude$f < 0) ival = -ival        #       12/1/83
+ 
+    mlen=mlen+1; msg[mlen] = ival
+   }
+ 
+#$% if assumed course is not ordered course
+if (xunt$AssumedCourse$f != Xunt$OrderedCourse$f)
+   {
+    #$% increment counter and save course and ordered course
+    mlen=mlen+1; msg[mlen] = $lex$Course$
+    mlen=mlen+1; msg[mlen] = abs(int(xunt$OrderedCourse$f * 180/$pi +.5))
+   }
+ 
+#$% if assumed speed is not ordered speed
+if (xunt$AssumedSpeed$f != Xunt$OrderedSpeed$f)
+   {
+    #$% increment counter, save speed and ordered speed
+    mlen=mlen+1; msg[mlen] = $lex$Speed$
+    mlen=mlen+1; msg[mlen] = int(xunt$OrderedSpeed$f + .5)
+   }
+ 
+#$% if true altitude/depth is not ordered altitude/depth
+if ((xUNT$Type$I == $Sub$code | xUNT$Type$I == $Air$code)
+     & (xUNT$TrueAltDepth$I != xUNT$OrderedAltDepth$I))
+   {
+    #$% increment counter
+    mlen=mlen+1
+    #$% if aircraft, save altitude, else save depth
+    if (unt$type$i == $air$code) msg[mlen] = $lex$Altitude$
+    else                         msg[mlen] = $lex$Depth$
+ 
+    #$% increment counter, save ordered altitude depth
+    mlen=mlen+1; msg[mlen] = Xunt$OrderedAltDepth$i
+   }
+ 
+#$% if ordered to sweep minefields
+if (Xunt$MineSweeping$i == $yes)
+   {
+    mlen=mlen+1; msg[mlen] = $lex$Sweeping$
+    mlen=mlen+1; msg[mlen] = $lex$MineField$
+   }
+ 
+ 
+if (mlen > 3)
+   {
+    #$% call to display view
+    #call send (iview,"LEX ",mlen,msg)
+    ilen = ihead
+    call synbld (int(msg[2]),      # time of execution
+                 $no,               # search plan order
+                 msg[3],              # order number
+                 mlen-3,             # number of quad-words of lex data
+                 msg[4],           # lex array
+                 dest,              # output array
+                 ilen)              # returned length
+ 
+    call pline (dest,ilen,ihead)        # put the line out....
+ 
+    #$% set flag
+    iflag = $yes
+   }
+ 
+#$% get rules of engagement
+unt$RulesOfEngage$i = Xunt$RulesOfEngage$i
+if (unt$RulesOfEngage$i != $IfAttacked$code)    # display ROE
+   {
+    msg[4] = iroe[unt$RulesOfEngage$i,1]
+    msg[5] = iroe[unt$RulesOfEngage$i,2]
+    msg[6] = iroe[unt$RulesOfEngage$i,3]
+    msg[7] = iroe[unt$RulesOfEngage$i,4]
+ 
+    #$% call to display view
+    #call send (iview,"LEX ",7,msg)
+    ilen = ihead
+    call synbld (int(msg[2]),      # time of execution
+                 $no,               # search plan order
+                 msg[3],              # order number
+                 4,             # number of quad-words of lex data
+                 msg[4],           # lex array
+                 dest,              # output array
+                 ilen)              # returned length
+ 
+    call pline (dest,ilen,ihead)        # put the line out....
+    iflag = $yes
+   }
+ 
+#$% if submarine
+if (xunt$SUPERtype$i == $submarine$SUPERcode) # jb SUPER    2/15/91
+   {
+    #$% get characteristics pointer
+    shc$pointer = xUNT$shcPntr$i
+ 
+    #$% if noise index is not electric
+    if (Xshc$NoiseIndx$i != Xshc$NoiseIndxElec$i)
+       {
+        msg[4] = $lex$mode$
+        #$% if prop mode is diesel, save diesel, else save electric
+        if (Xunt$PropulsionMode$i == $Diesel$code) msg[5] = $lex$diesel$
+        else                                       msg[5] = $lex$electric$
+ 
+        #$% call to display view
+        #call send (iview,"LEX ",5,msg)
+        ilen = ihead
+        call synbld (int(msg[2]),      # time of execution
+                     $no,               # search plan order
+                     msg[3],              # order number
+                     2,             # number of quad-words of lex data
+                     msg[4],           # lex array
+                     dest,              # output array
+                     ilen)              # returned length
+ 
+        call pline (dest,ilen,ihead)        # put the line out....
+ 
+        iflag = $yes
+       }
+   }
+ 
+  if (xUNT$SOF_Active$I != $no)           # clk 4/96 (E1536)
+    {
+     call echoh  (dest, ihead)
+     call echov  ("JTMD FLEET SOF ACTIVE, REPORT TIME ")
+     call echoiz (Game_DTG(xUNT$SOFReportTime$F), 6)
+     call echov  ("Z - INTERVAL ")
+     call echoi  (xUNT$SOFReportInterval$I)
+     call echov  (" MINUTES")
+     call echor
+    }
+  else if (xUNT$JSOF_Active$I != $no)     # clk 4/97 (E1765)
+    {
+     call echoh  (dest, ihead)
+     call echov  ("JTMD JOINT SOF ACTIVE, REPORT TIME ")
+     call echoiz (Game_DTG(xUNT$SOFReportTime$F), 6)
+     call echov  ("Z - INTERVAL ")
+     call echoi  (xUNT$SOFReportInterval$I)
+     call echov  (" MINUTES")
+     call echor
+    }
+  else if (xUNT$UGS_Active$I != $no)      # clk 4/96 (E1536)
+    {
+     call echoh (dest, ihead)
+     call echov ("JTMD UGS ACTIVE:  ")
+     if (xUNT$UGS_Acoustic_Active$I == $yes)   # clk 2/97 (E1760)
+       call echov ("Acoustic  ")      # supply the sensor
+     if (xUNT$UGS_IR_Active$I == $yes)         # type information
+       call echov ("IR  ")
+     if (xUNT$UGS_Magnetic_Active$I == $yes)
+       call echov ("Magnetic  ")
+     if (xUNT$UGS_Seismic_Active$I == $yes)
+       call echov ("Seismic")
+     call echor
+    }
+  else if (xUNT$JTMD_UAV_Active$I != $no)  # clk 4/96 (E1561)
+    {
+     call echoh (dest, ihead)
+     call echov ("JTMD UAV ACTIVE")
+     call echor
+    }
+  else if (xUNT$IUGS_Active$I != $no)  # clk 4/97 (E1764)
+    {
+     call echoh (dest, ihead)
+     call echov ("JTMD IUGS ACTIVE")
+     call echor
+    }
+  else if (xUNT$ATARS_Active$I != $no)  # clk 4/97 (E1785)
+    {
+     call echoh (dest, ihead)
+     call echov ("JTMD ATARS ACTIVE")
+     call echor
+    }
+  else if (xUNT$TARPS_Active$I != $no)  # clk 4/97 (E1785)
+    {
+     call echoh (dest, ihead)
+     call echov ("JTMD TARPS ACTIVE")
+     call echor
+    }
+ 
+  # if the unit is on a route, display the leg and the order
+  # it is currently processing on that leg.  SMM 6/97 (E1819)
+  if (xUNT$RteIndx$I != $No)
+    call xorder_process_route_display(UNT$Pointer)
+ 
+#$% clear flags
+neq = 0
+nfreq = 0
+irboc = $no
+iEOIR = $no                        # jb        2/6/90
+iMAD  = $no                        # smm clk  1/10/91
+iLIDAR = $no                       # smm clk  2/11/91
+idecm = $no
+iblip = $no
+ 
+#$% for each equipment entry
+iUPI = UNT$Pointer$index
+for_DEQ_CHAIN (iUPI)
+   {
+    #$% get equipment ID
+    deq$ident$i = Xdeq$ident$i
+    if (deq$ident$i == $Radar$code   |
+        deq$ident$i == $ESM$code     |
+        deq$ident$i == $Sonar$code   |
+        deq$ident$i == $PasSonar$code|
+        ((jecewsi$game == $yes) &                     # JFR 11/18/94 (jecewsi)
+         (deq$ident$i == $RadarJammer$Code  |         # JFR 11/18/94 (jecewsi)
+          deq$ident$i == $RadComJammer$Code |         # JFR 11/18/94 (jecewsi)
+          deq$ident$i == $CommunicationJammer$Code |  # JFR 11/18/94 (jecewsi)
+          deq$ident$i == $Jammer$Code)))              # JFR 11/18/94 (jecewsi)
+       {
+        #$% if equipment is off, get next
+        if (Xdeq$On$i == $off) next
+ 
+        if (neq < Max_Equipments )
+            {
+            neq = neq + 1
+            eq[1,neq] = deq$ident$i
+            eq[2,neq] = Xdeq$Type$c
+            eq[3,neq] = $off
+            eq[4,neq] = Xdeq$TimeWhenUse$f
+ 
+            if (deq$ident$i == $Sonar$code)
+                {
+                eq[3,neq] = Xdeq$On$i
+                }
+            else if (EMI$Analysis == $YES              &
+                       (deq$ident$i == $Radar$code |
+                        deq$ident$i == $esm$code    )   )
+                {
+                allbands = xDEQ$AllBands$i
+                if (allbands != 0)
+                    eq[3,neq] = NINT(mth$alog2(allbands)) + 1 + 10
+                }
+ 
+            }
+        next
+       }
+    #$% determine equipment ID, initialize flags
+    else if (deq$ident$i == $Blip$code) iblip = Xdeq$On$i
+    else if (deq$ident$i == $RBOC$code)
+        {
+        if (Xdeq$Remaining$i > 0) iRBOC = Xdeq$On$i
+        }
+    else if (deq$ident$i == $EOIR$code) iEOIR = Xdeq$On$i # jb  2/6/90
+    else if (deq$ident$i == $MAD$code) iMAD = Xdeq$On$i   # smm clk 1/10/91
+    else if (deq$ident$i == $LIDAR$code) iLIDAR = Xdeq$On$i  # smm clk 2/11/91
+    else if (deq$ident$i == $DECM$code) iDECM = Xdeq$On$i
+    else if (deq$ident$i == $Jammer$code)
+       {
+        jam$pointer = xdeq$pntr$i               # for each JAM entry
+        for (deq$em$index=1; deq$em$index$ok;
+             deq$em$index = deq$em$index+1)
+           {
+            #$% if JAM band is off, get next entry
+            if (xdeq$em$band$i == $off) next
+            jam$fq$index = deq$em$index
+            if (nfreq < Max_Frequencies)
+                {
+                nfreq = nfreq + 1
+                freq[nfreq] = xjam$fq$CenterFreq$i
+                }
+           }
+       }
+    else if (deq$ident$i == $CommunicationJammer$code )
+       {
+        cjc$pointer = xdeq$pntr$i               # for each CommJam entry
+        for (deq$em$index=1; deq$em$index$ok;
+             deq$em$index = deq$em$index+1)
+           {
+            #$% if JAM band is off, get next entry
+            if (xdeq$em$band$i == $off) next
+            cjc$fq$index = deq$em$index
+            if (nfreq < Max_Frequencies)
+                {
+                nfreq = nfreq + 1
+                freq[nfreq] = MIN(1.0,xCJC$fq$FrequencyJammed$F)
+                }
+           }
+       }
+   }
+ 
+mlen = 3                           # output RBOC/EOIR/BLIP/DECM/MAD/LIDAR on msg
+if (irboc == $yes)
+   {
+    mlen=mlen+1; msg[mlen]= $lex$rboc$
+   }
+if (iEOIR == $yes)
+   {
+   if (level$ir == 1)
+     {
+     mlen=mlen+1
+     ijk = 0
+     call smovv ("FLIR    ", msg[mlen], ijk)    # clf       7/2/93
+     }
+   else
+     {
+     mlen=mlen+1; msg[mlen]= $lex$EOIR$        # jb        2/6/90
+     }
+   }
+if (iblip == $yes)
+   {
+    mlen=mlen+1; msg[mlen]= $lex$blip$
+   }
+if (idecm == $yes)
+   {
+    mlen=mlen+1; msg[mlen]= $lex$decm$
+   }
+if (iMAD == $yes)
+   {
+    mlen=mlen+1; msg[mlen]= $lex$MAD$         # smm clk  1/10/91
+   }
+if (iLIDAR == $yes)
+   {
+    mlen=mlen+1; msg[mlen]= $lex$LIDAR$       # smm clk  2/11/91
+   }
+if (mlen > 3)
+   {
+    mlen=mlen+1; msg[mlen]= $lex$ON$
+    #$% call to display the order
+    #call send (iview,"LEX ",mlen,msg)
+    ilen = ihead
+    call synbld (int(msg[2]),      # time of execution
+                 $no,               # search plan order
+                 msg[3],              # order number
+                 mlen-3,             # number of quad-words of lex data
+                 msg[4],           # lex array
+                 dest,              # output array
+                 ilen)              # returned length
+ 
+    call pline (dest,ilen,ihead)        # put the line out....
+    iflag = $yes
+   }
+ 
+#$% for each category of device (Radar/ESM/PasSonar/Sonar)
+icatdev = 4 # non jecewsi default category max index - JFR 11/18/94
+if (jecewsi$game == $yes) icatdev = 8  # category max index for jecewsi - JFR 11/18/94
+for (i=1; i <= icatdev; i=i+1) # JFR 11/18/94 (jecewsi)
+   {
+    msg[4] = $lex$activate$
+    msg[5] = icode[2,i]
+    mlen = 5
+ 
+    #$% for each entry
+    for (ipnt = 1; ipnt <= neq; ipnt = ipnt + 1)
+       {
+        if (eq[1,ipnt] != icode[1,i]) next
+ 
+        mlen=mlen+1; msg[mlen]=eq[2,ipnt]
+ 
+        if (eq[4,ipnt] > game$Time)
+            {
+            mlen=mlen+1; msg[mlen]= '(down)'
+            }
+ 
+        if (eq[3,ipnt] != $off)
+            {
+            switch (eq[3,ipnt])
+                {
+                case $on$CZ : ival = '(CZ)'
+                case $on$DP : ival = '(DP)'
+                case $on$BB : ival = '(BB)'
+                case 11:       ival = '@1'
+                case 12:       ival = '@2'
+                case 13:       ival = '@3'
+                case 14:       ival = '@4'
+                case 15:       ival = '@5'
+                case 16:       ival = '@6'
+                case 17:       ival = '@7'
+                case 18:       ival = '@8'
+                case 19:       ival = '@9'
+                case 20:       ival = '@10'
+                default:       ival = '(??)'
+                }
+            mlen=mlen+1; msg[mlen]=ival
+            }
+       }
+ 
+    if (mlen > 5)
+       {
+        #$% call to display the order
+        #call send (iview,"LEX ",mlen,msg)
+        ilen = ihead
+        call synbld (int(msg[2]),      # time of execution
+                     $no,               # search plan order
+                     msg[3],              # order number
+                     mlen-3,             # number of quad-words of lex data
+                     msg[4],           # lex array
+                     dest,              # output array
+                     ilen)              # returned length
+ 
+        call pline (dest,ilen,ihead)        # put the line out....
+        iflag = $yes
+       }
+   }
+ 
+msg[4] = $lex$Jam$
+mlen = 4
+ 
+#$% for each radar entry
+for (rad$pointer$first; still_ok (rad) ; rad$pointer$next)
+   {
+    # find active operating freq using DEQ EM$Band field
+    #$% get operating frequency
+##xx temp 5/89 reh
+    RAD$CH$Index = 1
+    rad$CH$Frequency$F = Xrad$CH$Frequency$F  # jb  $F    1/18/91
+    kfreq = NINT(rad$CH$Frequency$F)     # jb Nearest int.1/18/91
+    #$% for each frequency entry
+    for (ipnt = 1; ipnt <= nfreq; ipnt=ipnt+1)
+       {
+        #$% if not same operating frequency
+        if (freq[ipnt] != kfreq) next    # 5/89reh jb kfreq 1/18/91
+ 
+        #$% increment counter and save radar type
+        mlen=mlen+1; msg[mlen]=xrad$Type$c
+        # break
+       }
+   }
+#$% for each CommSuite entry
+for (sui$pointer$first; still_OK(SUI) ; sui$pointer$next)
+   {
+    # find active operating freq using DEQ EM$Band field
+    #$% get operating frequency
+##xx temp 5/89
+    SUI$CH$Index = 1
+    SUI$CH$Frequency$f = XSUI$CH$Frequency$f
+ 
+    #$% for each frequency entry
+    for (ipnt = 1; ipnt <= nfreq; ipnt=ipnt+1)
+       {
+        if (freq[ipnt] == INT(sui$CH$Frequency$f))
+            {
+            #$% increment counter and save Suite name
+            mlen=mlen+1; msg[mlen]=xsui$Name$c
+            # ipnt = nfreq # i.e. break
+            }
+       }
+   }
+ 
+if (mlen > 4)
+   {
+    #$% call to display the order
+    #call send (iview,"LEX ",mlen,msg)
+    ilen = ihead
+    call synbld (int(msg[2]),      # time of execution
+                 $no,               # search plan order
+                 msg[3],              # order number
+                 mlen-3,             # number of quad-words of lex data
+                 msg[4],           # lex array
+                 dest,              # output array
+                 ilen)              # returned length
+ 
+    call pline (dest,ilen,ihead)        # put the line out....
+    iflag = $yes
+   }
+ 
+#$% if flag is NO, call to display msg2
+if (iflag == $no) #call send (iview,0,36,msg2)    # 36 vice 35 1/10/91
+{
+    call echoh (dest,ihead-1)
+    call echoh (msg2,36)
+    call echor
+}
+ 
+## Report number of aircraft from this base currently airborne; and
+##---  If > 30 min, Report time a/c will be in maintenance...   5/14/87
+ 
+if (Xunt$AirCapable$i == $YES)
+ {                              # jb  Tell of a/c in maint.     5/14/87
+  icnt = 0              # initlz. counter for each line of side-numbers
+  klen = 0              # initlz. pointer for MSG5..
+  isend4 = 0            # initlz. trigger for MSG4
+  nAIRBORNE = 0
+  nLOST = 0
+  nONdecks = 0                #        8/13/88
+  nTOTL  = 0            # Total a/c (Destr.+Airbrn+Aboard+Maint) 8/13/88
+ 
+  for(aml$pointer$first; aml$pointer$valid; aml$pointer$next)
+   {
+    #$% if unit and aml owner indices do no match, SKIP
+    if (iundx != xaml$ownerindx$i) NEXT #(iundx is unt$pointer$index)
+    nTOTL = nTOTL +1                    # jb - count Total a/c  9/14/88
+ 
+    if(Xaml$Status$i == $InFlight$code) # jb - Count number of  7/8/87
+     {
+      nAIRBORNE = nAIRBORNE +1  # AIRBORNE    9/13/88
+      NEXT                      # jb (NOT in maintenance)       9/13/88
+     }
+ 
+    if(Xaml$Status$i == $Destroyed$code) # jb - Count number of 7/8/87
+     {
+      nLOST = nLOST +1          # DESTROYED                     9/13/88
+      NEXT                      # jb (NOT in maintenance)       9/13/88
+     }
+ 
+    MINdelay = Xaml$TimeLaunch$f - Game$time
+    MINgone  = Game$time - Xaml$TimeMaint$f
+ 
+    if ( MINdelay > 30. & MINgone >= 0. ) # In maint. for more than 30 min.
+     {
+      if(isend4 < 1) #call SEND (iview,0,56,msg4)
+        {
+        call echoh (dest,ihead)
+        call echoh (msg4,56)
+        call echor
+        }
+      isend4    = 1
+ 
+      Cname = Xaml$SideNumber$c
+      call smovH(Cname,5,msg5,klen)
+      call smovv("[",msg5,klen)
+      call smovib (int(MINdelay),4,msg5,klen)
+      call smovv("]; ",msg5,klen)
+      icnt = icnt +1
+      if (icnt == 4)
+       {
+        #call send (iview,0,klen,msg5)
+        call echoh (dest,ihead)
+        call echoh (msg5,klen)
+        call echor
+        icnt = 0
+        klen = 0
+       }
+     }
+    ELSE
+     {
+      nONdecks = nONdecks  +1    # jb - count AVAILABLE  8/14/88
+     }
+   }    # End for AML$pointer..
+ 
+  if(klen > 0)  #call SEND (iview,0,klen,msg5)
+    {
+    call echoh(dest,ihead)
+    call echoh(msg5,klen)
+    call echor
+    }
+ 
+  if (nAirborne != 0)
+    {
+    klen = 5
+    call smovib (nAIRBORNE,4,msg6,klen) # jb - Msg6 to report num-        7/8/87
+    #call SEND (iview,0,33,msg6)      #   ber of a/c now airborne  7/8/87
+    call echoh (dest,ihead)
+    call echoh (msg6,33)
+    call echor
+    }
+ 
+  if (nlost > 0 | ntotl > 0 )
+    {
+    klen = 0
+    call smovib (nLOST,4,msg7,klen)     # jb -                       9/14/88
+    klen =10
+    call smovib (nTOTL,4,msg7,klen)# jb - Msg7 reports number LOST,  9/14/88
+    #call SEND (iview,0,34,msg7)     #   and beginning TOTAL       9/14/88
+    call echoh (dest,ihead)
+    call echoh (msg7,34)
+    call echor
+    }
+ 
+  if (nOnDecks > 0 )
+    {
+    klen = 0
+    call smovib (nONdecks,4,msg8,klen)# jb - Msg8 to report num-  7/8/87
+    #call SEND (iview,0,38,msg8)   #   ber of a/c now AVAILABLE    7/8/87
+    call echoh (dest,ihead)
+    call echoh (msg8,38)
+    call echor
+    }
+ 
+ }      #  End if this unit is aircraft capable
+ 
+return
+end        # End Xorder
+
+ 
+literal function target_name (unt$pointer,target_indx)
+ 
+#$% Note:      Kirk Chang - 4/93 (E1075)
+#$%            This subroutine copied from SWAR as there is more
+#$%            than one version and cannot be put into the library.
+ 
+BBcommon
+ 
+BBDeclare  (UNT$View$I,
+            UNT$Pointer,
+            RMT$Pointer,
+            RMT$Detectiontype$I,
+            RMT$Class$I,
+            RMT$Tracknumber$I,
+            VUE$Pointer,
+            VUE$Trackcode$C,
+            UNT2$Pointer)           # MJC 4/24/2000
+literal CSTRIP8,                    # MJC 4/24/2000
+        CSTRIP                      # MJC 4/24/2000
+integer target_indx,lastrmt
+literal name
+integer k
+ 
+k = 0
+call smovv ("        ", name, k)
+ 
+unt2$pointer$to target_indx
+if (xunt2$type$I == $shorebase$code)
+    name = xunt2$name$c
+else
+    {
+    unt$view$i = xunt$view$I
+    vue$pointer$to unt$view$i
+    rmt$pointer$to xvue$lastrmtindx$i
+    lastrmt = rmt$Pointer
+    for (rmt$pointer$to xvue$firstrmtindx$i;
+         rmt$Pointer <= lastrmt; rmt$Pointer$Next)
+        {
+        if (xrmt$detectee$i == target_indx)
+            {
+            rmt$detectiontype$i = xrmt$detectiontype$i
+            if ((rmt$detectiontype$i == $ActiveVisual$Code |
+                 rmt$detectiontype$i == $ActiveNonVisual$Code) &
+                (xrmt$tmaflag$i != $yes))
+                {
+                BREAK
+                }
+            }
+        }
+    vue$trackCode$c = xvue$trackcode$c
+    rmt$class$i = xrmt$class$i
+    rmt$tracknumber$i = xrmt$tracknumber$i
+    call TRKNUM(vue$TrackCode$C,rmt$detectiontype$i,
+                rmt$Class$i,RMT$TrackNumber$i,name)
+    }
+ 
+target_name = name
+ 
+return
+end
+
+subroutine ord_ir_status(DEQ$Pointer, work, i)
+ 
+bbcommon
+BBDeclare  (IRC$Pointer,
+            IRC$FOV$Index,
+            DEQ$Pointer,
+            DEQ$Scanrate$F)                                 # MJC 4/24/2000
+integer GAME_DTG, I                                         # MJC 4/24/2000
+real            Dazimuth, Delevation
+character       work[ARB]
+ 
+IRC$Pointer = xDEQ$pntr$I
+IRC$FOV$Index = xDEQ$FieldOfView$I
+Dazimuth =   (xDEQ$HorizSect$I*xIRC$FOV$AzHfAng$F+xIRC$Azimuth$F) * $rad2deg
+Delevation = (xDEQ$VertSect$I*xIRC$FOV$ElHfAng$F+xIRC$Elevation$F) * $rad2deg
+ 
+i = 0
+call smov ($Lparen, work, i)
+call smoviz (Game_DTG(GAME$TIME), 6, work, i)
+call smovv (")  ", work, i)
+if      (IRC$FOV$Index == 1)
+  {
+  call smovv("Wide ",work,i)
+  call smovv("Field of View; ", work, i)
+  if (xDEQ$Scan$I == $YES)
+    {
+    call smovv("Scan ", work, i)
+    DEQ$ScanRate$F = xDEQ$ScanRate$F
+    call smovf  (DEQ$ScanRate$F, 201, work, i)
+    call smovv  (" deg/sec; Elev ", work, i)
+    call smovf  (Delevation, 501, work, i)
+    call smovv  (" deg", work, i)
+    }
+  else
+    {
+    call smovv  ("Azim ", work, i)
+    call smovf  (Dazimuth, 501, work, i)
+    call smovv  (" deg; Elev ", work, i)
+    call smovf  (Delevation, 501, work, i)
+    call smovv  (" deg", work, i)
+    }
+  }
+else
+  {
+  if (IRC$FOV$Index == 2) call smovv("Medium ", work, i)
+  else                    call smovv("Narrow ", work, i)
+  call smovv("Field of View; ", work, i)
+  call smovv  ("Azim ", work, i)
+  call smovf  (Dazimuth, 501, work, i)
+  call smovv  (" deg; Elev ", work, i)
+  call smovf  (Delevation, 501, work, i)
+  call smovv  (" deg", work, i)
+  }
+ 
+return
+end
+
+ 
+subroutine Display_Targeting (target_code,    # in:  UNT$TargetType$I codes
+                              target_string,  # out: string
+                              string_len)     # out: string length
+##################################################################
+#$%
+#$% Purpose:   Display_Targeting will display the entered target
+#$%            priority from several ground attack commands.
+#$%
+#$% Called By: xorder
+#$%
+#$% Calls:     smov..
+#$%
+#$% Tables:    none
+#$%
+#$% Date:      June 1995
+#$%
+#$% Author:    Carol L. Kropp
+#$%
+########################################################
+BBCommon
+ 
+integer    target_code
+character  target_string[ARB]
+integer    string_len
+integer    I_SWITCH_1                                   # MJC 4/24/2000
+ 
+  string_len = 0
+  switch (target_code)
+    {
+     case $AirDefense$TargetCode:
+             call smovv ("AIRDEFENSE", target_string, string_len)
+     case $Armor$TargetCode:
+             call smovv ("ARMOR", target_string, string_len)
+     case $Artillery$TargetCode:
+             call smovv ("ARTILLERY", target_string, string_len)
+     case $EngBridge$TargetCode:
+             call smovv ("BRIDGE ENGINEERED", target_string, string_len)
+     case $FixedBridge$TargetCode:
+             call smovv ("BRIDGE FIXED", target_string, string_len)
+     case $Helicopters$TargetCode:
+             call smovv ("HELICOPTERS", target_string, string_len)
+     case $Infantry$TargetCode:
+             call smovv ("INFANTRY", target_string, string_len)
+     case $Road$TargetCode:
+             call smovv ("ROAD", target_string, string_len)
+     case $Trucks$TargetCode:
+             call smovv ("TRUCKS", target_string, string_len)
+     case $Radar$TargetCode:
+             call smovv ("RADAR", target_string, string_len)
+     case $AcquisitionRadar$TargetCode:
+             call smovv ("ACQ_RADAR", target_string, string_len)
+     case $CIWS$TargetCode:
+             call smovv ("CIWS", target_string, string_len)
+     case $Comm$TargetCode:
+             call smovv ("COMM", target_string, string_len)
+     case $FlightLine$TargetCode:
+             call smovv ("FLIGHTLINE", target_string, string_len)
+     case $Fuel$TargetCode:
+             call smovv ("FUEL", target_string, string_len)
+     case $Generic$TargetCode:
+             call smovv ("GENERIC", target_string, string_len)
+     case $Personnel$TargetCode:
+             call smovv ("PERSONNEL", target_string, string_len)
+     case $Shelters$TargetCode:
+             call smovv ("SHELTERS", target_string, string_len)
+     case $Stores$TargetCode:
+             call smovv ("STORES", target_string, string_len)
+     case $Weapons$TargetCode:
+             call smovv ("WEAPONS", target_string, string_len)
+     case $Radars$TargetCode:
+             call smovv ("RADARS", target_string, string_len)
+    }   # end of case on target_code
+ 
+return
+end
+
+ 
+subroutine xorder_jecewsi(unt$pointer)
+ 
+########################################################
+#$%
+#$% Purpose:   xorder_jecewsi lists all jecewsi factors received
+#$%            from JECEWSI for this platform.
+#$%
+#$% Called By: Pl_orders
+#$%
+#$% Tables:    UNT  JEW
+#$%
+#$% Date:      JULY 1996
+#$%
+#$% Author:    Susan Miller (E1626)
+#$%
+########################################################
+BBcommon
+ 
+integer UNT$Pointer, JEW$Pointer
+character msg1[ARB],msg2[ARB]
+integer   kk, jj, isave
+real     JEW$C3Factor$F
+real     JEW$LaunchFactor1$F,JEW$LaunchFactor2$F,JEW$LaunchFactor3$F,
+         JEW$LaunchFactor4$F,JEW$LaunchFactor5$F,JEW$LaunchFactor6$F,
+         JEW$LaunchFactor7$F,JEW$LaunchFactor8$F
+real     JEW$SpjFactor1$F, JEW$SpjFactor2$F, JEW$SpjFactor3$F,
+         JEW$SpjFactor4$F, JEW$SpjFactor5$F, JEW$SpjFactor6$F,
+         JEW$SpjFactor7$F, JEW$SpjFactor8$F
+integer  GAME_DTG                                               # MJC 4/24/2000
+literal  CSTRIP8                                                # MJC 4/24/2000
+ 
+jj = 0
+call smov ($Lparen,msg1,jj)
+call smoviz (Game_DTG(Game$Time), 6,msg1,jj)
+call smov ($Rparen,msg1,jj)
+call smov ($SPACE,msg1,jj)
+isave = jj
+ 
+JEW$Pointer$To  (UNT$Pointer$Index)
+if (!JEW$Pointer$Valid)
+  {
+   call smovh (msg1,isave,msg2,kk)         # put the time stamp on each line
+   call smovhn(xUNT$Name$C,$$MaxLit,msg2,kk)
+   call smovv (" JECEWSI factors are NOT available!  ",msg2,kk)
+   call smovv ("(Invalid table slot)",msg2,kk)
+   call echoh (msg2,kk)
+   call echor
+   return
+  }
+ 
+JEW$LaunchFactor1$F = XJEW$LaunchFactor1$F
+JEW$LaunchFactor2$F = XJEW$LaunchFactor2$F
+JEW$LaunchFactor3$F = XJEW$LaunchFactor3$F
+JEW$LaunchFactor4$F = XJEW$LaunchFactor4$F
+JEW$LaunchFactor5$F = XJEW$LaunchFactor5$F
+JEW$LaunchFactor6$F = XJEW$LaunchFactor6$F
+JEW$LaunchFactor7$F = XJEW$LaunchFactor7$F
+JEW$LaunchFactor8$F = XJEW$LaunchFactor8$F
+JEW$SpjFactor1$F = xJEW$SpjFactor1$F
+JEW$SpjFactor2$F = xJEW$SpjFactor2$F
+JEW$SpjFactor3$F = xJEW$SpjFactor3$F
+JEW$SpjFactor4$F = xJEW$SpjFactor4$F
+JEW$SpjFactor5$F = xJEW$SpjFactor5$F
+JEW$SpjFactor6$F = xJEW$SpjFactor6$F
+JEW$SpjFactor7$F = xJEW$SpjFactor7$F
+JEW$SpjFactor8$F = xJEW$SpjFactor8$F
+JEW$C3Factor$F = XJEW$C3Factor$F
+ 
+kk = 0
+call smovh (msg1,isave,msg2,kk)         # put the time stamp on each line
+call smovv ("JECEWSI Degradation Factors Aboard ",msg2,kk)
+call smovhn(xUNT$Name$C,$$MaxLit,msg2,kk)
+call echoh (msg2,kk)
+call echor
+ 
+kk = 0
+call smovh (msg1,isave,msg2,kk)         # put the time stamp on each line
+call smovv ("(1.00 = no degradation by JECEWSI) ",msg2,kk)
+call echoh (msg2,kk)
+call echor
+ 
+if ((JEW$LaunchFactor1$F == 1.0) &  # no degradation of JEW$LaunchFactors
+    (JEW$LaunchFactor2$F == 1.0) &
+    (JEW$LaunchFactor3$F == 1.0) &
+    (JEW$LaunchFactor4$F == 1.0) &
+    (JEW$LaunchFactor5$F == 1.0) &
+    (JEW$LaunchFactor6$F == 1.0) &
+    (JEW$LaunchFactor7$F == 1.0) &
+    (JEW$LaunchFactor8$F == 1.0))
+  {
+   kk = 0
+   call smovh (msg1,isave,msg2,kk)         # put the time stamp on each line
+   call smovv ("- ",msg2,kk)
+   call smovv ("Successful Weapons Launch Factor",msg2,kk)
+   call smovv (" is not JECEWSI degraded.  ",msg2,kk)
+   call echoh (msg2,kk)
+   call echor
+  }
+else # degradation of JEW$LaunchFactors
+  {
+   kk = 0
+   call smovh (msg1,isave,msg2,kk)         # put the time stamp on each line
+   call smovv ("- ",msg2,kk)
+   call smovv ("Successful Weapons Launch Factor ",msg2,kk)
+   call echoh (msg2,kk)
+   call echor
+ 
+   kk = 0
+   call smovh (msg1,isave,msg2,kk)         # put the time stamp on each line
+   call smovv ("    Sector 1:  ",msg2,kk)
+   call smovf (JEW$LaunchFactor1$F,702,msg2,kk)
+   call smovv ("    Sector 2:  ",msg2,kk)
+   call smovf (JEW$LaunchFactor2$F,702,msg2,kk)
+   call smovv (" ",msg2,kk)
+   call echoh (msg2,kk)
+   call echor
+ 
+   kk = 0
+   call smovh (msg1,isave,msg2,kk)         # put the time stamp on each line
+   call smovv ("    Sector 3:  ",msg2,kk)
+   call smovf (JEW$LaunchFactor3$F,702,msg2,kk)
+   call smovv ("    Sector 4:  ",msg2,kk)
+   call smovf (JEW$LaunchFactor4$F,702,msg2,kk)
+   call smovv (" ",msg2,kk)
+   call echoh (msg2,kk)
+   call echor
+ 
+   kk = 0
+   call smovh (msg1,isave,msg2,kk)         # put the time stamp on each line
+   call smovv ("    Sector 5:  ",msg2,kk)
+   call smovf (JEW$LaunchFactor5$F,702,msg2,kk)
+   call smovv ("    Sector 6:  ",msg2,kk)
+   call smovf (JEW$LaunchFactor6$F,702,msg2,kk)
+   call smovv (" ",msg2,kk)
+   call echoh (msg2,kk)
+   call echor
+ 
+   kk = 0
+   call smovh (msg1,isave,msg2,kk)         # put the time stamp on each line
+   call smovv ("    Sector 7:  ",msg2,kk)
+   call smovf (JEW$LaunchFactor7$F,702,msg2,kk)
+   call smovv ("    Sector 8:  ",msg2,kk)
+   call smovf (JEW$LaunchFactor8$F,702,msg2,kk)
+   call smovv (" ",msg2,kk)
+   call echoh (msg2,kk)
+   call echor
+  } # end of JEW$LaunchFactor
+ 
+if ((JEW$SpjFactor1$F == 1.0) &
+    (JEW$SpjFactor2$F == 1.0) &
+    (JEW$SpjFactor3$F == 1.0) &
+    (JEW$SpjFactor4$F == 1.0) &
+    (JEW$SpjFactor5$F == 1.0) &
+    (JEW$SpjFactor6$F == 1.0) &
+    (JEW$SpjFactor7$F == 1.0) &
+    (JEW$SpjFactor8$F == 1.0))
+  {
+   kk = 0
+   call smovh (msg1,isave,msg2,kk)         # put the time stamp on each line
+   call smovv ("- ",msg2,kk)
+   call smovv ("Probability of Successful Hit Factor",msg2,kk)
+   call smovv (" is not JECEWSI degraded.  ",msg2,kk)
+   call echoh (msg2,kk)
+   call echor
+  }
+else # degradation of JEW$SpjFactor
+  {
+   kk = 0
+   call smovh (msg1,isave,msg2,kk)         # put the time stamp on each line
+   call smovv ("- ",msg2,kk)
+   call smovv ("Probability of Successful Hit Factor ",msg2,kk)
+   call echoh (msg2,kk)
+   call echor
+ 
+   kk = 0
+   call smovh (msg1,isave,msg2,kk)         # put the time stamp on each line
+   call smovv ("    Sector 1:  ",msg2,kk)
+   call smovf (JEW$SpjFactor1$F,702,msg2,kk)
+   call smovv ("    Sector 2:  ",msg2,kk)
+   call smovf (JEW$SpjFactor2$F,702,msg2,kk)
+   call smovv (" ",msg2,kk)
+   call echoh (msg2,kk)
+   call echor
+ 
+   kk = 0
+   call smovh (msg1,isave,msg2,kk)         # put the time stamp on each line
+   call smovv ("    Sector 3:  ",msg2,kk)
+   call smovf (JEW$SpjFactor3$F,702,msg2,kk)
+   call smovv ("    Sector 4:  ",msg2,kk)
+   call smovf (JEW$SpjFactor4$F,702,msg2,kk)
+   call smovv (" ",msg2,kk)
+   call echoh (msg2,kk)
+   call echor
+ 
+   kk = 0
+   call smovh (msg1,isave,msg2,kk)         # put the time stamp on each line
+   call smovv ("    Sector 5:  ",msg2,kk)
+   call smovf (JEW$SpjFactor5$F,702,msg2,kk)
+   call smovv ("    Sector 6:  ",msg2,kk)
+   call smovf (JEW$SpjFactor6$F,702,msg2,kk)
+   call smovv (" ",msg2,kk)
+   call echoh (msg2,kk)
+   call echor
+ 
+   kk = 0
+   call smovh (msg1,isave,msg2,kk)         # put the time stamp on each line
+   call smovv ("    Sector 7:  ",msg2,kk)
+   call smovf (JEW$SpjFactor7$F,702,msg2,kk)
+   call smovv ("    Sector 8:  ",msg2,kk)
+   call smovf (JEW$SpjFactor8$F,702,msg2,kk)
+   call smovv (" ",msg2,kk)
+   call echoh (msg2,kk)
+   call echor
+  }
+ 
+kk = 0
+call smovh (msg1,isave,msg2,kk)         # put the time stamp on each line
+call smovv ("- ",msg2,kk)
+if (JEW$C3Factor$F == 1.0)
+  {
+   call smovv ("JECEWSI C3 Effectiveness Factor ",msg2,kk)
+   call smovv ("is not JECEWSI degraded.  ",msg2,kk)
+  }
+else
+  {
+   call smovv ("JECEWSI C3 Effectiveness Factor:   ",msg2,kk)
+   call smovf (JEW$C3Factor$F,702,msg2,kk)
+  }
+call echoh (msg2,kk)
+call echor
+ 
+return
+end
+
+ 
+include "bbrte.inc"
+ 
+subroutine xorder_process_route_display(UNT$Pointer) # unt pointer
+ 
+########################################################
+#$%
+#$% Purpose:   xorder_process_route_display generates the
+#$%            current route leg and orders to be displayed
+#$%            at the player station.
+#$%
+#$% Called By: xorder
+#$%
+#$% Calls:     SEND
+#$%
+#$% Tables:    UNT    RTE
+#$%
+#$% Date:      June 1997
+#$%
+#$% Author:    Susan Miller (E1819)
+#$%
+#$% Modified:  Jim Allen 11/02 (E2313)
+#$%            Change rte$missionFlag$i to rte$TankerType$i
+#$%            so airtanker can be referenced by sidenumber,
+#$%            event, and mission
+#$%
+########################################################
+BBcommon
+ 
+integer UNT$Pointer
+integer RTE$Pointer, msg_len
+character msg[70]
+integer game_DTG, dest [120], head_len
+BBDeclare  (ord$pointer)
+literal CSTRIP8                                     # MJC 4/24/2000
+ 
+ head_len = 0
+ call smov ($Lparen,dest,head_len)
+ call smoviz (Game_DTG(GAME$TIME),6,dest,head_len)
+ call smov ($Rparen,dest,head_len)
+ call smov ($SPACE,dest,head_len)
+ 
+ msg_len = 0
+ 
+ rte$pointer$to Xunt$RTEIndx$i
+ 
+# call smovv("CURRENTLY ON ORDER ",msg,msg_len)
+ call smovv("CURRENTLY ON ",msg,msg_len)
+# call fndrteInOrd (unt$pointer,ord$pointer)
+# if (ord$pointer != 0)
+# {
+#     if (Xunt$RouteInReverseFlag$i == $YES)
+#         call smovi(Xord$Count$i - Xord$Sequence$I + 1,msg,msg_len)
+#     else
+#         call smovi(Xord$Sequence$I,msg,msg_len)
+# }
+# call smovv(" OF ROUTE NAMED ",msg,msg_len)
+ call smovv("ROUTE NAMED ",msg,msg_len)
+ call smovh(xRTE$Name$C,$$MaxLit,msg,msg_len)
+ 
+ call echoh (dest,head_len)
+ call echoh (msg, msg_len)
+ call echor
+ 
+ 
+return
+end
+
+#Subroutine fndrteInOrd (unt$pointer,ord$pointer)
+######################################################################
+#$%
+#$% Purpose: find route in order table
+#$%
+#$% Called By:  xorder_process_route_display, route_tasking
+#$%
+#$% Calls:
+#$%
+#$% Tables:    UNT      RTE        ORD
+#$%
+#$% Date:      June 2005
+#$%
+#$% Author:    James O. Allen
+#$%
+########################################################
+ 
+#BBcommon
+ 
+#BBdeclare (unt$pointer, rte$pointer, ord$pointer)
+#integer UNTindx
+ 
+#ord$pointer = 0             # Not found
+ 
+#if (!unt$pointer$valid) return
+ 
+#rte$pointer$to Xunt$RTEIndx$i
+ 
+#if (!rte$pointer$valid) return
+ 
+#UNTindx = unt$pointer$index
+ 
+#for (ord$pointer$first; ord$pointer$ok; ord$pointer$next)
+#{
+ 
+#    if (Xord$AddIndx$i != UNTindx) next
+#    if (Xord$Count$i == 1) next
+#    break
+#}
+ 
+#if (!ord$pointer$ok) ord$pointer = 0
+ 
+#return
+#end
+ 

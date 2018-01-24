@@ -1,0 +1,801 @@
+#$%     MODULE                        UTILITY                   DATA
+#$%   SUBROUTINES                   SUBROUTINES                TABLES
+#$%   ===========                   ===========                ======
+#$%
+#$%     SBDMOD                         RANDN                     UNT
+#$%     SBDNEW                         RANDOM                    DEQ
+#$%     SBDSET                         INOUT                     SHC
+#$%     SBDDT1                         RLL2RB                    SON
+#$%     FALSE_SBD_CONTACTS                                       BIS
+#$%     REMOVE_TRACKS                                            SOS
+#$%     SBDPOS                                                   SOP
+#$%                                                              SBD
+#$%
+#$%
+#$%   NOTES
+#$%   =====
+#$%
+#$%   1.  <FILENAME> INDICATES WHERE SUBROUTINE IS LOCATED.
+#$%
+#$%   2.  UTILITY SUBROUTINES NOT SHOWN ON FLOWCHART.
+#$%
+#$%   3.  * INDICATES NO OTHER SUBROUTINES CALLED.
+#$%
+#$%
+#$%
+#$%   FLOWCHART FOR FILE SBDMOD
+#$%   =========================
+#$%
+#$%   SBDMOD - SBDPOS
+#$%          - FALSE_SBD_CONTACTS - SBDNEW
+#$%                               - SBDSET
+#$%          - SBDDT1 - SBDNEW
+#$%                   - SBDSET
+#$%          - REMOVE_TRACKS - SOSNEW
+#$%
+
+define (BBImplicit,Implicit None)           # This has no effect here
+ 
+define (SBD_Factor$ShallowWater,0.4)        # Pb Factor for Shallow Water Subs
+define ($debug,)
+ 
+define ($sbd_paired_unknown, 0)
+define ($sbd_paired_no, 1)
+define ($sbd_paired_yes, 2)
+define (SBD_Common,
+        integer  sbd_bstat_regn_paired_flag
+        integer  bstat_sos_regions [SOP$slots]   # holds the SOP Pointer value
+        integer  nbr_bstat_sos_regions
+        common /SBD_Common_Data/ sbd_bstat_regn_paired_flag,
+                                 bstat_sos_regions,
+                                 nbr_bstat_sos_regions)
+ 
+include "bbctl.inc"
+include "bbcode.inc"
+include "bbbis.inc"
+include "bbdeq.inc"
+include "bbpng.inc"
+include "bbsbd.inc"
+include "bbshc.inc"
+include "bbson.inc"
+include "bbsop.inc"
+include "bbsos.inc"
+include "bbunt.inc"
+include "macros.inc"
+define (BBImplicit, Implicit None)                  # MJC 7/13/2K (E2145)
+ 
+Subroutine SBDMOD
+#######################################################
+#$%
+#$% Purpose:   SBDMOD determines SOSUS bistatic detections
+#$%            of submarines.
+#$%
+#$% Called By: WARCYC
+#$%
+#$% Calls:     SBDDT1     SBDPOS     FALSE_SBD_CONTACTS
+#$%            INOUT      RLL2RB
+#$%
+#$% Tables:    UNT        DEQ        BIS
+#$%            SOP        SON
+#$%
+#$% Date:      July 1991
+#$%
+#$% Author:    Cynthia Leaf
+#$%
+#######################################################
+BBcommon
+SBD_Common
+BBDeclare  (SOP$Regionarea$F,
+            SOP$Pointer,
+            UNT$Truelongitude$F,
+            UNT$Truelatitude$F,
+            UNT$Pointer,
+            DEQ$Pointer,
+            SON$Pointer,
+            PNG$Pointer,
+            BIS$Pointer)                                # MJC 7/11/2K (E2145)
+integer I                                               # MJC 7/11/2K (E2145)
+real*4 Lats[6],Lons[6],MinLat,MinLon,MaxLat,MaxLon,minrange,maxrange,OverlapArea
+integer inside
+ 
+#$% if there are no sosus regions in the game, nothing to process
+#$% or there is no defined level of bistatic operations for this game
+if (SOP$Used == 0 | BISTATIC$Ops$Level <= 0)
+  return
+ 
+#$% sbd_bstat_regn_paired_flag indicates if any active sonars are paired
+#$% with the Sosus regions as the passive receiver and at least one
+#$% sosus region is bistatic capable
+if (sbd_bstat_regn_paired_flag == $sbd_paired_unknown)
+  {
+   sbd_bstat_regn_paired_flag = $sbd_paired_no
+   for (BIS$Pointer$First; BIS$Pointer$OK; BIS$Pointer$Next)
+     {
+      if (xBIS$PassiveIndx$i == 0)  # zero index is associated with BDS
+        {
+         nbr_bstat_sos_regions = 0
+         for (SOP$Pointer$First; SOP$Pointer$OK; SOP$Pointer$Next)
+           {
+            if (xSOP$BistaticCapable$i == $yes)
+              {
+               sbd_bstat_regn_paired_flag = $sbd_paired_yes
+               nbr_bstat_sos_regions = nbr_bstat_sos_regions + 1
+               bstat_sos_regions [nbr_bstat_sos_regions] = SOP$Pointer
+              }
+           }
+         break
+        }
+     }
+ 
+  }
+ 
+if (sbd_bstat_regn_paired_flag == $sbd_paired_no)
+  return
+ 
+#$% for each unit, search for an active sonar that is on
+for (UNT$Pointer$First; UNT$Pointer$OK; UNT$Pointer$Next)
+  {
+   If (xUNT$GhostedUnit$I == $YES) next  # skip any ghosts
+   else if (xUNT$Status$i == $BeingDeleted$Code) next # skip dead units
+ 
+   if (Xunt$NeverDetect$i == YES) next      # joa 3/05 per_never
+ 
+   #$% look for an active sonar in DEQ chain that is on
+   for_DEQ_CHAIN
+     {
+      if (xDEQ$Ident$i != $Sonar$Code) next
+      if (xDEQ$On$i == $NO) next
+ 
+      SON$Pointer = xDEQ$Pntr$i
+      if (xSON$ActiveLFA$I == $yes)    # if it's an LFA - is time for it to ping
+        {
+         PNG$Pointer$to (xDEQ$LFAPingIndex$i)
+         if (xpng$TimeOfNextPing$f <= Game$Time)  # if the time to ping is not
+           next                                     # in this game cycle - next
+        }
+ 
+      #$% Compare the Active Sonar's SON index with the SON indicies in the
+      #%$ BIS table to see if this sonar is paired with a BDS
+      for (BIS$Pointer$First; BIS$Pointer$OK; BIS$Pointer$Next)
+        {
+         if (SON$Pointer$Index != xBIS$ActiveIndx$i |
+             xBIS$PassiveIndx$i != 0) next
+ 
+         #$% search bistatic sosus regions for detections
+         for (i = 1; i <= nbr_bstat_sos_regions; i = i + 1)
+           {
+            SOP$Pointer = bstat_sos_regions [i]
+ 
+            #$% get latitudes and longitudes of vertices, find maximum and
+            #$% minimum of the latitudes and longitudes, and find range of
+            #$% vertex that is farthest from the unit
+            call SBDPOS(UNT$Pointer,SOP$Pointer,Lats,Lons,MinLat,MinLon,
+                        MaxLat,MaxLon,minrange,maxrange)
+ 
+            #$% compute area of sosus region that is ensonified
+            call inout(UNT$TrueLongitude$f,UNT$TrueLatitude$f,
+                       xSOP$NbrVertices$i,Lons,Lats,inside)
+            SOP$RegionArea$f = xSOP$RegionArea$f
+            if (inside == $NO)
+              {
+               if (minrange >= Max$Bistatic$Range) next
+              }
+ 
+            if (Max$Bistatic$Range >= maxrange)
+              OverlapArea = SOP$RegionArea$f
+            else
+              OverlapArea = (Max$Bistatic$Range/maxrange)*SOP$RegionArea$f
+ 
+            #$% determine if there are any false contacts
+            call false_sbd_contacts(UNT$Pointer,SOP$Pointer,OverlapArea,Lats,
+                                    Lons,MinLat,MinLon,MaxLat,MaxLon)
+ 
+            call SBDDT1(UNT$Pointer,SOP$Pointer,DEQ$Pointer,Lats,Lons)
+           }
+        }
+     }
+  }
+ 
+call REMOVE_TRACKS
+ 
+return
+end
+
+ 
+ 
+subroutine SBDPOS(UNT$Pointer,      # pointer to unit with active source on
+                  SOP$Pointer,      # pointer to bistatically capable region
+                  Lats,Lons,        # latitudes and longitudes of vertices
+                  MinLat,MinLon,    # minimum magnitude of lats and lons
+                  MaxLat,MaxLon,    # maximum magnitude of lats and lons
+                  minrange,         # range from source to closest vertex
+                  maxrange)         # range from source to farthest vertex
+########################################################################
+#$%
+#$% Purpose:   SBDPOS gets the latitudes and longitudes of the sosus
+#$%            region vertices, finds the maximum and minimum magnitudes
+#$%            of the latitudes and longitudes, and finds the ranges from
+#$%            the active source to the vertices that are closest to it and
+#$%            farthest from it.
+#$%
+#$% Called By: SBDMOD
+#$%
+#$% Calls:     RLL2RB
+#$%
+#$% Tables:    UNT        SOP
+#$%
+#$% Date:      July 1991
+#$%
+#$% Author:    Cynthia Leaf
+#$%
+#######################################################################
+BBcommon
+BBDeclare  (SOP$VER$Index,
+            SOP$Nbrvertices$I,
+            SOP$Pointer,
+            UNT$Truelatitude$F,
+            UNT$Pointer,
+            UNT$Truelongitude$F)                            # MJC 7/11/2K (E2145)
+real*4 Lats[6],Lons[6],MinLat,MinLon,MaxLat,MaxLon,minrange,maxrange,
+       coslat1,coslat2,range,bearing
+ 
+SOP$VER$Index = 1
+Lats[1] = xSOP$VER$Latitude$f
+Lons[1] = xSOP$VER$Longitude$f
+ 
+UNT$TrueLatitude$f = xUNT$TrueLatitude$f
+UNT$TrueLongitude$f = xUNT$TrueLongitude$f
+ 
+coslat1 = cos(UNT$TrueLatitude$f)
+coslat2 = cos(Lats[1])
+ 
+call rll2rb(UNT$TrueLatitude$f,UNT$TrueLongitude$f,coslat1,Lats[1],Lons[1],
+            coslat2,range,bearing)
+ 
+minrange = range
+maxrange = range
+MinLat = Lats[1]
+MaxLat = Lats[1]
+MinLon = Lons[1]
+MaxLon = Lons[1]
+ 
+SOP$NbrVertices$i = xSOP$NbrVertices$i
+ 
+for (SOP$VER$Index = 2; SOP$VER$Index <= SOP$NbrVertices$i;
+     SOP$VER$Index = SOP$VER$Index + 1)
+  {
+   Lats[SOP$VER$Index] = xSOP$VER$Latitude$f
+   Lons[SOP$VER$Index] = xSOP$VER$Longitude$f
+ 
+   if (MinLat > Lats[SOP$VER$Index])
+       MinLat = Lats[SOP$VER$Index]
+   if (MaxLat < Lats[SOP$VER$Index])
+       MaxLat = Lats[SOP$VER$Index]
+   if (MinLon > Lons[SOP$VER$Index])
+       MinLon = Lons[SOP$VER$Index]
+   if (MaxLon < Lons[SOP$VER$Index])
+       MaxLon = Lons[SOP$VER$Index]
+ 
+   coslat2 = cos(Lats[SOP$VER$Index])
+   call rll2rb(UNT$TrueLatitude$f,UNT$TrueLongitude$f,coslat1,
+               Lats[SOP$VER$Index],Lons[SOP$VER$Index],coslat2,
+               range,bearing)
+ 
+    if (maxrange < range)
+      maxrange = range
+    if (minrange > range)
+      minrange = range
+  }
+ 
+return
+end
+
+ 
+ 
+subroutine false_sbd_contacts(UNT$Pointer,  # unit pointer of active source
+                              SOP$Pointer,  # pointer to bistatic region
+                              OverlapArea,  # area of sosus region ensonified
+                              Lats,Lons,    # lats and lons of vertices
+                              MinLat,MinLon,# minimum magnitude of lats and lons
+                              MaxLat,MaxLon)# maximum magnitude of lats and lons
+########################################################################
+#$%
+#$% Purpose:   FALSE_SBD_CONTACTS determines whether a false contact has
+#$%            occurred and, if so, enters it into the SBD table.
+#$%
+#$% Called By: SBDMOD
+#$%
+#$% Calls:     SBDNEW     SBDSET     INOUT
+#$%            RANDOM
+#$%
+#$% Tables:    UNT        SOP
+#$%
+#$% Date:      July 1991
+#$%
+#$% Author:    Cynthia Leaf
+#$%
+#######################################################################
+BBcommon
+BBDeclare  (SOP$Nodedensity$F,
+            SOP$Pointer,
+            SOP$Nbrvertices$I,
+            UNT$Truelatitude$F,
+            UNT$Pointer,
+            UNT$Truelongitude$F)                            # MJC 7/11/2K (E2145)
+real RANDOM, x
+data x/0.0/		# Get next random number in sequence
+ 
+real*4 OverlapArea,Lats[6],Lons[6],MinLat,MinLon,MaxLat,MaxLon,n,Pfa,
+       U,U1,U2,coslat1,coslat2,Lat,Lon,range,bearing
+integer inside,indxs1,indxs2
+ 
+SOP$NodeDensity$f = xSOP$NodeDensity$f
+SOP$NbrVertices$i = xSOP$NbrVertices$i
+n = OverlapArea * SOP$NodeDensity$f
+ 
+Pfa = 1 - (0.9999)**n
+U = Random(x)
+if (U > Pfa) return
+ 
+inside = $NO
+while (inside == $NO)
+  {
+   U1 = Random(x)
+   U2 = Random(x)
+   Lat = MinLat + U1*(MaxLat - MinLat)
+   Lon = MinLon + U2*(MaxLon - MinLon)
+   call inout(Lon,Lat,SOP$NbrVertices$i,Lons,Lats,inside)
+  }
+ 
+#$% get next slot in SBD table
+call SBDNEW(indxs1,indxs2)
+ 
+UNT$TrueLatitude$f = xUNT$TrueLatitude$f
+UNT$TrueLongitude$f = xUNT$TrueLongitude$f
+coslat1 = cos(UNT$TrueLatitude$f)
+coslat2 = cos(Lat)
+call rll2rb(UNT$TrueLatitude$f,UNT$TrueLongitude$f,coslat1,Lat,Lon,
+            coslat2,range,bearing)
+#$% store false contact data
+call SBDSET(0,SOP$Pointer,indxs1,Lat,Lon,range)
+ 
+return
+end
+
+ 
+ 
+Subroutine SBDNEW(IndxS1,      #get and pass new track index
+                  IndxS2)
+#######################################################
+#$%
+#$% Purpose:   SBDNEW updates indices when getting
+#$%            index to a new slot.
+#$%
+#$% Called By: SBDDT1     FALSE_SBD_CONTACTS
+#$%
+#$% Calls:     None
+#$%
+#$% Tables:    SBD
+#$%
+#$% Date:      July 1991
+#$%
+#$% Author:    Cynthia Leaf
+#$%
+#######################################################
+BBcommon
+BBDeclare  (SBD$Pointer,
+            SBD$Nextindx$I)                             # MJC 7/11/2K (E2145)
+integer INDXS1,
+        INDXS2                                          # MJC 7/11/2K (E2145)
+#$% save pointer index to first free slot
+indxs1 = SBD$First$Free
+ 
+SBD$pointer$to indxs1       #point to this slot
+ 
+SBD$used = MAX(SBD$used, SBD$pointer$index * SBD$entry)
+ 
+#$% save pointer index to next free slot on chain
+indxs2 = xSBD$NextIndx$I
+ 
+#$% set the pointer index to the old first free slot and set to zero
+SBD$NextIndx$I = 0
+putSBD$NextIndx$I
+ 
+if (SBD$Last$Track != 0)             # if this is not the first track,
+  {                                  # then point to old last
+   SBD$Pointer$to SBD$Last$Track     # track and link old last track
+   SBD$NextIndx$I = indxs1           # to new last track.  this new
+   putSBD$NextIndx$I                 # last track was the first free
+  }
+else
+  {
+   SBD$Last$Track = indxs1           # if this is the first track
+   SBD$First$Track = indxs1          # indices to the first slot
+  }
+ 
+SBD$Last$Track = indxs1              #update last track
+SBD$First$Free = indxs2              #update first free space
+ 
+if (indxs1  == SBD$Last$Free)        #if the first and last free space
+  {
+   SBD$Last$Free = indxs2            #pointer indicies are equal
+ 
+   if (indxs1 == SBD$First$Track)    #if the first free space pointer
+     SBD$First$Track = indxs2
+  }
+ 
+Return
+End
+
+ 
+ 
+subroutine SBDSET(UNT$pointer,         # pointer to detected sub unit slot
+                  SOP$Pointer,         # sosus region pointer
+                  index1,              # new index into SBD table
+                  Lat,Lon,             # latitude and longitude of detected sub
+                  range)               # range from active sonar to track or
+                                       #  false contact
+#######################################################
+#$%
+#$% Purpose:   SBDSET initializes the new track.
+#$%
+#$% Called By: SBDDT1     FALSE_SBD_CONTACT
+#$%
+#$% Calls:     None
+#$%
+#$% Tables:    UNT        SBD        SOP
+#$%            SHC
+#$%
+#$% Date:      July 1991
+#$%
+#$% Author:    Cynthia Leaf
+#$%
+#######################################################
+BBcommon
+BBDeclare  (SBD$Pointer,
+            SBD$Detectedunit$I,
+            SBD$Apparentlat$F,
+            SBD$Apparentlon$F,
+            SBD$Sosusregid$I,
+            SBD$Detectiontime$F,
+            SBD$Reporttime$F,
+            UNT$Pointer,
+            SOP$Pointer)                                    # MJC 7/11/2K (E2145)
+real*4 Lat,Lon,range
+integer*4 index1
+real      report_delay_minutes
+ 
+SBD$pointer$to index1
+ 
+if (UNT$Pointer == 0)    # track is a false contact
+  {
+   SBD$DetectedUnit$i = 0
+   putSBD$DetectedUnit$i
+  }
+else    # track is a submarine
+  {
+   SBD$DetectedUnit$i = UNT$Pointer$Index
+   putSBD$DetectedUnit$i
+  }
+ 
+SBD$ApparentLat$f = Lat
+putSBD$ApparentLat$f
+ 
+SBD$ApparentLon$f = Lon
+putSBD$ApparentLon$f
+ 
+SBD$SosusRegId$i = SOP$Pointer$Index
+putSBD$SosusRegId$i
+ 
+sbd$DetectionTime$f = Game$Time
+putsbd$DetectionTime$f
+ 
+#$% compute report time
+sbd$ReportTime$f = Game$Time
+if (BISTATIC$Ops$Level == 2)
+  {
+   report_delay_minutes = 10.0 + range*0.021
+   sbd$ReportTime$f = Game$Time + report_delay_minutes
+  }
+putsbd$ReportTime$f
+ 
+return
+End
+
+ 
+ 
+subroutine SBDDT1(UNT$pointer,     # unit pointer of active source
+                  SOP$Pointer,     # pointer to sosus region
+                  DEQ$Pointer,     # pointer to active sonar equipment
+                  Lats,Lons)       # latitudes and longitudes of vertices
+#####################################################################
+#$%
+#$% Purpose:   SBDDT1 searches the unit table for subs and determines
+#$%            whether a bistatic detection occurs or not.
+#$%
+#$% Called By: SBDMOD
+#$%
+#$% Calls:     RLL2RB     INOUT      NVREGN
+#$%            RANDOM     RANDN      SBDNEW
+#$%            SBDSET
+#$%
+#$% Tables:    UNT        SOP        SON
+#$%            SBD        DEQ        PNG
+#$%
+#$% Date:      July 1991
+#$%
+#$% Author:    Cynthia Leaf
+#$%
+############################################################
+BBcommon
+BBDeclare  (DEQ$Lfapingindex$I,
+            DEQ$Pointer,
+            PNG$Pointer,
+            PNG$DTA$Index,
+            UNT2$Pointer,
+            UNT2$Status$I,
+            UNT$Pointer,
+            SOP$Pointer)                                # MJC 7/11/2K (E2145)
+real X,
+     RANDOM                                             # MJC 7/11/2K (E2145)
+data x/0.0/		# Get next random number in sequence
+ 
+real*4  Lats[6],Lons[6],Pd,U,range,bearing,coslat1,coslat2,lat1,lon1,
+        lat2,lon2,NodeDensity,NodeRange,PulseLen,ApparentLat,ApparentLon,
+        factor[4,4]
+integer inside,indser,envnum1,envnum2,indxs1,indxs2,NbrVertices
+ 
+data factor/ 1.0, 0.75, 0.25, 0.03,
+            0.60, 0.45, 0.15, 0.02,
+            0.20, 0.15, 0.05, 0.01,
+            0.10, 0.07, 0.02, 0.00/
+ 
+lat1 = xUNT$TrueLatitude$f
+lon1 = xUNT$TrueLongitude$f
+coslat1 = cos(lat1)
+ 
+#$% for each unit, search for a submarine inside the ensonified area
+for (UNT2$Pointer$First; UNT2$Pointer$OK; UNT2$Pointer$Next)
+  {
+   #$% unit must be a sub
+   if (xUNT2$Type$i != $sub$code) next
+ 
+   #$% get unit status
+   UNT2$Status$i = xUNT2$Status$i
+ 
+   #$% if being deleted or sinking, get next entry
+   if (UNT2$Status$i == $beingdeleted$code |   #skip if kaput
+       UNT2$Status$i == $sinking$code)  next   #skip if sinking
+ 
+   #$% if it's a countermeasure or torpedo, skip it
+   if ((xUNT2$SuperType$i == $CtrMeasure$SuperCode) |
+       (xUNT2$SuperType$i == $Torpedo$SuperCode)) next
+ 
+   #$% compute the range from the submarine to the active sonar
+   lat2 = xUNT2$TrueLatitude$f
+   lon2 = xUNT2$TrueLongitude$f
+   coslat2 = cos(lat2)
+   call rll2rb(lat1,lon1,coslat1,lat2,lon2,coslat2,range,bearing)
+ 
+   #$% check to see if sub is withen maximum bistatic range
+   if (range > Max$Bistatic$Range) next
+ 
+   NbrVertices = xSOP$NbrVertices$i
+   #$% check to see if submarine is in the BDS region
+   call inout(lon2,lat2,NbrVertices,Lons,Lats,inside)
+   if (inside == $NO) next
+ 
+   #$% compute preliminary probability of detection
+   NodeRange = xSOP$NodeBistaticRange$f * (1 - range/float(Max$Bistatic$Range))
+   NodeDensity = xSOP$NodeDensity$f
+      # get pulse length
+   DEQ$LFAPingIndex$i = xDEQ$LFAPingIndex$i
+   if (DEQ$LFAPingIndex$i != 0)    # active source is an LFA; get pulse length
+                                   # from PNG table
+     {
+      PNG$Pointer$to (xDEQ$LFAPingIndex$i)
+      if (xPNG$PingSchedule$i == $NO)   # no schedule set
+        PulseLen = float(xPNG$PulseLength$i)
+      else     # a  ping schedule has been set; get pulse length of last ping
+        {
+         PNG$DTA$Index = xPNG$NextScheduledPing$i - 1
+         PulseLen = float(xPNG$DTA$PulseLength$i)
+        }
+     }
+   else    # active source is not an LFA; use default pulse length
+     {
+      PulseLen = 1.0
+     }
+ 
+   if (PulseLen >= (2.5 * NodeRange))  # nodes are completely blanked,
+     Pd = 0.0                          #  detection impossible
+   else
+     {
+      Pd = NodeDensity * 0.5 * $Pi * NodeRange * (NodeRange - 0.4 * PulseLen)
+      if (Pd > 1.0)
+        Pd = 1.0
+     }
+ 
+   #$% adjust probability of detection for environments
+   call NVREGN(lat1,lon1,indser,envnum1)
+   call NVREGN(lat2,lon2,indser,envnum2)
+   Pd = Pd * factor[envnum2,envnum1]
+ 
+   #$% adjust probability of detection for shallow submarine depths
+   if (xUNT2$TrueAltDepth$i <= 150)
+     Pd = SBD_Factor$ShallowWater * Pd
+ 
+   #$% check to see if submarine is detected
+   U = Random(x)
+   if (U > Pd) next
+ 
+   #$% compute the apparent latitude and longitude
+   call ELLOFF (_    # ellipse center offset (in this case circle offset)
+                NodeRange,       # send the node range for semi major axis
+                NodeRange * 0.5, # send half of the node rng for semi minor axis
+                0.0,             # orientation # jb E2208 (0.0 vice 0)   9/27/00
+                lat2,            # latitude of target
+                lon2,            # longitude of target
+                COS (lat2),      # cosine of target latitude
+                ApparentLat,     # offset latitude position  (output)
+                ApparentLon)     # offset longitude position (output)
+ 
+   call SBDNEW(indxs1,indxs2)
+   call SBDSET(UNT2$Pointer,SOP$Pointer,indxs1,ApparentLat,ApparentLon,range)
+  }
+ 
+return
+end
+
+ 
+ 
+subroutine REMOVE_TRACKS
+##################################################################
+#$%
+#$% Purpose:   REMOVE_TRACKS loops through the SBD table and
+#$%            removes any old tracks from the detection list and
+#$%            transfers tracks that should be reported to the
+#$%            sosus track table.
+#$%
+#$% Called By: SBDMOD
+#$%
+#$% Calls:     SOSNEW
+#$%
+#$%
+#$% Tables:    SBD        SOS        UNT
+#$%
+#$% Date:      July 1991
+#$%
+#$% Author:    Cynthia Leaf
+#$%
+############################################################
+BBcommon
+BBDeclare  (SBD$Pointer,
+            SBD$Detectiontime$F,
+            SBD$Reporttime$F,
+            UNT$Pointer,
+            UNT$Sbdalertindx$I,
+            SOS$Pointer,
+            SOS$Sequencenmbr$I,
+            SOS$Offsetlat$F,
+            SOS$Class$C,
+            SOS$Offsetlon$F,
+            SOP$Pointer,
+            SHC$Pointer)                                # MJC 7/11/2K (E2145)
+literal CSTRIP8                                         # MJC 7/13/2K (E2145)
+integer*4  curr_track_index, curr_track_new_next, curr_trk_nxt
+integer*4  prev_track_index, prev_track_new_next
+integer*4  indxs2,NmbrTr,NodeRange,track_old
+integer*4  unt_index,sosus_index
+ 
+if (SBD$First$Track == 0)
+  return                       # no tracks to check
+ 
+prev_track_index = 0
+SBD$pointer$to SBD$First$Track
+ 
+while (SBD$Pointer$Index != 0)
+   {
+    curr_track_index = SBD$Pointer$Index
+    curr_trk_nxt = xSBD$NextIndx$I
+ 
+    #$% get the detection time and see if track is old
+    track_old = $NO
+    sbd$DetectionTime$f = xsbd$DetectionTime$f
+    if (Game$Time - sbd$DetectionTime$f >= SOSUS$Time$Track) # an old track
+      track_old = $YES
+ 
+    #$% check to see if track should be reported now or if track is old
+    sbd$ReportTime$f = xsbd$ReportTime$f
+    if ((Game$Time >= sbd$ReportTime$f) | (track_old == $YES))
+      {
+       if (track_old == $NO)            # transfer data from SBD to SOS before
+                                        # removing from SBD
+         {
+          #$% get class of sub and slot in SOS table
+          unt_index = xSBD$DetectedUnit$i
+          if (unt_index == 0)    # track is a false contact
+            {
+             SOS$Class$c = 'FALSE'
+             sosus_index = 0
+            }
+          else                   # track is not a false contact; get class
+            {
+             UNT$Pointer$to unt_index
+             SHC$Pointer = xUNT$ShcPntr$i
+             SOS$Class$c = xSHC$Type$c
+             sosus_index = xUNT$SBDAlertIndx$i
+            }
+ 
+          if (sosus_index != 0)           # this sub has a slot already in
+            SOS$Pointer$to sosus_index    # the sosus table
+          else
+            {
+             call SOSNEW(UNT$SBDAlertIndx$i,indxs2)  # get a new slot in the
+             SOS$Pointer$to UNT$SBDAlertIndx$i       # sosus table
+ 
+             if (unt_index != 0)    # track is NOT a false contact
+                 putUNT$SBDAlertIndx$i
+ 
+             #$% get a track number
+             NmbrTr = Sosus$TrackCntr
+             if (NmbrTr < 1 | NmbrTr > 999)
+               NmbrTr = 1
+             SOS$SequenceNmbr$i = NmbrTr
+             putSOS$SequenceNmbr$i
+             Sosus$TrackCntr = NmbrTr + 1
+            }
+          #$% store class in SOS table
+          putSOS$Class$c
+ 
+          #$% get apparent position of sub
+          SOS$OffSetLat$f = xSBD$ApparentLat$f
+          putSOS$OffSetLat$f
+          SOS$OffSetLon$f = xSBD$ApparentLon$f
+          putSOS$OffSetLon$f
+ 
+          #$% get detection and report times
+          putsos$LastDetTime$f (xsbd$DetectionTime$f)
+          putsos$LastUpTime$f (Game$Time)
+ 
+          putSOS$BistaticDetection$i (1)
+ 
+          SOP$Pointer$to xSBD$SosusRegId$i
+          NodeRange = xSOP$NodeBistaticRange$f + 0.5
+          putSOS$SemiMinorAxis$i (NodeRange)
+          putSOS$SemiMajorAxis$i (NodeRange)
+ 
+          putSOS$Detectee$i (xSBD$DetectedUnit$i)
+ 
+          putSOS$Modified$i ($YES)
+         }
+ 
+       #$% remove this track from the SBD table
+       if (prev_track_index == 0)
+         SBD$First$Track = curr_trk_nxt
+       else
+         prev_track_new_next = curr_trk_nxt
+ 
+       curr_track_new_next = SBD$First$Free
+       SBD$First$Free = curr_track_index
+ 
+       if (curr_track_index == SBD$Last$Track)
+         SBD$Last$Track = prev_track_index
+ 
+       #$% Store updated next pointer for the current track
+       putSBD$NextIndx$I (curr_track_new_next)
+ 
+       #$% Store updated next pointer for the previous track
+       SBD$Pointer$to  prev_track_index
+       putSBD$NextIndx$I (prev_track_new_next)
+      }
+ 
+    #$% update the previous track index
+    prev_track_index = curr_track_index
+ 
+    #$% update the SBD pointer
+    SBD$Pointer$To curr_trk_nxt
+   }
+ 
+return
+end

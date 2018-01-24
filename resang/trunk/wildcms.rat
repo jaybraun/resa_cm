@@ -1,0 +1,773 @@
+     ###                File WILDCMS.rat
+ 
+#####   version 3.1  dated-  7apr81
+#####   version 3.0  dated- 22dec80
+ 
+ 
+# 
+ 
+#$%      MODULE                       UTILITY                     DATA
+#$%    SUBROUTINES                  SUBROUTINES                  TABLES
+#$%    ===========                  ===========                  ======
+#$%
+#$%      WGLCMS                        ECHOH                      SUI
+#$%      GETSR  <WGLOAD>               ECHOR
+#$%      GSLOTM <WGLOAD>
+#$%
+#$%
+#$%     Modifications:
+#$%         2/14/90     trs     modified SUI$CH$Frequency to be floating point
+#$%
+#$%    NOTES
+#$%    =====
+#$%
+#$%    1.  <FILENAME> INDICATES WHERE SUBROUTINE IS LOCATED.
+#$%
+#$%    2.  UTILITY SUBROUTINES NOT SHOWN ON FLOWCHART.
+#$%
+#$%    3.  * INDICATES NO OTHER SUBROUTINES CALLED.
+#$%
+#$%
+#$%
+#$%    FLOWCHART FOR FILE WGLCMS
+#$%    =========================
+#$%
+#$%    START0 <WARGAM> - WGLOAD - WGLCMS - GETSR *
+#$%                                      - GSLOTM*
+ 
+
+ 
+define(DEBUG,#)
+define(DEBUGL,#)
+include "bbctl.inc"
+include "bbcode.inc"
+include "bbsui.inc"
+include "ascii.inc"
+include "wimain_eq.inc"               # MJC 4/27/2000
+ 
+define (BBImplicit, Implicit None)    # MJC 4/26/2000
+ 
+Subroutine wglcms (reccnt,recsz,rec)  #load in the commsuite scenario file
+ 
+########################################################
+#$%
+#$% Purpose:   WGLCMS loads in commsuite scenario
+#$%            file data.
+#$%
+#$% Called By: WGLOAD
+#$%
+#$% Calls:     ECHOH      ECHOR      GETSR
+#$%            GSLOTM
+#$%
+#$% Tables:    SUI
+#$%
+#$% Date:      OCT 80
+#$%
+#$% Author:    Ron Williams, Dana Wills
+#$%
+#$% Modifications: R. Hundt    04/88
+#$%            modifications to update BB with new commsuite fields
+#$%            "FREQ ", "XPOWR", "XGAIN", "RGAIN", "HOPPR",  "PULSE" and
+#$%            algorithm to calculate performance factor.
+#$%
+########################################################
+ 
+BBcommon
+ 
+integer*4    first_pos
+INTEGER*4    pnt, kk
+LITERAL      rec [ 1500 ]
+INTEGER*4    reccnt
+INTEGER*4    recsz
+REAL*4       TPowerDbm
+BBdeclare   (SUI$FullName$V)
+ 
+integer      ILEN, LOOP, LEN, ISTAT, LPNT,
+             SUI$Pointer, SUI$CH$Index,
+             SUI$CH$sensitivity$I, SUI$Emiflag$I,
+             SUI$Devicetype$I, SUI$Pimthreshold$I,
+             SUI$Band$I, SUI$Bercorrection$I,
+             SUI$Burnout$I, SUI$Transmissiontype$I,
+             SUI$Type$I, SUI$CH$bandwidth$I,
+             SUI$Receivergain$I, SUI$Mtbf$I,
+             SUI$CH$transmitterpower$I,
+             SUI$CH$intermediatefreq$I,
+             SUI$Losesynchronization$I,
+             SUI$Preventsynchronization$I,
+             SUI$Sensitivityss$I,
+             SUI$CH$ifbandwidth$I,
+             SUI$CH$oscillatorfreq$I,
+             SUI$CH$modulationcode$I,
+             SUI$CH$selectivitycode$I,
+             SUI$Transmitterpowerss$I,
+             SUI$Transmittergain$I,
+             SUI$Timetorepair$I,
+             SUI$CH$performancefactor$I         # MJC 4/26/2000
+real         SUI$Ifss$F,
+             SUI$Pulsewidth$F,
+             SUI$CH$frequency$F,
+             SUI$Pulseperiod$F,
+             SUI$Lofrequencyss$F,
+             SUI$Ifbandwidthss$F,
+             SUI$Highbandfrequencyss$F,
+             SUI$Lowbandfrequencyss$F,
+             SUIFREQ, DCBLS, DBEL4              # MJC 4/26/2000
+literal      SUI$Name$C,
+             CSTRIP8                            # MJC 4/26/2000
+ 
+EqErr$Common                                    # MJC 4/27/2000
+ 
+DEBUG call echov("<wglcms:")
+ 
+#$% set ilen to zero for smovh
+ilen = 0
+ 
+#$% move "Commsuite" to cfile for eventual display
+call smovv ("Commsuite", cfile, ilen)
+#$% set flag to YES
+cflg = $yes
+#$% if file empty
+if (reccnt <= 1)
+   {
+    #$% display error message to user
+    call echov ("Commsuite File Empty.  ")
+    call echor
+    return
+   }
+ 
+for (loop = 2; loop <= reccnt; )        #for each record in the file
+   {
+    call getsr (loop,recsz,rec)         #get scenario record
+    len = rec[1]                        #save length
+ 
+    #$% call to get slots
+    call gslotm (sui$pointer,$$sui,sui$entry,istat)
+ 
+    SUI$CH$Index = 1                # reh 4/89
+ 
+    #$% if status flag is NO (not loaded)
+    if(istat == $no)
+      {
+       #$% send error message
+       call echov ("Commsuites from ")
+       call echohn (rec[3],$$MaxLit)
+       call echov (" and on are not loaded.")
+       call echor
+       return
+      }
+ 
+    #$% get name of communications suite and save
+    SUI$NAME$C = rec[3]
+    PUTSUI$NAME$C
+ 
+    putSUI$Burnout$I (127)
+ 
+    #$%  4/91 reh
+    #$% default setting required due to redefinition (using Offset) in blackboard
+    for (SUI$CH$Index=1; SUI$CH$Index$OK; SUI$CH$Index = SUI$CH$Index+1)
+        {
+        SUI$CH$Sensitivity$I = 0
+        PUTSUI$CH$Sensitivity$I               # reh 4/91
+        }
+ 
+    DEBUGL  call echov ("Loading Commsuite")
+    DEBUGL  call echohn (rec[3],$$MaxLit)
+    DEBUGL  call echor
+ 
+    first_pos = 4               # 4/91
+ 
+    #$% set up defaults 4/91
+    SUI$EMIFlag$i = $NonBEESProcessing
+    putSUI$EMIFlag$i
+ 
+    #%  set up default
+    SUI$LoseSynchronization$i = 0
+    putSUI$LoseSynchronization$i
+ 
+    SUI$PreventSynchronization$i = 0
+    putSUI$PreventSynchronization$i
+ 
+    SUI$PulsePeriod$F = 0
+    putSUI$PulsePeriod$F
+ 
+    SUI$PulseWidth$F = 0
+    putSUI$PulseWidth$F
+ 
+    SUI$SensitivitySS$I = 0
+    putSUI$SensitivitySS$I
+ 
+    #$% if up-to-date database and category is present, 4/91 reh
+    if (rec[4] == 'CAT')
+        {
+        #$% set the starting point word position
+        first_pos = 6
+ 
+        #$% if the categeory is BEES freq hopper
+        if (rec[5] == 'HOPPR')
+            {
+            #$% this is a BEES frequency hopper
+            SUI$DeviceType$i = $FrequencyHopper
+            SUI$EMIFlag$i = $BEESProcessing
+            }
+        else if (rec[5] == 'HOP')
+            {
+            #$% this is not a BEES frequency hopper
+            SUI$DeviceType$i = $FrequencyHopper
+            }
+        else if (rec[5] == 'FMODE')
+            {
+            #$% this is not a BEES frequency hopper
+            SUI$DeviceType$i = $FixedMode
+            }
+        putSUI$DeviceType$i
+        }
+ 
+    putSUI$EMIFlag$i                # 4/91
+ 
+    SUI$PIMThreshold$i = -50        # default, if not entered
+    putSUI$PIMThreshold$i
+ 
+    lpnt = 1                        # save last word pointer
+ 
+#    for (pnt = 4; pnt <= len; )     # for each word in the record # out 4/91
+    for (pnt = first_pos; pnt <= len; ) # for each word in the record
+      {
+        if (pnt == lpnt)            # if ==, didnt process on last pass.... error
+          {
+            call badfld (_              # display unknown field
+                         "CommSuite ",  # file type
+                         rec[3],        # record name
+                         rec[pnt])      # ????? fld
+ 
+            #$% increment pointer
+            pnt = pnt + 1
+          }
+ 
+        #$% save the pointer
+        lpnt = pnt
+ 
+        #$% get frequency band of commsuite and save
+        if  ( rec [ pnt ] == 'BAND' )
+          {
+            if  (rec[ pnt+1 ] == 'LF')
+              SUI$BAND$I = $LF$code
+            else if (rec[ pnt + 1 ] == 'HF')
+              SUI$BAND$I = $HF$code
+            else if (rec[ pnt + 1 ] == 'HFLR')
+              SUI$BAND$I = $HFLRI$code
+            else if (rec[ pnt + 1 ] == 'HFLRI')
+              SUI$BAND$I = $HFLRI$code
+            else if (rec[ pnt + 1 ] == 'UHF')
+              SUI$BAND$I = $UHF$code
+            else if (rec[ pnt + 1 ] == 'VHF')
+              SUI$BAND$I = $VHF$code
+            else if (rec[ pnt + 1 ] == 'VLF')
+              SUI$BAND$I = $VLF$code
+            else if (rec[ pnt + 1 ] == 'ACOUS')
+              SUI$BAND$I = $ACOUS$code
+            else if (rec[ pnt + 1 ] == 'LAND')
+              SUI$BAND$I = $LAND$code
+            else  SUI$BAND$I = $LAND$code
+ 
+            PUTSUI$BAND$I
+ 
+            pnt = pnt + 2
+          }
+         #$% if pointer is at an antenna name, 10/91
+         else if (rec[pnt] == 'ANTEN')
+            {
+            #$% increment pointer, don't do anything this pass
+            pnt = pnt + 4
+            }
+        #$% else if word is pulse period , 4/91 reh
+        else if (rec[pnt] == 'PERIO')
+            {
+            SUI$PulsePeriod$F = rec [pnt+1]
+            putSUI$PulsePeriod$F
+ 
+            #$% increment counter
+            pnt = pnt + 2
+            }
+        #$% else if word is bit error rate correction , 4/91 reh
+        else if (rec[pnt] == 'BERCF')
+            {
+            SUI$BERCorrection$i = rec [pnt+1]              # dB
+            putSUI$BERCorrection$i
+ 
+            #$% increment counter
+            pnt = pnt + 2
+            }
+        #$% else if word is intermodulation threshold, 4/91 reh
+        else if (rec[pnt] == 'PIM')
+            {
+            SUI$PIMThreshold$i = rec [pnt+1]              # dB
+            putSUI$PIMThreshold$i
+ 
+            #$% increment counter
+            pnt = pnt + 2
+            }
+        #$% else if sensitivity of BEES Spread Spectrum device, 4/91 reh
+        else if (rec[pnt] == 'SENSI')
+            {
+            SUI$SensitivitySS$I = rec [pnt+1]
+            putSUI$SensitivitySS$I
+ 
+            #$% increment counter
+            pnt = pnt + 2
+            }
+        #$% else if Inter.Freq. of BEES Spread Spectrum device, 4/91 reh
+        else if (rec[pnt] == 'IF')
+            {
+            SUI$IFSS$F = rec [pnt+1]
+            putSUI$IFSS$F
+ 
+            #$% increment counter
+            pnt = pnt + 2
+            }
+        #$% else if local oscillator Freq. of BEES Spread Spectrum device, 4/91 reh
+        else if (rec[pnt] == 'LOFRQ')
+            {
+            SUI$LOFrequencySS$F = rec [pnt+1]
+            putSUI$LOFrequencySS$F
+ 
+            #$% increment counter
+            pnt = pnt + 2
+            }
+        #$% else if Inter.Freq. Bandwidth of BEES Spread Spectrum device, 4/91 reh
+        else if (rec[pnt] == 'IFBW')
+            {
+            SUI$IFBandwidthSS$F = rec [pnt+1]
+            putSUI$IFBandwidthSS$F
+ 
+            #$% increment counter
+            pnt = pnt + 2
+            }
+        #$% else if threshold at which sync is LOST, 4/91 reh
+        else if (rec[pnt] == 'LSYNC')
+            {
+            SUI$LoseSynchronization$I = rec [pnt+1]
+            putSUI$LoseSynchronization$I
+ 
+            #$% increment counter
+            pnt = pnt + 2
+            }
+        #$% else if threshold at which sync startup is PREVENTED, 4/91 reh
+        else if (rec[pnt] == 'PSYNC')
+            {
+            SUI$PreventSynchronization$I = rec [pnt+1]
+            putSUI$PreventSynchronization$I
+ 
+            #$% increment counter
+            pnt = pnt + 2
+            }
+ 
+         #$% else if word is Burnout Threshold
+         else if (rec[pnt] == 'BURNO')
+            {
+             SUI$Burnout$i = rec[pnt+1]
+             putSUI$burnout$i
+ 
+             #$% increment counter
+             pnt = pnt + 2
+            }
+         #$% else if word is transmission type
+         else if (rec[pnt] == 'XMSSN')
+            {
+            SUI$TransmissionType$i = $No
+ 
+            if (rec[ pnt+1 ] == 'DVOIC')
+                {
+                SUI$TransmissionType$i = $DigitalVoice$Code
+                }
+            else if (rec[ pnt+1 ] == 'DDATA')
+                {
+                SUI$TransmissionType$i = $DigitalData$Code
+                }
+            else if (rec[ pnt+1 ] == 'AVOIC')
+                {
+                SUI$TransmissionType$i = $AnalogVoice$Code
+                }
+            else if (rec[ pnt+1 ] == 'ADATA')
+                {
+                SUI$TransmissionType$i = $AnalogData$Code
+                }
+ 
+            putSUI$TransmissionType$i
+ 
+            #$% increment counter
+            pnt = pnt + 2
+            }
+        else if (rec[pnt] == 'HFREQ')
+            {
+            #$% if this was under the category "FMODE", the bounds are inserted
+            #$% anyway but not referenced in wargame processing
+ 
+            #$% this is the upper freq. limit of band used by freq. hopper
+            SUI$HighBandFrequencySS$F = rec[pnt+1]
+            putSUI$HighBandFrequencySS$F
+ 
+            #$% increment counter
+            pnt = pnt + 2
+            }
+        else if (rec[pnt] == 'LFREQ')
+            {
+            #$% if this was under the category "FMODE", the bounds are inserted
+            #$% anyway but not referenced in wargame processing
+ 
+            #$% this is the lower freq. limit of band used by freq. hopper
+            SUI$LowBandFrequencySS$F = rec[pnt+1]
+            putSUI$LowBandFrequencySS$F
+ 
+            #$% increment counter
+            pnt = pnt + 2
+            }
+ 
+#         #$% else if word is Receiver Intermediate Freq     reh 10/25/89
+#         else if (rec[pnt] == 'IFREQ')   # 8/3/89 reh
+#            {
+#             SUI$IntermediateFreq$i = rec[pnt+1]
+#             putSUI$IntermediateFreq$i
+#
+#             #$% increment counter
+#             pnt = pnt + 2
+#            }
+ 
+#         #$% else if word is Receiver Local Oscillator Freq
+#         else if (rec[pnt] == 'LOFRQ')   # 8/3/89 reh
+#            {
+#             SUI$OscillatorFreq$i = rec[pnt+1]
+#             putSUI$OscillatorFreq$i
+#
+#             #$% increment counter
+#             pnt = pnt + 2
+#            }
+ 
+        else if  ( rec [ pnt ] == 'TYPE' )
+          {
+            #$% get type of commsuite (send/receive/both) and save
+            if (rec[ pnt + 1 ] == 'SEND')
+              SUI$TYPE$I = $Transmitter$code
+            else if (rec[ pnt + 1 ] == 'RECV')
+              SUI$TYPE$I = $Receiver$code
+            else  SUI$TYPE$I = $Transceiver$code
+ 
+            PUTSUI$TYPE$I
+ 
+            pnt = pnt + 2
+          }
+ 
+        else if  ( rec [ pnt ] == 'FREQ' )
+            {
+            for (SUI$CH$Index=1; SUI$CH$Index$OK; SUI$CH$Index = SUI$CH$Index+1)
+               {
+                #$% update blackboard with frequency value from commsuite record
+                # default
+                SUI$CH$FREQUENCY$F = rec [ pnt + 1 ]     # jb    4/24/89
+                PUTSUI$CH$FREQUENCY$F                    # jb    4/24/89
+ 
+                SUI$CH$BandWidth$I = rec [ pnt + 2 ]    # jb    4/24/89
+                PUTSUI$CH$BandWidth$I                   # jb    4/24/89
+               }
+            pnt = pnt + 3
+            }
+ 
+#         #$% else if array word is intermediate freq bandwidth   reh 10/25/89
+#         else if (rec[pnt] == 'IFBW')
+#            {
+#             sui$IFBandWidth$i = rec[pnt+1]
+#             PUTsui$IFBandWidth$i
+#
+#             #$% increment pointer
+#             pnt = pnt + 2
+#            }
+ 
+#         else if (rec[pnt] == 'MODUL')    # jb            9/13/89    removed reh 10/25/89
+#           {
+#            call TypeModul (rec[pnt + 1],rec[pnt + 2], J)
+#
+#            PUTsui$ModulationType$i (J)
+#            #$% increment pointer
+#            pnt = pnt + 3
+#           }
+ 
+#     #$% else if array word is Receiver selectivity code
+#         else if (rec[pnt] == 'SELCT')
+#           {
+#             if      (rec[pnt+1] == 'POOR')
+#                 sui$SelectivityCode$i = $Poor_Selectivity$Code
+#             else if (rec[pnt+1] == 'AVG')
+#                 sui$SelectivityCode$i = $Average_Selectivity$Code
+#             else if (rec[pnt+1] == 'GOOD')
+#                 sui$SelectivityCode$i = $Good_Selectivity$Code
+#             else if (rec[pnt+1] == 'EXCEL')
+#                 sui$SelectivityCode$i = $Excellent_Selectivity$Code
+#             else
+#                 sui$SelectivityCode$i = $Average_Selectivity$Code
+#
+#             PUTsui$SelectivityCode$i
+#
+#             #$% increment pointer
+#            pnt = pnt + 2
+#            }
+ 
+         #$% else if array word is Receiver sensitivity
+#         else if (rec[pnt] == 'SENSI')  removed reh 10/25/89
+#           {
+#            sui$Sensitivity$i = rec [ pnt + 1 ]
+#
+#            PUTsui$Sensitivity$i
+#
+#             #$% increment pointer
+#            pnt = pnt + 2
+#            }
+ 
+ 
+        # if an alternate mode was defined
+        else if  ( rec [ pnt ] == 'MODE' )         # reh 10/24/89, was ACHAN
+            {
+            #$% device can be usd in EMI calculations
+            SUI$DeviceType$i = $FixedMode       # added 4/91
+            putSUI$DeviceType$i
+ 
+            SUI$EMIFlag$i = $BEESProcessing  # added 4/91
+            putSUI$EMIFlag$i
+ 
+            #$% this is the channel number
+            SUI$CH$Index = rec [ pnt + 1 ]
+ 
+            # check for valid channel number
+            IF ( SUI$CH$Index > 10 | SUI$CH$Index < 1 ) next
+ 
+            SUI$CH$TransmitterPower$I = rec [ pnt + 2 ]
+            PUTSUI$CH$TRANSMITTERPOWER$I
+ 
+            SUI$CH$Frequency$F = rec [ pnt + 3 ]
+            PUTSUI$CH$Frequency$F
+ 
+            SUI$CH$Bandwidth$I = rec [ pnt + 4 ]
+            PUTSUI$CH$Bandwidth$I
+ 
+            SUI$CH$IntermediateFreq$I = rec [ pnt + 5 ]
+            PUTSUI$CH$IntermediateFreq$I
+ 
+            SUI$CH$IFBandWidth$I      = rec [ pnt + 6 ]
+            PUTSUI$CH$IFBandWidth$I
+ 
+            SUI$CH$OscillatorFreq$I   = rec [ pnt + 7 ]
+            PUTSUI$CH$OscillatorFreq$I
+ 
+            SUI$CH$Sensitivity$I      = rec [ pnt + 8 ]
+ 
+            #$% check for bounds, added 4/91 reh
+            IF (SUI$CH$Sensitivity$I < $Lo_SUI$CH$Sensitivity$I)
+                {
+                call echov ('WARNING: Sensitivity < ')
+                call echoi($Lo_SUI$CH$Sensitivity$I)
+                call echov (' dBm for CommSuite ')
+                call echoh(xSUI$Name$c, ARB)
+                call echov ('/')
+                call echoi(SUI$CH$Index)
+                call echor
+                SUI$CH$Sensitivity$I = $Lo_SUI$CH$Sensitivity$I
+                }
+            ELSE IF (SUI$CH$Sensitivity$I > $Hi_SUI$CH$Sensitivity$I)
+                {
+                call echov ('WARNING: Sensitivity > ')
+                call echoi($Hi_SUI$CH$Sensitivity$I)
+                call echov (' dBm for CommSuite ')
+                call echoh(xSUI$Name$c, ARB)
+                call echov ('/')
+                call echoi(SUI$CH$Index)
+                call echor
+                SUI$CH$Sensitivity$I = $Hi_SUI$CH$Sensitivity$I
+                }
+ 
+            PUTSUI$CH$Sensitivity$I
+ 
+#            SUI$CH$ModulationCode$I   = function to convert (rec [ pnt + 9 ])
+            SUI$CH$ModulationCode$I = 1   # temp 10/25/89 in lieu of prev functin
+            PUTSUI$CH$ModulationCode$I
+ 
+            if      (rec[pnt+10] == 'POOR')
+                SUI$CH$SelectivityCode$i = $Poor_Selectivity$Code
+            else if (rec[pnt+10] == 'AVG')
+                SUI$CH$SelectivityCode$i = $Average_Selectivity$Code
+            else if (rec[pnt+10] == 'GOOD')
+                SUI$CH$SelectivityCode$i = $Good_Selectivity$Code
+            else if (rec[pnt+10] == 'EXCEL')
+                SUI$CH$SelectivityCode$i = $Excellent_Selectivity$Code
+            else
+                SUI$CH$SelectivityCode$i = $Average_Selectivity$Code
+ 
+            PUTSUI$CH$SelectivityCode$i
+ 
+            pnt = pnt + 11
+        }
+ 
+        else if  ( rec [ pnt ] == 'XPOWR' )
+            {
+            if (xSUI$DeviceType$i == $FrequencyHopper)  # 4/91
+                {
+                SUI$TransmitterPowerSS$i = rec [ pnt + 1 ]
+                putSUI$TransmitterPowerSS$i
+                }
+ 
+            for (SUI$CH$Index=1; SUI$CH$Index$OK; SUI$CH$Index =SUI$CH$Index+1)
+                {
+                #$% update blackboard with transmitter value from commsuite record
+                SUI$CH$TransmitterPower$I = rec [ pnt + 1 ]
+                PUTSUI$CH$TRANSMITTERPOWER$I
+                }
+            pnt = pnt + 2
+            }
+        else if  ( rec [ pnt ] == 'XGAIN' )
+            {
+            #$% update blackboard with transmitter antenna gain from commsuite record
+            SUI$TransmitterGain$I = rec [ pnt + 1 ]
+            PUTSUI$TRANSMITTERGAIN$I
+ 
+            pnt = pnt + 2
+            }
+ 
+        else if  ( rec [ pnt ] == 'RGAIN' )
+            {
+            #$% update blackboard with receiver antenna gain from commsuite record
+            SUI$ReceiverGain$I = rec [ pnt + 1 ]
+ 
+            PUTSUI$ReceiverGain$I
+ 
+            pnt = pnt + 2
+            }
+        #$% else "HOPPR" no longer exists in BUILD, but may exist in some
+        #$% databases. The field corresponds to a non-BEES freq hopper type
+        else if  ( rec [ pnt ] == 'HOPPR' )
+            {
+            #$% update blackboard with Hopper data from commsuite record
+            if ( rec [ pnt + 1 ] == 'YES' )
+                {
+#               SUI$FrequencyHopper$I = $Yes , out 4/91
+                SUI$DeviceType$I = $FrequencyHopper
+                }
+            else
+                {
+#               SUI$FrequencyHopper$I = $No , out 4/91
+                SUI$DeviceType$I = $FixedMode
+                }
+ 
+            PUTSUI$DeviceType$I
+ 
+            SUI$EMIFlag$i = $NonBEESProcessing  # added 4/91
+            putSUI$EMIFlag$i
+ 
+            pnt = pnt + 2
+            }
+ 
+        else if  ( rec [ pnt ] == 'PULSE' |
+                   rec [ pnt ] == 'DWELL' )
+            {
+            #$% update blackboard with Pulse value from commsuite record
+            SUI$PulseWidth$F = rec [ pnt + 1 ]
+ 
+            PUTSUI$PulseWidth$F
+ 
+            pnt = pnt + 2
+            }
+ 
+        else if  ( rec [ pnt ] == 'MNFAL' )
+          {
+            #$% update blackboard with Mean time between failure data
+            #$%from commsuite record
+            SUI$MTBF$I = rec [ pnt + 1 ]
+ 
+            putSUI$MTBF$I
+ 
+            pnt = pnt + 2
+          }
+ 
+        else if  ( rec [ pnt ] == 'MNRPR' )
+          {
+            #$% update blackboard with Pulse value from commSUIte record
+            SUI$TimeToRepair$I = rec [ pnt + 1 ]
+ 
+            putSUI$TimeToRepair$I
+ 
+            pnt = pnt + 2
+          }
+ 
+        else if(rec[pnt] == 'NOMEN')
+            {
+            SUI$Fullname$V = ""
+            kk = 0
+            call vmovh (rec[pnt+1], 24, SUI$Fullname$V, kk)
+            putSUI$Fullname$V
+            pnt = pnt + 4
+            }
+        else if(rec[pnt] == 'UDB')
+            {
+            if      (rec[pnt+1] == 'YES') putSUI$UDB$i ($YES)
+            else if (rec[pnt+1] != 'NO') putSUI$UDB$i (!$NO)
+            pnt = pnt + 2
+            }
+ 
+      } # loop for next field in record
+ 
+ 
+#    ------------------------------------------------------------
+    for(SUI$CH$Index=1; SUI$CH$Index$OK;
+                SUI$CH$Index =SUI$CH$Index+1) # jb (Loop added)     4/24/89
+     {
+     SUI$CH$TransmitterPower$I = xSUI$CH$TransmitterPower$I  # jb    4/24/89
+     SUI$CH$Frequency$F = xSUI$CH$Frequency$F                # jb    4/24/89
+     SUI$CH$BandWidth$I = xSUI$CH$BandWidth$I                # jb    4/24/89
+ 
+     IF  ( ( SUI$CH$Frequency$F != 0 ) &
+          ( SUI$CH$TransmitterPower$I != 0 ) &              # jb    4/24/89
+          ( SUI$CH$BandWidth$I != 0 ) )                     # jb    4/24/89
+       {
+        #$% convert power from Watts to DBm
+###     TpowerDbm = 30.0 + QKDB(FLOAT (xSUI$CH$TransmitterPower$I ))#OLD!
+ 
+        TPowerDbm = FLOAT (SUI$CH$TransmitterPower$I)       # jb     4/24/89
+        If(TPowerDbm <= 1.0) TPowerDbm = 30.0 # jb Protect LOG10 &   9/2/88
+        Else TPowerDbm = 30.0 + (10.0 * log10(TPowerDbm)) #repl.QKDB 9/2/88
+#    ------------------------------------------------------------
+##      SUI$CH$PerformanceFactor$I = NINT (        # jb (Old way)   8/31/88
+###        TPowerDbm +
+###        FLOAT ( xSUI$CH$TransmitterGain$I ) -
+###        QKDB ( FLOAT ( xSUI$CH$BandWidth$I ) ) +
+###        2.0 * QKDB ( 3.0E4 / FLOAT ( xSUI$CH$Frequency$I ) ) +
+###        77.0 )
+#    ------------------------------------------------------------
+###     DCBLS = QKDB( FLOAT ( xSUI$CH$BandWidth$I ) )# jb (Old way) 8/23/88
+ 
+        DCBLS = FLOAT (SUI$CH$BandWidth$I)                # jb     4/24/89
+        If ( DCBLS <= 1.0) DCBLS = 0.0    # jb Protect LOG10 &     9/2/88
+        Else DCBLS  = 10. * log10(DCBLS)         #jb replace QKDB 8/23/88
+#    ------------------------------------------------------------
+###  OTerm4 = QKDB ( 3.0E4 / FLOAT ( xSUI$CH$Frequency$I ) ) #OLD.. 8/24/88
+ 
+        SUIFreq = SUI$CH$Frequency$F           # jb; Protect the 4/24/89
+        If( SUIFreq >= 3.0E4) DBEL4 =  0.0     #  LOG10 function  9/2/88
+        Else                                                # jb  9/2/88
+         {
+          DBEL4 = 3.0E4 / SUIFreq                           # jb  9/2/88
+          DBEL4 = 10. * log10(DBEL4)            #jb replace QKDB 8/24/88
+         }
+        SUI$CH$PerformanceFactor$I = NINT (
+            TPowerDbm +
+            FLOAT ( SUI$TransmitterGain$I ) - DCBLS +    # jb   8/31/88
+            2.0 * DBEL4 + 77.0 )                          # jb   8/31/88
+#    ----------------------------------------------------------------
+        SUI$CH$PerformanceFactor$I = MAX ( 0, SUI$CH$PerformanceFactor$I )
+       }                                                 # jb    4/24/89
+    else
+       {
+        SUI$CH$PerformanceFactor$I = 0                   # jb    4/24/89
+       }
+    putSUI$CH$PerformanceFactor$I                        # jb    4/24/89
+   }    # End of added FOR SUI$CH$IndexOK                # jb    4/24/89
+ 
+ } # loop for next record
+ 
+return
+end

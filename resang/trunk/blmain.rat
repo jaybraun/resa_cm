@@ -1,0 +1,1246 @@
+# Port to Linux To Do
+# test recall
+ 
+#####   version 3.1 dated-  __opt81 conversion  revision 2
+#####   version 3.1 dated-  28opt81 conversion  revision 1
+ 
+ 
+#####   version 3.1  dated-  3sep81 modification new command (write to disk)
+#                                                new subroutine (bready)
+#                                                new subroutine (bgener)
+#                                                new subroutine (bwrite)
+ 
+#####   version 3.1  dated-  7apr81
+ 
+ 
+#####   version 3.0  dated- 22dec80
+ 
+ 
+# 
+ 
+include "macros.inc"
+include "ascii.inc"
+ 
+      program build
+#
+      IMPLICIT NONE
+ 
+###      IMPLICIT INTEGER (A-Q,S-Z)     # jb #2145  3/27/00
+#
+#       This program is a re-write of the original BUILD program for
+#       WES.  The intent is to provide the same file structure and
+#       command sequences with increased capability in the following
+#       areas:
+#
+#            1) Only one data file open at any one time.  Bypasses
+#               system limit to FORTRAN of fifteen files open at once.
+#
+#            2) Fewer disk accesses during maintenance.  Does not
+#               delete or rewrite records unless specificly required.
+#
+#            3) A general Print routine.  Each characteristics file
+#               has the data definition tables appended to the end of
+#               the data area to provide printing capability.
+#
+#            4) Standardized Maintenance routine with the majority
+#               of logic controled by the contents of DATA statements.
+#
+#            5) More substantial data validation controled by the DATA
+#               statements and optional special code.
+#
+#            6) Programming in Structured FORTRAN (RATFOR).
+#
+#            7) A Write routine.  One or more characteristics file can
+#               be written to a file on disk to provide a command file
+#               capability.
+#
+#
+#       MODIFIED 3/88 by REH to accomodate the communications jammer
+#             characteristics.
+#
+# Modified:  Susan Miller 5/98 (E1979)
+#            Hide Site characteristics were improperly displayed (Vehicle
+#            characteristics were being displayed instead).
+#            Nothing happened when Vehicle was selected.
+#
+ 
+define (NBRCMNDS,25)   # The JOINT option was removed - joa 11/97 (E1827)
+ 
+define ($CHKCMDS, 5)    # the number of commands used to check for
+                       # valid directory access      # smp 7/97 (E1343)
+define ($Intel_recl_multiplier,2)		# Intel needs 32 bit words
+define ($g77_recl_multiplier,8)			# g77 needs bytes
+ 
+#########################################################
+ 
+      external          ERROR_HANDLER
+ 
+      integer           clfc[NBRCMNDS],crecsz[NBRCMNDS],wcmd1,argc[20]
+      logical           pflg[NBRCMNDS]
+      character         line[ARB], pname[20]
+      vaxcharacter*20   pname_v
+      equivalence       (pname, pname_v)
+      vaxcharacter      vpname*64, myfile*arb, shofile*arb
+      character         basepath[ARB]
+ 
+      integer           in_one, out_the_other, answer
+      integer           warn_Count, rc, mylen
+      Integer           CONTEXT, find_file
+      Integer           i,k,kk,ilen,iunit,iunt,
+                        ccnt,line_len,loop,argcnt
+ 
+      litCharEquiv      (cfiles,2,NBRCMNDS)
+	  vmschar*16        cfilesV[NBRCMNDS]
+	  equivalence       (cfiles, cfilesV)
+ 
+      LitCharEquiv      (cmnd,NBRCMNDS)
+      LitCharEquiv      (bfiles,NBRCMNDS)
+      literal           icmd,wcmd,args[20]
+ 
+      equivalence (wcmd,wcmd1)
+      common /gbge/ wcmd
+ 
+      # Define finger print variables (to discern D_Float from G_Float)
+      integer           fprint1, fprint2, mlen, acount
+      VMSchar           msg*ARB
+ 
+      include "blmain.inc"
+#>>
+      data       cmndC/'BYE     ','PRINT   ','WRITE   ','AIR     ',
+                      'COMMBUOY','COMMPAIR','COMMSUIT','MISSILE ',
+                      'JAMMER  ','NAVAID  ','RADAR/ES','SHIP    ',
+                      'SHORE   ','SONAR   ','SONOBUOY','SURVSAT ',
+                      'WEAPON  ','COMMJAMM','GROUND  ','TORPEDO ',
+                      'COUNTERM','CHAFF   ','IFF     ','VEHICLE ',
+                      'SITE    '/
+ 
+      data       clfc/   0   ,   0   ,    0  ,   31  ,   32  ,
+                        33   ,  34   ,   35  ,   36  ,   37  ,
+                        38   ,  39   ,   40  ,   41  ,   42  ,
+                        43   ,  44   ,   45  ,   46  ,   47  ,
+                        48   ,  49   ,   50  ,   52  ,   53  /
+ 
+      data       crecsz/  0  ,    0  ,    0  ,   16  ,   16  ,
+                         16  ,   16  ,   16  ,   16  ,   16  ,
+                         16  ,   16  ,   16  ,   16  ,   16  ,
+                         16  ,   16  ,   16  ,   16  ,   16  ,
+                         16  ,   16  ,   16  ,   16  ,   16  /
+ 
+      data       bfilesC/    '',     '',      '',  'c.air', 'c.cmb',
+                        'c.cmp', 'c.cms', 'c.cru', 'c.jam', 'c.nav',
+                        'c.sen', 'c.shp', 'c.shr', 'c.snr', 'c.snb',
+                        'c.sat', 'c.wep', 'c.cjm', 'c.gnd', 'c.trp',
+                        'c.ctm', 'c.chf', 'c.iff', 'c.veh', 'c.sit'/
+ 
+      #$%   Use these file extensions to check for valid directory access
+      VMSchar*5     chkfiles[$chkcmds] / "c.air",    "c.sen",   "c.shp", "c.shr",      "c.wep" /
+      VMSchar*16    chknames[$chkcmds] / "Aircraft", "Sensors", "Ships", "ShoreBases", "Weapons" /
+ 
+9000 format(' Is ',5a1,' correct (Y/N) ? ', $ )
+9002 format(80a1)
+9005 format(8a1)
+9006 format ('0"',a8,'" IS NOT AN ALLOWED INPUT. ')
+ 
+#
+#
+#
+#** set up file names *******************************************************
+
+ 
+	#call echoff
+	call tty_set_echo (NO)          # turn off keyboard echoing
+ 
+ 
+#   CALL LIB$ESTABLISH (ERROR_HANDLER)       # AXP Compatible Error Handler
+#   call init_errset                         # turn off Arithimetic Errors
+	call initr4
+  call help_pgm(4,
+              "build: Manage characteristics of each type of RESA object",
+              "build Tags: database, objects",
+              "Usage: build [|-l] [|-n] [|-i=<script file>] <build name>",
+              "    -l load qualifier",
+              "    -n new database",
+              "    -i=<script file> input from script file",
+              "",
+              "Example: build demo")
+ 
+   call New_BLMAIN_Init (line,basepath)     # get the base name, (from command line)
+ 
+#****************************************************************************
+ 
+   bname = 0                            # save the basename of files
+   k=0; call smovhn (line,5,bname,k)
+ 
+   #$% loop for each command type
+   do loop=1,NBRCMNDS
+     {
+	  cfilesV[loop] = " "
+      k = 0
+      #$% concatenate base name with file type for full file name
+      call smovhn (bname,5,              cfiles[1,loop],k)
+      call smovhn (bfiles[loop],$$MaxLit,cfiles[1,loop],k)
+      #call smov   ($null,                cfiles[1,loop],k)
+     }
+ 
+#****************************************************************************
+# Look for basic files.... Warn the user if they are not present
+ 
+call echor
+call echor
+ 
+call New_build (answer)
+ 
+if (answer == YES)
+    {
+    call echov ('   New Characteristics Files, '//'Not validating for pre-existance.')
+    call echor
+    }
+else
+    {
+    call echov ('   Checking for valid files....')
+    call echor
+ 
+    warn_count = 0
+ 
+    for (loop = 1; loop <= $chkcmds; loop = loop + 1)
+        {
+		myfile = " "
+        mylen = 0
+        call vmovhn(bname,$$maxName,myfile,mylen)
+        call vmovvn(chkfiles[loop],myfile,mylen)
+ 
+        rc = find_file(myfile)
+ 
+        if (rc != 0)
+            {
+            warn_count = warn_count + 1
+            call echov ("        " // chknames[loop] // " (")
+            call echovn (myfile)
+            call echov (")")
+            call echor
+            }
+        else
+            {
+            #------------------------------------------------------------
+            # The file exists... should we check the finger print?
+ 
+            open (unit               =31,
+                  access             ='DIRECT',
+                  form               ='UNFORMATTED',
+                  file               =myfile,
+                  recl               =recsz*$Intel_recl_multiplier, 
+#                  associatevariable  =recpnt,
+#                  carriagecontrol    ='NONE',
+                  status             ='OLD',
+                  err                =8001)
+ 
+            mlen = 0
+            read (31,REC=1,err=8002) acount, fprint1, fprint2  # Read current rec count
+ 
+            8002    # File empty... not ALPHA problem
+ 
+            close (unit = 31)
+            8001 continue # Open failed....
+ 
+            #------------------------------------------------------------
+            } # endif (end of finger-print test)
+ 
+        }
+ 
+    if (warn_count > 0)
+        {
+        call echor
+        call echov ("   The characteristic files listed above are not in this");    call echor
+        call echov ("   directory and/or another problem exists.  If you are");     call echor
+        call echov ("   in the proper directory, and you want to create new");      call echor
+        call echov ("   Characteristics files with the name '")
+        call echohn (bname,$$maxname)
+        call echov ("', "); call echor
+        call echov ("   then you need to restart this program with "//"the -new qualifier.");   call echor
+        call echov ("   Example:  $ build -new "); call echohn (bname,$$maxname);       call echor
+ 
+        #call exit
+		stop
+        }
+ 
+    call echov ("      all set")
+    call echor
+    }
+ 
+ 
+#****************************************************************************
+ 
+   handle = 0
+ 
+ 
+   CALL Recall_Init (Handle, in_one, 20, 80)
+ 
+   lfc=0
+   repeat           #********* MAIN INPUT LOOP ******************
+ 
+      {
+       call echor                    # jb (portability  \/   3/23/00
+       call echov ("NEXT INPUT (BYE, PRINT, WRITE, AIR,"//" CHAFF, COMMBUOY, COMMJAMMER,")
+       call echor
+       call echov ('   COMMPAIR, COMMSUITE, COUNTERMEASURE, MISSILE,')
+       call echor
+       call echov ('   GROUND, IFF, JAMMER, NAVAID, RADAR/ESM/IR, SURVSAT,')
+       call echor
+       call echov ('   SHIP, SHORE BASE, SITE, SONAR, SONOBUOY, TORPEDO, VEHICLE,')
+       call echor
+       call echov ('   OR WEAPON)...')
+       call getlnh_r (handle,line,80)         # get command input
+       for (line_len = 80;
+            line_len >= 0 & line[line_len] == $SPACE;     # how many non-blank chars ?
+            line_len = line_len - 1);
+ 
+        if (line[1] == -1) {call echor; call exit}
+ 
+        # force input to uppercase and determine number of characters input
+        do i = 1, 80
+         {
+          if (line[i] >= $LITA & line[i] <= $LITZ)
+              line[i] = line[i] -  ($LITA - $LETA)
+         }
+ 
+        Call Recall_Add  (Handle, Line, line_len)
+ 
+        line[81] = 'z'
+        argcnt = 0
+ 
+        do i = 1, 20
+         {args[i] = $BLANKLIT
+          argc[i] = 1
+         }
+ 
+        #$% search for first space
+        for (i = 1; i <= 80; i = i + 1)
+         {
+          if (line[i] == $SPACE) next
+ 
+          k = 0
+          argcnt = argcnt + 1
+          args[argcnt] = $BLANKLIT
+          while (line[i] != $SPACE)
+            {
+             #$% test for argument count
+             if (k < 8) call smov(line[i], args[argcnt],k)
+             i = i + 1
+            }
+          argc[argcnt] = k
+         }
+ 
+ 
+        icmd = args[1]
+        ccnt = argc[1]
+ 
+        if (argcnt == 0) next
+ 
+        cmd=0                   # check CMND array for literal input
+ 
+        # Search Command table for match with least number of characters
+ 
+        do i=1,NBRCMNDS
+         {
+          wcmd = $BLANKLIT
+          ilen = 0
+          call smovhn( cmnd[i],ccnt,wcmd,ilen)
+ 
+          if (icmd == wcmd)     # Match ?
+           {if (cmd == 0)       # has there been a match already?
+             {cmd = i           # NO--save index
+             }
+            else
+             {cmd = -1          # YES--flag Ambigious entry
+              break
+             }
+           }
+         }
+ 
+        if (cmd < 0)
+          {
+           call echor
+           call echov (' Ambigious Entry ')
+           call echor
+ 
+           next
+          }
+ 
+        if (cmd==0)             # invalid command (no match)
+         {
+          if (icmd == 'QUIT') next  # NOP on Quit - for Scripts created by WRITE
+ 
+          call echor
+          print 9006,icmd
+          call echor
+          next                  # loop for more input
+         }
+ 
+        # prepare file (close,open,etc.) **********
+ 
+        if (clfc[cmd]!=lfc)     # is current file same as requested file?
+                                # NO
+         {if (lfc!=0)           # is there an old file?
+           {close (unit=31)     #   close it.
+           }
+ 
+          #$% set new current file
+          lfc = clfc[cmd]
+ 
+          if (clfc[cmd]!=0)     # is there a new file?
+           {
+            # At this point, the user has select a single "Type" of characteristics object
+            # Lets open the file, creating it if needed.
+ 
+            #$% set current record size
+            recsz = crecsz[cmd]  # (RECSZ an integer in BLMAIN.inc)
+ 
+            #$% open current record file
+            open (unit               =31,
+                  access             ='DIRECT',
+                  form               ='UNFORMATTED',
+                  file               =cfilesV[cmd],
+                  recl               =recsz*$Intel_recl_multiplier,
+                  status             ='UNKNOWN')
+ 
+            # For 20 years, the first record has only had 1, 32-bit integer
+            # value.  That value identified the number of RECSZ records in
+            # use for data.
+            # (Bear in mind that the data tables for each object type is
+            # written out beyond that point)
+ 
+            # Now, we are going to read a little bit more.. 3 values:
+            # a)  Reccnt (as a 32-bit integer)
+            # b)  Reccnt (as a 32-bit real) in F_Float format
+            # c)  Reccnt (as a 64-bit real) in D_Float [VAX] or G_Float [AXP]
+ 
+            read (31,REC=1,err=8011)reccnt, fprint1, fprint2  # Read current rec count
+ 
+            mlen = 0
+            goto 8012                        # (RECCNT an integer in BLMAIN.inc)
+  8011      reccnt=1                         # The file is new. So.... Set it to 1
+            write (31, REC=1) $Count_W_fingerprint(reccnt)
+  8012      continue
+           }
+         }
+ 
+#       ****************************************************************
+        if (cmd == 1)           #************** BYE ********************
+ 
+         {
+          #$% test for old file and close it
+          if (lfc != 0) close (unit = 31)
+          lfc = 0
+          call echor
+          call echov ("Have a nice day.")
+          call echor
+          #call hltslf
+		  stop
+          call echor
+          call echov ("Welcome Back")
+          call echor
+         }
+ 
+#       ****************************************************************
+        #$% set device to line printer
+        else if (cmd == 2)       #************** PRINT ******************
+         {
+          iunit=55
+		  pname_v = " "
+          kk = 0
+          call smovh (bname,5,pname,kk)
+          call smovv ("c.lis",pname,kk)
+          #call smov  (EOS,pname,kk)
+ 
+          #$% open file for output via PRINT
+          open (unit           = iunit,
+                access         ='SEQUENTIAL',
+                form           ='FORMATTED',
+                file           = pname_v,
+                status         ='UNKNOWN')
+ 
+          inquire (unit=iunit, NAME=vpname) # get full name
+ 
+          call echor
+          call echov (' Listings being generated to ')
+          call echovn(vpname)
+          call echov (' are:')
+          call echor
+ 
+          # set up selective print decoding
+ 
+          #$% loop for each command type
+          do i = 1,NBRCMNDS
+           {
+            #$% set selection flag to false
+            pflg[i] = .false.
+           }
+ 
+          #$% for each argument
+          for (i=2; i <= argcnt; i = i+1)
+           {
+            #$% if ALL, set selection flag to true and break
+            if (args[i] == 'ALL')
+             {
+              pflg[1] = .true.
+              break
+             }
+ 
+            #$% loop for each type
+            do k = 3, NBRCMNDS
+             {
+              wcmd = $BLANKLIT
+              ilen = 0
+              call smovhn(cmnd[k],argc[i],wcmd,ilen)
+ 
+              if (args[i] == wcmd)
+               {
+                pflg[k] = .true.
+                pflg[2] = .true.
+               }
+             }
+           }
+          if (!pflg[2]) pflg[1] = .true.   # if no specifics, select all...
+ 
+          #$% loop for each type
+          do i=1,NBRCMNDS
+           {
+            #$% if this one doesn't have a file, get next
+            if (crecsz[i] == 0) next
+ 
+            if (!(pflg[1]|pflg[i])) next   # check selection flag
+ 
+            #$% set current record size
+            recsz = crecsz[i]
+ 
+            #$% open each file as input for printing
+            open (unit               =31,
+                  access             ='DIRECT',
+                  form               ='UNFORMATTED',
+                  file               =cfilesV[i],
+                  recl               =recsz*$Intel_recl_multiplier,
+#                  associatevariable  =recpnt,
+#                  carriagecontrol    ='NONE',
+                  status             ='OLD',
+                  err                =8020)
+ 
+ 
+            read (31,REC=1,err=8021)reccnt, fprint1, fprint2  # Read current rec count
+ 
+            mlen = 0
+            call bsprep (cfiles[1,i])           # Print the file
+ 
+            #$% close current file
+            close (unit=31)
+            next
+ 
+  8020      call echor
+            call echov ("Sorry, but the file ")
+            call echoHn(cfiles[1,i],2*$$maxLit)
+            call echov (" does not yet exist.")
+            next
+ 
+  8021      call echor
+            call echov ("Sorry, but the file ")
+            call echoHn(cfiles[1,i],2*$$maxLit)
+            call echov (" is not properly initialized.")
+           }
+ 
+          close (unit = iunit)                  # Close the Print File
+          call echor
+         }
+ 
+#       ****************************************************************
+        #$% set device to disk
+        else if (cmd == 3)       #*********** WRITE TO DISK *************
+         {
+          iunt = 25             # LUN for disk file
+		  pname_v = " "
+          kk = 0
+          call smovhn(bname,  5,pname,kk)
+          call smovv ("c.scr",  pname,kk)
+          #call smov  (EOS,      pname,kk)
+ 
+          #$% open file for output via WRITE
+          open (unit           = iunt,
+                access         = 'SEQUENTIAL',
+                form           = 'FORMATTED',
+                file           = pname_v,
+#                carriagecontrol= 'LIST',
+                status         = "UNKNOWN")
+ 
+ 
+#          inquire (unit=iunt, NAME=vpname) # get full name
+ 
+          call echor
+          call echov (" Output will be to ")
+          call echovn(pname_v)
+          call echor
+ 
+          call echor
+          call echov (' Files being generated are: ')
+          call echor
+ 
+          # set up selective print decoding
+ 
+          #$% loop for each command type
+          do i = 1,NBRCMNDS
+           {
+            #$% set selection flag to false
+            pflg[i] = .false.
+           }
+ 
+          #$% for each argument
+          for (i=2; i <= argcnt; i = i+1)
+           {
+            #$% if ALL, set selection flag to true and break
+            if (args[i] == 'ALL')
+             {
+              pflg[1] = .true.
+              break
+             }
+ 
+            #$% loop for each type
+            do k = 3, NBRCMNDS
+             {
+              wcmd = $BLANKLIT
+              ilen = 0
+              call smovhn(cmnd[k],argc[i],wcmd,ilen)
+ 
+              if (args[i] == wcmd)
+               {
+                pflg[k] = .true.
+                pflg[2] = .true.
+               }
+             }
+           }
+          if (!pflg[2]) pflg[1] = .true.   # if no specifics, select all...
+ 
+          #$% loop for each type
+          do i=1,NBRCMNDS         # Loop for each type
+           {
+            #$% if this one doesn't have a file, get next
+            if (crecsz[i] == 0) next
+ 
+            if (!(pflg[1]|pflg[i])) next   # check selection flag
+ 
+            #$% set current record size
+            recsz = crecsz[i]
+ 
+            #$% open each file as input for WRITE
+            open (unit               =31,
+                  access             ='DIRECT',
+                  form               ='UNFORMATTED',
+                  file               =cfilesV[i],
+                  recl               =recsz*$Intel_recl_multiplier,
+#                  associatevariable  =recpnt,
+#                  carriagecontrol    ='NONE',
+                  status             ='OLD',
+                  err                =8030)
+ 
+ 
+            read (31,REC=1,err=8031)reccnt, fprint1, fprint2  # Read current rec count
+ 
+            mlen = 0
+            call bready (cfiles[1,i],cmnd[i])   # Prepare to write the file
+ 
+            #$% close current file
+            close (unit=31)
+            next
+ 
+  8030      call echor
+            call echov ("Sorry, but the file ")
+            call echoHn(cfiles[1,i],2*$$maxLit)
+            call echov (" does not yet exist.")
+            next
+ 
+  8031      call echor
+            call echov ("Sorry, but the file ")
+            call echoHn(cfiles[1,i],2*$$maxLit)
+            call echov (" is not properly initialized.")
+           }
+ 
+          #$% Add a final BYE
+          write (iunt,9009)
+          9009 format ("BYE")
+ 
+          close (unit = iunt)
+          call echor
+         }
+ 
+#       ****************************************************************
+        else if (cmd == 4)       #************** AIRCRAFT ***************
+         {
+           call air
+         }
+#       ****************************************************************
+        else if (cmd == 5)       #************** COMMBUOY ***************
+         {
+           call commb
+ 
+         }
+#       ****************************************************************
+        else if (cmd == 6)       #************** COMMPAIR ***************
+         {
+           call commp
+ 
+         }
+#       ****************************************************************
+        else if (cmd == 7)       #************* COMMSUITE ***************
+         {
+          call comms
+ 
+         }
+#       ****************************************************************
+        else if (cmd == 8)       #*********** MISSILE ************
+         {
+          call cruis
+ 
+         }
+#       ****************************************************************
+        else if (cmd == 9)       #************** JAMMER *****************
+         {
+          call jamme
+ 
+         }
+#       ****************************************************************
+        else if (cmd == 10)      #********* NAVIGATIONAL AID ************
+         {
+          call navaid
+ 
+         }
+#       ****************************************************************
+        else if (cmd == 11)      #************** RADAR/ESM **************
+         {
+          call senso
+ 
+         }
+#       ****************************************************************
+        else if (cmd == 12)      #**************** SHIP *****************
+         {
+          call ship
+ 
+         }
+#       ****************************************************************
+        else if (cmd == 13)      #************** SHORE BASE *************
+         {
+          call shore
+ 
+         }
+#       ****************************************************************
+        else if (cmd == 14)      #************** SONAR ******************
+         {
+          call sonar
+ 
+         }
+#       ****************************************************************
+        else if (cmd == 15)      #************** SONOBUOY ***************
+         {
+          call sonob
+ 
+         }
+#       ****************************************************************
+        else if (cmd == 16)      #************** SURVSAT ****************
+         {
+          call satel
+ 
+         }
+#       ****************************************************************
+        else if (cmd == 17)      #************** WEAPON *****************
+         {
+          call weapo
+ 
+         }
+#       ****************************************************************
+        else if (cmd == 18)      #************ COMMJAMMER ********* # REH
+         {
+          call commj
+ 
+         }
+        else if (cmd == 19)      #  Ground Unit # REH  11/30/89
+         {
+          call ground_unit
+         }
+#       ***************************************************************
+        else if (cmd == 20)      #*********** TORPEDO ******************
+         {
+          call torpe
+         }
+#       ***************************************************************
+        else if (cmd == 21)      #*********** COUNTERMEASURE ***********
+         {
+          call ctrme
+         }
+#       ****************************************************************
+        else if (cmd == 22)      #***********     CHAFF       ***********
+         {
+          call CHAFbld                                # jb        7/6/90
+         }
+#       ****************************************************************
+#       ****************************************************************
+        else if (cmd == 23)      #***********     IFF       ***********
+         {
+          call IFFbld                                # cml      2/20/91
+         }
+#       ****************************************************************
+#       ****************************************************************
+# SMM 5/98 (E1979) was 25
+        else if (cmd == 24)      #***********  JC3S VEHICLE    *********
+         {
+          call VEHICLE        #Joint Vechicle build processor   --- JFR 5/7/91
+         }
+#       ****************************************************************
+#       ****************************************************************
+# SMM 5/98 (E1979) was 26
+        else if (cmd == 25)      #***********  SITE  *******************
+         {
+          call SITE        #   --- MJF 3/24/92
+         }
+#       ****************************************************************
+#       ******************** exit input loop ***************************
+      }
+ 
+ 
+  end
+ 
+ 
+ 
+
+subroutine new_BLMAIN_Init (basename,basepath) # get the base name, (from DCL)
+implicit none
+ 
+# Description:
+#   The command line will now have two arguments...
+#
+#       P1 = the base name
+#       P2 = optional Base Path
+#
+#   In addition, a qualifier may be placed on the verb BUILD for /INPUT=file
+#             or /LOAD  (which disables required fields being required)
+#             or /NEW   (which does not require Air/Ship/Shore/Weapon & Sensor files
+#
+Integer*4           base_name_len
+Integer*4           base_path_len
+Integer*4           inp_name_len
+Integer*4           Arg_Lens[3]
+ 
+Integer*4           Answer
+integer*4           K
+ 
+character   basename[ARB]
+character   basepath[ARB]
+character   inputname[ARB]
+vaxcharacter*64     base_name
+vaxcharacter*64     base_path
+VaxCharacter*64     Args[3], Params, param, temp
+vaxcharacter*40     inp_name
+vaxcharacter*1      base_cat
+ 
+Integer*4           Load_Opt  / NO /
+Integer*4           New_Opt  / NO /
+#common  /load_com/ Load_Opt, New_Opt
+ 
+#------------------------------
+# get the command line
+ 
+call read_arguments (3, Args, Arg_Lens, Params) # read the command line
+ 
+base_name     = args[1]
+base_name_len = max(0,arg_lens[1])
+base_path     = args[2]
+base_path_len = max(0,arg_lens[2])
+base_cat      = "C"
+ 
+inp_name_len = 0
+inp_name     = ""
+ 
+k = 1
+repeat
+    {
+    call Get_Qualifier ( Params, K, Param )
+ 
+    if (Param[1:1] == "S" | Param[1:1] == "s")      # /SCENARIO qualifier
+        {
+        base_cat  = "S"
+        }
+    else if (Param[1:1] == "L" | Param[1:1] == "l") # /LOAD qualifier
+        {
+        Load_Opt = YES
+        }
+    else if (Param[1:1] == "N" | Param[1:1] == "n") # /NEW qualifier
+        {
+        New_Opt = YES
+        }
+    else if (Param[1:1] == "I" | Param[1:1] == "i")  # /INPUT qualifier
+        {
+ 
+        temp = ""
+        call str_element (temp, 1, "=", param)
+ 
+        inp_name_len = 0
+        call vmovvn (temp,inp_name,inp_name_len)
+        }
+ 
+    k = k + 1
+    } until (param[1:1] == "")
+ 
+#------------------------------
+# all items read in now.... put them in the right place
+ 
+if (base_name_len != 0)
+    {
+    print *,"Characteristics Base Name: ", base_name[:base_name_len]
+ 
+    k = 0
+    call smovvn (base_name, basename, k)
+    call smov  (EOS, basename, k)
+    }
+else
+    {
+    print *, "Invalid base name entered..."
+    call exit
+    }
+ 
+k = 0
+call smovvn (base_path, basepath, k)
+call smov  (EOS, basepath, k)
+ 
+if (base_path_len != 0)
+    {
+    print *,"Characteristics Base Path: ", base_path[:base_path_len]
+    }
+ 
+if (inp_name_len != 0)
+    {
+    k = 0
+    call smovvn (inp_name, inputname, k)
+    call smov  (EOS, inputname, k)
+ 
+    call get_command_file (inputname)
+ 
+    print *,"Command input from:    ", inp_name[:inp_name_len]
+    }
+ 
+return
+#--------------------------------------------------
+entry Loading_Build (answer)
+ 
+answer = Load_Opt
+return
+#--------------------------------------------------
+entry New_Build (answer)
+ 
+answer = New_Opt
+return
+#--------------------------------------------------
+end
+
+##############################################################################
+# SUBROUTINE BREADY
+# Ready to generate the command file
+#
+define(ZCOM,200)
+define(ZTYP,300)
+define(ZFLD,2000)
+define(ZARG,800)
+define(ZFMT,200)
+define(ZDSOBJ,4)
+define(ZDSCOM,2)
+define(ZDSFMT,5)
+define(TBLOK,1)
+#
+# arguments for deffld
+#     1) field name
+#     2) number sub field names for this input
+#     3) format element number
+#     4) sub field
+#     5) iterations of previous sub field
+#
+#
+ 
+  subroutine bready (cfile,type)    # Write the file
+ 
+  implicit NONE
+ 
+  integer    dccom,dctyp,dcfld,dsarg,dcarg,dcfmt
+ 
+  literal    type, defcom[ZCOM],deftyp[ZTYP],deffld[ZFLD],
+             defarg[ZARG],deffmt[ZFMT]
+ 
+  literal    cfile[2],object[ZDSOBJ]
+ 
+  Integer istat
+ 
+  call bsltbl (istat, #(status)    # LOAD DATA TABLES
+               object,             # object type
+               defcom,dccom,       # common definition table and size
+               deftyp,dctyp,       # type definition table and size
+               deffld,dcfld,       # field definition table and size
+               defarg,dsarg,dcarg, # argument definition table and size
+               deffmt,dcfmt)       # format definition table and size
+ 
+  if (istat == TBLOK)
+      call bgener (object,cfile,       # current object type, file name
+                   defcom,dccom,       # common definition table and size
+                   deftyp,dctyp,       # type definition table and size
+                   deffld,dcfld,       # field definition table and size
+                   defarg,dsarg,dcarg, # argument definition table and size
+                   deffmt,dcfmt,type)  # format definition table and size
+ 
+  else
+    {
+    call echor
+    call echov ("Sorry, but the file ")
+    call echoHn(cfile,2*$$maxLit)
+    call echov (" is not properly initialized.")
+    }
+ 
+  return
+  end
+ 
+
+##############################################################################
+# SUBROUTINE BGENER
+# Generate a command file on disk
+#
+#
+  subroutine bgener (object,cfile,       # current object type,file name
+                     defcom,dccom,       # common definition table and size
+                     deftyp,dctyp,       # type definition table and size
+                     deffld,dcfld,       # field definition table and size
+                     defarg,dsarg,dcarg, # argument definition table and size
+                     deffmt,dcfmt,type)  # format definition table and size
+ 
+implicit NONE
+ 
+  Integer dccom,dctyp,dcfld,dsarg,dcarg,dcfmt
+  literal    type, defcom[2,dccom],deftyp[dctyp],deffld[dcfld],
+             defarg[dsarg,dcarg],deffmt[5,dcfmt]
+ 
+  integer    ix[5000],pos[5000],
+             i,m,loop,knt,
+             cur,NXTREC
+ 
+  literal    name[5000],object[4],cfile[2]
+ 
+  include "blmain.inc"
+ 
+    nxtrec(cur) = cur + (oldlen+recsz-1)/recsz # .Data file
+#
+ 
+9003 format (a8)
+9004 format ("SAVE")
+9005 format ("QUIT")
+9006 format ("FIND ",a8)
+9007 format ("DELET ENTRY")
+ 
+  call echor
+  call echoh(object, 4 * $$maxLit)
+  call echov ('.....')
+ 
+ 
+  name[1] = $BLANKLIT
+  knt = 0
+ 
+  for (i = 2; i <= reccnt; i = nxtrec(i))
+     {
+      knt = knt + 1
+ 
+      read (31, REC=i) (out[m],m=1,recsz)
+ 
+      oldlen = out[1] + 1
+      name[knt] = out[3]
+      pos[knt] = i
+     }
+ 
+  call order1 (name,ix,knt)
+ 
+  for (loop = 1; loop <= knt; loop = loop + 1)
+     {
+ 
+      call bsbldA (work,               # current record array
+                   wrkopt,             # pointers to the work array
+                   defcom,dccom,       # common definition table and size
+                   deftyp,dctyp,       # type definition table and size
+                   deffld,dcfld,       # field definition table and size
+                   defarg,dsarg,dcarg, # argument definition table and size
+                   deffmt,dcfmt)       # format definition table and size
+ 
+ 
+      oldpos = pos[ix[loop]]
+ 
+      call bsbldC(defcom,dccom,       # common definition table and size
+                  deftyp,dctyp,       # type definition table and size
+                  deffld,dcfld,       # field definition table and size
+                  defarg,dsarg,dcarg, # argument definition table and size
+                  deffmt,dcfmt)       # format definition table and size
+ 
+ 
+      write (25,9003)type             # Writes the object to the file
+ 
+      write (25,9006) work[4]         # Find the matching entry
+      write (25,9007)                 # remove it
+ 
+      call bwrite                     # Writes the data to the file
+ 
+      write (25,9004)                 # Saves the entry
+      write (25,9005)                 # Clean up
+     }
+ 
+ 
+ 
+return
+end
+ 
+
+#############################################################################
+# SUBROUTINE BWRITE
+# Writes the characteristics file.
+#
+#$% Modified:  Jim Allen - 1/97 (E1618)
+#$%            Add seconds to latitude and longitude format (changed 9004
+#$%            and calls to prconv to accomodate seconds).
+#$%
+ 
+subroutine bwrite
+ 
+implicit NONE # jb E2145  3/23/00
+ 
+literal   name
+literal   twork
+real      fval
+character line[ARB]
+VMSchar   str_ck*ARB
+integer   is_valid_build_string, is_str, mm, m2
+ 
+Integer j,k,L1,L2,L3,m,n, kdir, ilen,len, ptr,       # jb E2145  3/23/00
+        IS_ALPHA_NUMERIC, NXTWRK,cur                 # jb E2145  3/23/00
+ ##     (LBUTIL.rat) /\    /\ (statement-function in BLSUB1.rin)
+ 
+include "blmain.inc"
+ 
+nxtwrk(cur) = cur + 2 + work[cur+1]
+ 
+9004 format (a8,i4,'-',i2.2,'-',i2.2,a1)
+9005 format (a8,ARB a1)
+9006 format (a8,2x, ARB a8)
+ 
+for (ptr=2; ptr < work[1]; ptr = nxtwrk(ptr))
+   {
+    name = work[ptr]
+    len = work[ptr+1]
+    j = ptr+2
+    n = j-1 +len
+ 
+ 
+    if (work[j] == '*REQ*') next
+ 
+    is_str = NO
+    if (len > 1)
+        {
+        mm = 0
+        str_ck = ""
+        call vmovh (work[j], len*8, str_ck, mm)
+ 
+        if (mm == len*8)
+            {
+            is_str = is_valid_build_string (str_ck, MM)
+            }
+        }
+ 
+    if (is_str == YES)
+        {
+        write (25, 9006) name, (work[j+m-1],m=1,len)
+        }
+    else if (name == 'LAT')
+      {
+       call prconv (work[j],1,l1,l2,l3,kdir)
+       write (25,9004) name,l1,l2,l3,kdir
+      }
+ 
+    else if (name == 'LONG')
+      {
+       call prconv (work[j],2,l1,l2,l3,kdir)
+       write (25,9004) name,l1,l2,l3,kdir
+      }
+ 
+    else
+      {
+       ilen = 0
+ 
+       for (k=1; k<=len; k=k+1)
+          {
+          if (is_alpha_numeric (work[ptr+k+1]) == YES)
+            {
+            call smovv (" ",line,ilen)
+            call smovh (work[ptr+k+1],$$MaxName,line,ilen)
+            }
+          else if ($iswhole (work[ptr+k+1]))  # integer check only
+            {
+            call smovv (" ",line,ilen)
+            call smovi (int(work[ptr+k+1]),line,ilen)
+            }
+          else
+            {
+            call smovv (" ",line,ilen)
+            fval = work[ptr+k+1]     # convert to 32-bit real
+            call smovf (fval,3,line,ilen) # display in floating point
+            }
+          }
+ 
+       write (25,9005) name,(line[m], m=1,ilen)
+      }
+ 
+ 
+   }
+ 
+ 
+ return
+ end
+
+ 
+Subroutine prconv (ang,idir,ideg,imin,isec,ihem)
+IMPLICIT NONE           # jb  4/21/98
+ 
+#$% Modified:   Dane Wills - 9/99 (E1618 & E1815)
+#$%             Add Seconds via floating point (*8) input argument
+#$%             This copy of LBUTIL taken from BEES 7-SEP-99
+ 
+#  converts an angle in the form dddmm.ss (real*8) to lat/long/hem
+#  idir: 1=lat, 2=long
+ 
+REAL*8  ang
+Integer iang,idir,ideg,imin,isec,ihem
+ 
+iang = ang
+ideg = abs(iang) / 100
+imin = abs(iang) - 100 * ideg
+isec = (abs(ang - iang)) * 100. + .5 # E2243 jhm 10/31/01 added abs to insure pos return
+ 
+if (isec >= 60)                    # E2243jhm 10/31/01 same logic as imin >= 60 test
+    {
+    isec = 0
+    imin = imin + 1
+    }
+ 
+if (imin >= 60)
+    {
+    imin = 0
+    ideg = ideg + 1
+    }
+ 
+ 
+if (idir == 1)
+    {
+    if (iang < 0) ihem = 'S'
+    else          ihem = 'N'
+    }
+else
+    {
+    if (iang < 0) ihem = 'W'
+    else          ihem = 'E'
+    }
+ 
+return
+end
+ 

@@ -1,0 +1,6076 @@
+
+####    FILE:   WGMDFLT.rat
+####
+####    Record of Modifications:
+####
+####        Programmer          Date        Modification
+####
+####        James Allen         2/96        Routines moved to wgmdfuel.rat
+####                                        (consolidating fuel related routines
+####                                        with the creation of ship fuel modeling).
+####                                        Routines moved:  REFUEL (now called refuel_aircraft)
+####                                                         find_max_fuel_to_deliver
+####
+####        G. G. Gustafson     4/4/88      Added call to ADD_POTENTIAL_JAMMER 
+####                                        in the subprograms:
+####
+####                                            FLSYSF 
+####                                            OLAUNC 
+
+#$%   FLOWCHART FOR FLTOPS is in WGMAIN.HIR
+#$%   =====================================
+
+INCLUDE "ascii.inc"         
+INCLUDE "bbctl.inc"         
+INCLUDE "bbcode.inc"         
+INCLUDE "bbacc.inc"         
+INCLUDE "bbaml.inc"         
+INCLUDE "bbbml.inc"                         # jb            5/15/89
+INCLUDE "bbbom.inc"         
+INCLUDE "bbdeq.inc"         
+include "bbjew.inc"                         # jecewsi - JFR 8/31/94
+INCLUDE "bbiff.inc"                         # cml           3/18/91
+INCLUDE "bbnav.inc"         
+INCLUDE "bbown.inc"                         # SMM           4/1/92
+INCLUDE "bbord.inc"         
+INCLUDE "bbpim.inc"         
+INCLUDE "bbrcn.inc"         
+INCLUDE "bbrmt.inc"         
+INCLUDE "bbrpm.inc"         
+include "bbrte.inc"              #def for ROUTEs
+include "bbrto.inc"              #def for ROUTE sub-orders
+INCLUDE "bbsqd.inc"         
+INCLUDE "bbshc.inc"         
+INCLUDE "bbtat.inc"         
+INCLUDE "bbtor.inc"         
+INCLUDE "bbunt.inc"         
+INCLUDE "bbwet.inc"         
+INCLUDE "orders.inc"         
+INCLUDE "plplay.inc"         
+include "stationmsg.inc"             # joa 12/97 (E1852)
+
+#define ($debugf,  $$Debug$Control)      # trace fltops
+define ($debugf,)
+
+define(equip$max,14)                    # max items of equipment on aircraft
+
+define(max$launch$rate,20)
+define(max$recover$rate,20)
+
+$DebugF define(trace$damage$EXE,istrip(trace$damage,0,M1bits)) # jb 5/6/87
+$DebugF define(trace$damage$WEP,istrip(trace$damage,1,M1bits)) # jb 5/6/87
+
+$DebugF define(trace$fltops$exe,istrip(trace$fltops,0,M1bits)) # trace
+$DebugF define(trace$fltops$pln,istrip(trace$fltops,3,M1bits)) # trace plan
+$DebugF define(trace$fltops$sel,istrip(trace$fltops,4,M1bits)) # trace flnque
+$DebugF define(trace$fltops$rcn,istrip(trace$fltops,5,M1bits)) # trace reconn
+$DebugF define(trace$fltops$tot,istrip(trace$fltops,6,M1bits)) # trace tot
+
+#define(launch$now,      istrip(trace$fltops,1,M1bits)) # queuing
+#define(recover$now,     istrip(trace$fltops,2,M1bits)) # queuing
+
+define (Max$Flights,unt$slots)  # Max number of Aircraft in queue joa 11/02 (E2313)
+                                # BB2AIR exceeded 400 aircraft in queue
+
+define(FltOpsCommon,
+integer cque,                   ## count of flights in queue
+        Lid,            ## Launch order id
+        Lunt,           ## available unt slot for flight
+        Lpos,           ## available pos slot for flight
+        Lacc,           ## aircraft characteristics pointer
+        Ldyn,           ## available dyn slot for flight
+        xaml,           ## qty of aml slots
+        Laml[200],      ## available aml slots (by iqty)
+        LTOP,           ## unt$pointer for leader of collective flight
+        iqty,           ## number of planes on the flight
+        icours,         ## initial course
+        ispeed,         ## initial speed
+        ialt,           ## initial altitude
+        is_relative_alt,## launch altitude is relative
+        ilead,          ## collective flight leader ($yes/$no)
+        loadc,          ## number of items in load
+        iload[3,equip$max],     ## name,qty,eq$index (name moved to NLOAD)
+        xlen,           ## length (in bytes) of msgx
+        xsave,          ## saved length (in bytes) of msgx
+        msgx[150],      ## message area
+        N_Airborne,     ## count Aircraft already occupying UNT slots
+        Endtime         ## Scramble.. can have an END time
+
+real    queue[5,Max$Flights],   ## Launch/Recovery queue
+        itime,          ## game minute requested to launch
+        Etime,          ## earliest time to launch
+        RQtime          ## Requested time to launch (TOT) 
+integer*2       Base_Indx[Max$Flights],
+                Base_More[Max$Flights]
+
+literal itype,          ## name of aircraft type
+        name,           ## event name
+        cname,          ## collective flight name (or $no)
+        missn,          ## Mission number >> Collective name
+        sname,          ## Squadron name
+        csign,          ## Scramble Call Sign
+        atoid,          ## Scramble ATO Id 
+        idup,           ## Flag indicating duplicate name
+        nload[equip$max]## name of equipment item 
+
+common /scratch$pad/ itype,name,cname,nload,    # jb E2145 (LITERALs) 7/3/00
+                     missn, sname, csign, atoid, idup, endtime,          # E2206 ATO interface (dew)
+                     queue,itime,Etime,RQtime,  # jb E2145 (REALs)    7/3/00
+                     cque,Lid,Lunt,Lpos,Lacc,Ldyn,xaml,Laml,LTOP,
+                     iqty,icours,ispeed,ialt,is_relative_alt,
+                     ilead,loadc,iload,xlen,xsave,msgx,N_Airborne,
+                     Base_Indx,Base_More    # jb E2145 (Integer*2's)  7/3/00
+) # end define fltops common
+
+## these 5 codes determine the priority of flight deck operations
+
+define(BBimplicit,IMPLICIT NONE)        # jb E2145  7/3/00
+define($$HalfLaunched ,1)               # Launch in progress,
+define($$Failure      ,2)               # Recovering w/System Failure,
+define($$Launching    ,3)               # Awaiting launch.
+define($$LowFuel      ,4)               # Recovering w/Low-Fuel Warning,
+define($$Recovering   ,5)               # Recovering,
+
+ 
+include "alsp.inc"         
+
+Subroutine FLTOPS 
+
+########################################################
+#$%
+#$% Purpose:   FLTOPS inputs data to be used in con-
+#$%            trolling flight operations for the
+#$%            game being processed and channels the
+#$%            data to the appropriate subroutine
+#$%            for processing.
+#$%
+#$%______________________________________________________________________
+#$%     Multiple Levels of Detail are supported by FLTOPS.  Levels are
+#$%     determined by the DEFINE LEVEL FLIGHT <number> command.  The
+#$%     default level is 1 (as specified in WIINIT.RAT).
+#$%
+#$%     Level 0 ==> Basic operations 
+#$%           1 ==> Que Launch/Recoveries to Platforms Launch/Recover rate
+#$%           2 ==> Turn Carrier into the Wind for Launch/Recoveries
+#$%                 (except for helo's and 'DownWind' a/c, require RECOVER
+#$%                  order if carrier is not into the wind already for a
+#$%                  Launch or Recovery)
+#$%           3 ==> Except for helo's, never Recover unless a RECOVER
+#$%                  order is IN EFFECT.
+#$%______________________________________________________________________
+#$%
+#$% Calls:     FLSYSF     FLBING     FLETA
+#$%            FLRCNN     REFUEL     FLAUNC
+#$%            FLRCVR     FLQUE
+#$%
+#$% Tables:    UNT        
+#$%
+#$% Date:      APRIL 81
+#$%
+#$% Author:    DANA WILLS
+#$%
+########################################################
+BBcommon
+FltOpsCommon
+
+Integer UNT$Pointer,UNT$Status$I,UNT$Marshallstatus$I # jb E2145  7/3/00
+
+call flrcnn                                     # process reconn entries
+
+cque = 0                                        # clear launch/recover queue
+
+for(unt$pointer$first;still_ok(unt);unt$pointer$next) # 9/26/88 
+   {
+    if(Xunt$type$i != $air$code) next           # skip if not aircraft
+
+    if (xUNT$GhostedUnit$I == $YES)             # skip if ghosted unit SMM 5/18/92
+       {
+        call chop_ghosted_airsupport(unt$pointer)
+        next
+       }
+    if (Xunt$MarshallStatus$i == $inflight$code)# In flight ?
+       {
+        call flsysf (unt$pointer)               # Check for system failure
+       }
+
+    if (Xunt$status$i == $ReadyToRecover$code &           # At the recovery point ?
+        Xunt$MarshallStatus$i != $Recovering$code)      ## tpa 4/18/85
+       {
+        call flbing (unt$pointer)
+        next
+       }
+
+    call fleta (unt$pointer)                    # check est time arrival
+
+    unt$status$i = Xunt$status$i
+
+    #$% if aircraft being deleted, get next
+    if (unt$status$i == $beingdeleted$code) next
+
+    unt$MarshallStatus$i = Xunt$MarshallStatus$i
+
+    #$% if a/c awaiting launch
+    if (unt$status$i == $AcAwaitingLaunch$code   |
+             unt$MarshallStatus$i == $Launching$code  |
+             unt$MarshallStatus$i == $AwaitLaunch$code )
+       {
+        #$% call for launch of a/c
+        call flaunc (unt$pointer)
+       }
+    #$% else if a/c ready for recovery
+    else if (Xunt$MarshallStatus$i == $Recovering$code)
+       {
+        #$% call for recovery of a/c
+        call flrcvr (unt$pointer)
+       }
+   }
+if (cque != 0) call flque                       # process launch/recover queue
+
+return
+end
+
+ 
+
+
+Subroutine flrcnn                       # process reconn 
+
+########################################################
+#$%
+#$% Purpose:   FLRCNN processes flight reconnaissance
+#$%            operations functions for the game being
+#$%            processed.
+#$%
+#$% Called By: FLTOPS
+#$%
+#$% Calls:     REPRCN
+#$%
+#$% Tables:    RCN        UNT        
+#$%
+#$% Date:      APRIL 81
+#$%
+#$% Author:    DANA WILLS
+#$%
+########################################################
+BBcommon
+
+
+REAL  RCN$Delivertime$F                 # jb E2145  7/3/00
+
+Integer UNT$Pointer, UNT$Status$I,      # jb E2145  7/3/00
+        RCN$Pointer,RCN$Reconnunit$I    # jb E2145  7/3/00
+
+#$% for each reconn entry
+for(RCN$POINTER$FIRST;still_ok(RCN);RCN$POINTER$NEXT)  # 9/26/88
+   {
+    #$% get reconn unit
+    rcn$ReconnUnit$i = xrcn$ReconnUnit$i
+
+    #$% if no unit, get next entry
+    if (rcn$ReconnUnit$i == 0)  next           #skip empty slot
+
+    #$% set unit pointer
+    unt$pointer$to rcn$reconnunit$i
+
+    #$% get unit status
+    unt$status$i = xunt$status$i
+
+    if (unt$status$i == $beingdeleted$code |   #if reconn unit kaput
+        Xunt$SysFailType$i == $crash$code  |
+        unt$status$i == $sinking$code)
+       {
+        rcn$zero
+        putRCN$modified$i (1)                           #       2/15/83
+       }
+    #$% else if flight is heading back to base
+    else if (unt$status$i == $ReadyToRecover$code )    
+       {
+        #$% get ACD pointer and reconn unit
+        rcn$ReconnUnit$i = xunt$recoverindx$i
+        putrcn$ReconnUnit$i
+
+        #$% set reconn msg delivery time and store it
+        rcn$DeliverTime$f = game$time + reconn$delay
+      putrcn$DeliverTime$f
+       }
+    else
+       {
+        #$% get reconn msg delivery time
+        rcn$DeliverTime$f = xrcn$DeliverTime$f
+
+        #$% deliver reconn msg when time for delivery matches game time
+        #$% or less
+        if (Xrcn$ReportStatus$i == 0  &
+             rcn$DeliverTime$f  != 0. &
+             rcn$DeliverTime$f  <= game$time) 
+             call reprcn(rcn$pointer)
+       }
+   }
+
+return
+end
+
+ 
+
+
+subroutine flaunc (unt$pointer)                 # flight waiting to launch 
+
+########################################################
+#$%
+#$% Purpose:   FLAUNC checks to see if it is time to
+#$%            launch an awaiting flight.  Also gets
+#$%            weather and other launch factor con-
+#$%            siderations.
+#$%
+#$% Called By: FLTOPS
+#$%
+#$% Calls:     FLPBLC     FLUPUP
+#$%
+#$% Tables:    UNT        
+#$%
+#$% Date:      APRIL 81
+#$%
+#$% Author:    DANA WILLS
+#$%
+########################################################
+BBcommon
+FltOpsCommon
+
+Literal  CSTRIP8                        # jb E2145  7/3/00
+REAL FACTOR, WHEN,                          # jb E2145  7/3/00
+     UNT$Timelaunched$F,UNT2$Fltsoktime$F   # jb E2145  7/3/00
+Integer N,IDECK,IRATE,ISTAT,IWAIT,KKLEN,    # jb E2145  7/3/00
+    UNT$Pointer,UNT$Launchindx$I,           # jb E2145  7/3/00
+    ACC$Pointer,UNT2$Pointer,WET$Pointer    # jb E2145  7/3/00
+Character msg[ARB]
+
+unt$LaunchIndx$i = Xunt$LaunchIndx$i            # get base unit
+unt2$pointer$to unt$LaunchIndx$i                # pointer to base unit
+
+#______________________________________________________________________
+# check on launch readiness of CV
+
+unt$TimeLaunched$f = xunt$TimeLaunched$f        # jb            10/30/86
+unt2$FltsOkTime$f =      Xunt2$FltsOkTime$f             # jb            10/30/86
+
+if (level$FltOps   >=  0         &
+    unt2$FltsOkTime$f >= Game$time)               # jb (No "X"    10/30/86
+    {
+    $debugf if (trace$fltops$exe == $yes)
+    $debugf    {
+    $debugf     call echor
+    $debugf     call echov  ('^')
+    $debugf     call echohn (Xunt2$name$c,$$MaxLit)
+    $debugf     call echov (" closed for launching aircraft.")
+    $debugf    }
+
+    if( unt$TimeLaunched$f < unt2$FltsOkTime$f &            # jb    10/30/86
+        unt$TimeLaunched$f == Game$time    )          # jb    10/30/86
+     {                                                  # jb    10/30/86
+      iwait = unt2$FltsOkTime$f - Game$time               # jb    10/30/86
+      kklen = 0  
+      Call SMOVHN(xunt2$name$c,$$MaxLit,msg,kklen) # jb    10/30/86
+      Call SMOVV(" deck closed for ",msg,kklen)
+      call smovi(iwait,msg,kklen)          # jb    10/30/86
+      Call SMOVV(" minutes.",msg,kklen)
+      call send_ (Xunt$View$i,0,kklen,msg) #former msg1   # jb    10/30/86
+     }                                                  # jb    10/30/86
+
+    RETURN
+    }
+
+#______________________________________________________________________
+# check on CV's position in the wind...
+
+# codes for ACC$CATEGORY$I      ==> $Jet$Code, $Prop$Code, $Helo$Code
+acc$pointer = Xunt$AccPntr$i
+
+if (level$FltOps    >= 2               & 
+    Xunt2$type$i    != $ShoreBase$code & 
+    Xacc$Category$i != $Helo$Code      &                # &     5/28/86
+    Xacc$DownWind$i != $YES             )          # DownWind   5/28/86
+    { #\/ jb no "X" 10/30/86
+    if (unt$TimeLaunched$f-4. > game$time) return      # not yet
+
+    if (Xunt2$status$i != $Fltops$code &
+         unt2$FltsOkTime$f < Game$time )                  # jb    10/31/86
+        {
+        PUTunt2$status$i ($Fltops$code)
+
+        $debugf if (trace$fltops$exe == $yes)
+        $debugf    {
+        $debugf     call echor
+        $debugf     call echov  ('^')
+        $debugf     call echov ("Turning ")
+        $debugf     call echohn (Xunt2$name$c,$$MaxLit)
+        $debugf     call echov (" into the wind.")
+        $debugf    }
+
+        return
+        }        
+
+    if ((Xunt2$MarshallStatus$i != $InFlight$Code) |
+        (Xunt2$status$i != $Fltops$code))
+        {
+        $debugf if (trace$fltops$exe == $yes)
+        $debugf    {
+        $debugf     call echor
+        $debugf     call echov  ('^')
+        $debugf     call echohn (Xunt2$name$c,$$MaxLit)
+        $debugf     call echov (" not turned into the wind yet.")
+        $debugf    }
+
+        return
+        }
+    }
+
+#______________________________________________________________________
+
+
+if (Xunt$TimeLaunched$f > (game$time+.001)) return   # skip it if not time yet
+
+if (Level$FltOps > 0)                           # if Queing launches
+   {
+    #$% set status to launching
+    istat = $$Launching
+
+    #$% if Marshall Status is launching
+    if (Xunt$MarshallStatus$i == $Launching$code)
+
+    #$% set status to launch in progress
+    istat = min0(istat,$$HalfLaunched)
+
+    #$% if launch of a flight is in progress, set time of launch to zero 
+    if (istat == $$HalfLaunched) when = 0
+
+    #$% else, set time launch will take place
+    else        when = unt$TimeLaunched$f      
+
+    #$% increment queue counter
+    cque = cque + 1
+
+    #$% store queue data
+    queue[1,cque] = unt$LaunchIndx$i
+    queue[2,cque] = istat
+    queue[3,cque] = when
+    queue[4,cque] = unt$pointer
+    queue[5,cque] = YES
+
+    $debugf if (trace$fltops$exe == $yes)
+    $debugf    {
+    $debugf     call echor
+    $debugf     call echov  ('^')
+    $debugf     call echov ("Queuing launch  ")
+    $debugf     call echohn (Xunt$name$c,$$MaxLit)
+    $debugf     call echov (" #")
+    $debugf     call echoi (cque)
+    $debugf     call echov (" from=")
+    $debugf     call echoi (unt$LaunchIndx$i)
+    $debugf     call echov (" pri=")
+    $debugf     call echoi (istat)
+    $debugf     call echov (" time=")
+    $debugf     call echoi (int(when))
+    $debugf    }
+   }
+else
+   {
+    ideck = Xunt$NbrAcTot$i - Xunt$NbrAc$i      # number in flight on deck
+
+    #$% set pointer to launch index
+    unt2$pointer$to unt$LaunchIndx$i
+
+    call flpblc (unt2$pointer,factor,n,irate,   # get launch factor, rate &
+                 wet$pointer)                   # weather report for the base
+    
+    call flupup (unt$pointer,                   # launch aircraft
+                 unt2$pointer,
+                 ideck,
+                 ideck,
+                 factor,
+                 wet$pointer)
+   }
+
+return
+end
+
+ 
+
+
+subroutine flrcvr (unt$pointer)                 # flight waiting to recover 
+
+########################################################
+#$%
+#$% Purpose:   FLRCVR processes recovery of flights.
+#$%            Checks are also made on weather and
+#$%            other recovery factor considerations.
+#$%
+#$% Called By: FLTOPS
+#$%
+#$% Calls:     FLPBRV     FLHOME    Check_for_turned_into_wind
+#$%
+#$% Tables:    UNT
+#$%
+#$% Date:      APRIL 81
+#$%
+#$% Author:    DANA WILLS
+#$%
+#$% Modified:  Jim Allen - 11/94 (E1422)
+#$%            When determining if the a/c is at marshall
+#$%            altitude add in the elevation of the
+#$%            recovering platform
+#$%
+#$%            Susan Miller - 5/97 (E1633)
+#$%            Added display of messages when a recovering
+#$%            platform needs to turn into the wind.  
+#$%
+########################################################
+BBcommon
+FltOpsCommon
+
+Literal  CSTRIP8                        # jb E2145  7/3/00
+REAL    FACTOR                                      # jb E2145  7/3/00
+integer    msg_len, into_wind
+integer    UNT$Pointer
+integer    UNT2$Status$I, UNT2$MarshallStatus$I,
+           UNT$Nbrac$I,UNT$Recoverindx$I           # jb E2145  7/3/00
+Integer N,IRATE,ISTAT,                             # jb E2145  7/3/00
+    UNT2$Pointer,ACC$Pointer,WET$Pointer           # jb E2145  7/3/00
+character  msg[ARB]
+
+UNT$RecoverIndx$I = xUNT$RecoverIndx$I          # get recovering unit
+UNT2$Pointer$To  UNT$RecoverIndx$I
+
+#$% if actual altitude depth is greater than marshalling altitude, return
+#$% Take into account the elevation of the recovering platform - joa 11/95 (E1422) 
+if (Xunt$TrueAltDepth$i > (marshall$altitude + Xunt2$TrueAltDepth$i))
+  return
+
+unt$NbrAc$i = Xunt$NbrAc$i                      # number in flight airborne
+
+unt$RecoverIndx$i = Xunt$RecoverIndx$i          # get base unit
+unt2$pointer$to unt$RecoverIndx$i # pointer to base unit MOVED UP 7/25/86
+
+if (Level$Fltops > 0)                           #$% if queing recoveries
+   {
+    # check on recovery readiness of CV
+    if (Xunt2$TimeBingo$f >= Game$time)
+        {
+        $debugf if (trace$fltops$exe == $yes)
+        $debugf    {
+        $debugf     call echor
+        $debugf     call echov  ('^')
+        $debugf     call echohn (Xunt2$name$c,$$MaxLit)
+        $debugf     call echov (" closed for recovering aircraft.")
+        $debugf    }
+        RETURN
+        }
+
+    #______________________________________________________________________
+    # check on CV's position in the wind...
+
+    # codes for ACC$CATEGORY$I  ==> $Jet$Code, $Prop$Code, $Helo$Code
+
+    acc$pointer = Xunt$AccPntr$i
+
+    if (level$FltOps       >= 2               & 
+        Xunt2$type$i       != $ShoreBase$code & 
+        Xacc$Category$i    != $Helo$Code      &
+        (Xacc$DownWind$i != $YES | level$FltOps >2)) # DownWind 10/27/86
+        {
+         UNT2$Status$I = xUNT2$Status$I
+         UNT2$MarshallStatus$I = xUNT2$MarshallStatus$I
+
+         # recover order always required in level 3
+         if (Level$Fltops >= 3) #$% if RECOVER ORDER REQUIRED...   7/28/86
+          {
+           if (Xunt2$RecoverOrd$i == $NO)                       #  7/28/86
+            {
+              # send a message to the I/O (but only once) - SMM 5/97 (E1633)
+              if (xUNT$MarshallWarning$I != $yes)
+                {
+                 msg_len = 0
+                 call smovhn (xUNT$Name$C, $$MaxLit, msg, msg_len) 
+                 call smovv  (" at marshall, RECOVERY ORDER REQUIRED for ", msg, msg_len)
+                 call smovhn (xUNT2$Name$C, $$MaxLit, msg, msg_len) 
+                 call smovv  (" to recover flight.", msg, msg_len)
+                 call send_   (xUNT$View$I, 0, msg_len, msg)
+                 putUNT$MarshallWarning$I ($yes)
+                }
+
+$debugf       if (trace$fltops$exe == $yes)
+$debugf         {
+$debugf          call echor
+$debugf          call echov  ('^')
+$debugf          call echohn (Xunt2$name$c,$$MaxLit)
+$debugf          call echov (" needs a RECOVER order.")      # 7/28/86
+$debugf         }
+              RETURN                                             # 7/28/86
+             } # end if (Xunt2$RecoverOrd$i == $NO)
+          } # end if (Level$Fltops >= 3)
+         else if (Level$Fltops == 2)    # SMM 5/97 (E1633)
+           { # check to see if the recovering unit is turned into 
+             # the wind and if not, send a message
+            call check_for_turned_into_wind(UNT2$Pointer, into_wind)
+            if (into_wind == $yes)
+              {
+               putUNT2$Status$I ($Fltops$code)
+              }
+            else
+              {
+              # send a message to the I/O             SMM 5/97 (E1633)
+              if (xUNT$MarshallWarning$I != $yes)   # SMM 5/97 (E1633)
+                {
+                 msg_len = 0
+                 call smovhn (xUNT$Name$C, $$MaxLit, msg, msg_len) 
+                 call smovv  (" at marshall, RECOVERY ORDER REQUIRED for ", msg, msg_len)
+                 call smovhn (xUNT2$Name$C, $$MaxLit, msg, msg_len) 
+                 call smovv  (" to recover flight.", msg, msg_len)
+                 call send_   (xUNT$View$I, 0, msg_len, msg)
+                 putUNT$MarshallWarning$I ($yes)
+                }   # end of if a message has not been sent
+             }   # end of if the recover platform is not turned into the wind
+           }   # end of if FltOps Level 2
+
+         # MarshallStatus is set to $InFlight$Code when it has turned
+         # into the wind and is ready to process flight ops set in MANUVR_flt
+         if (unt2$status$i         != $Fltops$code |
+             unt2$MarshallStatus$i != $InFlight$Code)
+            {
+            $debugf if (trace$fltops$exe == $yes)
+            $debugf    {
+            $debugf     call echor
+            $debugf     call echov  ('^')
+            $debugf     call echohn (Xunt2$name$c,$$MaxLit)
+            $debugf     call echov (" not turned into the wind.")
+            $debugf    }
+
+            return
+            } # end if !$Fltops or !$InFlight$code
+        } # end if level$FltOps >= 2 & etc...
+    #______________________________________________________________________
+
+    istat = $$Recovering                        #$% set status to recovering
+
+    #$% if fuel warning, set status to low fuel
+    if (Xunt$FuelWarning$i == $yes)
+        istat = min0(istat,$$LowFuel)
+
+    #$% if system failure, set status to failure
+    if (Xunt$SysFailType$i != $NoSystemFailure$code)
+        istat = min0(istat,$$Failure)
+
+    cque = cque + 1                             #$% increment queue counter
+
+                #$% store recovery queue data
+    queue[1,cque] = unt$RecoverIndx$i
+    queue[2,cque] = istat
+    queue[3,cque] = 0
+    queue[4,cque] = unt$pointer
+    queue[5,cque] = YES
+
+    $debugf if (trace$fltops$exe == $yes)
+    $debugf    {
+    $debugf     call echor
+    $debugf     call echov  ('^')
+    $debugf     call echov ("Queuing recover ")
+    $debugf     call echohn (Xunt$name$c,$$MaxLit)
+    $debugf     call echov (" #")
+    $debugf     call echoi (cque)
+    $debugf     call echov ("   to=")
+#    $debugf     unt2$pointer$to unt$RecoverIndx$i # MOVED UP   7/25/86
+    $debugf     call echohn (Xunt2$name$c,8)
+    $debugf     call echov (" pri=")
+    $debugf     call echoi (istat)
+    $debugf    }
+   }
+else
+   {
+    #$% set next recover index
+#   unt2$pointer$to unt$RecoverIndx$i # SEE TOP OF SUBRTN       7/25/86
+
+    call flpbrv (unt2$pointer,factor,n,irate,wet$pointer) # get recover factor,
+                                                        # rate and weather
+                                                        # for the base
+
+    call flhome (unt$pointer,                       # send 'em home
+                 unt2$pointer,
+                 unt$NbrAc$i,
+                 irate,
+                 factor,
+                 wet$pointer)
+   }
+
+return
+end
+
+ 
+
+
+subroutine flque                                # process launch/recover queue 
+
+
+########################################################
+#$%
+#$% Purpose:   FLQUE processes launch recovery queues.
+#$%
+#$% Called By: FLTOPS
+#$%
+#$% Calls:     FLNQUE   FLHOME  FLPBRV  FLUPUP  FLPBLC
+#$%
+#$% Tables:    UNT
+#$%
+#$% Date:      APRIL 81
+#$%
+#$% Author:    DANA WILLS
+#$%
+########################################################
+BBcommon
+FltOpsCommon
+
+Literal  CSTRIP8                        # jb E2145  7/3/00
+REAL    FACTOR, WHEN                       # jb E2145  7/3/00
+Integer N,IALLOW,ICNT,INDX,LINDX,IPNT,     # jb E2145  7/3/00
+    IRATE,ISTAT,IACT,LACT,NBASE,NUMBER,    # jb E2145  7/3/00
+    UNT$Pointer,UNT2$Pointer,WET$Pointer   # jb E2145  7/3/00
+#
+# que format:
+#
+# queue[1,n] == launch/recover index.
+#
+# queue[2,n] == flight stat; $$HalfLaunched  == launch of a flight in progress,
+#                            $$LowFuel       == Recovering w/Low-Fuel Warning,
+#                            $$Failure       == Recovering w/System Failure,
+#                            $$Recovering    == Recovering,
+#                            $$Launching     == Awaiting launch.
+#
+# queue[3,n] == time to launch, or
+#               0 if half-way launched, or
+#               0 if any kind of recovery.
+#
+# queue[4,n] == unt$pointer of flight (or 0 if processed)
+#
+# queue[5,n] == YES/NO indicates if Fltops Required (at launch platform)
+#               (when all are NO, then remove $FltOps$code in Unt$Status$i)
+#
+#
+
+#$% initialize values
+Lact = $null                            # type of activity (launch/recover)
+Lindx = 0
+ipnt = 0
+
+#$% get queue entry
+call flnque (ipnt)
+
+#$% process entries for each launch/recover platform
+for ( ; ipnt != 0; call flnque (ipnt) )
+   {
+    #$% get queue data
+    indx  = queue[1,ipnt]
+    istat = queue[2,ipnt]
+    when = queue[3,ipnt]
+    unt$pointer = queue[4,ipnt]
+
+    #$% if launching is in progress, set action to "launching"
+    if      (istat == $$HalfLaunched) iact = $Launching$code
+    else if (when == 0)               iact = $Recovering$code
+    else                              iact = $Launching$code
+
+    $debugf if (trace$fltops$exe == $yes)
+    $debugf    {
+    $debugf     call echor
+    $debugf     call echov  ('^')
+    $debugf     call echov ("Processing Que #")
+    $debugf     call echoi (ipnt)
+    $debugf    }
+
+    #$% if Lindx not set to indx, then do so and set pointer
+    if (Lindx != indx)
+       {
+        Lindx = indx
+        unt2$pointer$to Lindx
+
+        #$% set Lact to launching or recovering
+        Lact = iact
+
+        #$% if Lact is "launching"
+        if (Lact == $Launching$code)
+           {
+            #$% get launch factor, rate & weather from base
+            call flpblc (unt2$pointer,factor,n,irate,wet$pointer)
+           }
+        else
+           {
+            #$% get recovery factor, rate & weather from base
+            call flpbrv (unt2$pointer,factor,n,irate,wet$pointer)
+           }
+
+        icnt = 0                        # init number launched/recovered
+
+        $debugf if (trace$fltops$exe == $yes)
+        $debugf    {
+        $debugf     call echov (" new platform, rate=")
+        $debugf     call echoi (irate)
+        $debugf    }
+       }
+
+    #$% if not launching or recovering
+    if (Lact != iact)                   # only allow one activity
+       {
+        #$% set Lact
+        Lact = 9999
+
+        $debugf if (trace$fltops$exe == $yes)
+        $debugf    {
+        $debugf     call echov (" different activity.")
+        $debugf    }
+
+        next
+       }
+
+    #$% if launching
+    if (iact == $Launching$code)
+     {
+      #$% number is total a/c for launch less number in the flight
+      number = Xunt$NbrAcTot$i - Xunt$NbrAc$i         # number on deck
+     }  #  End if iact == $Launching$Code
+
+    #$% else number is total a/c for the launch (none launching)
+    else
+     {
+      number = Xunt$NbrAcTot$i                          #       8/6/84
+#     number = Xunt$NbrAc$i
+     }  # End if NOT launching...
+
+    $debugf if (trace$fltops$exe == $yes)
+    $debugf    {
+    $debugf     call echov (" cnt=")
+    $debugf     call echoi (icnt)
+    $debugf     call echov (" nbr=")
+    $debugf     call echoi (number)
+    $debugf    }
+
+    #$% if number launched exceeds the launch rate, get next a/c
+    if (icnt >= n & number != 0) next       # no more than specified rate
+
+    iallow = min0 (number, n-icnt)
+    icnt = icnt + iallow
+
+    #______________________________________________________________________
+    # test if all A/C (this flight) to be processed this cycle
+
+    if (iallow == number) queue[5,ipnt] = NO            # None left
+
+    if (iact == $Launching$code)
+       {
+        call flupup (unt$pointer,unt2$pointer,iallow,irate,factor,wet$pointer)
+       }
+    else
+       {
+        call flhome (unt$pointer,unt2$pointer,iallow,irate,factor,wet$pointer)
+       }
+   }     #  End for ( ; ipnt != 0; call flnque (ipnt) )  !!!!!
+
+#______________________________________________________________________
+# Sum remaining flights for each launch/recover platform 
+
+12345
+
+nbase = 0
+for (ipnt = 1; ipnt <= cque; ipnt = ipnt + 1)
+    {
+    for (n=1; n <= nbase; n=n+1)
+        {
+        if (queue[1,ipnt] != base_indx[n]) next
+
+        base_more[n] = base_more[n] + queue[5,ipnt]
+        next 2
+        }
+
+    nbase = nbase + 1
+    base_indx[nbase] = queue[1,ipnt] 
+    base_more[nbase] = queue[5,ipnt]
+    }
+
+#______________________________________________________________________
+# check all launch/recover platforms for Completion of FltOps
+
+for (n=1; n <= nbase; n=n+1)
+    {
+    if (base_more[n] != NO ) next
+
+    unt2$pointer$to base_indx[n]
+
+    $debugf if (trace$fltops$exe == $yes)
+    $debugf    {
+    $debugf     call echor
+    $debugf     call echov  ('^')
+    $debugf     call echov ("Securing ")
+    $debugf     call echohn (Xunt2$name$c,$$MaxLit)
+    $debugf    }
+
+    if (Xunt2$Status$i == $FltOps$Code)
+        {       
+        PUTunt2$Status$i ($Proceeding$Code)
+        PUTunt2$RecoverOrd$i ($NO)                      #       7/25/86
+        $debugf if (trace$fltops$exe == $yes)
+        $debugf    {
+        $debugf     call echov (" from flight Ops.")
+        $debugf    }
+        }
+    }
+return
+end
+ 
+
+subroutine flnque (ilast)                       # get next queue entry index 
+
+########################################################
+#$% Purpose:   FLNQUE gets next queue entry as a
+#$%            function of priority, platform and
+#$%            launch time.
+#$%
+#$% Called By: FLQUE
+#$%
+#$% Calls:     None
+#$% Tables:    None
+#$%
+#$% Date:      APRIL 81
+#$%
+#$% Author:    DANA WILLS
+#$%
+########################################################
+BBcommon
+FltOpsCommon
+
+Integer ILAST,ISAVE,INEXT,ICNT,IPNT     # jb E2145  7/3/00
+
+if (ilast != 0) queue[4,ilast] = 0              # clear last queue slot
+
+isave = max0 (ilast,1)
+inext = 0
+
+repeat                                          # repeat for next platform
+   {
+    icnt = 0                                    # count que entries left
+
+    for (ipnt = 1; ipnt <= cque; ipnt = ipnt + 1)
+       {
+        if (queue[4,ipnt] == 0) next            # skip empty slots
+
+        icnt = icnt + 1                         # count que entries left
+
+        if (isave == 0)
+           {
+            isave = ipnt
+            inext = isave
+            next
+           }
+
+        if (queue[1,ipnt] != queue[1,isave]) next   # if not same platform
+
+        if (queue[2,ipnt] < queue[2,isave])     # if higher priority
+           {
+            isave = ipnt
+            inext = isave
+            next
+           }
+
+        if (queue[3,ipnt] < queue[3,isave])     # if time of launch older
+           {
+            isave = ipnt
+            inext = isave
+            next
+           }
+
+        if (inext == 0) 
+           {
+            isave = ipnt
+            inext = isave
+           }
+       }
+
+    #$% if counter is zero or not next, break loop
+    if (icnt == 0 | inext != 0) break
+
+    isave = 0
+   }
+
+$debugf if (trace$fltops$sel == $yes)
+$debugf    {
+$debugf     call echov (" Lque=")
+$debugf     call echoi (ilast)
+$debugf     call echov (" Nque=")
+$debugf     call echoi (inext)
+$debugf    }
+
+ilast = inext
+
+return
+end
+
+ 
+
+
+subroutine flpbrv (unt$pointer,                 # get recover factor, rate & 
+                   factor,                      # weather report for base
+                   n,
+                   irate,
+                   wet$pointer)
+
+########################################################
+#$%
+#$% Purpose:   FLPBRV calculates recovery factors,
+#$%            recovery rates and weather reports
+#$%            for recovery platforms or bases.
+#$%
+#$% Called By: FLRCVR
+#$%
+#$% Calls:     FNDWET
+#$%
+#$% Tables:    SHC
+#$%            UNT
+#$%
+#$% Date:      APRIL 81
+#$%
+#$% Author:    DANA WILLS
+#$%
+########################################################
+BBcommon
+
+REAL  UNT$Truelatitude$F,UNT$Truelongitude$F,   # jb E2145  7/3/00
+        UNT$Timelastairrecovery$F, FACTOR       # jb E2145  7/3/00
+integer irate
+integer NinInterval
+integer RecoverRate 
+Integer    N,                         # jb E2145  7/3/00
+    UNT$Pointer, UNT$Indaylight$I,    # jb E2145  7/3/00
+    SHC$Pointer, WET$Pointer          # jb E2145  7/3/00
+
+#$% set pointers
+shc$pointer = XUNT$SHCPntr$i
+
+#$% initialize factor
+factor = 1.0
+unt$InDaylight$i = Xunt$InDaylight$i            # jb moved up   3/25/87
+
+#$% call for weather data
+unt$TrueLatitude$F  = xunt$TrueLatitude$F               ## tpa 8/15/83
+unt$TrueLongitude$F = xunt$TrueLongitude$F              ## tpa
+
+call fndwet (unt$TrueLatitude$f,
+             unt$TrueLongitude$F,
+             wet$pointer)
+
+#$% if shorebase
+if (Xunt$type$i == $ShoreBase$code)
+   {
+    #$% skip computing factors
+    continue
+   }
+else
+   {
+    #$% if nighttime
+    if (unt$InDaylight$i == $no)        # jb no X..     3/25/87
+       {
+        #$% compute night factor
+        factor = factor * night$factor
+       }
+
+    #$% if wave height exceeds previously established threshold
+    if (Xwet$WaveHeight$i > Xshc$WaveThreshold$i)
+       {
+        #$% adjust recovery factor for sea state
+        factor = factor * seastate$factor
+       }
+   }
+
+#$% set recovery rate
+RecoverRate = INT(Xshc$RecoverRate$f)
+if( unt$InDaylight$i != $YES | # jb Nite/Lo Visibility  3/20/87
+    Xwet$Ceiling$i < 300 | Xwet$Visibility$i < 2 ) # jb 3/20/87
+ {RecoverRate = 0.5 + RecoverRate/2.0}  # jb        3/20/87
+
+# Convert recover rate/min to recover rate/interval; 1000 means no count limit
+unt$TimeLastAirRecovery$f = Xunt$TimeLastAirRecovery$f
+n = NinInterval (unt$TimeLastAirRecovery$f, RecoverRate, 1000)
+irate = RecoverRate
+
+return
+end
+
+ 
+
+
+subroutine flpblc (unt$pointer,                 # get launch factor, rate & 
+                   factor,                      # weather report for base
+                   n,           # Number of launches in interval:out :int
+                   irate,       # Launches per minute: out: int
+                   wet$pointer)
+
+########################################################
+#$%
+#$% Purpose:   FLPBLC calculates launch factors,
+#$%            launch rates and weather reports
+#$%            for launching from a base.
+#$%
+#$% Called By: FLAUNC
+#$%
+#$% Calls:     FNDWET
+#$%
+#$% Tables:    SHC
+#$%            UNT
+#$%
+#$% Date:      APRIL 81
+#$%
+#$% Author:    DANA WILLS
+#$%
+########################################################
+BBcommon
+
+REAL    FACTOR, UNT$Timelastairlaunch$F,    # jb E2145  7/3/00
+     UNT$Truelatitude$F,UNT$Truelongitude$F # jb E2145  7/3/00
+integer irate, N                            # jb E2145  7/3/00
+integer NinInterval, launchrate
+Integer  UNT$Pointer,UNT$Indaylight$I,      # jb E2145  7/3/00
+    WET$Pointer, SHC$Pointer                # jb E2145  7/3/00
+
+#$% set pointers
+shc$pointer = Xunt$SHCPntr$i
+unt$InDaylight$i = Xunt$InDaylight$i    # jb Moved up   3/20/87
+
+#$% initialize factor
+factor = 1.0
+
+#$% get weather data
+unt$TrueLatitude$F  = xunt$TrueLatitude$F               ## tpa 8/15/83
+unt$TrueLongitude$F = xunt$TrueLongitude$F
+
+call fndwet (unt$TrueLatitude$f,
+             unt$TrueLongitude$f,
+             wet$pointer)
+
+#$% if shorebase
+if (Xunt$type$i == $ShoreBase$code)
+   {
+    #$% skip computing factors
+    continue
+   }
+else
+   {
+    if (unt$InDaylight$i == $no)        #$%  jb no X..  3/25/87
+       {
+        #$% compute night factor
+        factor = factor * night$factor
+       }
+
+    if (Xwet$WaveHeight$i > Xshc$WaveThreshold$i)
+       {
+        #$% adjust launch factor for sea state
+        factor = factor * seastate$factor
+       }
+   }
+
+LaunchRate = int(Xshc$LaunchRate$f)
+if( unt$InDaylight$i != $YES | # jb Nite/Lo Visibility  3/20/87
+    Xwet$Ceiling$i < 300 | Xwet$Visibility$i < 2 ) # jb 3/20/87
+ {LaunchRate = 0.5 + LaunchRate/2.0}  # jb  3/20/87
+    
+# Convert launch rate/minute to launch rate/interval; 1000 means no count limit
+unt$TimeLastAirLaunch$f = Xunt$TimeLastAirLaunch$f
+n = NinInterval(unt$TimeLastAirLaunch$f, LaunchRate, 1000)
+irate = LaunchRate
+
+return
+end
+
+ 
+
+
+subroutine flbing (unt$pointer)                  
+
+########################################################
+#$%
+#$% Purpose:   FLBING verifies that the flight
+#$%            reached the recovery point.
+#$%
+#$% Called By: FLTOPS
+#$%
+#$% Calls:     None
+#$%
+#$% Tables:    None
+#$%
+#$% Date:      APRIL 81
+#$%
+#$% Author:    DANA WILLS
+#$%
+########################################################
+BBcommon                                        
+
+Integer UNT$Pointer,UNT$Marshallstatus$I,UNT$Status$I   # jb E2145 7/3/00
+
+#$% set Marshall Status to recovering and store it
+unt$marshallStatus$i = $recovering$code
+PUTunt$marshallStatus$i
+
+#$% set unit status to on guide and store it
+unt$status$i = $OnGuide$code
+PUTunt$status$i
+
+return
+end
+
+
+
+
+subroutine flsysf (unt$pointer) 
+
+#########################################################
+#$%
+#$% Purpose:   FLSYSF processes aircraft system failures.
+#$%
+#$% Called By: FLTOPS
+#$%
+#$% Calls:     SEND       CLONAC     BINGO
+#$%
+#$% Tables:    UNT        AML
+#$%
+#$% Date:      APRIL 81
+#$%
+#$% Author:    DANA WILLS
+#$%
+#$% Modified:  Susan Miller - 12/95 (E1104)
+#$%            Added 1 parameter to update_destroyed_aircraft
+#$%
+#$%            Carol Kropp - 1/96 (E1726)
+#$%            When an aircraft is split off due to a failure
+#$%            added a call to Record_Flight_Split.
+#$%
+#$%            Carol Kropp - 3/97 (E1800)
+#$%            Change the "if (unt2$pointer != 0)" check after
+#$%            clonac to "if (UNT2$Pointer$Valid)" and moved the
+#$%            call to Record_Flight_Split from just before to
+#$%            within the if.
+#$%
+#########################################################
+BBcommon
+
+Literal   AML$Sidenumber$C, CSTRIP8, Ldummy/0/  # jb E2145  7/3/00
+REAL  X,RANDOM,TESTBT, AML$Systemfail$F         # jb E2145  7/3/00
+Integer  I,IDUMMY/0/,KKLEN,GAME_DTG,CNTAC,      # jb E2145  7/3/00
+    UNT$Pointer,UNT$Nbracsf$I,UNT$Nbractot$I,   # jb E2145  7/3/00
+    UNT$Hits$I,  UNT2$Pointer,                  # jb E2145  7/3/00
+    AML$Pointer,AML$Nextindx$I,AML$Status$I     # jb E2145  7/3/00
+Character msg[ARB]
+integer     IwillDitch                          # dew E2143
+
+#            #1234567890123456789012345678901234567890
+#string msg  "  ALL of        ditched.  MAYDAY!  "       #       5/6/83
+#String msg1 "      of        crashed on recovery  "     #       5/23/83
+#String msg2 "      forced to DITCH - system failure"    # jb    9/2/87        
+data x/0.0/		# Get next random number in sequence
+
+#$% get number of aircraft with system failure
+unt$NbrAcSF$i = Xunt$NbrAcSF$i
+
+#$% if type of system failure is none or there are no a/c with 
+#$% prospective system failures, return
+if (Xunt$SysFailType$i != $NoSystemFailure$code |
+    unt$NbrAcSF$i      == 0                   ) return
+
+#$% get total number of aircraft in flight
+unt$NbrAcTot$i = Xunt$NbrAcTot$i        # jb extract once..  9/2/87
+CntAc = unt$NbrAcTot$i                  
+
+aml$NextIndx$i = Xunt$AMLIndx$i                 # set first aml index
+
+#$% Follow flight's chain in AML table to process individual failures.. 
+for (i = 1; i <= CntAc; i = i + 1)
+   {
+    aml$pointer$to aml$NextIndx$i               # point to aml
+    aml$NextIndx$i = Xaml$NextIndx$i            # set next aml index
+
+    aml$SystemFail$f = Xaml$SystemFail$f
+
+    #$% if a/c destroyed or there is no system failure or
+    #$% system failure is later than current game minute, get next a/c
+    if (Xaml$Status$i    == $destroyed$code |
+        aml$SystemFail$f == 0.              |
+        aml$SystemFail$f > game$time       ) next
+
+    #$% count-down (toward zero) number of aircraft to check..
+    unt$NbrAcSF$i = unt$NbrAcSF$i - 1
+    PUTunt$NbrAcSF$i
+
+    testbt = random(x)
+
+    aml$SideNumber$c = Xaml$SideNumber$c        # jb    5/6/87
+    $debugf if (trace$fltops$exe == $yes)
+    $debugf    {
+    $debugf     call echor
+    $debugf     call echov  ('^')
+    $debugf     call echov ("System failure ")
+    $debugf     call echoh (aml$SideNumber$c,5) # jb  no "X" 5/6/87
+    $debugf     call echov (" of ")
+    $debugf     call echohn (Xunt$name$c,$$MaxLit)
+    $debugf     call echov ("   ")
+    $debugf    }
+
+    IwillDitch = $no
+
+    #$% if random number is less than or equal to crash probability
+    if (testbt <= BingoCrash$CumProb)
+       {
+        #$% if total number is one
+        if (unt$NbrAcTot$i == 1)       
+           {
+            #$% set next pointer
+            unt2$pointer = unt$pointer
+           }
+        else
+           {
+            #$% call new unit
+            call clonac (unt$pointer,  # original unit
+                         aml$pointer,
+                         unt2$pointer) # renamed clone
+
+            if (UNT2$Pointer$Valid)
+                {
+                call Record_Flight_Split (UNT$Pointer, 1, UNT2$Pointer)
+
+                CALL add_potential_jammer ( UNT2$Pointer$Index )
+                }
+            ELSE                        # no UNT slots available
+               {
+                $debugf if (trace$fltops$exe == $yes)
+                $debugf    {
+                $debugf     call echov (" Forced into ")
+                $debugf    }
+
+                IwillDitch = $yes
+#               go to 9000
+               }
+           }
+
+        if (IwillDitch == $no)
+            {
+        #$% if random number is less than or equal to recovery probability,
+        #$%             set failure type to recover-- i.e., not a failure
+        if(testbt <=BingoRcvr$CumProb) PUTunt2$SysFailType$i($recover$code)
+
+        else            # set to CRASH; and send message         # 5/24/83
+         {
+          PUTunt2$SysFailType$i ($crash$code)
+
+          #$% move message, side number and event into msg1      #  5/23/83
+          kklen = 0  
+          Call SMOVHN(Xaml$SideNumber$c,$$MaxName,msg,kklen) # SMM 10/99 E2141
+          Call SMOVV(" of ",msg,kklen)
+          Call SMOVHN(Xunt$Event$c,$$MaxName,msg,kklen)      # SMM 10/99 E2141
+          Call SMOVV(" crashed on recovery ",msg,kklen)
+          call smov ($bell,msg,kklen)               # jb 9/21/88
+          call send_ (Xunt$View$i,0,kklen,msg)  # msg1 - tell player it crashed
+         }
+
+        #$% send flight home
+        putUNT2$Mission$i ($NoneAssigned$Code)  # jb            7/22/87
+        call bingo (unt2$pointer)               
+
+        if (trace$damage$WEP != $NO     &       # jb            5/6/87
+            xunt2$SysFailType$i == $crash$code ) # hdf (7/31/90)
+         {
+          call echor
+          call echov ('#')
+          call echoiZ (Game_DTG(game$time),6)
+          call echov   (' ')
+          call echohn (aml$SideNumber$c,5)
+          call echov  (" crashing during bingo - flsysf")          
+         }
+
+        $debugf if (trace$fltops$exe == $yes)
+        $debugf    {
+        $debugf     call echov ("Going home")
+        $debugf     if (xunt2$SysFailType$i == $crash$code)
+        $debugf         call echov (" to crash!")
+        $debugf    }
+           } # end of (IwillDitch == $no)
+       }
+    else
+       {
+       IwillDitch = $yes
+       }
+
+    if (IwillDitch == $yes)
+       {
+#       9000 continue
+
+        $debugf if (trace$fltops$exe == $yes)
+        $debugf    {
+        $debugf     call echov ("Ditching")
+        $debugf    }
+
+        if (trace$damage$WEP != $NO)    # jb            5/6/87
+         {
+          call echor
+          call echov ('#')
+          call echoiZ (Game_DTG(game$time),6)
+          call echov   (' ')
+          call echohn (aml$SideNumber$c,5)
+          call echov  (" forced to DITCH - system failure")
+         }
+
+       #$% Enter data into the DAC table       clk 3/92
+       if (UNT2$Pointer$Valid)
+          call Update_Destroyed_Aircraft (UNT2$Pointer, idummy,
+                                          $Mayday$Code, ldummy, AML$Pointer,
+                                          0) # E1104 SMM 12/95
+       else
+          call Update_Destroyed_Aircraft (UNT$Pointer, idummy,
+                                          $Mayday$Code, Ldummy, AML$Pointer,
+                                          0) # E1104 SMM 12/95
+
+        if (log$engage != $no)              # if engagement log desired
+          {
+          call Generate_eng_rec ("SPLASH  ","SYSFAIL ",xaml$SideNumber$c)
+          }                                             
+
+        #$% set a/c status to DESTROYED and store it
+        aml$status$i = $destroyed$code  #<<<>>> send message?
+        PUTaml$status$i
+        kklen = 0  
+        Call SMOVHN(aml$SideNumber$c,$$MaxName,msg,kklen) # SMM 10/99 E2141
+        Call SMOVV(" forced to DITCH - flsysf ",msg,kklen)
+        call smov ($bell,msg,kklen)        # jb  # 9/21/88
+        call send_ (Xunt$View$i,0,kklen,msg) # msg2 - tell player it ditched
+
+        #$% increment UNT hits to cause a/c to disappear into AML limbo..
+        unt$Hits$i = Xunt$Hits$i + 1
+        PUTunt$Hits$i
+
+        #$% if random number is less than or equal to bingo/mayday
+        if (testbt <= BingoMayday$CumProb)
+           {
+            #$% move flight name to array for display
+            kklen = 0
+            Call SMOVV("  All of ",msg,kklen)
+            Call SMOVHN(Xunt$name$c,$$MaxLit,msg,kklen)
+            Call SMOVV(" ditched. MAYDAY! ",msg,kklen)
+            #$% if LAST a/c, display ALL <flight> is DITCHed    5/6/83
+            if (unt$NbrAcTot$i == 1)            
+             {
+              call smov ($bell,msg,kklen)           # jb 9/21/88
+              call send_ (xunt$view$i,0,kklen,msg)
+             }
+            #$% else log the <side-number> of <flight> DITCHed  5/6/83
+            else
+              {                                         #       5/6/83
+                kklen = 0
+                Call SMOVHN(Xaml$SideNumber$c,$$MaxName,msg,kklen) # SMM 10/99 E2141
+                Call SMOVV(" of ",msg,kklen)
+                Call SMOVHN(Xunt$name$c,$$MaxLit,msg,kklen)
+                Call SMOVV(" ditched. MAYDAY! ",msg,kklen)
+                call smov ($bell,msg,kklen) # jb    9/21/88
+                call send_ (xunt$view$i,0,kklen,msg)        #       5/6/83
+               }
+
+            $debugf if (trace$fltops$exe == $yes)
+            $debugf    {
+            $debugf     call echov ("  w/Mayday")
+            $debugf    }
+           }
+       }
+
+    #$% if count-down to zero is completed, quit..
+    if (unt$NbrAcSF$i == 0) break
+   }
+
+return
+end
+
+ 
+
+
+subroutine flupup (unt$pointer,unt2$pointer,number,irate,fact,wet$pointer) 
+
+########################################################
+#$%
+#$% Purpose:   FLUPUP processes the parameters
+#$%            needed to launch a flight from
+#$%            a platform or base.
+#$%
+#$% Called By: FLAUNC
+#$%
+#$% Calls:     SEND       FLFAIL     FLRNAM
+#$%            FLINIT     QCOS       RANDOM
+#$%
+#$% Tables:    ACC
+#$%            WET        UNT
+#$%
+#$% Date:      APRIL 81
+#$%
+#$% Author:    DANA WILLS
+#$%
+#$% Modified:  Carol Kropp - 10/94
+#$%            Added call to Record_C2_Launch_Complete
+#$%            for update of the mission history data
+#$%            (WPC C2 Interface).
+#$%
+#$%            Susan Miller - 12/95 (E1104)
+#$%            Added 1 parameter to update_destroyed_aircraft
+#$%
+#$%            JOA - 2/96 (E1467)
+#$%            Set flag unt$FuelConsumptionFlag$i to $ON
+#$%            to indicate that the flight is up and consuming
+#$%            fuel.
+#$%
+#$%            Carol Kropp - 12/96 (E1726)
+#$%            Record_C2_Launch_Complete changed to 
+#$%            Record_Air_Launch_Complete.
+#$%
+########################################################
+BBcommon
+
+Literal  CSTRIP8,Ldummy/0/,                 # jb E2145  7/3/00
+    UNT$Name$C,UNT$Event$C, AML$Sidenumber$C # jb E2145 7/3/00
+REAL   PROB,TESTSL,X,RANDOM,FACTOR,FACT,    # jb E2145  7/3/00
+       PROB1,DIFF,RSWND,DEKWIND,            # jb E2145  7/3/00
+    UNT$Guiderange$F,UNT$Guidebearing$F,    # jb E2145  7/3/00
+    UNT2$Truespeed$F,UNT2$Truecourse$F,     # jb E2145  7/3/00
+    UNT2$Timelastairlaunch$F,               # jb E2145  7/3/00
+    AML$Timelaunch$F,WET$Winddirection$F    # jb E2145  7/3/00
+integer NinInterval
+Integer I,N,IDUMMY/0/,IRATE,IUPUP,NUMBER,   # jb E2145  7/3/00
+    IWIND,KWIND,KKLEN,GAME_DTG, TOT,        # jb E2145  7/3/00
+    UNT$Pointer,UNT$Nbrac$I,UNT$Guideindx$I, # jb E2145  7/3/00
+    UNT$Guidetrue$I,UNT$Hits$I,UNT$Status$I, # jb E2145  7/3/00
+    UNT$Marshallstatus$I,UNT$Attackindx$I,   # jb E2145  7/3/00
+    WET$Pointer, WET$Windspeed$I,            # jb E2145  7/3/00
+    AML$Pointer,AML$Status$I,AML$Nextindx$I, # jb E2145  7/3/00
+    ACC$Pointer, UNT2$Pointer                # jb E2145  7/3/00
+VMSchar     vstrip*8
+
+Character msg[ARB]
+
+#String msg1 "      of        crashed on takeoff!"
+data x/0.0/		# Get next random number in sequence
+
+factor = fact
+
+if (number == 0) return                 # Since VTS could be zero this cycle
+
+#$% set number of a/c to launch
+iupup = number
+
+Tot = Xunt$NbrAcTot$i
+
+acc$pointer = Xunt$ACCPntr$i
+
+#$% if launching unit is not shorebase and weather is a factor
+if (Xunt2$Type$i != $ShoreBase$code &
+    wet$pointer  != 0                )          # any weather problems ?
+   {
+    #$% get wind speed and wind direction
+    wet$WindSpeed$i = Xwet$WindSpeed$i
+    wet$WindDirection$f = Xwet$WindDirection$f
+
+    #$% get platform true speed and true course
+    unt2$TrueSpeed$F = Xunt2$TrueSpeed$F
+    unt2$TrueCourse$F = Xunt2$TrueCourse$F
+
+    #$% angular difference between course and wind direction:
+    diff = wet$WindDirection$f - unt2$TrueCourse$F
+
+    #$% calculate wind vectors:
+    Iwind = COS(diff) * wet$WindSpeed$i + unt2$TrueSpeed$F # ALONG deck
+    rswnd =  wet$WindSpeed$i * SIN(diff)        # ACROSS deck   6/6/83
+    dekwind = SQRT( iwind*iwind +rswnd*rswnd )  #Resultant vec. 6/6/83
+    Kwind =   dekwind +0.5                      # Integer vectr 6/6/83
+    #$% if aircraft is helocopter
+    if (Xacc$Category$i == $Helo$code)
+       {
+        #$% if wind maximum for helocopter exceeded
+        if (Kwind > Wind$Max$Helo )
+            #$% reduce probability-of-launch factor
+            factor = factor * Launch$Wind$Factor$Helo
+       }
+    else
+       {
+        #$% for fixed wing aircraft,
+        #$% if wind is greater than maximum or less than minimum 
+        if (Kwind > Wind$Max$Fixed |    # Total vectr excessive 6/6/83
+            Iwind < Wind$Min$Fixed )    # Not enough along deck
+            #$% reduce probability-of-launch factor
+            factor = factor * Launch$Wind$Factor$Fixed
+       }
+   }
+
+#$% probabilty is combination of launch probability and factors above
+prob1 = factor * Xacc$ProbLaunch$f
+
+#$% set next AML entry
+aml$NextIndx$i = Xunt$AMLIndx$i                 # set to index next AML entry
+aml$pointer$to     aml$NextIndx$i
+unt$name$c = Xaml$SideNumber$c
+PUTunt$name$c
+PUTunt$FullName$V (Xunt$Name$v)                 # dew (E2209)
+PUTunt$flag$v     (Xaml$Flag$v)
+PUTunt$NOSICid$i  (Xaml$NosicId$i)
+PUTunt$OTGcode$i  (Xaml$OTGcode$i)
+
+unt$NbrAc$I = Xunt$NbrAc$I                      ## 5/7/84
+
+#$% for each aircraft in the flight
+for (i = 1; i <= unt$NbrAc$i; i = i + 1)
+   {
+    #$% set AML pointer to next index
+    aml$pointer$to aml$NextIndx$i
+
+    if (Xaml$Status$i == $Assigned$code)
+       {
+        #$% decrement counter and store number
+        unt$NbrAc$i = i - 1
+        PUTunt$NbrAc$i
+
+        break
+       }
+
+    #$% get AML next index
+    aml$NextIndx$i = Xaml$NextIndx$i
+   }
+
+$debugf if (trace$fltops$exe == $yes)
+$debugf    {
+$debugf     call echor
+$debugf     call echov  ('^')
+$debugf     call echohn (Xunt2$Name$c,$$MaxLit)
+$debugf     call echov (" launching ")
+$debugf     call echoh (Xunt$Event$c,5)
+$debugf     call echov ("  w/")
+$debugf     call echoi (int(prob1*100))
+$debugf     call echov ("% Pb")
+$debugf    }
+
+#$% for each launch entry
+for (i = 1; i <= iupup; i = i + 1)
+   {
+    #$% set pointer and get next index
+    aml$pointer$to     aml$NextIndx$i
+    aml$NextIndx$i = Xaml$NextIndx$i
+    aml$SideNumber$c = Xaml$SideNumber$c        # jb    5/21/87
+    #$% if status is destroyed, set probability to zero
+    if (Xaml$Status$i == $Destroyed$code) prob = 0.0
+    #$% else set to probability to one1
+    else                                  prob = prob1
+
+    $debugf if (trace$fltops$exe == $yes)
+    $debugf    {
+    $debugf     call echor
+    $debugf     call echov  ('^')
+    $debugf     call echov ("   Launch ")
+    $debugf     call echoh (aml$SideNumber$c,5) # no 'X' 5/21/87
+    $debugf     call echov (" of ")
+    $debugf     call echoh (Xunt$Event$c,5)
+    $debugf     call echov ("   ")
+    $debugf    }
+
+    #$% set random number
+    testsl = random (x)
+    if (prob > testsl)
+       {
+        $debugf if (trace$fltops$exe == $yes)
+        $debugf    {
+        $debugf     call echov (" OK")
+        $debugf    }
+
+        if (AircraftSystemFailure$Flag == $ON)      # JOA 9/02 E2306
+           {
+            call flfail (unt$pointer,               # check for sys fail time
+                         aml$pointer,
+                         acc$pointer)
+           }
+
+        #$% set status to in flight
+        aml$Status$i = $Inflight$code
+       }
+    else
+       {
+        if (trace$damage$WEP != $NO)    # jb            5/6/87
+         {
+          call echor
+          call echov ('#')
+          call echoiZ (Game_DTG(game$time),6)
+          call echov   (' ')
+          call echohn (aml$SideNumber$c,5)
+          call echov  (" crashed during takeoff.")         
+         }
+
+        $debugf if (trace$fltops$exe == $yes)
+        $debugf    {
+        $debugf     call echor                  # jb    5/21/87
+        $debugf     call echov (" Crash!")
+        $debugf    }
+
+        #$% Enter data into the DAC table       clk 3/92
+        call Update_Destroyed_Aircraft (UNT$Pointer, idummy,
+                                        $CrashedonTakeoff$Code,
+                                        ldummy, AML$Pointer,
+                                        0) #E1104 SMM 12/95
+
+        if (log$engage != $no)              # if engagement log desired
+          {
+          call Generate_eng_rec ("SPLASH  ","CRASH   ",xaml$SideNumber$c)
+          }                                             
+
+        #$% set status to destroyed
+        aml$Status$i = $Destroyed$code
+
+        #$% increment number of hits
+        unt$Hits$i = Xunt$Hits$i + 1            # invoke DAMAGE
+        PUTunt$Hits$i
+
+        #$% move message, side number and event into array
+        kklen = 0  
+        Call SMOVHN(Xaml$SideNumber$c,$$MaxName,msg,kklen) # SMM 10/99 E2141
+        Call SMOVV(" of ",msg,kklen)
+        Call SMOVHN(Xunt$Event$c,$$MaxName,msg,kklen) # SMM 10/99 E2141
+        Call SMOVV(" crashed on takeoff!",msg,kklen)
+
+        #$% display crashed message
+        call send_ (Xunt$View$i,0,kklen,msg)        # tell player it crashed
+       }
+
+    #$% store AML status
+    PUTaml$Status$i
+
+    #$% set time launch and store
+    aml$TimeLaunch$f = game$time
+    PUTaml$TimeLaunch$f
+
+    #$% increment number of aircraft and store
+    unt$NbrAc$i = Xunt$NbrAc$i + 1
+    PUTunt$NbrAc$i
+
+    #$% if all airborne, break loop
+    if (Xunt$NbrAcTot$i <= Xunt$NbrAc$i) break
+   }
+
+#$% if not all airborne
+if (Xunt$NbrAcTot$i > Xunt$NbrAc$i)             # Not all airborne.......
+   {
+    $debugf if (trace$fltops$exe == $yes)
+    $debugf    {
+    $debugf     call echov (" More to come.")
+    $debugf    }
+
+    #$% set status to on guide and store it
+    unt$Status$i = $OnGuide$code                #   Set OnGuide to platform
+    PUTunt$Status$i
+
+    #$% set Marshall Status to launching and store it
+    unt$MarshallStatus$i = $Launching$code
+    PUTunt$MarshallStatus$i
+
+    #$% set guide index and store it
+    unt$GuideIndx$i = unt2$pointer$index
+    PUTunt$GuideIndx$i
+
+    #$% set guide range and store
+    unt$GuideRange$F = marshall$distance
+    PUTunt$GuideRange$F
+
+    #$% set guide true to NO and store
+    unt$GuideTrue$i = $no
+    PUTunt$GuideTrue$i
+
+    #$% set guide bearings to zero and store
+    unt$GuideBearing$f = 0.0
+    PUTunt$GuideBearing$f
+   }
+else                                            # All airborne.......
+   {
+    $debugf if (trace$fltops$exe == $yes)
+    $debugf    {
+    $debugf     call echov (" Flight Assembled !")
+    $debugf    }
+
+    #$% set status to proceeding and store
+    unt$Status$i = $Proceeding$code
+    PUTunt$Status$i
+
+    #$% set Marshall Status to in flight and store
+    unt$MarshallStatus$i = $InFlight$code
+    PUTunt$MarshallStatus$i
+
+    #$% set guide index to NO and store
+    unt$GuideIndx$i = $no
+    PUTunt$GuideIndx$i
+
+    #$% set attack index to NO and store
+    unt$AttackIndx$i = $no
+    PUTunt$AttackIndx$i
+
+    call flinit (unt$pointer)                   # set initial course/speed
+
+    unt$Event$C = xunt$Event$C
+
+    call flrnam (unt$Event$C,unt$pointer$index)# reassign orders to unit
+
+    PUTunt$FuelConsumptionFlag$i ($ON)  # JOA 2/96 (E1467)
+
+    call Record_Air_Launch_Complete (UNT$Pointer)
+   }
+
+# Update last launch time
+unt2$TimeLastAirLaunch$f = Xunt2$TimeLastAirLaunch$f
+n = NinInterval(unt2$TimeLastAirLaunch$f, irate, iupup)
+PUTunt2$TimeLastAirLaunch$f
+
+return
+end
+
+ 
+
+
+Subroutine flinit (unt$pointer)                 # set initial course/speed 
+
+########################################################
+#$%
+#$% Purpose:   FLINIT sets the initial course or
+#$%            speed for a processing flight.
+#$%
+#$% Called By: FLUPUP
+#$%
+#$% Calls:     FNDORD     XGLAUN
+#$%
+#$% Tables:    UNT        ORD        
+#$%
+#$% Date:      APRIL 81
+#$%
+#$% Author:    DANA WILLS
+#$%
+#$% Modified:  Jim Allen - 11/95 (E1422)
+#$%            Take into account elevation if the
+#$%            initial altitude is relative to terrain.
+#$%
+########################################################
+BBcommon
+FltOpsCommon
+
+Literal  CSTRIP8                        # jb E2145  7/3/00
+REAL UNT$Orderedlatitude$F,UNT$Rangetonext$F,   # jb E2145   7/3/00
+    UNT$Orderedcourse$F, UNT$Orderedspeed$F,    # jb E2145   7/3/00
+    UNT$Guiderange$F                            # jb E2145   7/3/00
+
+integer the_elevation, alt_at_point    # E1422
+Integer  ID, NDX,                      # jb E2145   7/3/00
+    UNT$Pointer,UNT$Orderedaltdepth$I, # jb E2145   7/3/00
+    UNT$Guideindx$I,UNT$Leader$I,      # jb E2145   7/3/00
+    UNT$Altaboveground$I,              # jb E2145   7/3/00
+    ORD$Pointer, ORD$Status$I,         # jb E2145   7/3/00
+    UNT2$Pointer                       # jb E2145   7/3/00
+BBdeclare (unt$mission$i)
+
+Integer  LCOMP           # jb AAI01/LCOMP   E2145   2/13/01
+ 
+id = Xunt$LaunchOrdId$i
+call fndord (id,ord$pointer)                    # get order pointer
+
+#$% if not order pointer
+if (ord$pointer != 0)
+   {
+    #$% get launch command information
+    call xglaun (ord$pointer)
+
+    # Get mission from flight plan
+    call xgmission (ord$pointer, unt$mission$i)
+    if (unt$mission$i != -1) PUTunt$mission$i
+
+    #$% delete order and store
+    ord$Status$i = $BeingDeleted$code           # delete launch order
+    PUTord$Status$i
+    PUTUNT$LaunchOrdId$i ( 0 )                  # reh 12/8/89
+   }
+else
+   {
+    $debugf if (trace$fltops$exe == $yes)
+    $debugf    {
+    $debugf     call echov (" No orders.")
+    $debugf    }
+
+    #$% initialize flags
+    icours = 0
+    ispeed = 0
+    ialt   = 10000
+    is_relative_alt = $no
+    cname  = $no
+    ilead  = $no
+   }
+
+#$% set ordered latitude and store
+unt$OrderedLatitude$f = $pi
+PUTunt$OrderedLatitude$f
+
+#$% set range to next and store
+unt$RangeToNext$f = 2000.0
+PUTunt$RangeToNext$f
+
+#$% if not name or is leader
+if (cname == $no | ilead == $yes)               # Single or Leader
+   {
+    #$% set ordered course and store
+    unt$OrderedCourse$f = icours * $pi / 180.0
+    PUTunt$OrderedCourse$f
+
+    #$% set ordered speed
+    unt$OrderedSpeed$f = ispeed
+    PUTunt$OrderedSpeed$f
+
+    #$% set ordered altitude depth
+    unt$OrderedAltDepth$i = ialt
+    PUTunt$OrderedAltDepth$i
+    if (is_relative_alt == $yes)    # if altitude is relative to terrain - joa 11/95 (E1422
+      {
+       alt_at_point = the_elevation (xUNT$TrueLatitude$F*$rad2deg, 
+                                     xUNT$TrueLongitude$F*$rad2deg)
+
+       UNT$OrderedAltDepth$I = ialt + alt_at_point
+       putUNT$OrderedAltDepth$I
+       UNT$AltAboveGround$I = ialt
+       putUNT$AltAboveGround$I
+      }   # end of if ordered altitude is relative to the terrain
+   }
+else                                            # Member
+   {
+    ndx = 0
+    #$% for each entry
+    for (unt2$pointer$first; still_ok(unt2); unt2$pointer$next)  # 9/26/88
+       {
+        #$% if not force name get next
+        if (LCOMP(Xunt2$ForceName$c,cname) != 0) next  # jb AAI01/LCOMP 2/13/01
+
+        #$% if next unit is not leader, get next entry
+        if (Xunt2$Leader$i != $yes) next
+
+        ndx = unt2$pointer$index
+
+        break
+       }
+
+    if (ndx == 0)                               # Can't find leader
+       {
+        #$% set ordered course and store
+        unt$OrderedCourse$f = 0.0
+        PUTunt$OrderedCourse$f
+
+        #$% set ordered speed and store
+        unt$OrderedSpeed$f = 0.0
+        PUTunt$OrderedSpeed$f
+
+        #$% set ordered altitude depth and store
+        unt$OrderedAltDepth$i = 10000
+        PUTunt$OrderedAltDepth$i
+
+        putUNT$AltAboveGround$I  (0)            # Use absolute altitude
+       }
+    else                                        # Follow the leader
+       {
+        #$% set guide index to leader
+        unt$GuideIndx$i = ndx
+        PUTunt$GuideIndx$i
+
+        #$% set leader to NO and store
+        unt$Leader$i = $no
+        PUTunt$Leader$i
+
+        #$% set guide range and store
+        unt$GuideRange$f = 0.0
+        PUTunt$GuideRange$f
+
+        #$% set ordered course
+        unt$OrderedCourse$f    = Xunt2$OrderedCourse$f
+        PUTunt$OrderedCourse$f
+
+        #$% set ordered speed
+        unt$OrderedSpeed$f     = Xunt2$OrderedSpeed$f
+        PUTunt$OrderedSpeed$f
+
+        #$% set ordered altitude depth
+        unt$OrderedAltDepth$i  = Xunt2$OrderedAltDepth$i
+        PUTunt$OrderedAltDepth$i
+
+        putUNT$AltAboveGround$I  (0)            # Follow leaders altitude
+       }
+   }
+return
+end
+ 
+
+
+
+Subroutine flrnam (iname,indx)                  # reassign orders to unit 
+
+########################################################
+#$%
+#$% Purpose:   FLRNAM reassigns orders to the unit.
+#$%
+#$% Called By: FLUPUP
+#$%
+#$% Calls:     None
+#$%
+#$% Tables:    ORD
+#$%
+#$% Date:      APRIL 81
+#$%
+#$% Author:    DANA WILLS
+#$%
+########################################################
+BBcommon
+
+literal iname
+Literal  CSTRIP8                        # jb E2145  7/3/00
+Integer  IFLG,INDX,                     # jb E2145  7/3/00
+    ORD$Pointer,ORD$Addindx$I           # jb E2145  7/3/00
+Integer  LCOMP           # jb AAI01/LCOMP    E2145  2/13/01
+ 
+$debugf  iflg = $no
+
+#$% for each order entry
+for (ord$pointer$first; still_ok(ord); ord$pointer$next) # 9/26/88
+   {
+    #$% if not order address index, get next entry
+    if (Xord$AddIndx$i != 0) next
+
+    #$% if order addressee not same name, get next
+    if (LCOMP(Xord$Addressee$c,iname) != 0)  NEXT  # jb AAI01/LCOMP  2/13/01
+
+    $debugf if (trace$fltops$pln == $yes)
+    $debugf    {
+    $debugf     if (iflg == $no)
+    $debugf        {
+    $debugf         call echov ("  Flt plan ")
+    $debugf         iflg = $yes
+    $debugf        }
+    $debugf     else
+    $debugf        {
+    $debugf         call echo ($comma)
+    $debugf        }
+    $debugf     call echoi (Xord$Id$i)
+    $debugf    }
+
+    #$% set orders address index and store
+    ord$AddIndx$i = indx
+    PUTord$AddIndx$i
+   }
+
+return
+end
+
+ 
+
+
+
+Subroutine flfail (unt$pointer,                 # check for sys fail time 
+                   aml$pointer,
+                   acc$pointer)
+
+########################################################
+#$%
+#$% Purpose:   FLFAIL checks flight for system
+#$%            failure time.
+#$%
+#$% Called By: FLUPUP
+#$%
+#$% Calls:     None
+#$%
+#$% Tables:    AML        ACC        
+#$%
+#$% Date:      APRIL 81
+#$%
+#$% Author:    DANA WILLS
+#$%
+########################################################
+BBcommon
+
+REAL  TESTIM,X,RANDOM,TERM1,AML$Systemfail$F    # jb  E2145 7/3/00
+integer  Game_DTG,
+    UNT$Pointer,UNT$Nbracsf$I,    # jb  E2145 7/3/00
+    AML$Pointer,ACC$Pointer       # jb  E2145 7/3/00
+data x/0.0/		# Get next random number in sequence
+
+TESTIM = RANDOM(X)                          # draw # for time of fail
+
+term1 = LOG(1-XACC$PROBSYSFAILTIME$F)           # compute time of failure
+if (term1 == 0.0) aml$SystemFail$f = GAME$TIME + 10000.
+else              aml$SystemFail$f = int((120.0/term1) * LOG(1-TESTIM)) + 
+                                     GAME$TIME 
+
+PUTaml$SystemFail$f
+
+if (aml$SystemFail$f != Xaml$SystemFail$f)      # check for overflow of the
+   {                                            # time in the field
+    aml$SystemFail$f = 0
+    PUTaml$SystemFail$f
+   }
+
+if (aml$SystemFail$f != 0)
+   {
+    $debugf if (trace$fltops$exe == $yes)
+    $debugf    {
+    $debugf     call echov (" Failure at ")
+    $debugf     call echoiz(Game_DTG(aml$SystemFail$f),6)       ## 4/1183 tpa
+    $debugf    }
+
+    unt$NBRACSF$I = Xunt$NBRACSF$I + 1          # increment # ac w/failure
+    PUTunt$NBRACSF$I
+   }
+
+return
+end
+
+
+
+
+subroutine fltrec (unt$pointer)                 # return whole flight to deck 
+
+########################################################
+#$%
+#$% Purpose:   FLTREC handles the recovery of
+#$%            the last units in a flight.
+#$%
+#$% Called By: FLHOME   OCANCL
+#$%
+#$% Calls:     AIREXP     ECHOR      ECHOH
+#$%            TNK_adjust_fuel_remaining
+#$%
+#$% Tables:    UNT
+#$%
+#$% Date:      APRIL 81
+#$%
+#$% Author:    DANA WILLS
+#$%
+#$% Modified:  JOA - 2/96 (E1467)
+#$%            Put in a call to new routine to 
+#$%            handle setting of remaining fuel.
+#$%
+#$%            Susan Miller - 12/97 (E1660)
+#$%            Changed fuel amount from pounds (unit storage
+#$%            in ACC table and UNT for aircraft) to gallons 
+#$%            (unit storage in UNT table for ship or shore) 
+#$%            before call to TNK_adjust_fuel_remaining.
+#$%
+########################################################
+BBcommon
+
+Literal UNT$Event$C,  CSTRIP8                # jb E2145  7/3/00
+real fuel_amount,     # in gallons - smm 12/97 (E1660)
+   AML$Systemfail$F                          # jb E2145  7/3/00
+
+Integer  UNT$Pointer,UNT$Launchindx$I,       # jb E2145  7/3/00
+    UNT$Nbrac$I,UNT$TNK$Index,UNT$Type$I,    # jb E2145  7/3/00
+    UNT$Status$I,UNT$Amlindx$I,              # jb E2145  7/3/00
+    AML$Pointer,AML$Nextindx$I,AML$Status$I, # jb E2145  7/3/00
+    UNT2$Pointer, UNT2$Type$I                # jb E2145  7/3/00
+
+unt$Type$i = xunt$Type$i
+if (unt$Type$i != $Air$code)
+ {
+  RETURN
+ }    # End if Type != $air$code..
+
+unt$LaunchIndx$i = Xunt$LaunchIndx$i
+unt2$pointer$to unt$LaunchIndx$i
+
+#$% if aircraft left in flight
+unt$NbrAc$i = xunt$NbrAc$i
+#if (unt$NbrAc$i != 0)                      # joa 10/01 odelunt calls this routine (E2240)
+#   {
+#    unt$Event$c = xunt$Event$c
+#    call echor
+#    call echov  ('^')
+#    call echov ("Canceling partially launched ")
+#    call echoh (unt$Event$c,5)
+#    call echor
+#   }
+
+unt$AMLIndx$i  = Xunt$AMLIndx$i         
+aml$NextIndx$i =  unt$AMLIndx$i         # Follow chain in AMLog
+
+while (aml$NextIndx$i != 0)
+   {
+    #$% get AML next index
+    AML$pointer$To AML$NextIndx$i
+    AML$NextIndx$i = xAML$NextIndx$i
+
+    aml$Status$i = $OnDeck$code
+    PUTaml$Status$i
+
+    aml$SystemFail$f = 0
+    PUTaml$SystemFail$f
+
+    PUTaml$NextIndx$i (0)
+   }
+
+call airexp (unt$pointer,unt2$pointer,0.0) # restore EQUIPMENT
+
+UNT2$Type$I = xUNT2$Type$I
+if (unt2$Type$i == $ShoreBase$code |
+    unt2$type$i == $SurfaceWithAC$code |
+    unt2$type$i == $Surface$code)
+   {
+    #$% compute fuel remaining
+    unt$TNK$index = AviationFuelTank$Index      # JOA 2/96 (E1467)
+    # convert pounds of remaining fuel to gallons - smm 12/97 (E1660)
+    fuel_amount = (xUNT$TNK$FuelRemaining$F * xUNT$NbrAc$I)/$Pounds$Per$Gallon
+    call TNK_adjust_fuel_remaining(unt2$pointer,        
+                                  AviationFuelTank$Index,
+                                  fuel_amount)
+   }
+
+unt$status$i = $BeingDeleted$code               # set to deleted...
+PUTunt$status$i
+
+return
+end
+
+
+
+
+subroutine flhome (unt$pointer,unt2$pointer,number,irate,fact,wet$pointer) 
+
+########################################################
+#$%
+#$% Purpose:   FLHOME processes the parameters
+#$%            needed to recover a flight to a
+#$%            platform or base.
+#$%
+#$% Called By: FLQUE    FLRCVR
+#$%
+#$% Calls:     AIREXP   FLTREC  FLMANT  BINGO
+#$%            TNK_adjust_fuel_remaining
+#$%
+#$% Tables:    UNT        
+#$%            ACC
+#$%
+#$% Date:      APRIL 81
+#$%
+#$% Author:    DANA WILLS
+#$%
+#$% Modified:  Susan Miller 4/94 (E1243)
+#$%            When level$fltops = 0 and the RECALL (all)
+#$%            FLIGHTS command is given before a launched
+#$%            flight has incremented UNT$NbrAc$I from 0,
+#$%            the event becomes a unit that never recovers.
+#$%
+#$% Modified:  Carol Kropp - 10/94
+#$%            Added call to Record_C2_Flight_Landed
+#$%            for update of the mission history data
+#$%            (WPC C2 Interface).
+#$%
+#$%            Susan Miller - 12/95 (E1104)
+#$%            Added 1 parameter to update_destroyed_aircraft
+#$%
+#$%            James Allen - 2/96 (E1467)
+#$%            Put in a new routine call to handle management
+#$%            of remaining fuel.
+#$%
+#$%            Carol Kropp - 12/96 (E1726)
+#$%            Record_C2_Flight_Landed changed to
+#$%            Record_Flight_Landed.
+#$%
+#$%            Susan Miller - 12/97 (E1660)
+#$%            Changed fuel amount from pounds (unit storage
+#$%            in ACC table and UNT for aircraft) to gallons 
+#$%            (unit storage in UNT table for ship or shore) 
+#$%            before call to TNK_adjust_fuel_remaining.
+#$%
+########################################################
+BBcommon
+
+Literal  AML$Sidenumber$C, CSTRIP8, Ldummy/0/   # jb E2145  7/3/00
+real fuel_amount,       # in gallons - smm 12/97 (E1660)
+   FACTOR,FACT,PROB,PROB1,                   # jb E2145  7/3/00
+    TESTSR,X,RANDOM,TOT,                      # jb E2145  7/3/00
+   UNT2$Timelastairrecovery$F                # jb E2145  7/3/00
+integer NinInterval,
+    I,J,N,IAIR,ICNT,IEQ,IHOME,               # jb E2145  7/3/00
+    IDUMMY/0/,KKLEN,ILOST,NUMBER,            # jb E2145  7/3/00
+    IPLAT,ILAND,ISAVE,INDX,IRATE,            # jb E2145  7/3/00
+    UNT$Pointer,UNT$View$I,UNT$Type$I,       # jb E2145  7/3/00
+    UNT$Amlindx$I,UNT$TNK$Index,             # jb E2145  7/3/00
+    GAME_DTG, ACC$Pointer,                   # jb E2145  7/3/00
+    UNT$Nbractot$I,UNT$Nbrac$I,              # jb E2145  7/3/00
+    UNT2$Pointer,UNT2$Guideindx$I,           # jb E2145  7/3/00
+    UNT2$Type$I,UNT2$Status$I,UNT2$View$I,   # jb E2145  7/3/00
+    DEQ2$Pointer,DEQ2$Ident$I,DEQ2$Pntr$I,   # jb E2145  7/3/00
+    AML$Pointer,AML$Nextindx$I,AML$Status$I, # jb E2145  7/3/00
+    AML$Systemfail$F,AML$Ownerindx$I,        # jb E2145  7/3/00
+    AML2$Pointer,AML2$Nextindx$I,            # jb E2145  7/3/00
+    WET$Pointer, Last_WET,                   # jb E2145  7/3/00
+    already_destroyed                        # JHM E2261 5/9/02
+Character msg[ARB]
+
+#String msg1 "      of        crashed on recovery"       # 8/83
+data x/0.0/		# Get next random number in sequence
+
+factor = fact
+Last_WET = wet$pointer      # do something with wet$pointer
+
+#$% set number of aircraft to be recovered
+if (number > 0)
+  ihome = number
+else   # the unit is awaiting launch - smm 4/94 (E1243)
+  ihome = 1
+
+#$% if not shorebase, and a/c not engaged
+if (Xunt2$type$i        != $ShoreBase$code   &
+    Xunt$EngageStatus$i != $noEngagements$code)
+   {
+    #$% compute recover factor
+    factor = factor * Recover$engage$factor
+   }
+
+Tot = Xunt$NbrAcTot$i
+
+acc$pointer = Xunt$ACCPntr$i
+
+unt$View$i  = Xunt$View$i
+unt$Type$i  = Xunt$Type$i
+unt2$Type$i = Xunt2$Type$i
+
+ieq = $no                                       # recover equipment
+iair = $no                                      # recover plane
+
+#$% See if the Ship/Base has this type of aircraft
+FOR_DEQ2_CHAIN
+   {
+    if (Xdeq2$Pntr$i != acc$pointer) next  
+    ieq = $yes
+    iair = $yes
+    break
+   }
+
+if (iair == $no)                                        # DEW 3-Aug-90
+    {
+    # the base does not have this type of aircraft (yet), so let's add it....
+
+    call get_DEQ_entry ( UNT2$Pointer, DEQ2$Pointer)
+
+    if (DEQ2$pointer != 0)
+        {
+        deq2$ident$i        = $Aircraft$Code
+        PUTdeq2$ident$i        
+        deq2$pntr$i         = ACC$Pointer
+        PUTdeq2$pntr$i         
+#       deq2$remaining$i    = 0
+#       PUTdeq2$remaining$i    
+#       PUTdeq2$Logistical$I   
+#       deq2$Logistical$I   = 0
+
+        ieq = $yes
+        iair = $yes
+        } # end valid DEQ2 pointer
+    }
+
+#$% if shorebase, set equipment to YES
+if (unt2$type$i == $ShoreBase$code) ieq = $yes
+
+#$% if system fail is crash
+if      (Xunt$SysFailType$i == $crash$code  ) prob1 = 0.0
+#$% else if system fail is recover
+#else if(Xunt$SysFailType$i == $recover$code) prob1 = 1.0
+#$% else, compute recover prob
+else                                      prob1 = factor * Xacc$ProbRecover$f
+
+$debugf if (trace$fltops$exe == $yes)
+$debugf    {
+$debugf     call echor
+$debugf     call echov  ('^')
+$debugf     call echohn (Xunt2$Name$c,$$MaxLit)
+$debugf     call echov (" recovering ")
+$debugf     call echoh (Xunt$Event$c,5)
+$debugf     call echov ("  w/")
+$debugf     call echoi (int(prob1*100))
+$debugf     call echov ("% Pb")
+$debugf    }
+
+#$% set flags
+ilost = 0
+icnt = 0
+#$% for each entry
+for (i = 1; i <= ihome; i = i + 1)
+   {
+    prob = prob1
+
+    #$% zero pointer
+    aml$pointer = 0
+    aml2$pointer = 0
+
+    #$% set next index
+    aml$NextIndx$i = Xunt$AMLIndx$i
+    #$% for each entry
+    for (j = 0; aml$NextIndx$i != 0; j = j + 1)
+       {
+        #$% set next AML pointer
+        aml2$pointer = aml$pointer
+
+        #$% get next AML pointer
+        aml$pointer$to aml$NextIndx$i
+        aml$NextIndx$i = Xaml$NextIndx$i
+       }
+
+    #$% if not next AML pointer
+    if (aml2$pointer != 0)                      # reset new last-indx
+       {
+        #$% zero next index
+        aml2$NextIndx$i = 0
+        PUTaml2$NextIndx$i
+       }
+    else
+       {
+        #$% zero AML index
+        unt$AMLIndx$i = 0
+        PUTunt$AMLIndx$i
+       }
+
+    #$% if AML pointer is zero, break loop
+    if (aml$pointer == 0) break
+    #$% increment counter
+    icnt = icnt + 1
+
+    aml$SideNumber$c = Xaml$SideNumber$c        # jb    5/6/87
+
+    $debugf if (trace$fltops$exe == $yes)
+    $debugf    {
+    $debugf     call echor
+    $debugf     call echov  ('^')
+    $debugf     call echov ("   Recover ")
+    $debugf     call echoh (aml$SideNumber$c,5) # no 'X' 5/6/87
+    $debugf     call echov (" of ")
+    $debugf     call echoh (Xunt$Event$c,5)
+    $debugf     call echov ("   ")
+    $debugf    }
+
+    #$% if destroyed status
+    already_destroyed = $NO        #JHM E2261 
+    if (Xaml$status$i == $destroyed$code)
+     {
+      prob = 0.0
+      already_destroyed = $YES      # JHM E2261 fix alsp destroyed ac always COL
+     }
+
+    testsr = random (x)
+    if (prob > testsr)                          # land ok ?
+       {
+        #$% if aircraft is YES
+        if (iair ==$yes)                        #   Yes, re-launchable
+           {
+            $debugf if (trace$fltops$exe == $yes)
+            $debugf    {
+            $debugf     call echov (" OK")
+            $debugf    }
+
+            #$% set on deck status and store
+            aml$status$i = $ondeck$code
+            PUTaml$status$i
+
+            #$% zero system fail and store
+            aml$SystemFail$f = 0
+            PUTaml$SystemFail$f
+
+            #$% zero next index and store
+            aml$NextIndx$i = 0
+            PUTaml$NextIndx$i
+
+            #$% set owner index
+            aml$OwnerIndx$i = unt2$pointer$index
+            PUTaml$OwnerIndx$i
+
+            #$% check for maintenance
+            if (AircraftMaintenance$Flag == $ON)        # JOA 9/02 E2306
+                call flmant (aml$pointer,acc$pointer)   # check for maint
+           }
+        else                                    #   Yes, but not launchable
+           {
+            $debugf if (trace$fltops$exe == $yes)
+            $debugf    {
+            $debugf     call echov (" Not OK.")
+            $debugf    }
+
+            if (trace$damage$WEP != $NO)        # jb            5/6/87
+             {
+              call echor
+              call echov ('#')
+              call echoiZ (Game_DTG(game$time),6)
+              call echov   (' ')
+              call echohn (aml$SideNumber$c,5)
+              call echov  (" landed but cannot be launched.")              
+             }
+
+            #$% Enter data into the DAC table       clk 3/92
+            call Update_Destroyed_Aircraft (UNT$Pointer, idummy,
+                                            $CrashedonLanding$Code,
+                                            Ldummy, AML$Pointer,    
+                                            0) # E1104 SMM 12/95
+
+            if (log$engage != $no)              # if engagement log desired
+              {
+              call Generate_eng_rec ("SPLASH  ","LANDING ",xaml$SideNumber$c)
+              }                                             
+
+            #$% set destroyed status and store
+            aml$status$i = $destroyed$code
+            PUTaml$status$i
+           }
+       }
+    else if (already_destroyed != $Yes)      # E2261 fix alsp destroyed ac COL
+                                             #    No.....  BOOM
+       {
+        if (trace$damage$WEP != $NO)            # jb            5/6/87
+         {
+          call echor
+          call echov ('#')
+          call echoiZ (Game_DTG(game$time),6)
+          call echov   (' ')
+          call echohn (aml$SideNumber$c,5)
+          call echov  (" crashed on recovery - flhome")            
+         }
+
+        $debugf if (trace$fltops$exe == $yes)
+        $debugf    {
+        $debugf     call echor                  # jb            5/21/87
+        $debugf     call echov (" Crash!")
+        $debugf    }
+
+        kklen = 0  
+        Call SMOVHN(Xaml$SideNumber$c,$$MaxName,msg,kklen)  # SMM 10/99 E2141
+        Call SMOVV(" of ",msg,kklen)
+        Call SMOVHN(Xunt$Event$c,$$MaxName,msg,kklen)       # SMM 10/99 E2141
+        Call SMOVV(" crashed on recovery",msg,kklen)
+        call send_ (unt$View$i,0,kklen,msg)        # Tell Player it crashed
+
+        #$% Enter data into the DAC table       clk 3/92
+        call Update_Destroyed_Aircraft (UNT$Pointer, idummy,
+                                        $CrashedonLanding$Code,
+                                        Ldummy, AML$Pointer,
+                                        0) # E1104 SMM 12/95
+
+        if (log$engage != $no)              # if engagement log desired
+          {
+          call Generate_eng_rec ("SPLASH  ","LANDING ",xaml$SideNumber$c)
+          }                                             
+
+        #$% set destroyed status and store
+        aml$status$i = $destroyed$code
+        PUTaml$status$i
+
+        #$% increment lost counter
+        ilost = ilost + 1                       # indicate eq lost
+       }
+     
+    unt$NbrAcTot$i   = max0 ( 0, Xunt$NbrAcTot$i - 1)
+    PUTunt$NbrAcTot$i
+
+    unt$NbrAc$i      = max0 ( 0, Xunt$NbrAc$i - 1)      #       5/7/84
+    PUTunt$NbrAc$i                                      #       5/7/84
+
+    #$% if total aircraft is zero, break loop
+    if ( (unt$NbrAcTot$i + unt$NbrAc$i) == 0)
+     {
+      break                                             #       5/15/84
+     }
+   }
+
+#$% if count and total is not zero
+if (icnt != 0 & tot != 0.0)
+   {
+    if (ieq == $yes) iplat = unt2$pointer       # if equipment is recoverable, 
+    else             iplat = -1                 # else throw it away
+
+    iland = icnt - ilost
+
+    call AIREXP (unt$pointer, iplat, 1.0 - iland/tot)
+
+    unt2$type$i = Xunt2$type$i
+    if (unt2$Type$i == $ShoreBase$code |        
+        unt2$type$i == $SurfaceWithAC$code |
+        unt2$type$i == $Surface$code)
+       {
+        #$% compute fuel remaining              
+        unt$TNK$index = AviationFuelTank$Index  # JOA 2/96 (E1467)
+        fuel_amount = (xUNT$TNK$FuelRemaining$F * iland)/$Pounds$Per$Gallon
+        call TNK_adjust_fuel_remaining(unt2$pointer,
+                                      AviationFuelTank$Index, fuel_amount)
+       }
+
+    if ((tot-iland) > 0.0)
+        call AIREXP (unt$pointer,    -1, 1.0 - ilost/(tot-iland))
+   }
+
+
+if (Xunt$NbrAcTot$i == 0)
+   {
+    call Record_Flight_Landed (UNT$Pointer, UNT2$Pointer)
+
+    #______________________________________________________________________
+    # Have all other flights stationed on this flight bingo
+
+    isave = unt2$pointer                # save the ship/base pointer
+    indx  = unt$pointer$index
+
+    for (unt2$pointer$first; still_ok(unt2); unt2$pointer$next) # 9/26/88
+        {
+        unt2$status$i = xunt2$status$i                          ## tpa 4/19/85
+        if (unt2$Status$i == $BeingDeleted$code) next   # being deleted 
+        
+        unt2$view$i = Xunt2$view$i
+        if (unt2$view$i != unt$view$i) next     # same view
+
+        unt2$type$i = Xunt2$type$i
+        if (unt2$type$i != $air$code ) next     # must be Aircraft
+
+        unt2$GuideIndx$i = Xunt2$GuideIndx$i
+        if (unt2$GuideIndx$i != indx)  next     # guiding on...
+
+        call bingo (unt2$pointer)
+        }
+
+    unt2$pointer = isave                # restore the ship/base pointer
+    #______________________________________________________________________
+
+    $debugf if (trace$fltops$exe == $yes)
+    $debugf    {
+    $debugf     call echor                      # jb            5/21/87
+    $debugf     call echov (" Flight in.")
+    $debugf    }
+
+    #$% remove the flight
+    call fltrec (unt$pointer)                   # remove the flight
+   }
+
+# Update last recovery time
+unt2$TimeLastAirRecovery$f = Xunt2$TimeLastAirRecovery$f
+n = NinInterval(unt2$TimeLastAirRecovery$f, irate, ihome)
+PUTunt2$TimeLastAirRecovery$f
+
+return
+end
+
+ 
+
+
+subroutine flmant (aml$pointer,acc$pointer)     # check maint sched 
+
+########################################################
+#$%
+#$% Purpose:   FLMANT checks the flight maintenance
+#$%            schedule.
+#$%
+#$% Called By: FLHOME
+#$%
+#$% Calls:     None
+#$%
+#$% Tables:    AML        ACC
+#$%
+#$% Date:      APRIL 81
+#$%
+#$% Author:    DANA WILLS
+#$%
+########################################################
+BBcommon
+
+REAL  PUM,X,RANDOM,TIMEM,SD,RANDN,MAINTM,           # jb E2145  7/3/00
+  AML$Timeflown$F,AML$Timemaint$F,AML$Timelaunch$F  # jb E2145  7/3/00
+
+integer  Game_DTG,                                  # jb E2145  7/3/00
+     AML$Pointer, ACC$Pointer,                      # jb E2145  7/3/00
+     acc$MTBF$i                         # jb UFL01             5/10/01
+data x/0.0/		# Get next random number in sequence
+
+aml$TimeFlown$f = Xaml$TimeFlown$f + (Game$time - Xaml$TimeLaunch$f)
+PUTaml$TimeFlown$f
+
+acc$MTBF$i = Xacc$MTBF$i        # jb UFL01  (Avoid divide-by-0) 5/10/01
+
+if (acc$MTBF$i != 0)    # jb UFL01  If user did apecify MTBF)   5/10/01
+   {    # compute prob unschld maint
+    pUM = 1-(exp(-0.7*aml$TimeFlown$f/(acc$MTBF$i * 60.))) # jb UFL01 Need
+   }                                # MTBF in Minutes vice Hours    5/10/01
+else pUM = -2.0    # jb else set invalid if user bypassed MTBF      5/16/01
+
+if(pUM >= random(x))                    # if UNSCHLD maint to occur 1/17/83,
+   {
+    $debugf if (trace$fltops$exe == $yes)
+    $debugf    {
+    $debugf     call echov (" Un-sched maint. ")
+    $debugf    }
+
+    aml$TimeFlown$f = 0                         #reset time ac has flown
+    PUTaml$TimeFlown$f
+
+    aml$TimeMaint$f = game$time               #set time of last maint
+    PUTaml$TimeMaint$f
+
+    timem = Xacc$TimeUnScheduled$i       # UFL05 joa Minutes instead of hours
+    sd = Xacc$UnScheduledSD$i
+    maintm = amax1 (1.0, randn(timem,sd))       #compute maint time
+
+    aml$TimeLaunch$f = game$time + maintm     #set ac time avail for lnch
+    PUTaml$TimeLaunch$f
+   }
+
+# Delta Flight Time for Scheduled maint is in HOURS     # DEW IL01 11/20/00
+else if((Xacc$DelTimeSchedMaint$i * 60.0)  <= aml$TimeFlown$f) # schld m
+   {
+    $debugf if (trace$fltops$exe == $yes)
+    $debugf    {
+    $debugf     call echov (" Sched maint. ")
+    $debugf    }
+
+    aml$TimeFlown$f = 0                     #reset time ac has flown
+    PUTaml$TimeFlown$f
+
+    aml$TimeMaint$f = game$time           #set time of last maint
+    PUTaml$TimeMaint$f
+
+    aml$TimeLaunch$f = game$time +        #set ac time avail for lnch
+            Xacc$TimeToRepair$i           # JOA UFL04 Repair time in MIN
+    PUTaml$TimeLaunch$f
+   }
+else
+   {
+    aml$TimeLaunch$f = game$time +        #set ac time avail for lnch
+                       Xacc$RoutineDelay$i  # jb (Stored in MINutes)
+    PUTaml$TimeLaunch$f
+   }
+
+$debugf if (trace$fltops$exe == $yes)
+$debugf    {
+$debugf     call echov (" Ready at ")
+$debugf     call echoiz(Game_DTG (aml$TimeLaunch$f),6)          ## 4/11/83 tpa
+$debugf    }
+
+return
+end
+
+ 
+
+# This routine was moved to wgmdfuel.rat (refuel_aircraft)
+# Refuel is now a driver for ship and aircraft refueling.
+
+# Subroutine REFUEL(UNT$POINTER,         #receive flight pointer 
+#                   UNT2$POINTER)        #receive tanker pointer
+
+
+Subroutine bingo(unt$pointer)                   #receive flight pointer 
+
+########################################################
+#$%
+#$% Purpose:   BINGO causes a flight to return to
+#$%            the originating or other specified
+#$%            platform or base.
+#$%
+#$% Called By: FLHOME REFUEL ORECON OBINGO ORECAL ATOAIR AIROVER
+#$%
+#$% Calls:     FLETA      GETRB_M
+#$%            ocancl      <wgop.rat>
+#$%
+#$% Tables:    UNT        
+#$%            
+#$%
+#$% Date:      APRIL 81
+#$%            Modifications made for Air-to-air enhancements
+#$%            April 1992   Susan Miller
+#$%
+#$% Author:    DANA WILLS
+#$%
+#$% Modified:  SMM 6/94 PER #E1236 to remove attack command when
+#$%            an a/c is bingoed.
+#$%             
+#$%            James Allen - 2/96 (E1467)
+#$%            Replaced variable unt$FuelRemaining$f with 
+#$%            unt$TNK$FuelRemaining$f and added in unt$TNK$Index.
+#$%
+#$%            Carol Kropp - 8/96 (E1600)
+#$%            Set up a CANCEL ALL command - pending commands
+#$%            need to be cleared.  Also cleared the ordered
+#$%            latitude...after bingo the aircraft still
+#$%            showed the previous proceeding position as a
+#$%            current order.
+#$%
+#$%            Susan Miller - 7/97 (E1385)
+#$%            Set UNT$TestIntercept$I to $no when the
+#$%            assigned target is being cleared.
+#$%
+#$%            James Allen - 12/97 (E1370)
+#$%            Replaced clearing of maneuver related
+#$%            flags/fields with a call to clear_maneuver_all.
+#$%
+########################################################
+BBcommon
+
+literal  command_args[20]     # to set up a CANCEL ALL
+literal  command_addressee    # command call to ocancl
+Literal  CSTRIP8                        # jb E2145  7/3/00
+real rate, LBSTOHOME,                       # jb E2145  7/3/00
+    FUSE,FXCSS,FALT,RESRV,BRG,              # jb E2145  7/3/00
+    UNT$TNK$fuelremaining$F,                # jb E2145  7/3/00
+    UNT$Orderedspeed$F,UNT$Guiderange$F,    # jb E2145  7/3/00
+    UNT$Guidebearing$F,UNT$Rangetonext$F    # jb E2145  7/3/00
+integer     flt_indx, tgt_indx
+integer  nbr_command_args,     # clk 11/96 (E1600)
+    KK,ID,ICANGO,IXTRA,MINTOFLY,NORD,        # jb E2145  7/3/00
+    UNT$Pointer,UNT$View$I,UNT$Status$I,     # jb E2145  7/3/00
+    UNT$Guidetrue$I,UNT$Guideindx$I,         # jb E2145  7/3/00
+    UNT$Recoverindx$I,UNT$Rulesofengage$I,   # jb E2145  7/3/00
+    UNT$TNK$Index,                           # jb E2145  7/3/00
+    ACC$Pointer,ACC$Category$I,ACC$Maxfuel$I,  # jb E2145 7/3/00
+    ACC$Cruisespeed$I,ACC$Cruiserange$I,     # jb E2145  7/3/00
+    UNT2$Pointer                             # jb E2145  7/3/00
+character       nmsg1[ARB]                      # jb    7/23/87
+
+UNT$View$I = xUNT$View$I
+
+
+UNT$RecoverIndx$I = xUNT$RecoverIndx$I
+
+# Can happen if no bases and no air capable ships in view joa 3/04 per_noairbase
+if (UNT$RecoverIndx$I == 0)
+{
+    kk = 0
+    call smovhn (xUNT$Name$C, $$MaxLit, nmsg1, kk)
+    call smovv  (" is unable to bingo. No bases or air capable ships in view.", _
+                 nmsg1,kk)
+    call send_   (UNT$View$I, 0, kk, nmsg1)
+    return
+}
+ 
+UNT2$Pointer$To  (UNT$RecoverIndx$I)
+
+# Send a message to the unit's view that it is returning to base and set
+# up a CANCEL ALL command to clear pending orders - clk 11/96 (E1600)
+kk = 0
+call smovhn (xUNT$Name$C, $$MaxLit, nmsg1, kk)
+call smovv  (" is bingoing to ",nmsg1,kk)
+call smovhn (xUNT2$Name$C, $$MaxLit, nmsg1, kk)
+call smovv  (":",nmsg1,kk)
+call send_   (UNT$View$I, 0, kk, nmsg1)
+nbr_command_args = 2
+command_args[1] = $lex$Cancel$
+command_args[2] = $lex$All$
+command_addressee = xUNT$Name$C
+id = 99999999               # Cancel all pending orders           
+call ocancl (Cancel$Order, id, UNT$Pointer, UNT$View$I,
+             nbr_command_args, command_args, command_addressee)
+
+nord = BINGO$order                  # Clear current orders - joa 12/97 (E1370)
+call clear_maneuver_all (nord, id, UNT$View$I, UNT$Pointer)  # Unit being cleared: input
+
+acc$pointer = xunt$accpntr$i                    #get characteristics
+
+putUNT$AssignedCap$I  ($no)                     # clear the assigned cap flag    clk 3/92
+
+Flt_indx = unt$pointer$index                    # SMM 4/1/92
+Tgt_indx = xunt$AssignedTarget$i                #hold the assigned target
+
+# if multiple target flag is set to yes, then this unit is processing
+# an attack command so before this flag is set to $no, find the attack
+# order and clear it out to fix PER #E1236 where the aircraft drops all
+# of its weapons on the target. SMM 6/1/94
+if (xUNT$MultipleTarget$I == $Yes)
+    {
+     call canord(UNT$Pointer, -1)   # remove any pending orders
+     
+     putUNT$MultipleTarget$I ($no)              # SMM 4/1/93 used in ATTACK
+     putUNT$AttackedTarget$I ($no)
+    }
+
+call OSCUTTLE(scuttle$order,    # receive order number 
+              UNT$POINTER,      # receive unit pointer 
+              0,                # receive message length 
+              command_args)     # receive command text 
+
+unt$rulesofengage$i = $ifattacked$code          #weapons tight
+putunt$rulesofengage$i
+
+unt$status$i = $ReturningToBase$code                   #status is recovering
+putunt$status$i
+
+unt$guideindx$i = unt$recoverindx$i            #guide is recovery platform
+putunt$guideindx$i
+
+unt$guiderange$f = marshall$distance            #miles from home plate
+putunt$guiderange$f
+
+unt$guidetrue$i = $no                           #set to assummed value
+putunt$guidetrue$i
+
+unt$guidebearing$f = $pi                        #positon aft platform
+putunt$guidebearing$f
+
+call GETRB_M(unt$pointer,unt2$pointer,unt$RangeToNext$f,brg)
+PUTunt$RangeToNext$f
+
+call fleta (unt$pointer)                      # set eta to home plate
+
+################## Warnings inserted July 1987 ############# jb 7/23/87
+MINtoFLY = Xunt$TimeBingo$f - Game$time  # jb (time set by fleta al-
+#$% Determine the fuel used per minute      # clk 10/23/92
+#$% The above calculation doesn't match either the NWfuel
+#$% algorithm or the fuel algorithm from awsims...
+ACC$Category$I = xACC$Category$I
+if (Level$Air$Engagement < 1 |
+    ACC$Category$I == $HELO$code)   # use the previous fuel calculations
+{
+   call Ac_fuel_per_sec (ACC$Pointer, xUNT$Status$I, xUNT$MarshallStatus$i,
+                 float(xACC$LoiterSpeed$I), xUNT$OrderedAltDepth$I, rate)
+    rate = rate * $Seconds$Per$Minute   # Convert from rate/sec to rate/min
+}
+else                                # use the fuel calculations from awsims
+  {
+   ACC$CruiseSpeed$I = xACC$CruiseSpeed$I
+   ACC$CruiseRange$I = MAX (1, xACC$CruiseRange$I)  # avoid divide by 0
+   fuse = 0.81    # bingo at 0.93 * cruise speed, so  MAX (0.81, ((speed/cruise speed)^3))
+   falt = 1.0     # altitude factor = 1.0 when at bingo or marshall status
+   rate = (xACC$MaxFuel$I / ACC$CruiseRange$I) *
+          ((ACC$CruiseSpeed$I * fuse) * $Hours$Per$Minute) * falt
+  }
+#***************
+
+if (AirFuelConsumption$Flag == $ON & xUNT$FuelConsumptionFlag$I == $ON)
+{
+    LBStoHOME = MINtoFLY * rate
+    unt$TNK$Index = AviationFuelTank$Index              # JOA 2/96 E1467)
+    unt$TNK$FuelRemaining$f = Xunt$TNK$FuelRemaining$f  # variable name change
+    
+    if (unt$TNK$FuelRemaining$f <= LBStoHOME ) # jb             7/23/87
+    {
+        icango = 0.5 + unt$TNK$FuelRemaining$f/rate
+        kk = 0                                        # jb
+        call smov   ($bell,nmsg1,kk)                  # jb
+        call smovhn (Xunt$name$c,$$MaxLit,nmsg1,kk)
+        call smovv(" sends: I'll FLAMEOUT in ",nmsg1,kk)
+        call smovi(icango,nmsg1,kk)
+        call smovv(" min.: REQUEST TANKER",nmsg1,kk)
+        call smov   ($bell,nmsg1,kk)                  # jb
+        call send_ (unt$view$i,0,kk,nmsg1)             # jb
+    }
+    else
+    {
+        acc$MaxFuel$i = Xacc$MaxFuel$i
+        Fxcss = unt$TNK$FuelRemaining$f - LBStoHOME # jb LBS on arrival 7/23/87
+        Resrv = 0.15 * acc$MaxFuel$i                          # jb  7/27/87
+        if ( Fxcss < Resrv )  # jb Require ~ 15%    7/23/87
+        {
+            kk = 0
+            call smovhn (Xunt$name$c,$$MaxLit,nmsg1,kk)
+            call smovv(" sends: Estimate low state (",nmsg1,kk)
+            ixtra = INT(100 * Fxcss / acc$MaxFuel$i)
+            call smovi(ixtra,nmsg1,kk)
+            call smovv("%) at marshall",nmsg1,kk)
+            if ( Fxcss < 0.7 * Resrv ) 
+                call smovv(": Request immediate recovery on arrival.",nmsg1,kk)  
+            call smov ($bell,nmsg1,kk)                          # jb
+            call send_ (unt$view$i,0,kk,nmsg1)                   # jb
+        }
+    } 
+}                                 # End if consumption
+############# End of warnings inserted July 1987 #########      7/23/87
+
+if (Level$Air$Engagement < 1 |
+    ACC$Category$I == $HELO$code)
+   PUTunt$OrderedSpeed$F (Xacc$LoiterSpeed$i)    # jb
+else
+  {
+   UNT$OrderedSpeed$F = xACC$CruiseSpeed$I * 0.93
+   putUNT$OrderedSpeed$F
+   putUNT$UseOrdSpeed$I ($yes)
+  }    
+
+return
+end
+ 
+
+subroutine fleta (unt$pointer)                  # calculate ETA 
+
+########################################################
+#$%
+#$% Purpose:   FLETA calculates the estimated time
+#$%            of arrival to the home platform or
+#$%            base.
+#$%
+#$% Called By: FLTOPS     BINGO
+#$%
+#$% Calls:     None
+#$%
+#$% Tables:    UNT        
+#$%            ACC
+#$%
+#$% Date:      APRIL 81
+#$%
+#$% Author:    DANA WILLS
+#$%
+#$% Modified:  Jim Alen - 11/95 (E1422)
+#$%            Take into account the recovering platforms
+#$%            elevation when computing eta and ordered alt.
+#$%
+########################################################
+BBcommon
+
+REAL RANGE, UNT$Timebingo$F                  # jb E2145  7/5/00
+Integer  IALTD, ITIME, IETA,                 # jb E2145  7/5/00
+    UNT2$Pointer,ACC$Pointer,UNT$Pointer,    # jb E2145  7/5/00
+    UNT$Recoverindx$I,UNT$Orderedaltdepth$I  # jb E2145  7/5/00
+
+UNT$RecoverIndx$I = xUNT$RecoverIndx$I             # get recovering unit
+UNT2$Pointer$To  UNT$RecoverIndx$I
+
+#$% if recovery status
+if (Xunt$Status$i == $ReturningToBase$code)
+   {
+    #$% get characteristics pointer
+    acc$pointer = Xunt$ACCPntr$i
+
+    #$% get range to next
+    range = Xunt$RangeToNext$f
+
+    #$% calculate time in minutes
+    ialtd = xUNT$TrueAltDepth$I -                      # compute the change in
+           (xUNT2$TrueAltDepth$I + Marshall$Altitude)  # altitude required
+    if (ialtd >= 0)  # if a descent                    # joa 11/95 (E1422)
+      itime = float (ialtd) / float (xACC$MaxClimb$I * 2)
+    else             # a/c needs to climb to reach base
+      itime = float (-ialtd) / float (xACC$MaxClimb$I)
+
+    #$% calculate estimated time of arrival in minutes
+    ieta = $Minutes$Per$Hour * range/Xacc$CruiseSpeed$i + .999
+
+    #$% is ETA soon?  Or, comparable to time reaching 1000'?    5/22/84
+    if (ieta < 7 | ieta <= itime)
+      unt$OrderedAltDepth$i = marshall$altitude + xUNT2$TrueAltDepth$I
+    else
+      unt$OrderedAltDepth$i = .9 * Xacc$MaxAlt$i
+    PUTunt$OrderedAltDepth$i
+
+    unt$TimeBingo$f = float(ieta) + game$time + 2.
+   }
+#$% else if recovering
+else if (Xunt$MarshallStatus$i == $Recovering$code)
+   {
+    #$% set ordered altitude depth and store
+    unt$OrderedAltDepth$i = marshall$altitude + xUNT2$TrueAltDepth$I
+    PUTunt$OrderedAltDepth$i
+
+    #$% was: unt$TimeBingo$f = game$time + 1
+
+    unt$TimeBingo$f = game$time + time$step  # to end of cycle   
+   }
+else
+   {
+    #$% zero time bingo
+    unt$TimeBingo$f = 0
+   }
+
+#$% store time bingo
+putunt$TimeBingo$f
+
+return
+end
+
+ 
+
+
+subroutine oload (nord,id,unt$pointer)          # reload flight 
+
+########################################################
+#$%
+#$% Purpose:   OLOAD processes LOAD orders used
+#$%            to load expendable equipment on
+#$%            a flight being launched.
+#$%
+#$% Called By: EXEORD
+#$%
+#$% Calls:     FNDORD     ECHOH      XLOAD
+#$%            ECHOI
+#$%
+#$% Tables:    ORD        UNT
+#$%
+#$% Date:      APRIL 81
+#$%
+#$% Author:    DANA WILLS
+#$%
+########################################################
+BBcommon
+FltOpsCommon
+
+Integer ID, NORD,                # jb E2145  7/5/00
+    ORD$Pointer, ORD$Phase$I,    # jb E2145  7/5/00
+    UNT$Pointer                  # jb E2145  7/5/00
+
+call fndord (id,ord$pointer)                    # find LOAD command
+
+#$% if order not valid
+if (ord$pointer == 0)
+   {
+    #$% send message
+    call echov ("Load order lost. Id=")
+    call echoi (id + nord * 0)              # do something with nord (dew)
+    return
+   }
+
+#$% if order phase valid
+if (Xord$phase$i != 0)                          # old load (w/launch)
+   {
+    #$% zero order phase
+    ord$phase$i = 0
+    PUTord$phase$i
+   }
+else
+   {
+    xlen = 0
+
+    #$% reload unit
+    call xload (unt$pointer,ord$pointer)        # reload the unit
+
+    if (xlen != 0)
+       {
+        #$% move message to array for display
+        call smov ($null,msgx,xlen)
+
+        #$% display message
+        call send_ (Xunt$view$i,0,xlen,msgx)
+       }
+   }
+
+return
+end
+
+ 
+
+
+subroutine xload (unt$pointer,ord$pointer)      # reload the flight 
+
+########################################################
+#$%
+#$% Purpose:   XLOAD is used to reload a flight
+#$%            before launch.
+#$%
+#$% Called By: OLOAD
+#$%
+#$% Calls:     XGLOAD     XVLOAD     AIREXP
+#$%            XBLEQ
+#$%
+#$% Tables:    UNT        ACC
+#$%
+#$% Date:      APRIL 81
+#$%
+#$% Author:    DANA WILLS
+#$%
+########################################################
+BBcommon
+FltOpsCommon
+
+LITERAL    CSTRIP8            # jb E2145  7/5/00
+REAL       UNT$Timelaunched$F # jb E2145  7/5/00
+integer Game_DTG, IOK,ISAVE,  # jb E2145  7/5/00
+    UNT$Pointer, ACC$Pointer, # jb E2145  7/5/00
+    ORD$Pointer, UNT2$Pointer # jb E2145  7/5/00
+
+call smovv ("Cannot reload ",msgx,xlen)
+call smovhn (Xunt$name$c,$$MaxLit,msgx,xlen)
+call smovv (": ",msgx,xlen)
+
+#$% if not aircraft
+if (Xunt$Type$i != $air$code)
+   {
+    #$% send message
+    call smovv (" Not an aircraft.",msgx,xlen)
+    return
+   }
+
+#$% if not aircraft awaiting lunch
+if (Xunt$Status$i         != $AcAwaitingLaunch$code |
+    Xunt$MarshallStatus$i != $AwaitLaunch$code )
+   {
+    #$% move message
+    call smovv (" Too late.",msgx,xlen)
+    return
+   }
+
+#$% save unit pointer to aircraft
+Lunt = unt$pointer
+
+#$% set total number and aircraft characteristics
+iqty = Xunt$NbrAcTot$i
+Lacc = Xunt$ACCPntr$i
+
+#$% set characteristics pointer
+acc$pointer = Lacc
+
+itime = Xunt$TimeLaunched$f
+Etime = itime
+
+#$% get load command information
+call xgload (ord$pointer)
+
+unt2$pointer$to Xunt$LaunchIndx$i
+
+#$% verify equipment needed to load flight
+#$% bmb 6/93 - added acc$pointer to call, excess fuel loads (E1102)
+call xvload (unt2$pointer,unt$pointer,iok,acc$pointer)
+
+#$% if not OK, return
+if (iok == $no) return
+
+xlen = 0
+#$% move messages
+call smovv ("Reloading ",msgx,xlen)
+call smovhn (Xunt$name$c,$$MaxLit,msgx,xlen)
+call smovv (": ",msgx,xlen)
+isave = xlen
+
+call airexp (unt$pointer,unt2$pointer,0.0)      # unload all expendables
+
+call xbleq (unt2$pointer)                       # reload as per request
+
+#$% set time launched                           (OrdsDelay stored in minutes)
+unt$TimeLaunched$f = max (Etime, float(order$minute + Xacc$OrdsDelay$i))
+PUTunt$TimeLaunched$f
+
+#$% move message
+call smovv (" ETL is ",msgx,xlen)
+call smoviz(Game_DTG(unt$TimeLaunched$f),6,msgx,xlen)   ## tpa 4/14/83
+return
+end
+
+ 
+
+subroutine olaunc (nord,id,unt2$pointer)        # launch flight 
+
+########################################################
+#$%
+#$% Purpose:   OLAUNC processes launch orders
+#$%            causing a named flight to be
+#$%            launched, to assume a specified
+#$%            course and speed at a specified
+#$%            altitude.
+#$%
+#$% Called By: EXEORD
+#$%
+#$% Calls:     FNDORD     XLAUNC     SEND
+#$%            KILORD
+#$%
+#$% Tables:    ORD        UNT
+#$%
+#$% Date:      APRIL 81
+#$%
+#$% Author:    DANA WILLS
+#$%
+########################################################
+BBcommon
+FltOpsCommon
+
+Integer  NORD,LORD,IORDL,IORDE,            # jb E2145  7/5/00
+    ID,IDX,IOK,IUNTS,                      # jb E2145  7/5/00
+    ORD$Pointer,ORD$Phase$I,ORD$Unit$I,    # jb E2145  7/5/00
+    UNT$Pointer,UNT$Marshallstatus$I,      # jb E2145  7/5/00
+    UNT2$Pointer                           # jb E2145  7/5/00
+
+literal args[4], cstrip8, cstrip
+integer iview
+integer nargs
+data args/$lex$DELETE$, $lex$ROUTE$, 0, $lex$ALL$/
+
+call fndord (id,ord$pointer)                    # find LAUNCH command
+
+#$% if order is zero
+if (ord$pointer == 0)
+   {
+    #$% send message that order is lost
+    call echov ("Launch order lost. Id=")
+    call echoi (id + nord * 0)              # do something with nord
+    return
+   }
+
+#$% if order phase is zero
+if (Xord$phase$i == 0)                          # New LAUNCH
+   {
+    call fndord (id+1,Lord)                     # find LOAD command
+
+    #$% if load order is zero
+    if (Lord == 0)
+       {
+        #$% send message
+        call echov ("Load order lost. Id=")
+        call echoi (id+1)
+        return
+       }
+
+    #$% initialize load orders
+    Lid = id
+    iordL = ord$pointer     # LAUNCH
+    iordE = Lord            # LOAD
+    iuntS = unt2$pointer    # SHIP/BASE
+
+    $debugf if (trace$fltops$exe == $yes)
+    $debugf    {
+    $debugf     call echor
+    $debugf     call echov  ('^')
+    $debugf     call echov (" LAUNCH order ")
+    $debugf     call echoi (id)
+    $debugf    }
+
+    #$% validate and execute launch
+    call xlaunc (iuntS,iordL,iordE,iok)         # validate & execute LAUNCH
+
+    while (mod(xlen,5) != 0) call smov ($null,msgx,xlen)
+
+    call send_ (Xunt2$view$i,0,xlen,msgx)        # display message of ok/failure
+
+    #$% if launch OK is YES
+    if (iok == $yes)                            # was launch ok ?
+       {
+        $debugf if (trace$fltops$exe == $yes)
+        $debugf    {
+        $debugf     call echov ("  OK")
+        $debugf    }
+
+        #$% set order phase to one
+        ord$phase$i = 1                         # Yes..set LAUNCH to phase 1
+        PUTord$phase$i
+
+        unt$pointer = Lunt
+        ord$Unit$i = unt$pointer$index          #      save unt index
+        PUTord$Unit$i
+
+        ord$pointer = Lord
+        ord$phase$i = 1                         #      set LOAD to phase 1
+        PUTord$phase$i
+
+        CALL add_potential_jammer ( UNT$Pointer$Index )
+       }
+    else                                        # No...throw away flight plan
+       {
+        idx = id+Xord$count$i-1
+
+        $debugf if (trace$fltops$exe == $yes)
+        $debugf    {
+        $debugf     call echov ("  No good thru ")
+        $debugf     call echoi (idx)
+        $debugf    }
+
+        #$% end present order
+        call kilord (id,idx)
+
+        if (idup == $no & atoid != 0)
+        {
+            # if ATO flight, delete corresponding route if not duplicate misn
+            args[3] = atoid
+            nord = 0                # Flag indicating not to send error message
+            iview = Xunt2$view$i 
+            nargs = 4
+            call delRTE (nord, iview, nargs, args)
+        }
+
+       }
+   }
+else                                            # Airborne Yet ?
+   {
+    unt$pointer$to Xord$Unit$i
+    unt$MarshallStatus$i = xunt$MarshallStatus$i
+
+    if (unt$MarshallStatus$i != $AwaitLaunch$code &
+        unt$MarshallStatus$i != $Launching$code    )
+       {
+        ord$phase$i = 0                         #     Yes
+        PUTord$phase$i
+       }
+   }
+
+return
+end
+
+ 
+
+
+subroutine xgload (ord$pointer)                 # get load command info 
+
+########################################################
+#$%
+#$% Purpose:   XGLOAD gets Load Command Information
+#$%            specified in the load order.
+#$%
+#$% Called By: XLOAD      XLAUNC
+#$%
+#$% Calls:     None
+#$%
+#$% Tables:    ORD
+#$%
+#$% Date:      APRIL 81
+#$%
+#$% Author:    DANA WILLS
+#$%
+#$% Modified:  Carol Kropp - 6/96 (E1613)
+#$%            The expendable type "FUEL" and "JP" were
+#$%            being compared against the command amount
+#$%            (iload[2,loadc]), not the type (nload[loadc]).
+#$%            The amount of extra fuel was being multiplied
+#$%            against the number of a/c in the flight here
+#$%            and again later when determining if the
+#$%            launcher had sufficient fuel.
+#$%
+########################################################
+BBcommon
+FltOpsCommon
+
+LITERAL     CSTRIP8             # jb E2145  7/5/00
+integer  command_quantity,
+    ORD$Pointer, ORD$WRD$Index  # jb E2145  7/5/00
+
+loadc = 0
+for (ord$wrd$index = 2; ord$wrd$index$ok; ord$wrd$index=ord$wrd$index+1)
+   {
+    loadc = loadc + 1
+    command_quantity = Xord$wrd$$c               # get the requested amount
+
+    ord$wrd$index = ord$wrd$index + 1
+    nload[loadc] = Xord$wrd$$c                   # get expendable name
+
+    if (nload[loadc] == 'FUEL' | nload[loadc] == 'JP')
+      iload[2,loadc] = command_quantity
+    else
+      iload[2,loadc] = command_quantity * iqty   # get qty (* nbr in flight)
+
+    iload[3,loadc] = 0                           # init plat eq$index
+   }
+
+return
+end
+
+ 
+
+
+subroutine xvload (unt2$pointer,unt$pointer,iok,  # verify load available 
+                   acc$pointer)   # bmb 6/93 - excess fuel load (E1102)
+########################################################
+#$%
+#$% Purpose:   XVLOAD verifies the equipment needed
+#$%            to load a flight is available.
+#$%
+#$%            UNT2 points to the Ship/Base
+#$%            UNT points to the already loaded Aircraft (if > 0) for reload
+#$%
+#$% Called By: XLOAD      XVLAUN
+#$%
+#$% Calls:     None
+#$%
+#$% Tables:    DEQ
+#$%
+#$% Date:      APRIL 81
+#$%
+#$% Author:    DANA WILLS
+#$%
+########################################################
+BBcommon
+FltOpsCommon
+
+literal nameeq,   CSTRIP8                  # jb E2145  7/5/00
+literal wname
+BBDeclare (bom$pointer)
+Integer ISAVE,IOK,IPNT,IQTYEQ,              # jb E2145  7/5/00
+    IEQPTR,IPQTY,IAQTY,                     # jb E2145  7/5/00
+    DEQ2$Pointer,DEQ2$Ident$I,              # jb E2145  7/5/00
+    TOR$Pointer,TOR$Maxalt$I,               # jb E2145  7/5/00
+    DEQ$Pointer,DEQ$Ident$I,                # jb E2145  7/5/00
+    ACC$Pointer,UNT2$Pointer,UNT$Pointer    # jb E2145  7/5/00
+Integer  LCOMP           # jb AAI01/LCOMP     E2145  2/13/01
+
+isave = xlen                                    # save error msg length
+iok = $no
+
+if (ACC$Pointer$Valid)   # bmb 6/93 - valid excess fuel load, if any (E1102)
+  call xvfuel (UNT2$Pointer, UNT$Pointer, ACC$Pointer)
+
+#$% for each entry
+for (ipnt = 1; ipnt <= loadc; ipnt = ipnt + 1)
+   {
+    nameeq = nload[ipnt]
+    iqtyeq = iload[2,ipnt]
+
+    if (nameeq == 'FUEL' | nameeq == 'JP')   # bmb 6/93 - handled by
+      next                                   # xvfuel call above (E1102)
+
+    ieqptr = 0                                  # save pointer to equipment
+    ipqty  = 0                                  # init cnt avail on platform
+    iaqty  = 0                                  # init cnt avail on alternate
+
+    #$% for each equipment entry
+    FOR_DEQ2_CHAIN
+       {
+        #$% if not same equipment name, get next entry
+        if (LCOMP(Xdeq2$Type$C, nameeq) != 0)  NEXT # jb AAI01/LCOMP 2/13/01
+
+        deq2$ident$i = Xdeq2$ident$i
+        if (deq2$ident$i != $CruiseMissile$code &
+            deq2$ident$i != $Torpedo$code       &
+            deq2$ident$i != $AAM$code           &
+            deq2$ident$i != $ASM$code           &
+            deq2$ident$i != $Bomb$code          &
+            deq2$ident$i != $SmartTorpedo$Code  & # 5/14/90, reh
+            deq2$ident$i != $Mine$code          &
+            deq2$ident$i != $Gun$code           & # added for new Gun fire Model
+            deq2$ident$i != $CHAFF$code         & # jb For chaff charact. 8/1/90
+            deq2$ident$i != $SonoBuoy$code      &
+            deq2$ident$i != $GND$Code           & # reh 12/7/89, amphib. model
+            deq2$ident$i != $CommBuoy$code       ) next
+
+        iload[3,ipnt] = deq2$Pointer$index      
+
+        ipqty = Xdeq2$Remaining$i
+        ieqptr = Xdeq2$Pntr$i
+
+        ## if equipment is TORP and maxalt/depth is 0   ## tpa 8/12/83
+        if (deq2$Ident$I == $Torpedo$Code)
+            {
+            TOR$Pointer  = ieqptr
+            TOR$MaxAlt$I = xTOR$MaxAlt$I
+                
+            if (TOR$MaxAlt$I <= 0)
+                {
+                call smovv ("  Unable to load Surf",msgx,xlen)
+                call smovv ("ace launch Torpedos ",msgx,xlen)
+                call smovhn (nameeq,$$MaxLit,msgx,xlen)
+                }
+            }
+    
+        break
+       }
+
+
+    if (unt$pointer > 0 & ieqptr != 0)          # check alternate source
+       {
+        #$% for each equipment entry
+        FOR_DEQ_CHAIN
+           {
+            if (Xdeq$Logistical$i == $NO) next    # skip non-logistics equip
+
+            #$% if equipment is not flight equipment, get next entry
+            if (ieqptr != Xdeq$Pntr$i) next
+
+            #$% set equipment remaining
+            iaqty = Xdeq$Remaining$i
+            break
+           }
+        deq$ident$i = Xdeq$ident$i        # jb                8/1/90
+       }
+
+    # substitute noweap for non existent weapon
+    if (ieqptr == 0)
+    {
+        wname = 'NOWEAP'
+        bom$pointer = 0
+        call tblfind($$BOM, wname, bom$pointer)
+        if (bom$pointer != 0)
+        {
+            iload[3,ipnt] = -1                      # indicates no deq entry
+            ieqptr = bom$pointer
+            deq$ident$i = $Bomb$code
+            ipqty = 1000                            # More than requested
+
+        }
+    }
+    #$% if equipment pointer is zero
+    if (ieqptr == 0)
+       {
+        #$% move message
+        call smovv ("  ",msgx,xlen)
+        call smovhn (nameeq,$$MaxLit,msgx,xlen)
+        call smovv  ("  not available.",msgx,xlen)
+       }
+    #$% else if equipment needed is greater than equipment remaining
+    else if (iqtyeq > (ipqty+iaqty) & deq2$ident$i != $CHAFF$Code &
+            deq$ident$i  != $CHAFF$Code  )        # jb        8/1/90
+       {
+        #$% move message to output buffer
+        call smovv  ("  Not enough ",msgx,xlen)
+        call smovhn (nameeq,$$MaxLit,msgx,xlen)
+        call smovv  ("  available.",msgx,xlen)
+       }
+   }
+
+if (isave == xlen) iok = $yes                   # return status
+
+return
+end
+
+ 
+
+
+subroutine xglaun (ord$pointer)                 # get launch command info       # E2206 dew
+
+########################################################
+#$%
+#$% Purpose:   XGLAUN processes launch command
+#$%            input parameters.
+#$%
+#$% Called By: FLINIT     XLAUNC
+#$%
+#$% Calls:     None
+#$%
+#$% Tables:    ORD
+#$%
+#$% Date:      APRIL 81
+#$%
+#$% Author:    DANA WILLS
+#$%
+#$% Modified:  Jim Allen - 11/95 (E1422)
+#$%            Added processing of optional RELATIVE altitudes.
+#$%
+#$%            Dane Wills - 9/2000 (E2206) 
+#$%            Added SCRAMBLE syntax decoder
+#$%
+#$%            Jim Allen - 12/02 (E2313)
+#$%            Add MISSION keyword to disguish course from mission name
+#$%            which can now start with a number
+#$%
+########################################################
+BBcommon
+FltOpsCommon
+character atoidc[8]
+equivalence (atoid, atoidc)
+
+BBdeclare  (ORD$Pointer, ORD$WRD$Index, ORD$W05$C, ORD$W06$C, ORD$W07$C)
+
+BBdeclare  (AML$Pointer, AML$SQDindx$I,
+            ACC$Pointer, SQD$Pointer)
+
+LITERAL     CSTRIP8                 # jb E2145  7/5/00 
+literal     xmissn
+integer     iverb, ix_crs, isave_wrd, kk,
+            look_back, delta_minutes
+Integer  LCOMP          # jb AAI01/LCOMP E2145  2/13/01
+
+#$% set quantity, type, name, time
+iverb           = Xord$W01$c
+iqty            = Xord$W02$c
+itype           = Xord$W03$c
+name            = Xord$W04$c
+itime           = Xord$Start$i      # requested Launch Time
+
+ilead           = $no   # Collective flight parameters
+cname           = $no
+
+sname           = 0     # new SCRAMBLE parameters
+missn           = 0 
+csign           = 0
+atoid           = 0
+endtime         = 0     # time to be at END of first Route....
+
+ix_crs          = 0     # Course/speed/alt index
+icours          = $no
+ispeed          = $no
+ialt            = $no
+is_relative_alt = $no   # init altitude handling as absolute - joa 11/95 (E1422)
+
+ord$W05$c = Xord$W05$c
+ord$W06$c = Xord$W06$c
+ord$W07$c = Xord$W07$c
+
+if (iverb == $lex$scramble$)
+    {
+#   1                 2                     3
+#SCRAMBLE (number) <number> (of type) <aircraft-type>
+#     4                     5
+#   MISSION (number) <launch-event>
+#
+#          6                    7                8               9
+#   [ | CALLSIGN (callsign) <launch-event> [ | ATOID (ato id) <name> ] 
+#         6              7            8                     9
+#     | ATOID (ato id) <name>  [ | CALLSIGN (callsign) <launch-event> ] 
+#
+#   ] <degrees>
+#   (speed) <knots> (altitude) <feet> [ | RELATIVE ]
+#   [ END (traversing first route at) <dtg> |
+#   TIME <delay-minutes> | AT <dtg> ] ;
+
+# Build Aircraft unit
+#    unt$ForceName$c = cname
+#    unt$event$c = name
+#    unt$Name$c = Xaml$SideNumber$c
+
+# ALSP output
+#  if (xUNT$ForceName$C == $NO)
+#  {
+#    name      = ALSP_Literal_to_Char (xUNT$Event$C, name_litlen)
+#  }
+#  else
+#  {
+#    name      = ALSP_Literal_to_Char (xUNT$ForceName$C, name_litlen)
+#  }
+#  call_sign = ALSP_Literal_to_Char (xUNT$Name$C, call_sign_len)
+
+    sname = Xord$W03$c
+    missn = ord$W05$c
+    name = missn
+
+    # Translate Squadron name (if it exists) to A/C type...
+
+    for (AML$Pointer$First; AML$Pointer$OK; AML$Pointer$Next)
+        {
+        AML$SQDindx$i = xAML$SQDindx$i
+        if (AML$SQDindx$i == 0 ) next
+
+        SQD$pointer$to AML$SQDindx$i        # Requested Squadron....
+        if (LCOMP(sname,xSQD$SquadronName$C) == 0) # jb AAI01/LCOMP  2/13/01    
+            {
+            ACC$pointer = xAML$AccPntr$I
+            itype = xACC$Type$c             # use this A/C type
+
+            break
+            }
+        }
+
+    # Look for CallSign or ATOID
+
+    ord$wrd$index = 6
+    repeat
+        {
+        isave_wrd = ord$wrd$index
+
+        if (Xord$wrd$$C == $lex$callsign$)
+            {
+            ord$wrd$index = ord$wrd$index + 1
+            csign = Xord$wrd$$C 
+            name  = csign
+
+            ord$wrd$index = ord$wrd$index + 1
+            }
+
+        if (Xord$wrd$$C == $lex$atoid$)
+            {
+            ord$wrd$index = ord$wrd$index + 1
+            atoid = Xord$wrd$$C 
+    
+            ord$wrd$index = ord$wrd$index + 1
+            }
+        } until (isave_wrd == ord$wrd$index)
+
+    cname = missn       # Use Mission number(name) as Collective name...
+    ilead = $yes
+    itype = sname       # type is/was squadron name...
+
+    ix_crs = ord$wrd$index      # this could be a 6, 8 or 10
+
+    # Look for END parameter
+    ord$wrd$index = Xord$NbrArgs$i - 1      # 2nd to last Arg
+    if (Xord$WRD$$c == $lex$END$)           # an END ?
+        {
+        ord$wrd$index = ord$wrd$index + 1
+        EndTime = Xord$wrd$$C 
+
+        # Convert DTG to delta minutes from current cycle
+
+        # Determine Delta minutes from current DTG to specified DTG
+        # Replace Start time with Delta value
+
+        look_back = 24 * 60         # 24 hours
+
+        call dtg_to_delta_min (EndTime,        # input - the DTG
+                               look_back,      # input - window in minutes
+                               delta_minutes)  # output - the corresponding game minute
+
+        EndTime = Delta_minutes + game$minute
+        }
+
+    }
+#                  1                 2                      3
+# FOR <addressee> LAUNCH (number) <number> (of type) <aircraft-type>                     # DEW (E2206)
+#                 4
+# (callsign) <launch-event> 
+#      5                   6
+# [ MISSION (number) <launch-event>
+#     7
+#  [ MEMBER                             
+#      7                         8
+#   | LEADER (initial course) <degrees>
+#               9                 10           11
+#     (speed) <knots> (altitude) <feet>  [ | RELATIVE ]
+#  ]
+#      5                 6                 7           8
+# | <degrees> (speed) <knots> (altitude) <feet> [ | RELATIVE ]
+# ]
+# [ TIME <delay-minutes> | AT <dtg> ] ;
+
+else if (ord$W07$c == $lex$leader$)     # Collective Flight
+    {
+    cname    =  name
+    name     =  ord$W06$c
+    ilead    = $yes
+    ix_crs   = 8
+    }
+else if (ord$W07$c == $lex$member$)     # Collective Flight
+    {
+    cname    =  name
+    name     =  ord$W06$c
+    # No course/speed/alt
+    }
+else # standard Launch
+    {
+    ix_crs   = 5
+    }
+
+if (ix_crs != 0)
+    {
+    #$% set course, speed, altitude
+
+    ord$wrd$index = ix_crs
+    icours        = Xord$WRD$$c
+
+    ord$wrd$index = ord$wrd$index + 1
+    ispeed        = Xord$WRD$$c
+
+    ord$wrd$index = ord$wrd$index + 1
+    ialt          = Xord$WRD$$c
+
+    if (Xord$NbrArgs$i > ord$wrd$index) # check to see if the ordered alt is
+        {                               # relative to terrain
+        ord$wrd$index = ord$wrd$index + 1
+        if (Xord$WRD$$c == $lex$RELATIVE$) is_relative_alt = $yes
+        }
+    }
+
+return
+end             # end
+
+ 
+
+
+subroutine xlaunc (unt2$pointer,                # validate&execute LAUNCH 
+                   iordL,                       # Launch order pointer
+                   iordE,                       # Load order printer
+                   iok)                         # status return ($yes/$no)
+
+########################################################
+#$%
+#$% Purpose:   XLAUNC calls routines to validate
+#$%            and execute launch command para-
+#$%            meters.
+#$%
+#$% Called By: OLAUNC
+#$%
+#$% Calls:     XGLAUN     XGLOAD     XVLAUN
+#$%            XBLAUN
+#$%
+#$% Tables:    UNT
+#$%
+#$% Date:      APRIL 81
+#$%
+#$% Author:    DANA WILLS
+#$%
+########################################################
+BBcommon
+FltOpsCommon
+
+Integer IORDL,IORDE,IOK2,IOK,  # jb E2145  7/5/00
+        UNT2$Pointer           # jb E2145  7/5/00
+
+call xglaun (iordL)                             # get launch command info
+call xgload (iordE)                             # get load command info
+
+call xvlaun (unt2$pointer,iordL,iordE,iok2)     # validate launch
+
+if (iok2 == $yes)                               # build required entries
+   {
+    #$% build active table entries
+    call xblaun (unt2$pointer)
+    iok = $yes
+   }
+else
+   {
+    iok = $no
+   }
+
+return
+end
+
+ 
+
+
+subroutine xvlaun(unt2$pointer,iordL,iordE,iok) # validate launch 
+
+########################################################
+#$%
+#$% Purpose:   XVLAUN validates launch command
+#$%            parameters and calls a routine
+#$%            to validate LOAD parameters.
+#$%            The UNT2$pointer points to the Launch Platform (ship/base)
+#$%
+#$% Called By: XLAUNC
+#$%
+#$% Calls:     XVLOAD
+#$%
+#$% Tables:    UNT        DEQ        ACC
+#$%            
+#$%
+#$% Date:      APRIL 81
+#$%
+#$% Author:    DANA WILLS
+#$%
+#$% Modified:  Susan Miller - 12/97 (E1660)
+#$%            Convert jfuel to gallons before checking to 
+#$%            see if the launching platform has enough fuel
+#$%            to launch the flight.
+#$%
+#$%            Jim Allen - 11/02 (E2313)
+#$%            Make sure event names and force names are unique within view
+#$%
+########################################################
+BBcommon
+FltOpsCommon
+
+LITERAL UNT$Name$C,DEQ2$Type$C, CSTRIP8 # jb E2145  7/5/00
+REAL    UNT2$TNK$fuelremaining$F         # jb E2145  7/5/00
+Integer IORDL,IORDE,IOK,LOK,        # jb E2145  7/5/00
+    INDX,JFUEL,KKLEN,                    # jb E2145  7/5/00
+    UNT$Pointer,UNT$Type$I,              # jb E2145  7/5/00
+    DEQ2$Pointer,DEQ2$Ident$I,           # jb E2145  7/5/00
+    UNT2$Pointer,UNT2$TNK$Index,         # jb E2145  7/5/00
+    ACC$Pointer,AML$Pointer,             # jb E2145  7/5/00
+    SHC$Pointer, ORD$Pointer
+integer UNT2$Type$I # SMM 2/98 (E1930)
+Integer  Litcmp
+Character  msg[ARB]
+integer    last_OrdL, last_OrdE, game_dtg
+real       transit_time, que_time, launch_Rate,
+           new_itime, requested_time
+
+#$% set flag to No
+iok = $no
+
+#$% save message
+kklen = 0  
+Call SMOVHN(xunt2$name$c,$$MaxLit,msg,kklen)
+Call smovv(" cannot launch ",msg,kklen)
+Call SMOVHN(name,$$MaxLit,msg,kklen)
+Call smovv(" : ",msg,kklen)
+
+xlen = 0
+#$% move messages
+call smovh(msg,kklen,msgx,xlen)
+call smov ($tab,msgx,xlen)
+call smov (xlen-1,msgx,xlen)
+xsave = xlen                            # save length of error msg
+
+Lunt  = $no
+idup  = $no
+Ltop  = $no
+Etime = order$minute
+N_Airborne = 0
+last_OrdL  = iOrdL                      # do something with iOrdL (dew)
+last_OrdE  = iOrdE                      # do something with iOrdE (dew)
+
+#$% for each entry
+for (unt$pointer$first; still_valid(unt); unt$pointer$next) # 9/26/88
+   {
+    #$% if this slot not in use
+    if (Xunt$InUse$i == 0)
+       {
+        if (Lunt == $no) Lunt = unt$pointer     # save reference to empty UNT
+        next
+       }
+
+    # if we don't exclude deleted unt's here, we cannot launch/scramble
+    # with the same name until the next (recorded) minute   # dew
+    if (Xunt$status$i == $beingdeleted$code) next           # dew 10/6/00
+
+    unt$Name$c = Xunt$Name$c
+    unt$Type$i = Xunt$Type$i 
+
+    if (unt$Type$i == $air$code) N_Airborne = N_Airborne + 1
+
+    #$% if same name, flag Dup-error as YES
+#    if (LITCMP(name,unt$Name$c)==0) idup = $yes
+    if (LITCMP(cname, unt$Name$c) == 0) idup = $yes
+
+    #$ if force name and leader
+    if (cname != $no  & Xunt$Leader$i == $yes  & 
+        LITCMP(cname, Xunt$ForceName$c) == 0 )
+       {
+        Ltop = unt$pointer
+        if (unt$type$i == $air$code)
+            Etime = Xunt$TimeLaunched$f + 2.
+       }
+   }
+
+#$% if duplicate name
+if (idup == $yes)
+   {
+    #$% move message
+    call smovv ("  Duplicate Name.",msgx,xlen)
+   }
+
+if (idup == $no)
+   {
+    #$% Check for duplicate event name or force name within view  (E2313)
+
+    for (unt$pointer$first; still_valid(unt); unt$pointer$next)
+       {
+        if (Xunt$status$i == $beingDeleted$code) next
+
+        if (Xunt$view$i != Xunt2$view$i) next   # Must be in same view for dup
+
+        If (Xunt$GhostedUnit$i == $YES) next    # Can't give orders to ghosted
+
+        if (cname != $no)                       # Check for dup collective/mission
+           {
+            if ((LITCMP(cname, Xunt$ForceName$c) == 0 & ilead == $yes) |
+                LITCMP(cname, Xunt$Event$c)     == 0)
+               {
+                 idup = $yes
+                 break
+               }
+           }
+        #$% Check for duplicate event
+#        if (name != $no)
+#           {
+#            if (LITCMP(name,  Xunt$Event$c)     == 0 |
+#                LITCMP(name,  Xunt$ForceName$c) == 0)
+#               {
+#                 idup = $yes
+#                 break
+#               }
+#           }
+       }
+   }
+
+
+#$% if duplicate name
+if (idup == $yes)
+   {
+    call smovv ("  Duplicate Mission Number",msgx,xlen)
+    # Process mission as inflight ACO, if appropriate.
+    # ATO mission orders are routes.  This routine assumes orders in flight pln
+    #call infltmisn(unt2$pointer, unt$pointer, iordL)
+   }
+
+if (cname != $no)                       # if collective flight
+   {
+    if (ilead == $no)                  # if member
+       {
+        #$% move message
+        if (Ltop == 0) call smovv ("  Group leader missing.",msgx,xlen)
+       }
+   }
+
+Lacc = $no
+#$% for each equipment entry of the launch platform
+FOR_DEQ2_CHAIN
+   {
+    #$% if equipment ID is not aircraft, get next entry
+    deq2$Ident$i = Xdeq2$Ident$i 
+    if (deq2$Ident$i != $Aircraft$code) next
+    #$% if not same equipment type, get next entry
+
+    deq2$Type$c = Xdeq2$Type$c 
+    if (deq2$Type$c != itype) next
+    Lacc = Xdeq2$Pntr$i
+    break
+   }
+if (Lacc == $no)
+   {
+    #$% move message
+    call smovv  ("  ",msgx,xlen)
+    call smovhn (itype,$$MaxLit,msgx,xlen)
+    call smovv  (" are not on platform.",msgx,xlen)
+    return
+   }
+
+acc$pointer = Lacc
+
+#----------------------------------------
+# At this point:                                    # (E2206) dew
+#   Etime is the the current minute, or two minutes after the leader is launched 
+#   Possible is the minimum launch delay after the current minute....
+#   iTime, is the LAUNCH time requested on the command line (or the current minute)
+#
+# If EndTime is non-zero, need to figure time required to get to end of first route.
+# Otherwise, need to look for first non-zero ORD$PAT$i in the flight plan,
+# and adjust ITIME accordingly.
+#
+# if NO PAT's and no END, leave ITIME alone.
+#
+#----------------------------------------
+
+Que_time = 0.0
+Transit_time = 0.0
+Requested_Time = game$minute
+
+#------------------------------
+# Adjust for multiple A/C
+
+shc$pointer = Xunt2$SHCPntr$i
+Launch_Rate = Xshc$LaunchRate$F
+que_time = 0.0 
+if (Launch_Rate > 0.0)
+    que_time = iqty/Launch_rate
+
+#------------------------------
+# Adjust for END or first TOT/PAT
+
+ord$pointer = iOrdL
+if (xORD$DTGstart$i == $NO |    # If user did not enter DTG (i.e. AT <dtg> )
+    EndTime         != 0    )
+    {
+    call Compute_Launch_Delay (iORDL, unt2$pointer, acc$pointer,
+                               icours, ispeed, ialt, EndTime, 
+                               Requested_Time, Transit_Time)
+
+    iTime = max(iTime, Requested_Time)
+    }
+
+new_iTime = iTime - (que_time + Transit_Time)
+RqTime = New_itime
+#------------------------------
+#           (leader,      possible,                           asked for) # ETL
+
+Etime = max (Etime, float(order$minute + Xacc$LaunchDelay$i), new_itime)
+
+if (itime == Xord$Start$i)      # No PAT or AT in order
+    RqTime = Etime              # Avoid warning message of launch delay
+
+# if eTime > RqTime... then we cannot launch fast enough....
+# Send a message?                                               # DEW
+# How about if difference is > 20 minutes? 
+# [Message generated in XBLAUN]
+#------------------------------
+
+#$% if shorebase
+UNT2$Type$I = xUNT2$Type$I  # SMM 2/98 (E1930)
+if (unt2$type$i == $ShoreBase$code |
+    unt2$type$i == $Surface$code)
+   {
+    #$% set ACC pointer
+    acc$pointer = Lacc
+    #$% compute maximum fuel
+    jfuel = Xacc$MaxFuel$i * iqty   # in pounds (E1660)
+
+    #$% get fuel remaining
+    unt2$TNK$index = AviationFuelTank$Index     # JOA 2/96 (E1467)
+    unt2$TNK$FuelRemaining$f = Xunt2$TNK$FuelRemaining$f  # in gallons (E1660)
+
+    #$% if not enough fuel remaining            # JOA 2/96 (E1467)
+    #$% if not enough fuel remaining - convert pounds to gallons - smm 12/97 (E1660)
+    if(unt2$TNK$FuelRemaining$f < (jfuel/$Pounds$Per$Gallon))
+       {
+        #$% move message
+        call smovv ("  Insufficient fuel.",msgx,xlen)
+       }
+   }
+
+#$% verify equipment needed to load
+#$% bmb 6/93 - added acc$pointer, to load excess fuel (E1102)
+call xvload (unt2$pointer, -1, Lok, acc$pointer)
+
+#$% if unit table is full
+if (Lunt == $no)
+   {
+    #$% move message
+    call smovv ("  Unit table full.",msgx,xlen)
+   }
+
+#$% set flag to NO
+Ldyn = $no
+
+IF (N_Airborne >= Simultaneous$flights)
+   {
+    #$% move message
+    call smovv ("  Aircraft table full.",msgx,xlen)
+   }
+
+
+indx = unt2$pointer$index                       #find qty of aml entries
+xaml = 0
+#$% for each AML entry
+for (aml$pointer$first; still_ok(aml) ; aml$pointer$next) # 9/26/88
+   {
+    #$% if not on deck status, get next entry
+    if (Xaml$Status$i != $OnDeck$code) next
+
+    #$% if not owner index, get next entry
+    if (Xaml$OwnerIndx$i != indx) next
+
+    #$% if not aircraft characteristics, get next entry
+    if (Xaml$ACCPntr$i != Lacc) next
+
+    #$% if launch time exceeded
+    if (Xaml$TimeLaunch$f > (Etime) ) next
+
+    #$% increment AML counter
+    xaml = xaml + 1
+    #$% save AML pointer
+    Laml[xaml] = aml$pointer
+
+    #$% if entries exceeded, break loop
+    if (xaml >= iqty) break
+   }
+
+#$% if entries not exceeded
+if (xaml < iqty)
+   {
+    #$% move message
+    call smovv  ("  Only ",msgx,xlen)                 # jb    11/12/86
+    call smovi(xaml,msgx,xlen)                          # jb    11/12/86
+    call smovv  (" ",msgx,xlen)                       # jb    11/12/86
+    call smovhn (itype,$$MaxLit,msgx,xlen)
+    call smovv  (" aircraft available.",msgx,xlen)
+   }
+
+if (xsave == xlen) iok = $yes
+else if ( (eTime - RqTime) > 2)
+    {
+    # tell him if launch time is too late.....
+    # if eTime > RqTime... then we cannot launch fast enough....
+
+    call smov  ($tab,                   msgx,xlen)
+    call smov  (4,                      msgx,xlen)
+    call smov  ($return,                msgx,xlen)
+    call smovv ("Note: It is already ", msgx,xlen) 
+    call smovi (nint(etime - RqTime),   msgx,xlen)
+    call smovv (" minutes late for a",  msgx,xlen) 
+    call smovv (" requested launch at ",msgx,xlen) 
+    call smoviz(Game_DTG (RqTime), 6,   msgx,xlen)
+    }
+
+return
+end
+
+
+
+Subroutine infltmisn (unt2$pointer,  # Launching platform
+                     unt$pointer,   # in air flight
+                     iordL)         # ord$pointer to launch
+
+########################################################
+#$%
+#$% Purpose:   infltmisn determines if inflight mission
+#$%            determine resume point,
+#$%            and have flight execute rte
+#$%
+#$% Called By: XLAUNC
+#$%
+#$% Calls:
+#$%
+#$% Tables:    UNT
+#$%
+#$% Date:      Dec 08
+#$%
+#$% Author:    James Allen
+#$%
+########################################################
+BBcommon
+FltOpsCommon
+StationMsgCommon
+
+BBDeclare (ord$pointer, ord$sequence$i, ord$count$i, ord$code$i)
+BBDeclare (unt2$pointer, unt$pointer, rto$pointer, rto$wrd$index)
+BBDeclare (unt$TrueLatitude$f, unt$TrueLongitude$f, unt$CosTrueLat$f)
+BBDeclare (rte$pointer, rte$Name$c, acc$pointer)
+
+integer iordL, kk, ilen, rteindx, nargs, klen, id, nord
+integer i, npnts, iseq, icnt, iordresume, ionum, iview, ista
+real pntlat[100], pntlon[100], pntord[100]
+real minrng, tcos2, range, relbrg, bear, dms2rad
+
+Literal iinp[$order$array$size]
+Literal ilex[$order$array$size]
+literal cstrip8
+
+character msg[ARB]
+
+# The revised route is in the route table.
+# Now the ATO flight needs to resume at the current order number
+
+xsave = xlen
+
+call smovv ("  Duplicate Mission Number",msgx,xlen)
+
+# If mission in bingo state do not execute ACO
+if (Xunt$Status$i == $Bingo$code) return
+
+# If not ATO mission, do not replace flight plan
+if (atoid == 0) return
+
+# Task mission to execute route at resume position
+# FOR <addressee> RESUME (route name) <route-name>
+#                      (at order) <number> [ | SPEED <knots> ]
+#                      [ | BACK ] TIME <start-minute>;
+
+iordresume = 1          # Default is first order
+call fndordByName (Xunt$Name$c, ord$pointer)
+if (ord$pointer != 0)
+{
+    iOrdResume = Xord$sequence$i
+}
+
+ilex[1] = $lex$RESUME$
+ilex[2] = Xunt$ForceName$c
+ilex[3] = iOrdResume
+ilex[4] = $lex$SPEED$
+acc$pointer = Xunt$AccPntr$i
+ilex[5] = Xacc$CruiseSpeed$i
+nargs = 5
+ionum = resume$order
+id = 0
+call ORESUME(IONUM, UNT$POINTER, Nargs, ILEX, ID) 
+
+# Undo duplicate error message
+xlen = xsave
+
+#  message that mission executing ACO
+call smovv  (" executing revised inflight mission ", msgx, xlen)
+call smovhn (Xunt$ForceName$c, $$Maxlit, msgx, xlen)
+
+return
+end
+ 
+
+subroutine xblaun(unt2$pointer)                 # build required tables 
+
+########################################################
+#$%
+#$% Purpose:   XBLAUN calls routines needed
+#$%            to build the active units,
+#$%            position and maneuver, and
+#$%            dynamics tables entries re-
+#$%            quired to launch a flight.
+#$%
+#$% Called By: XLAUNC
+#$%
+#$% Calls:     XBLUNT     XBLDYN     XBLAML
+#$%
+#$% Tables:    UNT
+#$%
+#$% Date:      APRIL 81
+#$%
+#$% Author:    DANA WILLS
+#$%
+########################################################
+BBcommon
+FltOpsCommon
+
+integer  Game_DTG,
+    UNT2$Pointer, RPM$Pointer   # jb E2145  7/5/00
+real Otime
+
+Otime = max(etime, Xunt2$FltsOKTime$f)
+xlen = 0
+Call smovhn(cname,$$MaxLit,msgx,xlen)    
+call smovv (" ET launch is ",msgx,xlen) 
+call smoviz(Game_DTG (Otime),  6,msgx,xlen)             ## 4/11/83 tpa
+if (Otime > etime)                              # Fltops close delay
+{
+    call smovv (" including fltops closed delay min ",msgx,xlen)
+    call smovi (int(Otime-etime),msgx,xlen)
+} 
+
+#$% move message
+call smovv (".  ",msgx,xlen)
+
+if ((etime - RqTime) > 2)                       # (E2206) dew
+    {
+    # if eTime > RqTime... then we cannot launch fast enough....
+    # How about if difference is > 20 minutes? 
+
+    call smov  ($return,                msgx,xlen)
+    call smovv ("This supercedes requested launch time of ",msgx,xlen) 
+
+    call smoviz(Game_DTG (RqTime), 6,   msgx,xlen)
+    call smovv (" (",                   msgx,xlen) 
+    call smovi (nint(etime - RqTime),   msgx,xlen)
+    call smovv (" min late).",          msgx,xlen) 
+    }
+
+call xblunt (unt2$pointer)                      # init unt/pos entries
+
+call xbldyn (unt2$pointer)                      # init dyn entry
+
+call Build_AML_Entries (iqty,Laml,$yes)         # init aml entries
+
+call getrpm(Lunt,rpm$pointer)
+call seturp(Lunt,rpm$pointer)                   # init reporting policy
+
+return
+end
+
+
+subroutine xblunt(xunt2)            # build unt/pos entries
+########################################################
+#$%
+#$% Purpose:   XBLUNT builds active units table
+#$%            or position and maneuver table
+#$%            entries required to construct a
+#$%            flight for launch.
+#$%
+#$% Called By: XBLAUN
+#$%
+#$% Calls:     Build_Unit_Table_For_AC
+#$%
+#$% Tables:    UNT        ACC
+#$%
+#$% Date:      APRIL 81
+#$%
+#$% Author:    DANA WILLS
+#$%
+#$% Modified:  Jim Allen - 11/95 (E1422)
+#$%            For terrain processing: 1) Set the initial
+#$%            altitude to be the elevation of the base
+#$%            or 100 feet (for ships).  2) Init the
+#$%            AltAboveGround field to zero.
+#$%
+#$%            James Allen - 2/96 (E1467)
+#$%            Put in a call to new routine to 
+#$%            handle setting of remaining fuel.
+#$%
+#$%            Susan Miller 3/97 (E1746)
+#$%            Moved part of subroutine into new subroutine
+#$%            Build_Unit_Table_For_AC, so it could be reused
+#$%            be CREATE AIRCRAFT command processing.
+#$%
+#$%            Susan Miller 5/97 (E1660)
+#$%            Changed fuel amount from pounds (unit storage
+#$%            in ACC table and UNT for aircraft) to gallons 
+#$%            (unit storage in UNT table for ship or shore) 
+#$%            before call to TNK_adjust_fuel_remaining.
+#$%
+########################################################
+BBcommon
+FltOpsCommon
+character atoidc[8]
+equivalence (atoid, atoidc)
+
+BBDeclare (unt$atoid$c)
+character untatoidc[8]
+equivalence (unt$atoid$c, untatoidc)
+
+LITERAL    UNT$Forcename$C              # jb E2145  7/5/00
+real fuel_amount     # in gallons - smm 12/97 (E1660)
+real real_course, real_speed
+REAL UNT$Guiderange$F,UNT$Costruelat$F,  # jb E2145  7/5/00
+                     UNT$Rangetonext$F   # jb E2145  7/5/00
+integer xunt2
+integer UNT2$Pointer, UNT$Pointer, ACC$Pointer
+integer launch,  UNT2$Type$I,              # jb E2145  7/5/00
+    UNT$Launchordid$I,UNT$Truealtdepth$I,  # jb E2145  7/5/00
+    UNT$Guideindx$I, UNT$Leader$I,         # jb E2145  7/5/00
+    UNT$Orderedaltdepth$I,UNT$TNK$Index    # jb E2145  7/5/00
+integer kk
+
+character my_missn[9]
+
+UNT2$Pointer = xunt2
+UNT$Pointer = Lunt
+ACC$Pointer = Lacc
+launch = $yes
+
+real_course = icours * $pi/180.0
+real_speed = FLOAT(ispeed)
+call Build_Unit_Table_For_AC (UNT2$Pointer, UNT$Pointer, ACC$Pointer,
+                              launch, name, Etime, real_speed, real_course,
+                              0)        
+
+UNT$LaunchOrdId$I = Lid                         #enter order id
+putUNT$LaunchOrdId$I
+
+if (xUNT2$Type$I == $SurfaceWithAC$Code)       # if not a base    joa 11/95 (E1422)
+    UNT$TrueAltDepth$I = 100                   # use previous default of 100 feet
+else
+    UNT$TrueAltDepth$I = xUNT2$TrueAltDepth$I  # use the altitude of base
+putUNT$TrueAltDepth$I
+putUNT$AltAboveGround$I  (0)
+
+unt$OrderedAltDepth$i = ialt                    #enter ordered altitude
+PUTunt$OrderedAltDepth$i
+
+unt$CosTrueLat$f = Xunt2$CosTrueLat$f           #enter cosine of latitude
+PUTunt$CosTrueLat$f
+
+unt$RangeToNext$f = 200.0                       #initialize 200 mile departure
+PUTunt$RangeToNext$f
+
+unt2$Type$i = Xunt2$Type$i
+if (unt2$Type$i == $ShoreBase$code |
+    unt2$type$i == $SurfaceWithAC$code |
+    unt2$type$i == $Surface$code)
+   {
+    #$% compute fuel remaining
+    # convert pounds of remaining fuel to gallons SMM 5/97 (E1660) for
+    # launching platform.
+    fuel_amount = (xACC$MaxFuel$I * iqty*(-1.))/$Pounds$Per$Gallon
+    call TNK_adjust_fuel_remaining(unt2$pointer,
+                                  AviationFuelTank$Index, fuel_amount)
+   }
+unt$TNK$index = AviationFuelTank$Index
+# don't convert pounds of remaining fuel to gallons (smm 12/97 (E1660)) for
+# a/c being launched (fuel for a/c stored in pounds in UNT table)
+call TNK_adjust_fuel_remaining(unt$pointer,
+                               AviationFuelTank$Index,
+                               (Xacc$MaxFuel$i-Xunt$TNK$FuelRemaining$f))
+
+if (cname != 0)                                 # if a collective flight
+   {
+    if (ilead == $yes)                          #    Leader
+       {
+        unt$Leader$i = $yes
+        PUTunt$Leader$i
+       }
+    else                                        #    Member
+       {
+        #$% set guide index
+        unt2$pointer = LTOP
+        unt$GuideIndx$i = unt2$pointer$index
+        PUTunt$GuideIndx$i
+
+        #$% set guide range
+        unt$GuideRange$f = 0.0
+        PUTunt$GuideRange$f
+       }
+
+    #$% set force name
+    unt$ForceName$c = cname
+    PUTunt$ForceName$c
+   }
+
+kk = 0
+call smovv (" ", unt$ATOID$c, kk)
+if (atoid != 0)
+{
+	PUTunt$ATOIDName$c(atoid)
+	# Determine if auot ATO mission by presence of atoid and EndTime and
+    # Mission number ends with letter(a-z)
+    kk = 0
+    call smovhn (missn, $$MaxLit, my_missn, kk)
+    if (EndTime != 0 & kk > 0)
+    {
+        if (my_missn[kk] >= $LETA & my_missn[kk] <= $LETZ)
+            untATOIDc[1] = my_missn[kk]
+    }
+}
+
+PUTunt$ATOID$c
+
+return
+end
+
+
+
+
+subroutine xbldyn (unt2$pointer)                # build dyn entry 
+
+########################################################
+#$%
+#$% Purpose:   XBLDYN builds dynamic table entries
+#$%            required to construct a flight for
+#$%            launch.
+#$%
+#$% Called By: XBLAUN     
+#$%
+#$% Calls:     XBLEQ      Create_AC_EQ_Entry
+#$%
+#$% Tables:    UNT        ACC
+#$%
+#$% Date:      APRIL 81
+#$%
+#$% Author:    DANA WILLS
+#$%
+#$% Modified:  Carol Kropp - 10/94
+#$%            Added call to Init_C2_Flight_Mission_History
+#$%            to begin the mission history for the WPC
+#$%            C2 System Interface.
+#$%
+#$%            Carol Kropp - 12/96 (E1724)
+#$%            Init_C2_Flight_Mission_History changed to
+#$%            Init_Air_Mission_History.
+#$%
+#$%            Susan Miller - 2/97 (E1746)
+#$%            Moved code pertaining to the equipment list
+#$%            of the new unit into subroutine Create_AC_EQ_Entry
+#$%            for reuse when processing CREATE AIRCRAFT commands.
+#$%
+########################################################
+BBcommon
+FltOpsCommon
+
+LITERAL UNT$Event$C                             # jb E2145  7/5/00
+Integer UNT$Pointer,UNT$Recoverindx$I,          # jb E2145  7/5/00
+    UNT$Launchindx$I,UNT$Accpntr$I,             # jb E2145  7/5/00
+    UNT$Nbrac$I,UNT$Nbractot$I,UNT$Nbracsf$I,   # jb E2145  7/5/00
+    UNT2$Pointer,AML$Pointer,ACC$Pointer        # jb E2145  7/5/00
+
+UNT$Pointer = Lunt  
+
+unt$NbrAc$i = 0                                 #initialize # of ac in flt = 0
+putunt$NbrAc$i
+
+acc$pointer = Lacc
+unt$accpntr$i = Lacc                            #enter characteristics pntr
+putunt$accpntr$i
+
+unt$launchindx$i = unt2$pointer$index           #enter launch platform index
+putunt$launchindx$i
+
+unt$recoverindx$i = unt$LaunchIndx$i            #enter recover platform index
+PUTunt$recoverindx$i
+
+unt$event$c = name                              #set air event number
+putunt$event$c
+
+unt$NbracTot$i = iqty                           #enter # of ac requested
+putunt$NbrAcTot$i
+
+unt$nbracsf$i = 0                               #initialize # of sys fail = 0
+putunt$nbracsf$i
+
+#$% set AML index
+aml$pointer = Laml[1]
+
+call Create_AC_EQ_Entry (ACC$Pointer, UNT$Pointer, AML$Pointer)# SMM 3/97 (E1746)
+
+call xbleq (unt2$pointer)                       # transfer eq from ship to flt
+
+call Init_Air_Mission_History (UNT$Pointer, 0)
+
+return
+end
+
+ 
+
+
+subroutine xbleq (unt2$pointer)                 # transfer equip to flight 
+
+########################################################
+#$%
+#$% Purpose:   XBLEQ transfers the equipment
+#$%            needed to load a flight from
+#$%            the launch platform or base
+#$%            to the flight.
+#$%
+#$%            UNT2 points to ship/base launching
+#$%            Lunt points to Flight
+#$%
+#$% Called By: XLOAD       SBLDYN
+#$%
+#$% Calls:     None
+#$%
+#$% Tables:    UNT
+#$%
+#$% Date:      APRIL 81
+#$%
+#$% Author:    DANA WILLS
+#$%
+#$% Modified:  James Allen - 2/96 (E1467)
+#$%            Replaced variable unt$FuelRemaining$f with 
+#$%            unt$TNK$FuelRemaining$f and added in unt$TNK$Index.
+#$%            Put in a new routine call to handle management 
+#$%            of remaining fuel.
+#$%
+#$%            Carol Kropp - 6/96 (E1613)
+#$%            The fuel amount in the call to TNK_adjust_fuel_remaining
+#$%            for the aircraft was sent as an integer but the routine
+#$%            is expecting a real.
+#$%
+#$%            Susan Miller 5/97 (E1660)
+#$%            Changed fuel amount from pounds (unit storage
+#$%            in ACC table and UNT for aircraft) to gallons 
+#$%            (unit storage in UNT table for ship or shore) 
+#$%            before call to TNK_adjust_fuel_remaining.
+#$%
+########################################################
+BBcommon
+FltOpsCommon
+
+literal wname
+BBDeclare (bom$pointer)
+real fuel_amount                      # in gallons - smm 12/97 (E1660)
+integer  new_fuel_amt, old_fuel_amt   # bmb 6/93 (E1102)
+Integer IOVER,IPNT,                # jb E2145  7/5/00
+    UNT$Pointer,UNT$TNK$Index,     # jb E2145  7/5/00
+    DEQ$Pointer,DEQ$Ident$I,       # jb E2145  7/5/00
+    DEQ$Pntr$I,DEQ$Remaining$I,    # jb E2145  7/5/00
+    DEQ2$Pointer,DEQ2$Remaining$I, # jb E2145  7/5/00
+    UNT2$Pointer,UNT2$Type$I,      # jb E2145  7/5/00
+    ACC$Pointer                    # jb E2145  7/5/00
+
+UNT$Pointer = Lunt
+ACC$Pointer = Lacc    # bmb 6/93 (E1102)
+
+## we will probable need a UNT$Pointer input parameter indicating ship/
+## shorebase
+
+# Free/Clear any equipment items with Zero quantities
+FOR_DEQ_CHAIN
+    {
+    if (Xdeq$Logistical$i == $YES &
+        XDEQ$Remaining$i == 0    )  PUTDEQ$Ident$i ($null$code)
+    }
+
+new_fuel_amt = 0         # bmb 6/93 (E1102)
+unt$TNK$Index = AviationFuelTank$Index          # joa - 2/96 (E1467)
+old_fuel_amt = xUNT$TNK$FuelRemaining$f - xACC$MaxFuel$I
+
+iover = $no                                     # init overloaded flag
+for (ipnt = 1; ipnt <= loadc; ipnt = ipnt + 1)
+   {
+    if (nload [ipnt] == 'FUEL' | nload [ipnt] == 'JP')
+      {
+       new_fuel_amt = iload [2,ipnt]
+       next
+      }
+
+    if (iload[3,ipnt] == -1)
+    {
+        wname = 'NOWEAP'
+        bom$pointer = 0
+        call tblfind ($$BOM, wname, bom$pointer)
+        deq2$pointer$to deq$first$free
+        putdeq2$ident$i ($bomb$code)
+        putdeq2$pntr$i (bom$pointer)
+    }
+    else
+        deq2$Pointer$To iload[3,ipnt]  # get launch platform eq pointer
+
+    call get_deq_entry ( UNT$Pointer, DEQ$Pointer )
+
+    #$% if no DEQ slots
+    IF ( DEQ$Pointer == 0 ) 
+        {
+        #$% set over to YES
+        iover = $yes
+        break
+        }
+    #$% get equipment ID
+    deq$Ident$i = Xdeq2$Ident$i
+    PUTdeq$Ident$i
+
+    #$% load equipment remaining
+    deq$Remaining$i = iload[2,ipnt]
+    PUTdeq$Remaining$i
+
+    PUTdeq$Logistical$i ($YES)            # flag this as traceable
+
+    #$% compute equipment remaining on platform
+    if(deq$Ident$i != $CHAFF$Code)        # jb        8/1/90
+       {
+        deq2$Remaining$i = Xdeq2$Remaining$i - iload[2,ipnt]
+        if (deq2$Remaining$i < 0) deq2$Remaining$i = 0
+        PUTdeq2$Remaining$i
+       }
+
+    #$% get equipment pointer
+    deq$Pntr$i = Xdeq2$Pntr$i
+    PUTdeq$Pntr$i
+   }
+
+if (new_fuel_amt != 0 | old_fuel_amt != 0)  # if excess fuel load (E1102)
+  {
+   unt2$type$i = Xunt2$type$i
+   if (unt2$Type$i == $ShoreBase$code |
+       unt2$type$i == $Surface$code    |
+       unt2$type$i == $SurfaceWithAC$code)
+       {
+        #$% compute fuel remaining
+        # convert pounds of remaining fuel to pounds for
+        # launching platform.    # SMM 12/97 (E1660) 
+        fuel_amount = (((new_fuel_amt - old_fuel_amt) * iqty)*(-1.))/$Pounds$Per$Gallon
+        call TNK_adjust_fuel_remaining(unt2$pointer,
+                                  AviationFuelTank$Index, fuel_amount)
+       }
+
+   # don't convert pounds of remaining fuel to gallons
+   # for a/c being launched.     # SMM 12/97 (E1660) 
+   call TNK_adjust_fuel_remaining(unt$pointer,
+                                  AviationFuelTank$Index,
+                                  Float(new_fuel_amt - old_fuel_amt))
+  }
+
+#$% if overloaded
+if (iover == $yes)
+   {
+    #$% move message
+    call smovv ("  Overloaded.",msgx,xlen)
+   }
+
+return
+end
+
+ 
+
+
+Subroutine Build_AML_Entries (_
+                Number_of_ac,
+                save_AML,
+                launch)    # $yes if launching a/c
+########################################################
+#$%
+#$% Purpose:   Build_AML_Entries builds Air Maintenance
+#$%            Log entries.
+#$%
+#$% Called By: XBLAUN   process_ac_data_for_create
+#$%
+#$% Calls:     None
+#$%
+#$% Tables:    AML
+#$%
+#$% Date:      APRIL 81
+#$%
+#$% Author:    DANA WILLS
+#$%
+#$% Modified:  Susan Miller 3/97 (E1746)
+#$%            Changed name from xblaml, added parameters 
+#$%            and removed common block so it could be called 
+#$%            from process_ac_data_for_create.
+#$%
+########################################################
+BBcommon
+
+real     AML$SystemFail$F
+integer  Number_of_ac, save_AML[200], launch
+integer  loop_pointer, AML$Pointer, AML$Status$I, AML$NextIndx$I
+
+ #$% set AML next index to zero
+ AML$NextIndx$i = 0
+
+ #$% for each entry
+ for (loop_pointer = Number_of_ac; loop_pointer >= 1;
+                                   loop_pointer = loop_pointer - 1)
+    {
+     AML$Pointer = save_AML[loop_pointer]
+ 
+     #$% store AML next index
+     putAML$NextIndx$I
+
+     #$% set assigned status
+     if (launch == $yes)        # SMM 3/97 (E1746)
+         AML$Status$I = $Assigned$Code
+     else 
+         AML$Status$I = $InFlight$Code
+     putAML$Status$I
+
+     #$% set system failure to zero
+     AML$SystemFail$F = 0
+     putAML$SystemFail$F
+
+     #$% set AML next index
+     AML$NextIndx$I = AML$Pointer$Index
+    }
+
+return
+end
+
+ 
+
+
+
+Subroutine RECONN(unt$pointer)                  #store reconnaissance data 
+
+########################################################
+#$%
+#$% Purpose:   RECONN processes and stores data
+#$%            obtained from a reconnaissance
+#$%            mission.
+#$%
+#$% Called By: ORECON
+#$%
+#$% Calls:     SEND
+#$%
+#$% Tables:    UNT        RCN
+#$%            SHC
+#$%
+#$% Date:      APRIL 81
+#$%
+#$% Author:    DANA WILLS
+#$%
+#$% Modified:  James Allen - 2/96 (E1467)
+#$%            Replaced one variable with two different ones.
+#$%
+########################################################
+BBcommon
+
+LITERAL     CSTRIP8                               # jb E2145  7/5/00
+REAL  RCN$Reconntime$F,RCN$Shipfueldamage$F,      # jb E2145  7/5/00
+    RCN$Aviationfueldamage$F,RCN$Storedamage$F,   # jb E2145  7/5/00
+    RCN$Latitude$F, RCN$Longitude$F,              # jb E2145  7/5/00
+    RCN$Topsidedamage$F,RCN$Samdamage$F           # jb E2145  7/5/00
+Integer IUNDEX, KKLEN,                            # jb E2145  7/5/00
+    UNT$Pointer, UNT$Attackindx$I,                # jb E2145  7/5/00
+    RCN$Pointer, RCN$Reconnunit$I,                # jb E2145  7/5/00
+    RCN$Nbrac$I,RCN$Course$I,RCN$Sinking$I,       # jb E2145  7/5/00
+    RCN$Speed$I,RCN$View$I,RCN$Targetcode$I,      # jb E2145  7/5/00
+    UNT2$Pointer, UNT2$Type$I,                    # jb E2145  7/5/00
+    AML$Pointer,  AML$Status$I                    # jb E2145  7/5/00
+Character msg[ARB]
+
+unt2$pointer$to xunt$attackindx$i
+
+unt$attackindx$i = $NO          #remove attack guide
+putunt$attackindx$i
+
+#$% for each reconn entry
+for (rcn$pointer$first;still_valid(rcn);rcn$pointer$next) # 9/26/88
+   {
+    if (xrcn$ReconnUnit$i == 0)  break      #find empty slot in RCN
+   }
+
+if (!rcn$pointer$valid)                     #if no room in table
+   {
+    #$% move message to array for display
+    kklen = 0 
+    Call SMOVHN(xunt$name$c,$$MaxLit,msg,kklen)
+    call SMOVV (" cannot carry out reconnaissance ", msg, kklen)
+    call smovv ("mission -- array full.", msg, kklen)
+
+    #$% display message
+    call send_(xunt$view$i,0,kklen,msg)
+
+    return
+   }
+
+#$% set reconn unit
+rcn$ReconnUnit$i = unt$pointer$index
+putrcn$ReconnUnit$i
+
+#$% get view
+rcn$View$i = Xunt$View$i
+putrcn$View$i
+
+#$% set reconn type
+rcn$ReconnTime$f = game$time
+putrcn$ReconnTime$f
+
+putrcn$ReportStatus$i (0)
+
+iundex = unt2$pointer$index
+
+#$% get platform type
+unt2$type$i = xunt2$type$i
+
+#$% zero airborne aircraft
+rcn$NbrAC$i = 0
+
+#$% for each AML entry
+for (aml$pointer$first;still_ok(aml);aml$pointer$next) # 9/26/88
+   {
+    #$% if owner index is not unit, get next entry
+    if (xaml$OwnerIndx$i != iundex)  next
+
+    #$% get AML status
+    aml$status$i = xaml$status$i
+
+    #$% if on deck status or assigned status
+    if (aml$status$i == $OnDeck$code |
+        aml$status$i == $Assigned$code)
+       {
+        #$% increment reconn counter
+        rcn$NbrAc$i = rcn$NbrAc$i + 1
+       }
+   }
+
+putrcn$NbrAC$i                                      #parked aircraft
+
+putRCN$TgtPntr$i (Xunt2$ShcPntr$i)                  # 3/30/89 DEW
+
+if (unt2$type$i == $shorebase$code)                 #if shorebase
+   {
+#    rcn$base$i = $yes
+#    putrcn$base$i
+    rcn$TargetCode$i = $BaseRecon$Code    # jb            2/24/92
+    putrcn$TargetCode$i
+
+    rcn$SAMDamage$f = xunt2$SAMDamage$f               #% SAM sites damaged
+    putrcn$SAMDamage$f
+
+    rcn$ShipFuelDamage$f = xunt2$ShipFuelDamage$f             #% fuel lost
+    putrcn$ShipFuelDamage$f
+
+    rcn$AviationFuelDamage$f = xunt2$AviationFuelDamage$f     #% fuel lost
+    putrcn$AviationFuelDamage$f
+
+    rcn$StoreDamage$f = xunt2$StoreDamage$f           #% stores lost
+    putrcn$StoreDamage$f
+   }
+else if (unt2$type$i == $surface$code |             #if ship
+#        unt2$type$i == $surfacewithac$code |
+         unt2$type$i == $sub$code)
+   {
+##    unt2$pointer$to iundex        
+    rcn$TargetCode$i = $ShipRecon$Code    # jb            2/24/92
+    putrcn$TargetCode$i                   # jb            2/24/92
+
+    rcn$latitude$f = xunt2$truelatitude$f           #ship latitude
+    putrcn$latitude$f
+
+    rcn$longitude$f = xunt2$truelongitude$f         #ship longitude
+    putrcn$longitude$f
+
+    if (xunt2$status$i == $sinking$code)
+       {
+        rcn$sinking$i = $yes                        #sinking
+        putrcn$sinking$i
+       }
+    else
+       {
+        rcn$topsidedamage$f = xunt2$topsidedamage$f  #comm/sensors
+        putrcn$topsidedamage$f
+
+        rcn$course$i = xunt2$truecourse$f * (180./$pi)  #ship course
+        putrcn$course$i
+
+        rcn$speed$i = xunt2$truespeed$f + .5        #ship speed
+        putrcn$speed$i
+       }
+   }
+
+if (rcn$pointer > rcn$last)
+    rcn$last$to rcn$pointer + rcn$entry - 1
+
+return
+end
+
+
+
+
+Subroutine REPRCN(RCN$Pointer)                  #report reconnaissance data 
+
+########################################################
+#$%
+#$% Purpose:   REPRCN formats and outputs messages
+#$%            in the form of reconnaisance data
+#$%            reports.
+#$%
+#$% Called By: FLRCNN
+#$%
+#$% Calls:     None
+#$%
+#$% Tables:    UNT        RCN
+#$%
+#$% Date:      APRIL 81
+#$%
+#$% Author:    DANA WILLS
+#$%
+########################################################
+BBcommon
+
+Integer RCN$Pointer,RCN$Reportstatus$I,  # jb E2145  7/5/00
+    UNT$Pointer, UNT$Reportreconn$I      # jb E2145  7/5/00
+
+rcn$ReportStatus$I = $NeedsReport$code
+PUTrcn$ReportStatus$I                   #$% set report-status flag
+
+unt$pointer$to xrcn$ReconnUnit$i        #$% set UNT pntr to recon unit
+
+unt$ReportReconn$i = $yes
+PUTunt$ReportReconn$i                   #$% set REPORT RECONN flag
+
+return
+end
+
+
+
+
+
+ Subroutine ORECON(IONUM,                              #receive order number 
+                   UNT$POINTER,                        #receive unit pointer
+                   IWORD,                              #receive word count
+                   ILEX,                               #receive command string
+                   id)
+
+ #######################################################
+ #$%
+ #$% Purpose:   ORECON processes RECONN orders
+ #$%            used to direct a flight RECONN
+ #$%            a platform or base.
+ #$%
+ #$% Called By: EXEORD
+ #$%
+ #$% Calls:     FNDORD     RECONN     BINGO
+ #$%            SEND       GTACT      VECTOR
+ #$%
+ #$% Tables:    UNT        ORD        
+ #$%            RMT
+ #$%
+ #$% Date:      APRIL 81
+ #$%
+ #$% Author:    DANA WILLS
+ #$%
+ #$% Modified:  James Allen - 12/97 (E1370)
+ #$%            Added call to clear_maneuver_all after
+ #$%            the order is validated.
+ #$%
+ #######################################################
+BBcommon
+
+Literal ILEX[20], UNT$Name$C, CSTRIP8   # jb E2145  7/5/00
+REAL    UNT$Attackrange$F               # jb E2145  7/5/00
+REAL    ican # jb E2208 (VECTOR now exects a real)  9/27/00
+Integer IWORD,ID,IBONLY,IFOUND,         # jb E2145  7/5/00
+    JJ,IONUM,KKLEN,                # jb E2145  7/5/00
+    UNT$Pointer,UNT$Rulesofengage$I,    # jb E2145  7/5/00
+    UNT$View$I,UNT$Mission$I,UNT$Status$I, # jb E2145  7/5/00
+    UNT$Attackindx$I,UNT$Attacktrue$I,  # jb E2145  7/5/00
+    ORD$Pointer,ORD$Phase$I,ORD$Unit$I, # jb E2145  7/5/00
+    UNT2$Pointer, RMT$Pointer           # jb E2145  7/5/00
+Integer  LCOMP          # jb AAI01/LCOMP     E2145  2/13/01
+Character msg[ARB]
+#String msg1 "      cannot perform reconn mission" 
+#String msg2 "      can't reconn invalid track number      " 
+#String msg4 "       cannot reconn invalid base name       " 
+#String msg5 "       cannot reconn non-surface track       " 
+#String msg8 "      cannot reconn old track         "    #       5/5/83
+
+ UNT$VIEW$I = XUNT$VIEW$I                       #get reconn view
+
+ UNT$NAME$C = XUNT$NAME$C                       #get unit name
+
+ call fndord (id,ord$pointer)                   # find the order in ORD
+
+ if (ord$pointer == 0)  return
+ if (iword < 2)  return                         # do something with IWORD... dew
+
+ if (xord$phase$i == 1)                         #if on the way
+    {
+     #$% Substract 0.01 for VTS purpose sice roundoff affects test -JFR 7/14/94
+     if ( game$time < order$minute - 0.01) return    # process only once per min
+
+     #$% if attack index is not order or mission is not reconn
+     if (xunt$attackindx$i != xord$unit$i |
+         xunt$mission$i    != $reconn$code)
+        {
+         $debugf if (trace$fltops$rcn != $no)
+         $debugf    {
+         $debugf     call echor
+         $debugf     call echov  ('^')
+         $debugf     call echohn(xunt$Name$c,$$MaxLit)
+         $debugf     call echov(" giving up on recon target ")
+         $debugf     UNT2$Pointer$To xORD$Unit$I
+         $debugf     call echohn(xUNT2$Name$C,$$MaxLit)
+         $debugf    }
+
+         ord$phase$i = 0                        #kill order
+         PUTord$phase$i
+
+         return
+        }
+     if (xunt$status$i == $OnGuide$Code)
+        {
+         call reconn(unt$pointer)
+
+         ord$phase$i = 0                        #kill order
+         PUTord$phase$i
+
+         #$% if order count is order sequence
+         if (xord$count$i == xord$sequence$i)
+             call bingo(unt$pointer)
+
+         return
+        }
+	return
+    }
+ if(xUNT$Type$I != $AIR$CODE)                 #if not flight
+   {
+    kklen = 0
+    Call SMOVHN(UNT$NAME$C,$$MaxLit,MSG,kklen)          #insert name in message
+    Call SMOVV(" cannot perform recon mission",MSG,kklen) # jb E2145 7/5/00
+
+    call send_(UNT$VIEW$I,                         #pass player view index
+              0,                                  #status message flag
+              kklen,                                 #message length
+              MSG)               #message address # jb E2145 7/5/00
+
+    return
+   }
+
+ if(ILEX[2] == $LEX$BASE$)                      #if reconn a base
+   {
+    #$% set found to NO
+    ifound = $no
+
+    #$% for each entry
+    for(unt2$pointer$first;still_ok(unt2);unt2$pointer$next) # 9/26/88
+      {
+       #$% if right name, type is shorebase
+       if (LCOMP(xUNT2$Name$C, ilex[3]) == 0 &   # jb AAI01/LCOMP    2/13/01
+          xUNT2$Type$I == $Shorebase$Code )
+         {
+          #$% set flag to YES
+          ifound = $yes
+          break
+         }
+      }
+
+    #$% if not found
+    if(ifound == $no)
+      {
+       #$% move message to array for display
+       kklen = 0 
+       Call SMOVHN(unt$name$c,$$MaxLit,msg,kklen)
+       Call SMOVV(" cannot recon invalid base name ",msg,kklen)
+       Call SMOVHN(ilex[3],$$MaxLit,msg,kklen)
+
+       #$% display message
+       call send_(unt$view$i,0,kklen,msg)
+       return
+      }
+   }                                            #end if at base
+ else                                           #if at track
+   {
+    rmt$pointer = 0                             # set track pointer to zero
+
+    call gtact(unt$view$i,                      #locate the track
+               ILEX[2],                         #pass track number
+               rmt$POINTER,                     #receive pointer
+               ibonly)
+
+    if(rmt$pointer == 0)                       #if invalid track number
+      {
+       #$% move message to array for display
+       kklen = 0  
+       Call SMOVHN(unt$name$c,$$MaxLit,msg,kklen)
+       Call SMOVV(" can't recon invalid track number ",msg,kklen)
+       Call SMOVHN(ilex[2],$$MaxName,msg,kklen) # SMM 10/99 E2141
+
+       #$% display message
+       call send_(unt$view$i,0,kklen,msg)
+       return
+      }
+
+    else if(ibonly == $yes)     # ELSEif track is not active    5/5/83
+      {
+       #$% move message to array for display
+       kklen = 0  
+       Call SMOVHN(unt$name$c,$$MaxLit,msg,kklen)
+       Call SMOVV(" cannot recon inactive track ",msg,kklen)
+       Call SMOVHN(ilex[2],$$MaxName,msg,kklen) # SMM 10/99 E2141
+
+       #$% display message
+       call send_(unt$view$i,0,kklen,msg)
+       return
+      }
+
+    else if(xrmt$class$i != $surface$code) #ELSEif track not surf.5/5/83
+      {
+       #$% move message to array for display
+       kklen = 0  
+       Call SMOVHN(unt$name$c,$$MaxLit,msg,kklen)
+       Call SMOVV(" cannot recon non-surface track ",msg,kklen)
+       Call SMOVHN(ilex[2],$$MaxName,msg,kklen) # SMM 10/99 E2141
+
+
+       call send_(unt$view$i,0,kklen,msg)
+       return
+      }
+
+                                        # else if track is OLD  5/5/83
+    else if( xrmt$LastDetTime$f + Minutes$to$Old < Game$Time )
+      {
+       jj = 0
+       call smovhn(UNT$NAME$C,$$MaxLit,msg,jj) # move data to msg for display
+       Call SMOVV(" cannot recon old track ",msg,jj)
+       call smovhn(ilex[2],$$MaxName,msg,jj) # SMM 10/99 E2141
+       call send_(unt$view$i,0,jj,msg)  #$% send msg to view for display 
+       return
+      }
+
+    UNT2$Pointer$To xRMT$Detectee$I             ## 6/1/83
+
+    ican = NO
+    call VECTOR(unt$pointer,rmt$pointer,ican)   #start toward intercept
+   }
+
+ call clear_maneuver_all (ionum, id, xUNT$View$I, UNT$Pointer)
+
+ ord$phase$i = 1
+ PUTord$phase$i
+
+ #$% set rules of engage to if attacked
+ ORD$Unit$i = unt2$pointer$index
+ PUTord$unit$i
+
+ UNT$RULESOFENGAGE$I = $IFATTACKED$CODE
+ PUTUNT$RULESOFENGAGE$I
+
+ UNT$MISSION$I = $RECONN$CODE                   #Set mission as reconnaissance
+ PUTUNT$MISSION$I
+
+ UNT$ATTACKINDX$I = ord$unit$i                  #assign target as attack guide
+ PUTUNT$ATTACKINDX$I
+
+ unt$status$i = $Proceeding$code                # get him to move....
+ PUTunt$status$i
+
+ unt$ATTACKRANGE$F = 0.0                        #close up
+ PUTunt$ATTACKRANGE$F
+
+ unt$ATTACKTRUE$I = $NO                         #relative bearing attack
+ PUTunt$ATTACKTRUE$I
+ PUTunt$ATTACKbearing$F ($PI)           #       9/14/83
+
+ return
+ end
+
+ 
+Subroutine clonac (unt2$pointer,                # clone flight 
+                   aml2$pointer,                # to include one side number
+                   unt$pointer)                 # return new unit
+
+########################################################
+#$%
+#$% Purpose:   CLONAC duplicates a flight to
+#$%            include one side number and
+#$%            returns to new unit.
+#$%
+#$% Called By: FLSYSF
+#$%
+#$% Calls:     AIREXP
+#$%
+#$% Tables:    AML        UNT        DEQ
+#$%            
+#$%
+#$% Date:      APRIL 81
+#$%
+#$% Author:    DANA WILLS
+#$%
+#$% Modified:  Carol Kropp - 3/97 (E1799)
+#$%            Clearing the ALSP ID of the cloned a/c
+#$%            was moved into the if/else check for the
+#$%            lead aircraft.  If the leader splits, the
+#$%            clone keeps the ALSP ID; otherwise, the
+#$%            the clone ALSP ID is cleared.  This is
+#$%            done so that the original ALSP ID stays
+#$%            with the original ALSP CALL_SIGN.
+#$%
+#$%            Carol Kropp - 3/97 (E1800)
+#$%            If there is no room in the UNT table, reset
+#$%            the value of UNT$Pointer back to zero - which
+#$%            the caller was expecting.
+#$%
+#$%            Susan Miller - 5/97 (E1575)
+#$%            If the last a/c in a flight has a system 
+#$%            failure the whole flight bingoed - the
+#$%            "if (Xaml$NextIndx$I == 0)" is removed
+#$%            since the caller performs the check to
+#$%            determine if a split is necessary.
+#$%
+########################################################
+BBcommon
+
+LITERAL UNT2$Name$C,UNT$Name$C,CSTRIP8  # jb E2145  7/5/00
+REAL PCENT, TOT                         # jb E2145  7/5/00
+Integer INDX,NINDX,NUNT,                # jb E2145  7/5/00
+    AML$Pointer,AML$Nextindx$I,         # jb E2145  7/5/00
+    DEQ$Pointer,DEQ$Nextdeq$I,          # jb E2145  7/5/00
+    UNT2$Pointer,UNT2$Nbractot$I,       # jb E2145  7/5/00
+    UNT2$Nbrac$I,UNT2$Amlindx$I,        # jb E2145  7/5/00
+    AML2$Pointer,DEQ2$Pointer,UNT$Pointer # jb E2145 7/5/00
+VMSchar     vstrip*ARB
+
+aml$pointer = aml2$pointer
+
+# commented out SMM 5/97 (E1575)
+#if (Xaml$NextIndx$I == 0)      # JFR 3/29/94:  Can't clone the last a/c in flight
+#   {                           # since damage model won't delete original.
+#    unt$pointer = unt2$pointer # indicate that no real cloning taking place
+#    return                     # i.e. - the new "cloned unit" is the original unit
+#   }                           # necessary since flsysf does "housekeeping" on cloned unit
+
+Nunt = 0
+#$% for each pointer entry
+for (unt$pointer$first; still_valid(unt); unt$pointer$next) # 9/26/88
+   {
+    #$% if slot in use, get next
+    if (Xunt$InUse$i != $no) next
+    Nunt = unt$pointer
+    break
+   }
+
+#$% if unit pointer is zero, return, cause there's no room in the inn
+if (Nunt == 0)         # before returning, set the UNT$Pointer
+  {                    # back to zero - clk 3/97 (E1800)
+   call echor
+   call echov ("clonac was called, but there are no available UNT slots")
+   call echo  ($Bell)
+   call echor
+   UNT$Pointer = 0
+   return
+  }
+
+unt$pointer = Nunt 
+
+#$% if last entry not exceeded
+if (unt$last < unt$pointer)
+   {
+    #$% compute number used
+    unt$used = unt$pointer$index * unt$entry
+   }
+
+#$% duplicate entry
+unt$duplicate$unt2
+
+#########################################
+# fix-up clone...
+
+unt$Name$c = Xaml$SideNumber$c
+PUTunt$Name$c
+PUTunt$FullName$V (Xunt$Name$v)                 # dew (E2209)
+PUTunt$flag$v     (Xaml$Flag$v)
+PUTunt$NOSICid$i  (Xaml$NosicId$i)
+PUTunt$OTGcode$i  (Xaml$OTGcode$i)
+
+PUTunt$FirstLclIndx$i ( 0 )
+
+PUTunt$Leader$i ( 0 )            # this new guy cannot be the leader (8/89 dew)
+
+indx = aml$pointer$index
+PUTunt$AMLIndx$i ( indx )
+
+tot = Xunt$NbrAcTot$i                           # save total Nbr of aircraft
+PUTunt$NbrAcTot$i ( 1 )
+
+PUTunt$NbrAc$i ( 1 )
+PUTunt$NbrEq$i ( 0 )
+
+#$% set number of aircraft system failure to zero
+PUTunt$NbrAcSF$i ( 0 )
+
+nindx = Xaml$NextIndx$i                         # save next AML index
+PUTaml$NextIndx$i ( 0 )
+
+FOR_DEQ2_CHAIN               # need to build DEQ list for new flight
+    {                        # it should be identical to original flight
+    # clk 1/94 - the DEQ2$Ident was being used w/out extracting the value
+    if ( xDEQ2$Ident$i != $null )
+        {
+        call get_deq_entry( Unt$pointer, DEQ$Pointer )
+
+        if ( DEQ$Pointer == 0 ) break   # are we out of DEQ entries yet ??
+
+        deq$NextDEQ$i = Xdeq$NextDEQ$i  # save DEQ link
+        DEQ$Duplicate$DEQ2              # duplicate what we had 
+                                        # NOTE: AIREXP will clean up Qtys
+        PUTdeq$NextDEQ$i                # restore DEQ link
+        
+        } # end IF non-null ident
+    } # end FOR DEQ2 Chain
+
+
+pcent = 1.0 - 1.0/tot                           # shift eq remaining
+
+call airexp (unt2$pointer,unt$pointer,pcent)
+
+unt2$NbrAcTot$i = Xunt2$NbrAcTot$i - 1          # fix-up the original
+PUTunt2$NbrAcTot$i
+
+unt2$NbrAc$i = Xunt2$NbrAc$i- 1
+PUTunt2$NbrAc$i
+
+unt2$AMLIndx$i = Xunt2$AMLIndx$i
+if (unt2$AMLIndx$i == indx)                     # Is it the first plane ?
+   {
+    putUNT2$ALSPid$I  (0)    # clear the ALSP ID of remaining flight
+
+    unt2$AMLIndx$i = Nindx                      #  Yes
+    PUTunt2$AMLIndx$i
+
+    aml$pointer$to Nindx                        #    rename the unit
+    unt2$name$c = Xaml$SideNumber$c
+    PUTunt2$name$c
+    PUTunt2$FullName$V (Xunt2$Name$v)           # dew (E2209)
+    PUTunt2$flag$v     (Xaml$Flag$v)
+    PUTunt2$NOSICid$i  (Xaml$NosicId$i)
+    PUTunt2$OTGcode$i  (Xaml$OTGcode$i)
+   }
+else                                            #  No
+   {
+    putUNT$ALSPid$I  (0)    # clear the ALSP ID of new clone
+
+    aml$NextIndx$i = unt2$AMLIndx$i
+
+    while (aml$NextIndx$i != 0)                 # Find the AML entry pointing
+       {                                        # to the one removed
+        aml$pointer$to aml$NextIndx$i
+        aml$NextIndx$i = Xaml$NextIndx$i
+
+        if (aml$NextIndx$i != indx) next        # is this it ?....   no
+
+        aml$NextIndx$i = Nindx                  #   Yes
+        PUTaml$NextIndx$i
+        break
+       }
+   }
+
+return
+end
+
+
+Subroutine xvfuel (UNT2$Pointer,  # launching platform
+                   UNT$Pointer,   # aircraft unit
+                   ACC$Pointer)   # aircraft characteristics
+########################################################
+#$%
+#$% Purpose:   Xvfuel verifies the fuel needed to load
+#$%            a flight is available at the launching
+#$%            platform.
+#$%
+#$% Called By: xvload
+#$%
+#$% Calls:     smov..     SEND
+#$%
+#$% Tables:    ACC        UNT
+#$%
+#$% Date:      June 1993
+#$%
+#$% Author:    Brent Burkhalter
+#$%
+#$% Modified:  James Allen - 2/96 (E1467)
+#$%            Replaced $Hi_UNT$AcFuelRemaining$I with
+#$%            $Hi_unt$TNK$FuelRemaining$f and replaced
+#$%            UNT2$FuelRemaining$I with UNT2$TNK$FuelRemaining$f 
+#$%
+#$%            Carol Kropp - 6/96 (E1613)
+#$%            Launching platform type of $SurfaceWithAC$code
+#$%            was checked for sufficient fuel, but not
+#$%            $Surface$Code.  $SurfaceWithAC$code is not
+#$%            really used anymore.
+#$%            New_fuel_amt was initialized to zero, but never
+#$%            set before use in computing total_fuel_amt.
+#$%
+#$%            Susan Miller - 12/97 (E1660)
+#$%            Changed fuel amount from pounds (unit storage
+#$%            in ACC table and UNT for aircraft) to gallons 
+#$%            (unit storage in UNT table for ship or shore) 
+#$%            before call to TNK_adjust_fuel_remaining.
+#$%
+########################################################
+BBcommon
+FltOpsCommon
+
+real       UNT2$TNK$FuelRemaining$f
+real       old_fuel_amt, total_fuel_amt      # changed these from ints - smm 12/97 (E1660)
+integer  UNT2$Pointer, UNT$Pointer, ACC$Pointer
+integer    UNT$TNK$Index
+integer    UNT2$TNK$Index
+integer    xtrlen,  i
+integer    new_fuel_amt
+Integer ACC$Maxfuel$I, UNT2$Type$I        # jb E2145  7/5/00
+character  xtrfuelmsg[200]
+
+  new_fuel_amt = 0
+  ACC$MaxFuel$I = xACC$MaxFuel$I
+
+  # examine each item in the load order
+  for (i = 1; i <= loadc; i = i + 1)
+    {
+     if (nload [i] == 'FUEL' | nload [i] == 'JP')  # if item is fuel
+       {
+        if (iload [2,i] > ($Hi_unt$TNK$FuelRemaining$f - ACC$MaxFuel$I))
+         {
+          iload [2,i] = $Hi_unt$TNK$FuelRemaining$f - ACC$MaxFuel$I
+          xtrlen = 0
+          call smovv ("Total aircraft fuel, including ",xtrfuelmsg, xtrlen)
+          call smovv ("excess fuel, cannot exceed ",xtrfuelmsg, xtrlen)
+          call smovi ($Hi_unt$TNK$FuelRemaining$f, xtrfuelmsg, xtrlen)
+          call smovv (".  Current excess fuel load = ", xtrfuelmsg, xtrlen)
+          call smovi (iload [2,i], xtrfuelmsg, xtrlen)
+          call smovv (" JP.", xtrfuelmsg, xtrlen)
+          call send_ (xUNT$View$I, 0, xtrlen, xtrfuelmsg)
+         }
+        new_fuel_amt = iload [2,i]
+        break
+       }
+    }
+
+  if (i <= loadc)  # if a LOAD FUEL was entered
+    {
+     unt2$Type$i = Xunt2$Type$i
+     if (UNT2$Type$I == $ShoreBase$Code |
+         unt2$Type$i == $Surface$Code)
+       {
+        unt$TNK$Index = AviationFuelTank$Index
+        unt2$TNK$Index = AviationFuelTank$Index
+        if (UNT$Pointer != -1)    # reloading after initial load-out
+          {
+           old_fuel_amt = xUNT$TNK$FuelRemaining$f - acc$MaxFuel$i      # in pounds
+           old_fuel_amt = old_fuel_amt/$Pounds$Per$Gallon               # in gallons - smm 12/97 (E1660)
+           UNT2$TNK$FuelRemaining$f = xUNT2$TNK$FuelRemaining$f + (old_fuel_amt * iqty)
+           total_fuel_amt = (new_fuel_amt * iqty)/$Pounds$Per$Gallon    # in gallons - smm 12/97 (E1660)
+          }
+        else
+          {
+           UNT2$TNK$FuelRemaining$f = xUNT2$TNK$FuelRemaining$f
+           total_fuel_amt = ((ACC$MaxFuel$I + new_fuel_amt) * iqty)/$Pounds$Per$Gallon   # in gallons - smm 12/97 (E1660)
+          }
+
+        if (UNT2$TNK$FuelRemaining$f < total_fuel_amt)
+          {
+           call smovv ("  Insufficient fuel.", msgx, xlen)
+          }
+       }
+    }
+  
+return
+end
+
+# This routine was moved to wgmdfuel.rat - consolidating
+# all fuel/refueling routines into one file.
+
+#subroutine find_max_fuel_to_deliver(ACC$Pointer, 
+#                                    UNT2$Pointer,
+#                                    number_in_flt,
+#                                    fuel_to_deliver)
+
+
+subroutine Check_for_turned_into_wind (_
+                 UNT$Pointer,  # in:  UNT of unit to check
+                 into_wind)    # out: $yes/$no flag for if into the wind
+########################################################################
+#$%
+#$% Purpose:   Check_for_turned_into_wind returns the into_wind of
+#$%            $yes if the unit is turned into the wind.
+#$%
+#$% Called By: FLRCVR
+#$%
+#$% Calls:     fndwet     ang2pi     angpi     ABS
+#$%
+#$% Tables:    UNT        
+#$%
+#$% Date:      May 1997 (E1633)
+#$%
+#$% Author:    Susan Miller
+#$%            Reused code currently used in MANUVR_flt
+#$%
+########################################################################
+BBcommon
+
+real    UNT$TrueLatitude$f, UNT$TrueLongitude$f
+real    UNT$TrueSpeed$f, UNT$TrueCourse$f
+real    WET$WindDirection$F
+real    UNT$OrderedCourse$F, course_diff
+real    max_speed, UNT$OrderedSpeed$F
+integer UNT$Pointer, into_wind
+integer WET$Pointer, WET$WindSpeed$I
+
+  into_wind = $no
+
+  # locate weather region and current wind direction and speed
+  UNT$TrueLatitude$f  = xUNT$TrueLatitude$F
+  UNT$TrueLongitude$f = xUNT$TrueLongitude$F
+  UNT$TrueSpeed$f     = xUNT$TrueSpeed$F   
+  UNT$TrueCourse$f    = xUNT$TrueCourse$F  
+
+  call FNDWET (UNT$TrueLatitude$f, UNT$TrueLongitude$f, WET$Pointer)
+
+  WET$WindDirection$F = xWET$WindDirection$F
+  WET$WindSpeed$I = xWET$WindSpeed$I
+
+  # calculate course & speed for launch/recover of aircraft
+  #  --steering 10 degrees to right of oncoming true wind and computing
+  # shipspeed so that wind + shipspeed * cos(10 deg) = 20 kts.
+  # (Note: if course is within 45 deg. of movement, keep present speed,
+  # subject to max of 30 kts over the deck.)
+
+  # assuming that WindDirection is 000 deg. for a wind coming from
+  # due North:
+ 
+  UNT$OrderedCourse$F = WET$WindDirection$F + (10.*$PI/180.) # 10-deg on port bow 
+  call ang2PI (UNT$OrderedCourse$F)
+
+  course_diff = UNT$OrderedCourse$F - UNT$TrueCourse$F
+  call angPI (course_diff) 
+
+  if (ABS(course_diff) < $PI/4. ) # keep speed if course in  
+    {                             # general direction of PIM's
+     max_speed = 30. - WET$WindSpeed$i 
+     max_speed = min(UNT$TrueSpeed$f,max_speed)
+     UNT$OrderedSpeed$F = max_speed
+    }
+  else                            # else, 20 kts across deck
+    UNT$OrderedSpeed$F =(20.- WET$WindSpeed$i) / 0.9848  # .9848 ~ cos(10deg)
+
+  UNT$OrderedSpeed$F = max(4.0, UNT$OrderedSpeed$F)
+
+  # check if unit is on the approved Course/Speed
+  if ((UNT$OrderedSpeed$F  == XUNT$TrueSpeed$F & 
+       UNT$OrderedCourse$F == XUNT$TrueCourse$F) |
+      (UNT$OrderedSpeed$F  == XUNT$AssumedSpeed$F &
+       UNT$OrderedCourse$F == XUNT$AssumedCourse$F ))
+    into_wind = $yes
+
+return
+end
+
+
+subroutine Create_AC_EQ_Entry (_
+                 ACC$Pointer,     # in: a/c characteristics
+                 UNT$Pointer,     # in: a/c unit
+                 AML$Pointer)     # in: a/c AML entry
+#########################################################################
+#$%
+#$% Purpose:    Create_AC_EQ_Entry fills the DEQ appropriate information for
+#$%             either a launched or created aircrafted
+#$%
+#$% Called By:  XBLDYN  Build_AC_DEQ
+#$% 
+#$% Calls:      Naverr  Get_DEQ_Entry
+#$%
+#$% Tables:     UNT     ACC     DEQ     AML
+#$%
+#$% Author:     Susan Miller 3/97 (E1746)
+#$%             Code removed from routine xbldyn <wgmdflt.rat>
+#$%
+#########################################################################
+BBCommon
+
+integer  ACC$Pointer, UNT$Pointer
+integer  UNT$AMLIndx$I, AML$Pointer
+integer  UNT$Mission$I, UNT$JTIDSReportingNbr$I 
+integer  UNT$CECParticipating$I, e_indx
+integer  ACC$Eq$Index, DEQ$Pointer
+integer  DEQ$Ident$I, DEQ$Pntr$I, DEQ$EmitterIndx$I, DEQ$On$I
+integer  DEQ$Em$Index
+integer  IFF$Pointer
+
+  UNT$AMLIndx$I = AML$Pointer$Index
+  putUNT$AMLIndx$I
+
+  UNT$Mission$I = xAML$DefaultMission$I  # clk 4/95 (E1394)
+  putUNT$Mission$I
+ 
+  UNT$JTIDSReportingNbr$I = xAML$JTIDSReportingNbr$I     # clk 12/95 (E1469)
+  putUNT$JTIDSReportingNbr$I
+
+  UNT$CECParticipating$I = xAML$CECParticipating$I       # clk 10/96 (E1695)
+  putUNT$CECParticipating$I
+
+  e_indx = 1 # init the jecewsi emitter index 
+
+  #$% for each aircraft entry
+  for (ACC$Eq$Index=1; ACC$Eq$Index$OK; ACC$Eq$Index=ACC$Eq$Index+1)
+    {
+     DEQ$Ident$I = xACC$Eq$Ident$I
+     DEQ$Pntr$I = xACC$Eq$Pntr$I
+
+     #$% else if equipment ID is navigational sensor
+     if (DEQ$Ident$I == $NavSensor$code)
+       {
+        call Naverr (DEQ$Pntr$I,UNT$Pointer)
+        next
+       }
+
+     #$% set equipment index
+     call Get_DEQ_Entry (UNT$Pointer, DEQ$Pointer)
+
+     #$% if no DEQ slots
+     IF ( DEQ$Pointer == 0 ) break
+
+     #$% get equipment ID
+     putDEQ$Ident$I
+
+     #$% get equipment pointer
+     DEQ$Pntr$I = xACC$Eq$Pntr$I
+     putDEQ$Pntr$I
+
+    # load up the emitter index  - JFR 8/8/94
+    if (DEQ$Ident$I == $CommunicationJammer$Code |
+        DEQ$Ident$I == $Radar$Code               |          
+        DEQ$Ident$I == $RadarJammer$Code         |        
+        DEQ$Ident$I == $RadComJammer$Code        |       
+        DEQ$Ident$I == $Jammer$Code              )             
+       { 
+        DEQ$EmitterIndx$I = e_indx
+        putDEQ$EmitterIndx$I          # store the emitter index
+        e_Indx = min(e_Indx + 1, jew$or$slots)  # bump up the emitter index
+       }
+
+    if (DEQ$Ident$I == $ESM$Code)
+       {
+        DEQ$On$I = $default$ESM$setting     # see table 7.2 of BBCODE.DEF
+        putDEQ$On$I
+
+        DEQ$Em$Index = 1
+        putDEQ$Em$Band$I (DEQ$On$I)
+       }
+    else if (DEQ$Ident$i == $MAD$code)
+       {
+        DEQ$On$I = $default$MAD$setting
+        putDEQ$On$I
+       }
+    #$% antenna blockage stuff added 10/91, reh
+    else if (DEQ$Ident$I == $RADAR$Code)
+       {
+        #$% if antenna blockage exists
+        if (xACC$EQ$ACRIndx$i != 0)
+            {
+            putDEQ$AntennaBlockage$i ($yes)
+            }
+       }
+    else if (DEQ$Ident$I == $LIDAR$code)
+       {
+        DEQ$On$I = $default$LIDAR$setting
+        putDEQ$On$I
+       }
+    else if (DEQ$Ident$I == $COMMSUITE$Code)
+       {
+        putDEQ$OkToSend$I  ($yes)
+       }
+    else if (DEQ$Ident$i == $IFF$Code)
+       {
+        IFF$Pointer = xDEQ$Pntr$i
+        if (xIFF$Function$i == $TRANSPONDER$Code)  # if IFF is a transponder,
+          putDEQ$On$i ($YES)                       # initialize on;
+        else                                       # otherwise,
+          putDEQ$On$i ($NO)                        # initialize off
+       }
+    else if (DEQ$Ident$I == $IR$code)
+       {
+       putUNT$IRopDetFct$F (1.0)
+       putUNT$IRopClaFct$F (1.0)
+       putUNT$IRopIdFct$F  (1.0)
+       }
+    }
+
+return
+end   # end of Create_AC_EQ_Entry
+
+
+subroutine Build_Unit_Table_For_AC (_
+                UNT2$Pointer,   # in: new a/c unit
+                UNT$Pointer,    # in: launching platform
+                ACC$Pointer,    # in: a/c characteristics pointer
+                Launch,         # in: $yes if called by xblaun
+                unit_name,      # in: new unit name
+                time_of_launch, # in: time of launch or order$minute
+                real_speed,     # in: speed in floating point value
+                real_course,    # in: course in radians
+                AML$Pointer)    # In: optional- AML Pointer
+########################################################
+#$%
+#$% Purpose:   Build_Unit_table fills in parts of required
+#$%            data needed to create an aircraft at time
+#$%            of launch or creation (CREATE AIRCRAFT)
+#$%
+#$% Called By: XBLUNT    Fill_AC_UNT_Data
+#$%
+#$% Calls:     None
+#$%
+#$% Tables:    UNT        ACC
+#$%
+#$% Author:    Susan Miller 3/97 (E1746)
+#$%            Removed code from XBLUNT so it could be 
+#$%            used in call from Fill_AC_UNT_Data
+#$%
+########################################################
+BBcommon
+
+literal  unit_name 
+real     time_of_launch, real_speed, real_course
+real     UNT$TimeLaunched$F
+real     UNT$TrueLatitude$F, UNT$TrueLongitude$F
+real     UNT$AssumedLatitude$F, UNT$AssumedLongitude$F
+real     UNT$OrderedSpeed$F, UNT$TrueSpeed$F, UNT$AssumedSpeed$F
+real     UNT$OrderedCourse$F, UNT$TrueCourse$F, UNT$AssumedCourse$F
+integer  UNT2$Pointer, UNT$Pointer, ACC$Pointer
+integer  launch
+integer  UNT$Status$I, UNT$MarshallStatus$I
+integer  UNT$View$I
+integer  UNT$HierarchyId$I
+integer  UNT$JTIDSCapable$I, UNT$FuelRemaining$I
+integer     aml$pointer
+VMSchar     vstrip*ARB
+
+  if (UNT$last < UNT$Pointer)
+     UNT$Used = UNT$Pointer$Index * UNT$Entry
+
+  if (Launch == $yes)
+    {
+     UNT$Status$I = $AcAwaitingLaunch$code        #status awaiting launch
+     UNT$MarshallStatus$I = $AwaitLaunch$code     #marshall status await launch
+    }
+  else    # a/c is not going through normal launch procedures
+    {
+     UNT$Status$I = $Proceeding$Code              # status in the air
+     UNT$MarshallStatus$I = $InFlight$Code        # marshall status in flight
+    }    
+  putUNT$Status$I
+  putUNT$MarshallStatus$I
+
+  UNT$View$I = xUNT2$View$I                       #owners view
+  putUNT$View$I
+
+  putUNT$Type$I  ($Air$Code)
+
+  putUNT$Name$C  (unit_name)
+  PUTunt$FullName$V (Xunt$Name$v)                 # dew (E2209)
+  if (aml$pointer != 0)
+    {
+    PUTunt$flag$v     (Xaml$Flag$v)
+    PUTunt$NOSICid$i  (Xaml$NosicId$i)
+    PUTunt$OTGcode$i  (Xaml$OTGcode$i)
+    }
+
+  UNT$TimeLaunched$F = time_of_launch             #compute launch time
+  putUNT$TimeLaunched$F
+
+  UNT$HierarchyId$I = xUNT2$HierarchyId$I         #hierarchy of owner
+  putUNT$HierarchyId$I
+
+  if (Launch == $yes)
+    {
+     UNT$TrueLatitude$F = Xunt2$TrueLatitude$F       #enter true latitude
+     putUNT$TrueLatitude$F
+
+     UNT$TrueLongitude$F = xUNT2$TrueLongitude$F     #enter true longitude
+     putUNT$TrueLongitude$F
+
+     UNT$AssumedLatitude$F = xUNT2$AssumedLatitude$F #enter assumed latitude
+     putUNT$AssumedLatitude$F
+
+     UNT$AssumedLongitude$F = xUNT2$AssumedLongitude$F #enter assumed longitude
+     putUNT$AssumedLongitude$F
+
+     UNT$OrderedSpeed$F = INT(real_speed)                #enter ordered speed
+     UNT$TrueSpeed$F = 0.0
+     UNT$AssumedSpeed$F = 0.0                        # enter assumed speed
+
+     UNT$OrderedCourse$F = real_course               # enter ordered course
+     UNT$TrueCourse$F = xUNT2$TrueCourse$F           # enter true course
+     UNT$AssumedCourse$F = xUNT2$AssumedCourse$F     # enter assumed course
+    }
+  else 
+    {
+     UNT$OrderedSpeed$F     = real_speed             # enter ordered speed
+     UNT$TrueSpeed$F        = real_speed             # enter true speed
+     UNT$AssumedSpeed$F     = real_speed             # enter assumed speed
+
+     UNT$OrderedCourse$F    = real_course            # enter ordered course
+     UNT$TrueCourse$F       = real_course            # enter true course
+     UNT$AssumedCourse$F    = real_course            # enter assumed course
+    }
+  putUNT$OrderedSpeed$F
+  putUNT$TrueSpeed$F                              #enter true speed
+  putUNT$AssumedSpeed$F
+
+  putUNT$OrderedCourse$F
+  putUNT$TrueCourse$F
+  putUNT$AssumedCourse$F
+
+  putUNT$OrderedLatitude$f  ($pi)                # negate position order
+
+  UNT$JTIDSCapable$I = xACC$JTIDSCapable$I       # clk 12/95 (E1469)
+  putUNT$JTIDSCapable$I
+
+  UNT$FuelRemaining$I = xACC$MaxFuel$I           # enter fuel
+  putUNT$FuelRemaining$I
+
+return
+end   # end of Build_Unit_Table_For_AC
+
+subroutine chop_ghosted_airsupport(unt$pointer)
+########################################################
+#$%
+#$% Purpose:   Chop ALSP ghosted blue air support missions
+#$%            to user specified blue view
+#$%
+#$% Called By: FLTOPS
+#$%
+#$% Calls:     None
+#$%
+#$% Tables:    UNT
+#$%
+#$% Author:    Jim Allen (E2304)
+#$%
+########################################################
+BBcommon
+BBDeclare (UNT$Mission$I, UNT$Pointer,UNT$View$I, ACC$Pointer)
+
+literal cstrip8
+
+literal ilex[3]
+data ilex /$lex$CHOP$,$lex$BLUE$,0/
+
+
+litCharEquiv(otg_ilex,9)
+integer m
+
+data (otg_ilex[m],m=1,4) /$lex$ENTER$,$lex$OTG$,0,$lex$FLAG$/
+data otg_ilexC[5] /"US"/
+data (otg_ilex[m],m=6,8) /$lex$ID$,0,$lex$REPORT$/
+data otg_ilexC[9] /"OTH"/
+
+integer nargs
+integer nord
+integer get_nosicId
+
+# Make sure this is an ALSP game
+if (ALSP$Game != $no)
+{
+    UNT$View$I = xUNT$View$I    #JHM AAI03 (E2327)
+    nargs = 9
+    nord = EnterOTG$order
+
+    if (UNT$View$I != ALSP$BlueAirSupportGhost$View &
+        UNT$View$I != ALSP$OrangeGhost$View)   # JHM aai03 second fix
+    {
+        # Check for air support missions in ghosted blue view
+        UNT$Mission$I = xUNT$Mission$I
+        if ((UNT$Mission$I == $AEW$Code) |
+            (UNT$Mission$I == $AirTanker$Code) |
+            (UNT$Mission$I == $STtanker$Code))
+        {
+            # Convert view index into blue view number
+            ilex[3] = ALSP$BlueAirSupportGhost$View - $FirstBlue$View + 1
+            # Chop blue air support mission to user specified view
+            call change_view(unt$pointer, ilex)
+
+            # enter otg for E3A type aircraft
+            acc$pointer = Xunt$AccPntr$i
+            if (Xacc$Type$c == 'E3A')
+            {
+                # 3 - name, 7 - nosicid
+                otg_ilex[3] = Xunt$name$c
+                otg_ilex[7] = get_nosicId()
+                call oenter_otg (nord,ALSP$BlueAirSupportGhost$View,_
+                                nargs,otg_ilex)
+            }
+        }
+    }
+}
+
+return
+end
+
+
+
+subroutine xgmission (ordpntr, unt$mission$i) # Get mission from flight plan
+BBcommon
+
+BBdeclare (ord$pointer, unt$mission$i)
+literal cstrip8
+integer ordpntr
+integer i, icnt, ord$wrd$index
+
+ord$pointer = ordpntr
+
+icnt = min(3, Xord$count$i)         # Only look at first 3 orders
+
+unt$Mission$i = -1
+
+# look for mission order in flight plan
+for (i = 2; i <= icnt; i = i + 1)
+{
+    ord$pointer$next
+    if (Xord$code$i == MissionAir$order)    
+    {
+        ord$wrd$index = 2
+        call Lex_to_Mission_Code (Xord$WRD$$C, UNT$Mission$I)
+        break
+    }
+}
+
+return
+end

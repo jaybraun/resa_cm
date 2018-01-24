@@ -1,0 +1,2496 @@
+####    FILE:   WGMDBOAT.rat
+####
+####    Record of Modifications:
+####
+####        Programmer          Date        Modification
+####
+####        Carol Kropp         10/93       V.T.S.-no longer 60 second cycels
+####
+####        D.E. Wills          12-May-89   Created initial model
+####
+ 
+INCLUDE "ascii.inc"
+INCLUDE "bbctl.inc"
+INCLUDE "bbcode.inc"
+INCLUDE "bbshc.inc"
+INCLUDE "bbjew.inc"
+INCLUDE "bbbml.inc"
+INCLUDE "bbord.inc"
+INCLUDE "bbsta.inc"          # JHM 9/03
+INCLUDE "bbunt.inc"
+INCLUDE "bbdeq.inc"
+INCLUDE "orders.inc"
+INCLUDE "bbtor.inc"
+INCLUDE "bbrpm.inc"
+INCLUDE "bbiff.inc"
+include "plplay.inc"
+include "wimain_eq.inc"
+define (BBimplicit, IMPLICIT NONE)  # jb E2145  6/26/00
+#define ($debugf,  $$Debug$Control)      # trace boat-ops
+define ($debugf,)
+ 
+define(equip$max,24)                    # max items of equipment
+ 
+$DebugF define(trace$boatops$exe,istrip(trace$boatops,0,M1bits)) # trace
+$DebugF define(trace$boatops$pln,istrip(trace$boatops,3,M1bits)) # trace plan
+$DebugF define(trace$boatops$sel,istrip(trace$boatops,4,M1bits)) # trace flnque
+$DebugF define(trace$boatops$rcn,istrip(trace$boatops,5,M1bits)) # trace reconn
+ 
+define(BoatOpsCommon,
+integer Lid,            ## Launch order id
+        Lunt,           ## available unt slot for boat
+        Lshc,           ## boat characteristics pointer
+        Lbml,           ## specified bml slot
+        itime,          ## game minute requested to launch
+        loadc,          ## number of items in load
+        iload[3,equip$max],     ## name,qty,eq$index (name moved to NLOAD)
+        xlen,           ## length (in bytes) of msgx
+        msgx[150],      ## message area
+        N_underway,     ## count Boats already occupying UNT slots
+        bnumber,        ## number of boats to launch
+        baseNameLen     ## Length of base name
+ 
+real    Etime           ## earliest time to launch
+ 
+literal bname,          ## name of boat or event name
+        bclass,         ## class of boat to launch
+        bforce,         ## Force name for each boat in launch
+        nload[equip$max]## name of equipment item
+ 
+common /scratch$pad/ nload, bname, bclass, bforce,  # jb E2145  (Literals) 6/26/00
+                     Etime,             # jb E2145  (REAL)     6/26/00
+                     Lid,  Lunt, Lshc, Lbml, itime, loadc,
+                     iload, xlen, msgx, N_underway, bnumber, baseNameLen
+    )
+ 
+
+ 
+Subroutine Boat_Engine_Fail (UNT$Pointer,     # in: (BOAT's Pointer)
+                             engine_failure)  # out: $yes/$no flag
+########################################################
+#$%
+#$% Purpose:   As MOTMAN starts looping thru the UNT table, it calls
+#$%    Boat_Engine_Fail in order to update UNT$Status$i IF failure
+#$%    causes the boat to go Dead_in_Water.
+#$%
+#$% Called By: MOTMAN (wgmdmot)
+#$%
+#$% unt2 refers to the TUG;  UNT, to the SmallBoat to be towed.
+#$%
+#$% Date:      June 89
+#$%
+#$% Author:    Joe Bryant
+#$%
+#$% Modified:  James Allen - 12/97 (E1370)
+#$%            When failure occurs call clear_maneuver_all to
+#$%            cancel all current orders.
+#$%
+###################################################################
+BBcommon
+ 
+LITERAL  CSTRIP8                    # jb E2145  6/26/00
+REAL     BML$Systemfail$F           # jb E2145  6/26/00
+integer  UNT$Pointer, engine_failure
+Integer NORD, ID, JJ,               # jb E2145  6/26/00
+    UNT$Status$I, UNT$Bmlindx$I,    # jb E2145  6/26/00
+    BML$Pointer                     # jb E2145  6/26/00
+ 
+#string sbfail"     : Engine failure at                 "
+character    sbfail[60]
+ 
+engine_failure = $no        # initialize failure flag to no
+unt$status$i = Xunt$status$i
+if (unt$status$i == $undertow$code | unt$status$i == $Sinking$code |
+    unt$status$i == $readytorecover$code) return
+ 
+unt$BmlIndx$i = Xunt$BmlIndx$i
+BML$Pointer$TO (unt$BmlIndx$i)
+bml$SystemFail$f = xbml$SystemFail$f
+if ( bml$SystemFail$f != 0 &
+     bml$SystemFail$f <= Game$Time )
+   {
+    if (UNT$Status$I != $DeadInWater$code)
+       {
+        call canord (unt$pointer, -1)   # remove (cancel) any pending orders
+ 
+        nord = NO$order                 # Clear current orders - joa 12/97 (E1370)
+        id = -1
+        call clear_maneuver_all (nord, id, xUNT$View$I, UNT$Pointer)
+ 
+        jj = 0
+        call smovhn (Xunt$name$c, $$MaxLit, sbfail, jj)
+        call smovv  (" engine failure at ",sbfail,jj)
+        call smovll (xUNT$assumedLATITUDE$f,"NS",sbfail,jj)
+        call smovv  (" ",sbfail,jj)
+        call smovll (xUNT$assumedLONGITUDE$f,"EW",sbfail,jj)
+        call send_   (xunt$view$i, 0, jj, sbfail)
+ 
+        PUTunt$STATUS$i    ($DeadInWater$code)
+       }    # End if boat status was not previous DIW
+ 
+    engine_failure = $yes
+    PUTunt$TrueSpeed$F (0.0)
+    putUNT$AssumedSpeed$F (0.0)
+    PUTunt$OrderedSpeed$F (0.0)
+   }
+ 
+return
+end
+
+ 
+subroutine omoor  (nord,unt$pointer,nargs,args,id)
+ 
+#################################################################
+#$%    OMOOR causes the addressed SmallBoat to try to go to the
+#$% designated Port ( SHIP (NOT a SmallBoat) or SUB or SHOREbase )
+#$% and sets its status to ReturningToBase
+#$%
+#$% Command Format:    MOOR (at) [ | <force-name> ]
+#$%
+#$% Calls:     clear_maneuver_all
+#$%
+#$% Tables:    UNT
+#$%
+#$% Date:      June 89
+#$%
+#$% Author:    Dane Wills
+#$%
+#$% Modified:  Brent Burkhalter - MArch 1993 (H1040)
+#$%            Made the returning location optional.
+#$%
+#$%            James Allen - 2/96 (E1467)
+#$%            Allow ships to "moor" for refueling.
+#$%
+#$%            James Allen  - 12/97 (E1246)
+#$%            Added the order id to the argument list
+#$%            for calls to omoor_ship and clear_maneuver_all
+#$%            (to remove current orders for the unit).
+#$%
+########################################################
+BBcommon
+ 
+literal         args[20]
+literal         name_boat, name_port
+LITERAL  CSTRIP8                             # jb E2145  6/26/00
+REAL            UNT$Orderedspeed$F           # jb E2145  6/26/00
+integer         nord, nargs, id
+integer         msglen, xsave
+integer         LCOMP     # jb  AAI01/LCOMP       E2145  2/13/01
+Integer  INDX_PORT,                          # jb E2145  6/26/00
+    UNT$Pointer, UNT$View$I,UNT$Status$I,    # jb E2145  6/26/00
+    UNT3$Pointer, UNT3$Type$I,UNT3$View$I,   # jb E2145  6/26/00
+    UNT3$Supertype$I,UNT3$Boatrestricted$I,  # jb E2145  6/26/00
+    SHC$Pointer                              # jb E2145  6/26/00
+character       msg[200]
+ 
+if (Xunt$SuperType$i == $Surface$SuperCode)    # joa 2/96 (E1467)
+  {
+    call omoor_ship (nord, id, unt$pointer, nargs, args)
+    return
+  }
+else if (Xunt$SuperType$i != $SmallBoat$SuperCode ) # ignore non-small boats (w/no msg)
+    return                                     # caused by "FOR 1.1... MOOR (at).."
+ 
+#if (Xunt$smallboat$i == $no)          # ignore non-small boats (w/no msg)
+#    return                            # caused by "FOR 1.1... MOOR (at) .."
+ 
+name_boat = xUNT$Name$C                        # jb    6/7/89
+ 
+msglen = 0                              # build an initial error message
+call smovhn(name_boat,$$MaxLit,msg,msglen)            # jb    6/7/89
+call smovv(" cannot moor: ",msg,msglen)      # jb    6/7/89
+call smov ($tab,msg,msglen)
+call smov (msglen,msg,msglen)
+xsave = msglen
+ 
+#$% "if" logic added 5/91 reh
+if (xUNT$Status$i == $BeingDeleted$Code)
+    {
+    call smovv (" is not an operational boat",msg,msglen)
+    call send_ (xunt$view$i,0,msglen,msg)     # display message of failure
+    return
+    }
+ 
+# UNT is used for the boat                     # jb    6/7/89
+# UNT3 is used for the destination port
+ 
+indx_port = 0
+ 
+if (nargs >= 2)                                 # bh 3/9/93 (H1040)
+    {
+    name_port = args[2]                            # jb    6/7/89
+    #$% look for boat and port with specified names
+    for (UNT3$pointer$first; still_ok(UNT3); UNT3$pointer$next) # 9/26/88
+       {
+        if (XUNT3$InUse$i == 0) next         # skip empty slots
+ 
+        if (LCOMP(xUNT3$name$c, name_port) == 0) # jb AAI01/LCOMP  2/13/01
+           {
+            indx_port = UNT3$pointer$index
+            break
+           }
+       }
+    }
+else                    # no base/ship name was entered
+    {                   # so return to the launching unit
+    unt3$pointer$to  Xunt$launchindx$i
+    indx_port = UNT3$pointer$index
+    name_port = Xunt3$name$c
+    }
+ 
+unt$view$i  = Xunt$view$i
+ 
+if (indx_port == 0)
+   {
+    call smovv ("  No such destination.",msg,msglen)
+   }
+else
+    {
+    unt3$pointer$to indx_port
+    unt3$type$i = Xunt3$type$i
+    unt3$view$i = Xunt3$view$i
+#   unt3$smallboat$i = Xunt3$smallboat$i
+    unt3$SuperType$i   = Xunt3$SuperType$i
+    unt3$BoatRestricted$i = Xunt3$BoatRestricted$i
+ 
+    if ( (unt3$type$i != $ShoreBase$code &
+          unt3$type$i != $Surface$code   &
+#         unt3$type$i != $Surfacewithac$code   &
+          unt3$type$i != $Sub$code              ) |
+          unt3$SuperType$i == $SmallBoat$SuperCode )
+        {
+        call smovv ("  Invalid destination.",msg,msglen)
+        }
+    else if ( unt3$BoatRestricted$i == $yes )
+        {
+        call smovv ("  Illegal destination.",msg,msglen)
+        }
+    }
+ 
+if  ( unt3$view$i != unt$view$i )                # jb    6/7/89
+   {
+    call smovv ("  Not in same view.",msg,msglen)
+   }
+ 
+if (xsave != msglen)
+    {
+    while (mod(msglen,4) != 0)
+        call smov ($null,msg,msglen)
+ 
+    call send_ (unt$view$i,0,msglen,msg)     # display message of failure
+    return                                  # drop out...
+    }
+ 
+#$%    ------------- If order valid, proceed... --------------------
+ 
+call clear_maneuver_all (nord, id, xUNT$View$I, UNT$Pointer)
+ 
+PUTunt$GuideIndx$i       (indx_port)
+PUTunt$GuideBearing$f    (0.0)
+PUTunt$GuideRange$f      (0.0)
+PUTunt$GuideTrue$i       ($YES)
+PUTunt$OrderedLatitude$f ($pi)              # Remove ordered lat/long
+PUTunt$AssignedTarget$i  ($no)              # remove target assignment
+PUTunt$AttackIndx$I      ($no)              # delete attack index SMM 6/94
+ 
+# the following two lines are handled in clear_maneuver_all
+#PUTUNT$MotionFlags$I     (0)                # clear any route being used
+#PUTunt$RangeToNext$F     (200.0)
+ 
+putUNT$RecoverIndx$i (indx_port)
+ 
+shc$Pointer = Xunt$shcpntr$i
+unt$OrderedSpeed$f = Xshc$cruisespeed$i
+if (nargs >= 4)
+{
+    if (args[3] == $lex$SPEED$)     # Check for speed arg JOA 6/04
+        unt$OrderedSpeed$f = args[4]
+}
+ 
+unt$OrderedSpeed$f = min(int(unt$OrderedSpeed$f),Xunt$speed$i)
+PUTunt$OrderedSpeed$f                       # put unit's new speed
+ 
+UNT$Status$i = $ReturningToBase$Code
+putUNT$Status$i
+ 
+return
+end
+ 
+
+subroutine otow (nord,unt$pointer,nargs,args,id)
+ 
+########################################################
+#$%
+#$% Purpose:    OTOW is the multiple-phased processing of the Tow command
+#$%             for towing a small boat to a designated port.
+#$%
+#$% Command: TOW (boat) <name> (to) <force-name>
+#$%
+#$% Algorithm:
+#$%             Phase 0 - New command
+#$%               A) Validate the following...
+#$%                 1) The specified tug is a unt of type Ship/Sub/Boat
+#$%                 2) The specified boat is a unt of small boat type
+#$%                 3) The specified port is of type Ship/Sub/Shore
+#$%                 4) The specified tug, boat and port are in the same view
+#$%               B) If Invalid ...
+#$%                 1) Tell the player
+#$%                 2) leave phase of command at 0
+#$%                 3) return
+#$%               C) Otherwise...
+#$%                 1) Set guide on the disabled boat
+#$%                 2) Set status to tow (?)
+#$%                 3) Set phase of command to 1
+#$%                 4) return
+#$%
+#$%             Phase 1 - Outbound to the disabled boat
+#$%               A) Is the guide still the boat ?  If not...
+#$%                 1) set phase to 0 (canceled)
+#$%                 2) return
+#$%               B) Are we there yet ? If not...
+#$%                 1) return
+#$%               C) Is the boat Undertow (already) ?
+#$%                 1) tell player
+#$%                 2) Set phase of command to 0
+#$%                 3) return
+#$%               D) Otherwise...
+#$%                 1) Set boat to guide on the TUG
+#$%                 2) Set boat status to UTOW
+#$%                 3) Set guide of Tug to port
+#$%                 4) Set Tug status to tow
+#$%                 5) Set phase of command to 2
+#$%                 6) return
+#$%               E) Is the port <==> Tug ?  (???)
+#$%
+#$%             Phase 2 - Inbound with the disabled boat, to port
+#$%               A) Is the boat still guiding on the Tug ?  If not...
+#$%                 1) set phase to 0 (canceled)
+#$%                 2) return
+#$%               B) Are we there (to port) yet ? If not...
+#$%                 1) return
+#$%               C) Otherwise...
+#$%                 1) Set boat to guide on the PORT
+#$%                 2) Set boat status to ReadyToRecover
+#$%                 3) Set guide of Tug to port
+#$%                 4) Set Tug status to onstation (???)
+#$%                 5) Set phase of command to 0
+#$%                 6) return
+#$%
+#$%             Note:  This assumes the following in Motion model:
+#$%                3)  Speed for small boats (as a tug) is 80% of cruise speed
+#$%                    only if the attack index is Nil (i.e. boat in tow)
+#$%                4)  On arrival to port: change tug's status to on-station,
+#$%                    change boat's guide index to port, set boat's status
+#$%                    to ReadyToRecover.
+#$%                5)  A boat with status of undertow uses no fuel, and
+#$%                    is processed as if on-station to the guide (i.e. TUG),
+#$%                    and matches the tug's speed.
+#$%                6)  Process a  boat with status of ReturningToBase as if
+#$%                    proceeding to the guide (i.e. PORT).  On arrival,
+#$%                    set boat's status to ReadyToRecover.
+#$%                7)  Process a  boat with status of ReadyToRecover as if
+#$%                    on-station to the guide (i.e. PORT), and use no fuel.
+#$%
+#$% Called By: EXEORD (in WGOP.rat)
+#$%
+#$% Calls:     None
+#$%
+#$% Tables:    UNT
+#$%
+#$% Date:      June 89
+#$%
+#$% Author:    Dane Wills
+#$%
+#$% Modified:  James Allen - 12/97 (E1246)
+#$%            Added the order id to the parameter list of
+#$%            otow_Phase_0.
+#$%
+########################################################
+BBcommon
+ 
+literal         args[20]
+integer         nord, nargs, id  # jb unused arg. (NORD}
+Integer ORD$Pointer,ORD$Phase$I,    # jb E2145 6/26/00
+        UNT$Pointer                 # jb E2145 6/26/00
+ 
+#
+# UNT is used for the TUG
+# UNT2 is used for the disabled boat
+# UNT3 is used for the destination port
+#
+ 
+call fndord (id,ord$pointer)
+ 
+if (ord$pointer == 0)
+    {
+    call echov ("TOW order lost. Id=")
+    call echoi (id)
+    return
+    }
+ 
+ord$Phase$i = Xord$Phase$i
+ 
+if (ord$Phase$i == 0)                                       # New Command
+    {
+    call otow_Phase_0  (unt$pointer,id,nargs,args,ord$pointer)
+    }
+else if (ord$Phase$i == 1)                                  # Outbound
+    {
+    call otow_Phase_1  (unt$pointer,nargs,args,ord$pointer)
+    }
+else if (ord$Phase$i == 2)                                  # Inbound
+    {
+    call otow_Phase_2  (unt$pointer,nargs,args,ord$pointer)
+    }
+else                                                        # Lost in space
+    {
+    call echov ("TOW order out of control. Id=")
+    call echoi (id)
+    PUTord$Phase$i (0)
+    }
+ 
+return
+end
+
+subroutine otow_Phase_0  (unt$pointer,id,nargs,args,ord$pointer)
+ 
+########################################################
+#$%
+#$% Purpose:   OTOW_phase_0 - Validate the command and start processing
+#$%
+#$% Called By: OTOW_P
+#$%
+#$% Calls:     None
+#$%
+#$% Tables:    UNT
+#$%
+#$% Date:      June 89
+#$%
+#$% Author:    Dane Wills
+#$%
+#$% Modified:  James Allen - 12/97 (E1246)
+#$%            Added the order id to the argument list for the call
+#$%            clear_maneuver_all.  Removed clearing of motion
+#$%            flags handled in clear_maneuver_all.
+#$%
+########################################################
+BBcommon
+ 
+literal         args[20]
+literal         name_tug, name_boat, name_port
+LITERAL  UNT2$Name$C, CSTRIP8               # jb E2145  6/26/00
+REAL    UNT$Orderedspeed$F                  # jb E2145  6/26/00
+integer         nargs, id  # jb Unused argument {NARGS)
+integer         LCOMP     # jb  AAI01/LCOMP      E2145  2/13/01
+integer         msglen, xsave
+Integer  NORD, INDX_BOAT, INDX_PORT,        # jb E2145  6/26/00
+       UNT$Pointer,UNT$Type$I,UNT$View$I,   # jb E2145  6/26/00
+       UNT2$Pointer, UNT2$View$I,            # jb E2145  6/26/00
+       UNT3$Pointer,UNT3$View$I,UNT3$Type$I, # jb E2145  6/26/00
+       UNT3$Supertype$I,                     # jb E2145  6/26/00
+       ORD$Pointer, SHC$Pointer              # jb E2145  6/26/00
+character       msg[200]
+ 
+#
+# UNT is used for the TUG
+# UNT2 is used for the disabled boat
+# UNT3 is used for the destination port
+#
+ 
+name_tug = Xunt$Name$c
+name_boat = args[2]
+name_port = args[3]
+ 
+#------------------------------------------------------------
+# start validation of the command
+ 
+msglen = 0                              # build an initial error message
+call smovhn(name_tug,$$MaxLit,msg,msglen)
+call smovv(" cannot tow ",msg,msglen)
+call smovhn(name_boat,$$MaxLit,msg,msglen)
+call smovv(" to ",msg,msglen)
+call smovhn(name_port,$$MaxName,msg,msglen) # SMM 10/99 E2141
+call smovv(": ",msg,msglen)
+call smov ($tab,msg,msglen)
+call smov (msglen,msg,msglen)
+xsave = msglen                            # save length of error msg
+ 
+unt$type$i  = Xunt$type$i
+unt$view$i  = Xunt$view$i
+unt2$view$i = unt$view$i
+unt3$view$i = unt$view$i
+ 
+if (unt$type$i != $Surface$code &
+#   unt$type$i != $SurfaceWithAc$code &
+    unt$type$i != $Sub$code      )
+    {
+    call smovv ("  It is not capable.",msg,msglen)
+    }
+ 
+indx_boat = 0
+indx_port = 0
+ 
+#$% look for boat and port with specified names
+for (unt2$pointer$first; still_ok(unt2); unt2$pointer$next) # 9/26/88
+    {
+    if (Xunt2$InUse$i == 0) next         # skip empty slots
+ 
+    unt2$name$c = Xunt2$name$c
+    if (LCOMP(unt2$name$c, name_boat) == 0)  # jb AAI01/LCOMP   2/13/01
+        {
+        indx_boat = unt2$pointer$index
+ 
+        if (indx_port != 0) break
+        }
+    else if (LCOMP(unt2$name$c, name_port) == 0) # jb  AAI01/LCOMP 2/13/01
+        {
+        indx_port = unt2$pointer$index
+ 
+        if (indx_boat != 0) break
+        }
+    }
+ 
+if (indx_boat == 0)
+    {
+    call smovv ("  No such boat.",msg,msglen)
+    }
+else if (LCOMP(name_tug, name_boat) == 0)  # jb AAI01/LCOMP
+    {
+    call smovv ("  Cannot tow itself.",msg,msglen)
+    }
+else
+    {
+    unt2$pointer$to indx_boat
+    unt2$view$i = Xunt2$view$i
+ 
+#   if (Xunt2$smallboat$i != $YES)
+    if (Xunt2$SuperType$i != $SmallBoat$SuperCode)
+        {
+        call smovv ("  Only boats can be towed.",msg,msglen)
+        }
+    }
+ 
+if (indx_port == 0)
+    {
+    call smovv ("  No such destination.",msg,msglen)
+    }
+else
+    {
+    unt3$pointer$to indx_port
+    unt3$type$i = Xunt3$type$i
+    unt3$view$i = Xunt3$view$i
+#   unt3$smallboat$i = Xunt3$smallboat$i
+    unt3$SuperType$i = Xunt3$SuperType$i
+ 
+    if ( (unt3$type$i != $ShoreBase$code &
+          unt3$type$i != $Surface$code   &
+#         unt3$type$i != $Surfacewithac$code   &
+          unt3$type$i != $Sub$code               ) |
+          unt3$SuperType$i == $SmallBoat$SuperCode ) # cannot dock at a boat
+        {
+        call smovv ("  Invalid destination.",msg,msglen)
+        }
+    }
+ 
+if ( (unt2$view$i != unt$view$i) | (unt3$view$i != unt$view$i) )
+    {
+    call smovv ("  Not in same view.",msg,msglen)
+    }
+ 
+if (xsave != msglen)
+    {
+    while (mod(msglen,4) != 0)
+        call smov ($null,msg,msglen)
+ 
+    call send_ (unt$view$i,0,msglen,msg)     # display message of failure
+ 
+    PUTord$phase$i (0)
+    return                                  # drop out...
+    }
+ 
+#------------------------------------------------------------
+# validation complete, now initiate action
+ 
+call clear_maneuver_all (nord, id, xUNT$View$I, UNT$Pointer)
+ 
+PUTunt$GuideIndx$i       (indx_boat)
+PUTunt$GuideBearing$f    (0.0)
+PUTunt$GuideRange$f      (0.0)
+PUTunt$GuideTrue$i       ($YES)
+ 
+shc$pointer = Xunt$shcpntr$i
+unt$OrderedSpeed$f = Xshc$cruisespeed$i
+PUTunt$OrderedSpeed$f                       # put unit's new speed
+ 
+PUTunt$Status$i ($Towing$code)
+PUTord$phase$i (1)
+ 
+return
+end
+
+subroutine OTOW_Phase_1  (unt$pointer,nargs,args,ord$pointer)
+ 
+########################################################
+#$%
+#$% Purpose:   OTOW_phase_1 - check to see if we have met the boat yet
+#$%
+#$% Called By: OTOW_P
+#$%
+#$% Calls:     None
+#$%
+#$% Tables:    UNT
+#$%
+#$% Date:      June 89
+#$%
+#$% Author:    Dane Wills
+#$%$
+########################################################
+BBcommon
+ 
+literal         args[20]
+literal         name_tug, name_boat, name_port
+LITERAL         CSTRIP8                         # jb E2145  6/26/00
+LITERAL         UNT2$name$c,UNT3$Name$C         # jb E2145  6/26/00
+REAL            UNT$Rangetonext$F               # jb E2145  6/26/00
+integer         nargs   # jb (Unused argument)
+integer         LCOMP     # jb  AAI01/LCOMP          E2145  2/13/01
+Integer INDX_TUG,INDX_BOAT,INDX_PORT,           # jb E2145  6/26/00
+    UNT$Pointer,UNT$Attackindx$I,               # jb E2145  6/26/00
+    UNT2$Pointer,UNT2$Status$I,UNT2$Guideindx$I,  # jb E2145  6/26/00
+    UNT3$Pointer,  ORD$Pointer                    # jb E2145  6/26/00
+integer         msglen, kk
+character       msg[80]
+ 
+#
+# UNT is used for the TUG
+# UNT2 is used for the disabled boat
+# UNT3 is used for the destination port
+#
+ 
+name_tug = Xunt$Name$c
+name_boat = args[2]
+name_port = args[3]
+ 
+indx_tug  = unt$pointer$index
+ 
+#------------------------------------------------------------
+# start validation of the command
+ 
+# Is the guide still the boat to be towed ?
+ 
+indx_boat = Xunt$GuideIndx$i
+ 
+if (indx_boat != 0)
+    {
+    unt2$pointer$to indx_boat
+    unt2$Name$c = Xunt2$Name$c
+    }
+else
+    {
+    kk = 0; call smovv ("       ", unt2$Name$c, kk)
+    }
+ 
+if (LCOMP(name_boat, unt2$Name$c) != 0)  # jb AAI01/LCOMP   2/13/01
+    {
+    PUTord$phase$i (0)
+    return
+    }
+ 
+# Are we there yet ?
+ 
+unt$AttackIndx$i  = Xunt$AttackIndx$i
+if (unt$AttackIndx$i != 0)              # fool'n around somewhere...
+    {
+    return
+    }
+ 
+unt$RangeToNext$F = Xunt$RangeToNext$F
+if (unt$RangeToNext$F > 0.01)           # Arrived at disabled boat yet ?
+    {
+    return                              # no
+    }
+ 
+unt2$status$i = Xunt2$status$i
+unt2$guideindx$i = Xunt2$guideindx$i
+ 
+if (! (unt2$status$i == $DeadInWater$code |
+       (unt2$status$i == $Undertow$code & unt2$guideindx$i == indx_tug) ) )
+    {
+    msglen = 0                              # build an initial error message
+    call smovhn(name_tug,$$MaxLit,msg,msglen)
+    call smovv(" cannot tow ",msg,msglen)
+    call smovhn(name_boat,$$MaxLit,msg,msglen)
+    call smovv(" to ",msg,msglen)
+    call smovhn(name_port,$$MaxName,msg,msglen) # SMM 10/99 E2141
+    call smovv(": Boat is not DeadInWater.",msg,msglen)
+ 
+    call send_ (Xunt$view$i,0,msglen,msg)    # display message of failure
+ 
+    PUTord$phase$i (0)
+    return                                  # drop out...
+    }
+ 
+# get the unt pointer to the port
+ 
+if (LCOMP(name_tug, name_port) == 0) # jb AAI01/LCOMP    2/13/01
+    {
+    indx_port = unt$pointer$index
+    }
+else
+    {
+    indx_port = 0
+ 
+    for (unt3$pointer$first; still_ok(unt3); unt3$pointer$next)
+        {
+        if (Xunt3$InUse$i == 0) next         # skip empty slots
+ 
+        unt3$name$c = Xunt3$name$c
+        if (LCOMP(unt3$name$c, name_port) == 0) # jb AAI01/LCOMP    2/13/00
+            {
+            indx_port = unt3$pointer$index
+            break
+            }
+        }
+    }
+ 
+if (indx_port == 0)
+    {
+    msglen = 0                              # build an initial error message
+    call smovhn(name_tug,$$MaxLit,msg,msglen)
+    call smovv(" cannot tow ",msg,msglen)
+    call smovhn(name_boat,$$MaxLit,msg,msglen)
+    call smovv(" to ",msg,msglen)
+    call smovhn(name_port,$$MaxName,msg,msglen) # SMM 10/99 E2141
+    call smovv(": Destination gone now.",msg,msglen)
+ 
+    call send_ (Xunt$view$i,0,msglen,msg)    # display message of failure
+ 
+    PUTord$phase$i (0)
+    return                                  # drop out...
+    }
+ 
+#------------------------------------------------------------
+# validation complete, now initiate action
+ 
+# The TUG (UNT) has arrived at rendezvous with Boat (UNT2) to be towed..
+ 
+PUTunt2$GUIDEindx$i       (unt$Pointer$Index)   # set to TUG
+PUTunt2$ATTACKindx$i      ($no)
+PUTunt2$AssignedTarget$i  ($no)                 # remove target assignment
+PUTunt2$GuideBearing$f    ($pi)                 # follow behind the TUG
+PUTunt2$GuideRange$f      (0.1)
+PUTunt2$GuideTrue$i       ($no)
+PUTunt2$OrderedLatitude$f ($pi)                 # Remove ordered lat/long
+PUTunt2$RangeToNext$F     (0.0)
+PUTunt2$Status$i          ($UNDERTOW$Code)
+ 
+PUTunt$GUIDEindx$i        (indx_port)           # set to port
+PUTunt$RangeToNext$F      (2000.0)
+putUNT$Status$i           ($Towing$Code)
+ 
+PUTord$phase$i (2)
+ 
+return
+end
+
+subroutine OTOW_Phase_2  (unt$pointer,nargs,args,ord$pointer)
+ 
+########################################################
+#$%
+#$% Purpose:   OTOW_Phase_2 - check to see if we have arrived at port
+#$%
+#$% Called By: OTOW_P
+#$%
+#$% Calls:     None
+#$%
+#$% Tables:    UNT
+#$%
+#$% Date:      June 89
+#$%
+#$% Author:    Dane Wills
+#$%$
+########################################################
+BBcommon
+ 
+literal         args[20]
+literal         name_tug, name_boat, name_port
+LITERAL         UNT3$Name$C, CSTRIP8   # jb E2145  6/26/00
+REAL            UNT$Rangetonext$F      # jb E2145  6/26/00
+integer         nargs, kk
+integer         LCOMP     # jb  AAI01/LCOMP E2145  2/13/01
+Integer INDX_TUG, INDX_PORT,           # jb E2145  6/26/00
+    UNT$Pointer, UNT$Attackindx$I,     # jb E2145  6/26/00
+    UNT2$Pointer, UNT2$Guideindx$I,    # jb E2145  6/26/00
+    UNT3$Pointer, ORD$Pointer          # jb E2145  6/26/00
+#
+# UNT is used for the TUG
+# UNT2 is used for the disabled boat
+# UNT3 is used for the destination port
+#
+name_tug = Xunt$Name$c
+name_boat = args[2]
+name_port = args[3]
+ 
+#------------------------------------------------------------
+# start validation of the command
+ 
+# Is the guide still the port to tow to ?
+ 
+indx_port = Xunt$GuideIndx$i
+ 
+if (indx_port != 0)
+    {
+    unt3$pointer$to indx_port
+    unt3$Name$c = Xunt3$Name$c
+    }
+else
+    {
+    kk = 0; call smovv ("       ", unt3$Name$c, kk)
+    }
+ 
+if (LCOMP(name_port, unt3$Name$c) != 0) # jb AAI01/LCOMP  2/13/01
+    {
+    PUTord$phase$i (0)      # (????)
+    return
+    }
+ 
+# Are we there yet ?
+ 
+unt$AttackIndx$i  = Xunt$AttackIndx$i
+if (unt$AttackIndx$i != 0)              # fool'n around somewhere...
+    {
+    return
+    }
+ 
+unt$RangeToNext$F = Xunt$RangeToNext$F
+if (unt$RangeToNext$F > 0.01)           # Arrived at port yet ?
+    {
+    return                              # no
+    }
+ 
+#------------------------------------------------------------
+# validation complete, now initiate action
+ 
+# The TUG (UNT) has arrived at port (UNT3) ...
+ 
+ 
+# process the unt2$pointer (s) to the boat(s) in tow
+ 
+indx_tug = unt$pointer$index
+ 
+for (unt2$pointer$first; still_ok(unt2); unt2$pointer$next)
+    {
+    if (Xunt2$status$i != $undertow$code) next
+ 
+    unt2$GuideIndx$i = Xunt2$GuideIndx$i
+    if (Xunt2$GuideIndx$i != indx_tug ) next
+ 
+    PUTunt2$GuideIndx$i       (indx_port)   # put boat on guide to port
+    PUTunt2$GuideBearing$f    (0.0)
+    PUTunt2$GuideRange$f      (0.0)
+    PUTunt2$GuideTrue$i       ($YES)
+    PUTunt2$OrderedLatitude$f ($pi)         # Remove ordered lat/long
+    PUTunt2$AssignedTarget$i  ($no)         # Remove target assignment
+    PUTunt2$AttackIndx$i      ($no)
+    PUTunt2$RangeToNext$F     (0.0)
+    PUTunt2$Status$i          ($ReadyToRecover$Code)
+    PUTunt2$RecoverIndx$i     (indx_port)
+    }
+ 
+# Process the Tug boat just arriving
+ 
+PUTunt$GuideIndx$i       (indx_port)        # put boat on guide to port
+PUTunt$GuideBearing$f    (0.0)
+PUTunt$GuideRange$f      (0.2)
+PUTunt$GuideTrue$i       ($YES)
+PUTunt$OrderedLatitude$f ($pi)              # Remove ordered lat/long
+PUTunt$RangeToNext$F     (0.0)
+PUTunt$Status$i          ($ONGUIDE$Code)
+PUTunt$AssignedTarget$i  ($no)              # remove target assignment
+PUTunt$AttackIndx$i      ($NO)
+ 
+if (Xunt$GuideIndx$i == Unt$pointer$index)  # did I tow to myself?
+    {
+    PUTunt$GuideIndx$i    (0)                # clear it
+    PUTunt$OrderedSpeed$f (0.0)              # Remove ordered speed
+    PUTunt$Status$i       ($Proceeding$Code) # sit still
+    }
+ 
+PUTord$phase$i (0)
+ 
+return
+end
+
+Subroutine OLAUNCH_BOAT (nord,id,unt2$pointer)
+########################################################
+#$%
+#$% Purpose:   OLAUNCH_BOAT processes launch orders
+#$%            causing a specified small boat to be launched
+#$%            initial destination is 1 miles north of
+#$%            launching base/ship.
+#$%
+#$% Command Format:  FOR <addressee> LAUNCH BOAT (number) <number>
+#$%                                              (of class) <class>
+#$%                                              (event/serial)<force-name>
+#$%
+#$% Called By: EXEORD
+#$%
+#$% Calls: add_potential_jammer    kilord    xlaunch_boat
+#$%        findord    send
+#$%
+#$% Tables:    ORD      UNT
+#$%
+#$% Date:      MAY 89
+#$%
+#$% Author:    DANE WILLS
+#$%
+########################################################
+BBcommon
+BoatOpsCommon
+EqErr$Common
+ 
+Integer NORD    # jb E2145 (Unused argument)  6/26/00
+Integer ID,IOK,IDX,LORD,IORDL,IORDE,IUNTS, # jb E2145 6/26/00
+    ORD$Pointer, ORD$Unit$I, ORD$Phase$I,  # jb E2145 6/26/00
+    UNT$Pointer, UNT$Timelaunched$F,       # jb E2145 6/26/00
+    UNT2$Pointer, BML$Pointer              # jb E2145 6/26/00
+integer hit, LCOMP                         # JHM 11/03 AAI04
+LITERAL   CSTRIP8                          # JHM 11/03 AAI04
+BBDeclare (shc$pointer,shc$category$i)
+ 
+call fndord (id,ord$pointer)                    # find LAUNCH command
+ 
+#$% if order is zero
+if (ord$pointer == 0)
+   {
+    call echov ("Launch Boat order lost. Id=")
+    call echoi (id)
+    return
+   }
+ 
+#$% if order phase is zero
+if (Xord$phase$i == 0)                          # New LAUNCH
+   {
+    call fndord (id+1,Lord)                     # find LOAD command
+ 
+    #$% if load order is zero
+    if (Lord == 0)
+        {
+        #$% send message
+        call echov ("Load order lost. Id=")
+        call echoi (id+1)
+        return
+        }
+ 
+    $debugf if (trace$BoatOps$exe == $yes)
+    $debugf    {
+    $debugf     call echor
+    $debugf     call echov  ('^')
+    $debugf     call echov (" LAUNCH BOAT order ")
+    $debugf     call echoi (id)
+    $debugf    }
+ 
+    #$% initialize load orders
+    Lid = id
+    iordL = ord$pointer     # LAUNCH
+    iordE = Lord            # LOAD
+    iuntS = unt2$pointer    # SHIP/BASE
+ 
+    xlen = 0
+ 
+    call xglaunch_boat (iordL)                  # get launch command info
+ 
+# search SHC table for class match
+ 
+    cflg = NO                              # Do not generate err msg if not found
+    call eqfind($$SHC,0,bclass,SHC$Pointer) # search SHC table for class
+ 
+    if (SHC$Pointer == 0)              #E2361 JOA ufl03... ship class is found in SHC table
+    {
+        call smovv("  Invalid boat class ", msgx, xlen)
+        call smovhn (bclass,$$MaxLit,msgx,xlen)
+    }
+    else
+    {
+        SHC$Category$I = xSHC$Category$I
+        if (SHC$Category$I != $SmallBoat$Subcode)
+        {
+            call smovv("  Invalid boat class.", msgx, xlen)
+            call smovhn (bclass,$$MaxLit,msgx,xlen)
+        }
+    }
+ 
+    Lshc = shc$pointer
+ 
+    if (xlen != 0)              # There is an error message
+    {
+        while (mod(xlen,4) != 0)
+            call smov ($null,msgx,xlen)
+ 
+        call send_ (Xunt2$view$i,0,xlen,msgx)        # display message of ok/failure
+        idx = id+Xord$count$i-1
+        #$% end present order
+        call kilord (id,idx)
+        return
+    }
+ 
+    if (bnumber > 1)                # Launch multiple boats
+    {
+        # Generate launch orders for each boat
+        call glaunch_boat (iuntS,iordL,iordE,iok)   # generate LAUNCH orders
+        if (iok == $no)
+        {
+            while (mod(xlen,4) != 0)
+                call smov ($null,msgx,xlen)
+ 
+            call send_ (Xunt2$view$i,0,xlen,msgx)        # display message of ok/failure
+        }
+        idx = id+Xord$count$i-1
+        #$% end present order
+        call kilord (id,idx)
+        return
+    }
+    #$% validate and execute launch
+    call xlaunch_boat (iuntS,iordL,iordE,iok)   # validate & execute LAUNCH
+ 
+    while (mod(xlen,4) != 0)
+        call smov ($null,msgx,xlen)
+ 
+    call send_ (Xunt2$view$i,0,xlen,msgx)        # display message of ok/failure
+ 
+    #$% if launch OK is YES
+    if (iok == $yes)                            # was launch ok ?
+        {
+        $debugf if (trace$BoatOps$exe == $yes)
+        $debugf    {
+        $debugf     call echov ("  OK")
+        $debugf    }
+ 
+        #$% set order phase to one
+        ord$phase$i = 1                         # Yes..set LAUNCH to phase 1
+        PUTord$phase$i
+ 
+        unt$pointer = Lunt
+        ord$Unit$i = unt$pointer$index          #      save unt index
+        PUTord$Unit$i
+ 
+        ord$pointer = Lord
+        ord$phase$i = 1                         #      set LOAD to phase 1
+        PUTord$phase$i
+ 
+        CALL add_potential_jammer ( UNT$Pointer$Index )
+        }
+    else                                        # No...throw away boat plan
+        {
+        idx = id+Xord$count$i-1
+ 
+        $debugf if (trace$BoatOps$exe == $yes)
+        $debugf    {
+        $debugf     call echov ("  No good thru ")
+        $debugf     call echoi (idx)
+        $debugf    }
+ 
+        #$% end present order
+        call kilord (id,idx)
+        }
+    }
+else                                            # Underway Yet ?
+   {
+    unt$pointer$to Xord$Unit$i                  # get launch time
+ 
+    unt$TimeLaunched$f = Xunt$TimeLaunched$f
+    if ( game$time >= unt$TimeLaunched$f )
+        {
+        bml$pointer$to Xunt$BMLindx$i
+ 
+        PUTbml$Status$i ( $underway$code )
+        PUTunt$Status$i ( $proceeding$code )
+        }
+ 
+    if (Xunt$Status$i != $AwaitingLaunch$code )
+       {
+        PUTord$phase$i ( 0 )
+       }
+   }
+ 
+return
+end
+ 
+
+subroutine xgload_Boat (ord$pointer)                 # get load command info
+ 
+########################################################
+#$%
+#$% Purpose:   XGLOAD_BOAT gets Load Command Information
+#$%            specified in the load order.
+#$%
+#$% Called By: XLAUNCH_boat
+#$%
+#$% Calls:     None
+#$%
+#$% Tables:    ORD
+#$%
+#$% Date:      May 89
+#$%
+#$% Author:    DANE WILLS
+#$%
+########################################################
+BBcommon
+BoatOpsCommon
+ 
+LITERAL  CSTRIP8                             # jb E2145  6/26/00
+Integer ORD$Pointer, ORD$WRD$Index  # jb E2145  6/26/00
+ 
+loadc = 0
+for (ord$wrd$index = 2; ord$wrd$index$ok; ord$wrd$index=ord$wrd$index+1)
+   {
+    loadc = loadc + 1
+ 
+    iload[2,loadc] = Xord$wrd$$c                # get qty
+ 
+    ord$wrd$index = ord$wrd$index + 1
+    nload[loadc] = Xord$wrd$$c                  # get name
+ 
+    iload[3,loadc] = 0                          # init plat eq$index
+   }
+ 
+return
+end
+ 
+
+subroutine xvload_boat (unt2$pointer,unt$pointer,iok) # verify load available
+ 
+########################################################
+#$%
+#$% Purpose:   XVLOAD_BOAT verifies the equipment needed
+#$%            to load a flight is available.
+#$%
+#$%            UNT2 points to the Ship/Base
+#$%            UNT points to the already loaded Aircraft (if > 0) for reload
+#$%
+#$% Called By: xvlaunch_boat
+#$%
+#$% Calls:     None
+#$%
+#$% Tables:    DEQ
+#$%
+#$% Date:      May 89
+#$%
+#$% Author:    Dane Wills
+#$%
+########################################################
+BBcommon
+BoatOpsCommon
+ 
+literal nameeq
+LITERAL  CSTRIP8                             # jb E2145  6/26/00
+Integer ISAVE,IOK,IPNT,IQTYEQ,  # jb E2145  6/26/00
+    IEQPTR,IPQTY,IAQTY,         # jb E2145  6/26/00
+    UNT$Pointer,UNT2$Pointer,   # jb E2145  6/26/00
+    DEQ$Pointer,                # jb E2145  6/26/00
+    DEQ2$Pointer,DEQ2$Ident$I,  # jb E2145  6/26/00
+    TOR$Pointer, TOR$Maxalt$I   # jb E2145  6/26/00
+integer  LCOMP   # jb  AAI01/LCOMP   E2145  2/22/01
+ 
+isave = xlen                                    # save error msg length
+iok = $no
+ 
+#$% for each entry
+for (ipnt = 1; ipnt <= loadc; ipnt = ipnt + 1)
+   {
+    nameeq = nload[ipnt]
+    iqtyeq = iload[2,ipnt]
+ 
+    ieqptr = 0                                  # save pointer to equipment
+    ipqty  = 0                                  # init cnt avail on platform
+    iaqty  = 0                                  # init cnt avail on alternate
+ 
+    #$% for each equipment entry
+    FOR_DEQ2_CHAIN
+       {
+        #$% if not same equipment name, get next entry
+###        if (Xdeq2$Type$C != nameeq) next
+        if (LCOMP(Xdeq2$Type$C, nameeq) != 0 ) next # jb aai01/LCOMP 2/22/01
+ 
+        deq2$ident$i = Xdeq2$ident$i
+        if (deq2$ident$i != $CruiseMissile$code &
+            deq2$ident$i != $Torpedo$code       &
+            deq2$ident$i != $SAM$code           &
+            deq2$ident$i != $Bomb$code          &
+            deq2$ident$i != $Mine$code          &
+            deq2$ident$i != $SmartTorpedo$Code  & # 5/15/90, reh
+            deq2$ident$i != $Gun$code           & # Added for Gun model 7/89
+            deq2$ident$i != $GND$code           & # reh 12/7/89 amphibious model
+            deq2$ident$i != $CommBuoy$code       ) next
+ 
+        iload[3,ipnt] = deq2$Pointer$index
+ 
+        ipqty = Xdeq2$Remaining$i
+        ieqptr = Xdeq2$Pntr$i
+ 
+        ## if equipment is TORP and maxalt/depth is 0         ## tpa 8/12/83
+        if (deq2$Ident$I == $Torpedo$Code)
+            {
+            TOR$Pointer  = ieqptr
+            TOR$MaxAlt$I = xTOR$MaxAlt$I
+ 
+            if (TOR$MaxAlt$I >  0)
+                {
+                call smovv ("  Cannot load air launch torpedos ",msgx,xlen)
+                call smovhn (nameeq,                 $$MaxLit,msgx,xlen)
+                }
+            }
+ 
+        break
+       }
+ 
+    if (unt$pointer > 0 & ieqptr != 0)          # check alternate source
+       {
+        #$% for each equipment entry
+        FOR_DEQ_CHAIN
+           {
+            if (Xdeq$Logistical$i == $NO) next    # skip non-logistics equip
+ 
+            #$% if equipment is not flight equipment, get next entry
+            if (ieqptr != Xdeq$Pntr$i) next
+ 
+            #$% set equipment remaining
+            iaqty = Xdeq$Remaining$i
+            break
+           }
+       }
+ 
+    #$% if equipment pointer is zero
+    if (ieqptr == 0)
+       {
+        #$% move message
+        call smovv ("  ",msgx,xlen)
+        call smovhn (nameeq,$$MaxLit,msgx,xlen)
+        call smovv  ("  not available.",msgx,xlen)
+       }
+    #$% else if equipment needed is greater than equipment remaining
+    else if (iqtyeq > (ipqty+iaqty))
+       {
+        #$% move message to output buffer
+        call smovv("  Not enough ",msgx,xlen)
+        call smovhn (nameeq,$$MaxLit,msgx,xlen)
+        call smovv ("  available.",msgx,xlen)
+       }
+   }
+ 
+if (isave == xlen) iok = $yes                   # return status
+ 
+return
+end
+ 
+
+subroutine xglaunch_boat (ord$pointer)      # get launch command info
+ 
+########################################################
+#$%
+#$% Purpose:   XGLAUN processes launch command
+#$%            input parameters.
+#$%
+#$% Called By: XLAUNCH_BOAT
+#$%
+#$% Calls:     None
+#$%
+#$% Tables:    ORD
+#$%
+#$% Date:      May 89
+#$%
+#$% Author:    Dane Wills
+#$%
+#$% Modified:  Jim Allen 6/03 E2349
+#$%            Get number of boats and boat class
+########################################################
+BBcommon
+BoatOpsCommon
+ 
+LITERAL  CSTRIP8                             # jb E2145  6/26/00
+Integer ORD$Pointer  # jb E2145  6/26/00
+ 
+#$% set name, time
+bnumber  = Xord$W03$c
+if (bnumber < 0)                    # Decode number of chars in base name
+{
+    baseNameLen = -bnumber
+    bnumber = 1
+}
+else
+    baseNameLen = 0
+ 
+bclass   = Xord$W04$c
+bname    = Xord$W05$c
+itime    = Xord$Start$i
+ 
+return
+end        # end
+ 
+
+subroutine glaunch_boat (unt2$pointer,   # validate&execute LAUNCH
+                         iordL,          # Launch order pointer
+                         iordE,          # Load order pointer
+                         iok)            # status return ($yes/$no)
+ 
+########################################################
+#$%
+#$% Purpose:   GLAUNCH_BOAT generates launch order for
+#$%            each boat.
+#$%
+#$% Called By: OLAUNCH_BOAT
+#$%
+#$% Calls:
+#$%
+#$% Tables:    UNT
+#$%
+#$% Date:      June 03
+#$%
+#$% Author:    James O. Allen
+#$%
+#$% Modified:  James O. Allen Jul03 (E2350)
+#$%            Transform GROUP order in boat plan into STATION order
+#$%
+########################################################
+##{153,ABE, AH  } FOR <addressee> LAUNCH BOAT <number> <class> <force-name>
+ 
+BBcommon
+BoatOpsCommon
+ 
+literal cstrip8
+literal iinp[$order$array$size],stalex[$order$array$size],ilex[$order$array$size]
+Integer IOK,isave,IORDL,IORDE,
+    UNT2$Pointer
+literal baseName, gboatName, guide
+integer barray[bml$slots], nbarray
+integer ilen, ndigits, idlo, idhi,i, kk
+integer nargs, kview, ista, id, index_ord_wrd, bi, li, nlex
+ 
+BBDeclare (ord$pointer, ord$W03$c, ord$W05$c, shc$pointer,sta$pointer)
+ 
+isave = xlen                                    # save error msg length
+iok = $no
+ 
+shc$pointer = Lshc
+ 
+# Validate number of boats requested are available
+if (bnumber <= 0 | bnumber > bml$slots)
+{
+    call smovv("  Invalid number of boats.",msgx,xlen)
+    return
+}
+else
+{
+    call get_available_boats (unt2$pointer, shc$pointer, bnumber,
+                              barray, nbarray)
+#### JHM 11/03 AAI04 this check to avoid crash on no boats
+    if (nbarray <= 0 )
+    {
+    call smovv("  No boats available on this ship/base.",msgx,xlen)
+    return
+    }
+ 
+    if (nbarray < bnumber)
+    {
+        call smovv("   Requested boats reduced from ",msgx,xlen)
+        call smovi(bnumber, msgx, xlen)
+        call smovv(" to ",msgx,xlen)
+        call smovi(nbarray, msgx, xlen)
+ 
+        bnumber = nbarray
+    }
+}
+ 
+# validate length of force-name
+baseNameLen = 0
+call smovhn (bname, $$Maxlit, baseName, baseNameLen)
+ndigits = log10(float(bnumber)) + 1
+ 
+if ((baseNameLen + ndigits) > $$Maxlit)
+{
+    call smovv("   Event name and number exceed name length.",msgx,xlen)
+    return
+}
+ 
+# Generate launch and load orders for each boat
+for (bi = 1; bi <= bnumber; bi = bi + 1)
+{
+    for (i=0; i < $order$array$size; i=i+1)   #jhm 11/03
+          iinp[i] = $SPACE
+ 
+    ord$pointer = iordL
+    idlo = Xord$id$i
+    idhi = idlo+Xord$count$i-1
+ 
+    #Change number of boats to 1
+    ord$W03$c = -baseNameLen            # Communicate baseNameLen to single launch
+    PUTord$W03$c
+ 
+    #Append boat event number to event base name
+    kk = 0; call smovv ("        ", gboatName, kk)
+    ilen = 0
+    call smovhn (bname, $$Maxlit, gboatName, ilen)
+    call smoviz (bi, ndigits, gboatName, ilen)
+    PUTord$W05$C( gboatName )
+ 
+    if (bi == 1) guide = gboatName
+ 
+    for (ord$pointer = iordL; (Xord$id$i <= idhi & Xord$id$i >= idlo);
+         ord$pointer$next)
+    {
+        # Copy launch and plan for each boat
+        $ord$min = Xord$Start$I
+        $ord$len = ord$entry
+        $ord$num = XORD$Code$I
+        $ord$start = 0
+        if (ord$pointer == iordL)
+        {
+            $ord$addr = Xord$Addressee$C
+        }
+        else
+        {
+            $ord$addr = gboatName
+        }
+ 
+        $ord$seq = XORD$Sequence$I
+        $ord$cnt = XORD$Count$I
+        kview = XORD$View$I
+        ista = XORD$STAIndx$I
+        nargs = Xord$NbrArgs$i
+ 
+        if ($ord$num == FORMATION$order)
+        {
+            for (ord$wrd$index=1; ord$wrd$index<=nargs;
+                 ord$wrd$index=ord$wrd$index+1)
+            {
+                #$% set word and save
+                ilex[ord$wrd$index] = XORD$WRD$$C
+            }
+            call formation2station(guide, bi, ilex, nargs, stalex, nlex)
+            for (li = 1; li <= nlex; li = li + 1)
+            {
+                iinp[li+7] = stalex[li]
+            }
+            $ord$len = (ORD$entB+nargs*ORD$entS)
+            $ord$num = STATION$order
+            nargs = nlex
+        }
+        else
+        {
+            #$% for each word entry
+            for (ord$wrd$index=1; ord$wrd$index<=nargs;
+                 ord$wrd$index=ord$wrd$index+1)
+            {
+                #$% set word and save
+                iinp[ord$wrd$index+7] = XORD$WRD$$C
+            }
+        }
+ 
+        call bldord (kview,ista,nargs+6,iinp)    # build the order into ORD
+    }
+}
+ 
+if (isave == xlen) iok = $yes
+ 
+return
+end
+ 
+
+subroutine get_available_boats (unt2$pointer,   # Ship/base
+                                shc$pointer,    # Boat class
+                                nboatsneeded,   # Number of boats needed
+                                barray,         # array of boat pointer (out)
+                                nbarray)        # Number of returned boats
+########################################################
+#$%
+#$% Purpose:   Get requested number of available boats from ship/base
+#$%            of given class.
+#$%
+#$% Called By: GLAUNCH_BOAT
+#$%
+#$% Calls:
+#$%
+#$% Tables:    UNT, BML
+#$%
+#$% Date:      June 03
+#$%
+#$% Author:    James O. Allen
+#$%
+########################################################
+BBcommon
+ 
+literal cstrip8
+integer barray[bml$slots], nbarray, nboatsneeded
+BBDeclare (bml$pointer, bml2$pointer, unt2$pointer, shc$pointer)
+integer i, j, t, nb, nn
+ 
+nb = 0
+for (bml$pointer$to Xunt2$BMLIndx$i; bml$pointer$ok;
+     bml$pointer$to Xbml$NextBML$i)
+{
+    if (Xbml$SHCPntr$i != shc$pointer) next
+    if (Xbml$Status$i != $OnDeck$Code) next
+    nb = nb + 1
+    barray[nb] = bml$pointer
+}
+ 
+# Select boats with soonest launch time
+nn = min(nboatsNeeded, nb)
+for (i = 1; i <= nn; i = i + 1)
+{
+    for (j = i + 1; j <= nb; j = j + 1)
+    {
+        bml$pointer = barray[i]
+        bml2$pointer = barray[j]
+        if (Xbml2$TimeLaunch$f < Xbml$TimeLaunch$f)
+        {
+            t = barray[i]
+            barray[i] = barray[j]
+            barray[j] = t
+        }
+    }
+}
+ 
+nbarray = nn
+ 
+return
+end
+
+subroutine xlaunch_boat (unt2$pointer,   # validate&execute LAUNCH
+                         iordL,          # Launch order pointer
+                         iordE,          # Load order printer
+                         iok)            # status return ($yes/$no)
+ 
+########################################################
+#$%
+#$% Purpose:   XLAUNCH_BOAT calls routines to validate
+#$%            and execute launch boat command parameters.
+#$%
+#$% Called By: OLAUNCH_BOAT
+#$%
+#$% Calls:
+#$%
+#$% Tables:    UNT
+#$%
+#$% Date:      MAY 89
+#$%
+#$% Author:    DANE WILLS
+#$%
+########################################################
+##{153,ABE, AH  } FOR <addressee> LAUNCH BOAT <name> TIME <start-minute>;
+ 
+BBcommon
+BoatOpsCommon
+ 
+Integer IOK,IOK2,IORDL,IORDE,   # jb E2145  6/26/00
+    UNT2$Pointer                # jb E2145  6/26/00
+ 
+call xgload_boat (iordE)                        # get load command info
+ 
+call xvlaunch_boat (unt2$pointer,iordL,iordE,iok2)     # validate launch
+ 
+if (iok2 == $yes)                               # build required entries
+   {
+    #$% build active table entries
+    call xblaunch_boat (unt2$pointer)
+    iok = $yes
+   }
+else
+   {
+    iok = $no
+   }
+ 
+return
+end
+ 
+
+subroutine xvlaunch_boat (unt2$pointer,iordL,iordE,iok) # validate launch
+ 
+########################################################
+#$%
+#$% Purpose:   XVLAUNCH_BOAT validates launch command
+#$%            parameters and calls a routine
+#$%            to validate LOAD parameters.
+#$%            The UNT2$pointer points to the Launch Platform (ship/base)
+#$%
+#$% Called By: XLAUNCH_boat
+#$%
+#$% Calls:    xvload_boat
+#$%
+#$% Tables:    UNT        DEQ        SHC
+#$%
+#$%
+#$% Date:      May 89
+#$%
+#$% Author:    Dane Wills
+#$%
+#$% Modified:  James Allen - 2/96 (E1467)
+#$%            Verify that the unit has enought fuel to
+#$%            provide to the boat before launching it.
+#$%
+#$%            Susan Miller - 6/99 (E2091)
+#$%            Removed fuel requirement of launching platform
+#$%            if it is a sub.
+########################################################
+BBcommon
+BoatOpsCommon
+ 
+LITERAL    CSTRIP8,UNT$Name$C                   # jb E2145 6/26/00
+REAL       FUEL_LOAD
+integer     LCOMP                 # jb  AAI01/LCOMP E2145  2/13/01
+Integer    IORDL,IORDE          # jb E2145 (Unused arg's)  6/26/00
+Integer IOK,IDUP,LTOP,LOK,LDYN,INDX,            # jb E2145 6/26/00
+    XBML,XSAVE,                                 # jb E2145 6/26/00
+    UNT$Pointer,UNT$Type$I,                     # jb E2145 6/26/00
+    BML$Pointer,BML$Status$I,                   # jb E2145 6/26/00
+    SHC$Pointer,SHC$Launchdelay$I,SHC$EQ$Index, # jb E2145 6/26/00
+    UNT2$Pointer,UNT2$TNK$Index,                # jb E2145 6/26/00
+    DEQ$Ident$I                                 # jb E2145 6/26/00
+integer barray[bml$slots],nbarray
+ 
+#$% set flag to No
+iok = $no
+ 
+xlen = 0
+#$% move messages
+call smovhn(xunt2$name$c,$$MaxLit,msgx,xlen)
+call smovv(" cannot launch ",msgx,xlen)
+call smovhn(bname,$$MaxLit,msgx,xlen)
+call smovv(": ",msgx,xlen)
+call smov ($tab,msgx,xlen)
+call smov (xlen,msgx,xlen)
+xsave = xlen                            # save length of error msg
+ 
+Lunt  = $no
+idup  = $no
+Ltop  = $no
+Etime = order$minute
+N_underway = 0
+ 
+#$% Check for duplicate names
+for (unt$pointer$first; still_valid(unt); unt$pointer$next) # 9/26/88
+   {
+    #$% if this slot not in use
+    if (Xunt$InUse$i == 0)
+       {
+        if (Lunt == $no) Lunt = unt$pointer     # save reference to empty UNT
+        next
+       }
+ 
+    if (Xunt$status$i == $beingDeleted$code) next
+ 
+    #if (Xunt$view$i != Xunt2$view$i) next   #  JHM 9/03 (E2365)     want uniqueness across views
+ 
+    If (Xunt$GhostedUnit$i == $YES) next    # Can't give orders to ghosted
+ 
+    unt$Name$c = Xunt$Name$c
+    unt$Type$i = Xunt$Type$i
+ 
+    if (Xunt$SuperType$i == $SmallBoat$SuperCode)
+        N_Underway = N_Underway + 1
+ 
+    #$% if same name, flag Dup-error as YES
+    if (LCOMP(bname, unt$Name$c)== 0) idup = $yes # jb AAI01/LCOMP 2/13/01
+   }
+ 
+#$% verify equipment needed to load
+call xvload_boat (unt2$pointer,-1,Lok)
+ 
+#$% if unit table is full
+if (Lunt == $no)
+   {
+    #$% move message
+    call smovv ("  Unit table full.",msgx,xlen)
+   }
+ 
+#$% set flag to NO
+Ldyn = $no
+ 
+IF (N_Underway >= Simultaneous$boats)
+   {
+    call smovv ("  Boat limit reached.",msgx,xlen)
+   }
+ 
+indx = unt2$pointer$index
+xbml = 0
+Lbml = 0
+ 
+for (bml$pointer$first; still_ok(bml) ; bml$pointer$next) # 9/26/88
+   {
+    if (LCOMP(bname, Xbml$Name$c) != 0)  NEXT  # jb AAI01/LCOMP     2/13/00
+ 
+    if ( indx  != Xbml$OwnerIndx$i ) break      # wrong base (tell him nothing)
+ 
+    bml$Status$i = Xbml$Status$i
+    if (bml$Status$i == $Underway$code)
+        {
+        call smovv  ("  Already underway.",msgx,xlen)
+        break
+        }
+    else if (bml$Status$i == $Assigned$code)
+        {
+        call smovv  ("  Already preparing to launch.",msgx,xlen)
+        break
+        }
+    else if (bml$Status$i != $OnDeck$code)
+        {
+        call smovv  ("  Not available.",msgx,xlen)
+        break
+        }
+    xbml = xbml + 1
+    break
+    }
+ 
+if (xbml == 0)                              # Explicit side number not found
+{                                           # Use class to find available boat
+ 
+    call get_available_boats (unt2$pointer, Lshc, bnumber,
+                              barray, nbarray)
+    if (nbarray > 0)
+    {
+        xbml = 1
+        bml$pointer = barray[1]
+    }
+}
+ 
+if (xbml > 0)
+{
+    Lbml = bml$pointer
+    shc$pointer = Xbml$SHCPntr$i
+    Lshc        = shc$pointer
+    shc$LaunchDelay$i = Xshc$LaunchDelay$i
+ 
+    # ETL
+    Etime = max (Etime,                                 # ?
+                 float(order$minute+shc$LaunchDelay$i), # Now + delay
+                 float(itime),                          # When asked for
+                 Xbml$TimeLaunch$f+shc$LaunchDelay$i)   # after "turn-around"
+}
+ 
+if (  xbml != 1       &                           # no BML entry
+     xsave == xlen     )                          # and no previous error
+   {
+    call smovv ("  No such boat aboard.",msgx,xlen)
+   }
+ 
+if (  idup == $yes &                              # if duplicate name
+     xsave == xlen     )                          # and no previous error
+   {
+    call smovv ("  Duplicate Name.",msgx,xlen)
+   }
+ 
+ 
+# only check for fuel if the launching platform is not a sub SMM 6/99 (E2091)
+if (xUNT2$SuperType$I != $Submarine$SuperCode & BoatFuelConsumption$Flag == $ON)
+  {
+   #$% Verify enough fuel to launch - joa 2/96 (E1467)
+   for (shc$eq$index=1; shc$eq$index$ok; shc$eq$index=shc$eq$index+1)
+      {
+       deq$Ident$i = Xshc$eq$Ident$i
+       if (deq$Ident$i == $fuel$code)
+         {
+          fuel_load = Xshc$EQ$Remaining$i
+          unt2$tnk$index = ShipFuelTank$Index
+          if (fuel_load > Xunt2$TNK$FuelRemaining$f)
+            {
+             #$% move message to output buffer
+             call smovv("  Insufficient fuel ",msgx,xlen)
+            }
+         }
+      }
+  } # end of check of launcher is not a sub.
+ 
+if (xsave == xlen) iok = $yes
+ 
+return
+end
+ 
+
+subroutine xblaunch_Boat(unt2$pointer)                 # build required tables
+ 
+########################################################
+#$%
+#$% Purpose:   XBLAUNCH_BOAT calls routines needed
+#$%            to build the active UNT table entries
+#$%            needed to launch a small boat.
+#$%
+#$% Called By: XLAUNC
+#$%
+#$% Calls:     XBLUNT     XBLDYN     XBLBML
+#$%
+#$% Tables:    UNT
+#$%
+#$% Date:      May 89
+#$%
+#$% Author:    Dane Wills
+#$%
+########################################################
+BBcommon
+BoatOpsCommon
+ 
+integer Game_DTG,
+    UNT2$Pointer, RPM$Pointer   # jb E2145  6/26/00
+ 
+xlen = 0
+Call smovhn(bname,$$MaxLit,msgx,xlen)
+call smovv (" ET launch is ",msgx,xlen)
+call smoviz(Game_DTG (etime),  6,msgx,xlen)
+call smovv (".  ",msgx,xlen)
+ 
+call xblunt_boat (unt2$pointer)                  # init unt/pos/dyn entries
+call xblbml_boat                                 # init bml entries
+ 
+call getrpm (Lunt,rpm$pointer)
+call seturp (Lunt,rpm$pointer)                   # init reporting policy
+ 
+return
+end
+ 
+
+subroutine xblunt_boat (xunt2)                   # build UNT entries
+ 
+########################################################
+#$%
+#$% Purpose:   XBLUNT_boat builds active unit & equipment
+#$%            table entries required to prepare a
+#$%            SmallBoat for launch.
+#$%
+#$% Called By: XBLAUNCH_BOAT
+#$%
+#$% Calls:     None
+#$%
+#$% Tables:    UNT        SHC    DEQ
+#$%
+#$% Date:      May 89
+#$%
+#$% Author:    Dane Wills
+#$%
+#$% Modified:  Carol Kropp - 8/95 (E1446)
+#$%            Resurrected boats when killed again had
+#$%            multiple NAM entries (CLEAR DAM wouldn't
+#$%            work), so call Update_NAM_Unt_Index.
+#$%
+#$%            Susan Miller - 12/95 (E1516)
+#$%            When boats are launched the emitters on board
+#$%            need to have a deq$emitterindx$I.
+#$%
+#$%            James Allen - 2/96 (E1467)
+#$%            Default the boat to consume fuel.
+#$%            Replaced directly setting of FuelRemaining with
+#$%            new mechanism of TNK_adjust_fuel_remaining.
+#$%
+#$%            Susan Miller - 4/99 (E2066)
+#$%            Set SAMCapable flag for UNT when a boat is
+#$%            launched that has a SAM on board so that
+#$%            the SAMs can be used.
+#$%
+#$%            Susan Miller - 6/99 (E2091)
+#$%            Removed fuel requirement of launching platform
+#$%            if it is a sub.
+#$%
+#$%            James Allen - 2/04
+#$%            For group boat launch, assign boat base name as
+#$%            collective name.  Each boat is a leader.
+#$%
+########################################################
+BBcommon
+BoatOpsCommon
+ 
+literal cstrip8
+REAL    UNT$Orderedspeed$F                        # jb E2145  6/26/00
+integer     xunt2
+integer     My_indx
+integer     next_bml
+integer*4   maxhgt
+integer     success
+integer     e_indx # SMM 12/8/95 (E1516)
+integer     lcomp
+integer     bi, li, kk
+Integer UNT$Pointer,IFF$Pointer,                  # jb E2145  6/26/00
+    BML$Pointer,BML$Rtlindx$I,                    # jb E2145  6/26/00
+    SHC$Pointer,SHC$Maxspeed$I,SHC$EQ$Index,      # jb E2145  6/26/00
+    DEQ$Pointer,DEQ$Ident$I,DEQ$Pntr$I,           # jb E2145  6/26/00
+    DEQ$Emitterindx$I,DEQ$Remaining$I,            # jb E2145  6/26/00
+    DEQ$On$I,DEQ$EM$Index,DEQ$Oktosend$I,         # jb E2145  6/26/00
+    BML2$Pointer,BML2$Nextbml$I,                  # jb E2145  6/26/00
+    UNT2$Pointer                                  # jb E2145  6/26/00
+BBDeclare (unt$ForceName$c)
+ 
+VMSchar     vstrip*ARB
+character   bnameC[8]
+equivalence (bname,bnameC)
+ 
+e_indx = 1 # init the jecewsi emitter index SMM 12/8/95 (E1516)
+ 
+unt$pointer = Lunt
+bml$pointer = Lbml
+ 
+if (unt$last < unt$pointer)
+   {
+    unt$used = unt$pointer$index * unt$entry
+   }
+ 
+unt2$pointer = xunt2
+ 
+ 
+PUTunt$Status$i ( $AwaitingLaunch$code )           # status awaiting launch
+PUTunt$View$i   ( Xunt2$View$i )                   # owners view
+PUTunt$Type$i   ( $surface$code )                  # unit type is surface
+PUTunt$SubType$i ( $SmallBoat$SubCode )            # unit type is small boat
+PUTunt$Name$c   (bname)                            # enter boat name
+kk = 0; call smovv ("        ", bforce, kk)
+bi = 0
+if (LCOMP(bname, XBml$name$c) != 0)                # If not boat side number, must have base name
+{
+    PUTunt$Leader$i( 1 )                           # Every boat in group launch is a leader
+    call smovhn (bname, baseNameLen, bforce, bi)
+}
+PUTunt$Event$c    ( bforce )                       # enter boat event name
+PUTunt$ForceName$c (XBml$name$c)                         # enter boat force name
+PUTunt$FullName$V (Xunt$Name$v)                    # dew (E2209)
+PUTunt$flag$v     (Xbml$Flag$v)
+PUTunt$NOSICid$i  (Xbml$NosicId$i)
+PUTunt$OTGcode$i  (Xbml$OTGcode$i)
+PUTunt$TimeLaunched$f ( Etime )                    # compute launch time
+ 
+PUTUNT$HierarchyId$i ( XUNT2$HierarchyId$i )       # hierarchy of owner
+PUTunt$TrueLatitude$f ( Xunt2$TrueLatitude$f )     # enter true latitude
+PUTunt$TrueLongitude$f ( Xunt2$TrueLongitude$f )   # enter true longitude
+PUTunt$CosTrueLat$f ( Xunt2$CosTrueLat$f )         # enter cosine of latitude
+PUTunt$AssumedLatitude$f (Xunt2$AssumedLatitude$f) # enter assumed latitude
+PUTunt$AssumedLongitude$f (Xunt2$AssumedLongitude$f)# enter assumed longitude
+PUTunt$OrderedLatitude$f ( $pi )                   # negate position order
+PUTunt$FuelConsumptionFlag$i (BoatFuelConsumption$Flag) # Assume system setting for Boats (dew 1/01)
+ 
+PUTunt$OrderedSpeed$f ( 60.0 )                     # enter ordered speed
+PUTunt$TrueSpeed$f ( 0.0 )                         # enter true speed
+PUTunt$AssumedSpeed$f ( 0.0 )                      # enter assumed speed
+PUTunt$OrderedCourse$f ( 0.0 )                     # enter ordered course
+PUTunt$TrueCourse$f ( Xunt2$TrueCourse$f )         # enter true course
+PUTunt$AssumedCourse$f ( Xunt2$AssumedCourse$f )   # enter assumed course
+PUTunt$RangeToNext$f ( 200.0 )                     # init 200 mile departure
+ 
+PUTunt$GuideIndx$i ( unt2$pointer$index )          # set guide index
+PUTunt$GuideRange$f ( 1.0 )
+PUTunt$GuideBearing$f ( 360.0 / 180.* $PI )
+PUTunt$GuideTrue$i ( $yes )
+ 
+shc$pointer = Lshc
+ 
+PUTunt$shcpntr$i ( Lshc )                       # enter characteristics pntr
+PUTunt$launchindx$i ( unt2$pointer$index )      # enter launch platform index
+PUTunt$recoverindx$i ( unt2$pointer$index )     # enter recover platform index
+shc$MaxSpeed$i = Xshc$MaxSpeed$i
+PUTunt$speed$i (shc$MaxSpeed$i)                # Undamaged Max speed
+unt$orderedspeed$f = float(shc$MaxSpeed$i)     # initial speed to station
+PUTunt$orderedspeed$f
+ 
+PUTunt$BMLIndx$i ( bml$pointer$index )          # set BML index
+ 
+BML$RTLIndx$I = xBML$RTLIndx$I    # get the index to the recognized tonals - JFR 4/25/94
+                                  # really names mapped to number of tonals      (E1267)
+PUTunt$RTLIndx$I (BML$RTLIndx$I)  # set the RTL index in UNT slot now that boat
+                                  # is a unit
+ 
+if (xBML$ResurrectedFlag$I == $yes)
+  call Update_NAM_Unt_Index (bname, UNT$Pointer$Index, success)
+ 
+maxhgt = 0                                      # 6/91, reh
+ 
+#$% for each equipment on the small boat
+for (shc$eq$index=1; shc$eq$index$ok; shc$eq$index=shc$eq$index+1)
+   {
+    deq$Ident$i = Xshc$eq$Ident$i
+    if (deq$Ident$i == $fuel$code & BoatFuelConsumption$Flag == $ON )
+        {
+         # transfer fuel to the boat from the launching platform
+         call TNK_adjust_fuel_remaining (UNT$Pointer,    # joa 2/96 (E1467)
+                                         ShipFuelTank$Index,
+                                         float (xSHC$EQ$Remaining$I) )
+ 
+         # only move fuel if the launching platform is not a sub SMM 6/99 (E2091)
+         if (xUNT2$SuperType$I != $Submarine$SuperCode)
+           {
+            call TNK_adjust_fuel_remaining (UNT2$Pointer,    # joa 2/96 (E1467)
+                                         ShipFuelTank$Index,
+                                         float(xSHC$EQ$Remaining$I)*(-1.0) )
+           }
+         next
+        }
+    #$% else if equipment ID is navigational sensor
+    else if (deq$Ident$i == $navsensor$code)
+       {
+        deq$Pntr$i = Xshc$eq$Pntr$i
+        call naverr (deq$Pntr$i,unt$pointer)
+        next
+       }
+    #$% else if an antenna associated with equipment (added 6/91, reh)
+    else if ( deq$Ident$i == $commsuite$code           |
+              deq$Ident$i == $jammer$code              |
+              deq$Ident$i == $communicationjammer$code |
+              deq$Ident$i == $radar$code               |
+              DEQ$Ident$I == $RadarJammer$Code         |
+              DEQ$Ident$I == $RadComJammer$Code        |
+              deq$Ident$i == $esm$code                 |
+              deq$Ident$i == $iff$code )
+            {
+            maxhgt = max( maxhgt, xSHC$Eq$AntHeight$i )
+            }
+ 
+    #$% set equipment index
+ 
+    call get_deq_entry ( UNT$Pointer, DEQ$Pointer )
+ 
+    #$% if no DEQ slots
+    IF ( DEQ$Pointer == 0 )
+        {
+        call smovv ("  (out of DEQ slots)",msgx,xlen)
+        break
+        }
+ 
+    # Load up the emitter index - SMM 12/8/95 (E1516)
+    # DEQ$Ident$I extracted above based on the SHC$EQ$Ident$I
+    if (DEQ$Ident$I == $Jammer$Code              |
+        DEQ$Ident$I == $CommunicationJammer$Code |
+        DEQ$Ident$I == $Radar$Code               |
+        DEQ$Ident$I == $RadarJammer$Code         |
+        DEQ$Ident$I == $RadComJammer$Code)
+       {
+        DEQ$emitterIndx$I = e_indx
+        putDEQ$emitterIndx$I    # store the emitter index
+        e_indx = min(e_indx + 1, jew$or$slots)     # bump up the emitter index
+       }
+ 
+    PUTdeq$Ident$i                                   # store equipment ID
+ 
+    deq$Pntr$i = Xshc$eq$Pntr$i
+    PUTdeq$Pntr$i
+    deq$Remaining$i = Xshc$eq$Remaining$i            # Qty and/or Ant Hgt
+    PUTdeq$Remaining$i
+ 
+    #$% if equipment ID is ESM
+    if (deq$Ident$i == $esm$code)
+       {
+        #$% set equipment ON
+        deq$On$i = $default$ESM$setting        # see table 7.2 of BBCODE.DEF
+        PUTdeq$On$i
+ 
+        deq$em$index = 1
+        PUTdeq$em$band$i ( deq$On$i )
+       }
+    #$% else if equipment ID is commsuite
+    else if (deq$Ident$i == $commsuite$code)
+       {
+        #$% set equipment OK to send
+        deq$OkToSend$i = $yes
+        PUTdeq$OkToSend$i
+       }
+    #$% else if equipment ID is radar, 10/91
+    else if (deq$Ident$i == $radar$code)
+        {
+        if (xSHC$EQ$ACRIndx$i != 0)
+            {
+            putDEQ$antennablockage$i ($yes)
+            }
+        }
+    #$% else if equipment ID is iff
+    else if (DEQ$Ident$i == $IFF$Code)
+       {
+        iff$pointer = xDEQ$Pntr$i
+        if (xIFF$Function$i == $TRANSPONDER$Code)  # if iff is a transponder,
+          putDEQ$On$i ($YES)                       # initialize on;
+        else                                       # otherwise,
+          putDEQ$On$i ($NO)                        # initialize off
+       }
+    else if (DEQ$Ident$I == $SAM$CODE) # SMM 4/99 (E1969,E2066)
+        {
+         putUNT$SAMcapable$I ($YES)
+        }
+   }
+ 
+putUNT$AntennaHeight$i (maxhgt)                    # 6/91 reh
+ 
+call xbleq_boat (unt2$pointer)   # transfer eq from base/ship to boat
+ 
+# reset BML chain for the launching platform
+ 
+my_indx = Xunt$BMLindx$i        # boat being launched
+next_bml = Xbml$NextBML$i       # BML entry following one being launched
+ 
+BML2$NextBML$i = Xunt2$BMLindx$i    # First BML for the SHIP/BASE
+if (BML2$nextBML$i == My_indx)
+    {
+    PUTunt2$BMLindx$i (next_bml)  # Next (second) is now first
+    }
+else
+    {
+    for (BML2$pointer$to BML2$NextBML$i;
+         bml2$pointer >= bml$base;
+         BML2$pointer$to BML2$NextBML$i)
+        {
+        BML2$NextBML$i = xBML2$NextBML$i
+        if (BML2$NextBML$i == my_indx)
+            {
+            putBML2$NextBML$i (next_bml)
+            break
+            }
+        }
+    }
+ 
+return
+end
+ 
+
+subroutine xbleq_boat (unt2$pointer)   # transfer equip frm base to boat
+ 
+########################################################
+#$%
+#$% Purpose:   XBLEQ transfers ordered equipment
+#$%            from the launch platform or base
+#$%            to a boat.
+#$%
+#$%            UNT2 points to ship/base launching
+#$%            Lunt points to Flight
+#$%
+#$% Called By: XLOAD       SBLDYN
+#$%
+#$% Calls:     get_deq_entry
+#$%                (and uses FOR_DEQ_CHAIN macro)
+#$% Tables:    UNT
+#$%
+#$% Date:      May 89
+#$%
+#$% Author:    Dane Wills
+#$%
+########################################################
+BBcommon
+BoatOpsCommon
+ 
+Integer    UNT2$Pointer    # jb E2145 (Unused argument)    6/26/00
+Integer IOVER,IPNT,UNT$Pointer,                         # jb E2145 6/26/00
+    DEQ$Pointer,DEQ$Ident$I,DEQ$Remaining$I,DEQ$Pntr$I, # jb E2145 6/26/00
+    DEQ2$Pointer, DEQ2$Remaining$I                      # jb E2145 6/26/00
+ 
+UNT$Pointer = Lunt
+ 
+## we will probably need a UNT$Pointer input parameter indicating ship/
+## shorebase
+ 
+iover = $no                                     # init overloaded flag
+for (ipnt = 1; ipnt <= loadc; ipnt = ipnt + 1)
+   {
+    call get_deq_entry ( UNT$Pointer, DEQ$Pointer ) # get a free one
+ 
+    #$% if no DEQ slots
+    IF ( DEQ$Pointer == 0 )                     # none left....
+        {
+        #$% set over to YES
+        iover = $yes
+        break
+        }
+ 
+    deq2$Pointer$To iload[3,ipnt]           # get launch platform eq pointer
+ 
+    deq$Ident$i = Xdeq2$Ident$i             # get equipment ID
+    PUTdeq$Ident$i
+ 
+    deq$Remaining$i = iload[2,ipnt]         # load equipment remaining
+    PUTdeq$Remaining$i
+ 
+    PUTdeq$Logistical$i ($YES)              # flag this as traceable
+ 
+    deq2$Remaining$i = max( 0, Xdeq2$Remaining$i - iload[2,ipnt] )
+    PUTdeq2$Remaining$i                     # equipment remaining on platform
+ 
+    deq$Pntr$i = Xdeq2$Pntr$i               # equipment type pointer
+    PUTdeq$Pntr$i
+    }
+ 
+if (iover == $yes)                          # if no DEQ available
+   {
+    call smovv ("  Overloaded.",msgx,xlen)       # tell them
+   }
+ 
+return
+end
+ 
+
+subroutine xblbml_boat                          # build bml entries
+ 
+########################################################
+#$%
+#$% Purpose:   XBLBML builds Boat Maintenance
+#$%            Log entries.
+#$%
+#$% Called By: XBLAUN
+#$%
+#$% Calls:     None
+#$%
+#$% Tables:    BML
+#$%
+#$% Date:      May 89
+#$%
+#$% Author:    Dane Wills
+#$%
+########################################################
+BBcommon
+BoatOpsCommon
+ 
+REAL X,RANDOM,                          # jb E2145  6/26/00
+     BML$Systemfail$F, SHC$Pbpropfail$F # jb E2145  6/26/00
+Integer  BML$Pointer,                   # jb E2145  6/26/00
+         SHC$Pointer,UNT$Pointer        # jb E2145  6/26/00
+data x/0.0/		# Get next random number in sequence
+ 
+bml$pointer = Lbml
+unt$pointer = Lunt
+shc$pointer = Lshc
+ 
+PUTbml$status$i ( $assigned$code ) # set ASSIGNED status
+bml$SystemFail$f = 0               # default system failure to zero
+PUTbml$UntIndx$i (unt$pointer$index)
+ 
+if (BoatSystemFailure$Flag == $ON)  # JOA 9/02 (E2306)
+    {
+    SHC$PbPROPfail$F = xSHC$PbPROPfail$F
+    if (SHC$PbPROPfail$F > RANDOM(X) )      # Random draw (FAIL or NOT)
+        {
+        bml$SystemFail$f = RANDOM(X) * 480 + Xunt$TimeLaunched$f
+        }
+    }
+putbml$SystemFail$f
+putBML$NextBML$i (0)    # single BML in the unit
+ 
+return
+end
+ 
+
+subroutine Boat_Recover (unt$pointer)  # Place a boat on its recover base
+ 
+########################################################################
+#$%
+#$% Purpose:   When an underway boat's status has been set
+#$%    to $ReadyToRecover$Code, BOAT_RECOVER returns the boat
+#$%    to ONDECK status on the recovery platform; prepends
+#$%    its BML slot to the platform's linked-list; sets its
+#$%    ownerindx to the platform's index; transfers 'acceptable'
+#$%    extraneous equipment to the platform; computes the time
+#$%    when a launch-order can be executed; resets the damage-
+#$%    multiplier to 1; and arranges for the release of the UNT
+#$%    slot that it had been occupying.
+#$%
+#$% Called By:    MOTMAN
+#$%
+#$% Calls:     Echo..
+#$%            MovExp <wgmddam.rat>
+#$%
+#$% Date:      June 89
+#$%
+#$% Author:    Joe Bryant
+#$%
+#$% Modified:  James Allen - 2/96 (E1467)
+#$%            Transfer the fuel remaining on the boat to the
+#$%            recovering platform.
+#$%
+###################################################################
+bbcommon
+ 
+real time_available
+LITERAL  CSTRIP8                                 # jb E2145  6/26/00
+Integer UNT2$Pointer, UNT2$Type$I,               # jb E2145 6/26/00
+    UNT$Pointer,UNT$TNK$Index,UNT$Recoverindx$I, # jb E2145 6/26/00
+    BML$Pointer,  SHC$Pointer                    # jb E2145 6/26/00
+ 
+bml$Pointer$TO     (Xunt$BmlIndx$i)             # jb        5/15/89
+ 
+#$% "if" logic added to correct a situation of unknown origin, 5/91
+if (xBML$Status$i == $OnDeck$Code)
+    {
+    call echov (" Re-Mooring ")
+    call echohn (xUNT$Name$C,$$MaxLit)
+ 
+    PUTunt$status$i ($BeingDeleted$code)
+    return
+    }
+ 
+putBML$Status$i     ($OnDeck$Code)            # jb        5/15/89
+putbml$SystemFail$f (0)                       # jb        5/15/89
+ 
+unt$RecoverIndx$i = Xunt$RecoverIndx$i          # jb        6/7/89
+unt2$pointer$to      unt$RecoverIndx$i          # jb        6/7/89
+ 
+PUTBML$NextBML$i (Xunt2$BMLindx$i)              # Prepend the BML entry to
+PUTunt2$BMLindx$i (BML$Pointer$index)           # the BASE's linked list
+PUTunt$BMLindx$i   (0)                          # BML on only one list DEW 5/91
+PUTbml$OwnerIndx$i (unt$RecoverIndx$i)          # Be SURE Indx non-Zero!!!
+ 
+call MovExp (unt$pointer, unt2$pointer, 0.0)    # restore EQUIPMENT
+ 
+unt2$type$i = Xunt2$type$i
+if (unt2$Type$i == $ShoreBase$code |       # transfer the fuel
+    unt2$type$i == $Surface$code    |      # on the boat to the
+    unt2$type$i == $SurfaceWithAC$code)    # recovering platform
+   {                                       # joa 2/96 (E1467)
+    #$% Transfer remaining fuel to recovering platform
+    unt$TNK$index = ShipFuelTank$Index
+    call TNK_adjust_fuel_remaining (UNT2$Pointer,
+                                    ShipFuelTank$Index,
+                                    xUNT$TNK$FuelRemaining$F)
+   }
+ 
+PUTunt$status$i    ($BeingDeleted$code)         # jb        5/15/89
+ 
+SHC$Pointer = xBML$SHCpntr$I
+time_available = Game$Time +                    # turn around time in minutes
+                          (xBML$DamageMultiplier$I * xSHC$TurnAround$I)
+putbml$TimeLaunch$f (time_available)
+ 
+PUTbml$DamageMultiplier$i (1)
+PUTbml$UNTindx$i          ($NO)
+ 
+return
+end
+
+ 
+subroutine omoor_ship  (nord,id,unt$pointer,nargs,args)
+#################################################################
+#$%
+#$% Purpose:   OMOOR_SHIP causes the addressed ship to try to
+#$%            go to the designated Port and sets it status to
+#$%            ReturningToBase.
+#$%
+#$%            MOOR (at) [ | <force-name> ] [| SPEED <knots>]
+#$%
+#$% Calls:     clear_maneuver_all
+#$%
+#$% Tables:    UNT
+#$%
+#$% Date:      February 1996 (E1467)
+#$%
+#$% Author:    Jim Allen
+#$%
+#$% Modified:  James Allen - 3/96 (E1467)
+#$%            Refuse a moor command if the ship is
+#$%            already in port.
+#$%
+#$%            James Allen - 12/97 (E1246)
+#$%            Added the order id to the argument list
+#$%            for call to clear_maneuver_all.
+#$%
+########################################################
+BBcommon
+ 
+literal         unt$name$c, name_port
+literal         args[20]
+LITERAL     CSTRIP8                        # jb E2145  6/26/00
+REAL        UNT$Orderedspeed$F             # jb E2145  6/26/00
+integer         nord, nargs, id
+integer         msglen, xsave
+integer     LCOMP             # jb  AAI01/LCOMP E2145  2/13/01
+Integer INDX_PORT,                         # jb E2145  6/26/00
+    UNT$Pointer,UNT$View$I,UNT$Status$I,   # jb E2145  6/26/00
+    UNT3$Pointer,UNT3$Type$I,              # jb E2145  6/26/00
+    UNT3$View$I,UNT3$Supertype$I,          # jb E2145  6/26/00
+    SHC$Pointer                            # jb E2145  6/26/00
+ 
+character       msg[200]
+ 
+unt$name$c = xUNT$Name$C
+unt$view$i  = Xunt$view$i
+ 
+msglen = 0                              # build an initial error message
+call smovhn(unt$name$c,$$MaxLit,msg,msglen)
+call smovv(" cannot moor: ",msg,msglen)
+call smov ($tab,msg,msglen)
+call smov (msglen,msg,msglen)
+xsave = msglen
+ 
+if (xUNT$Status$i == $BeingDeleted$Code)
+    {
+    call smovv (" is not an operational ship",msg,msglen)
+    call send_ (unt$view$i,0,msglen,msg)     # display message of failure
+    return
+    }
+ 
+# UNT is used for the ship
+# UNT3 is used for the destination port
+ 
+indx_port = 0
+ 
+if (nargs == 2 | nargs == 4)
+    {
+    name_port = args[2]
+    #$% look for port with specified name
+    for (UNT3$pointer$first; still_ok(UNT3); UNT3$pointer$next)
+       {
+        if (XUNT3$InUse$i == 0) next         # skip empty slots
+ 
+        if (LCOMP(xUNT3$name$c, name_port) == 0) # jb AAI01/LCOMP   2/13/01
+           {
+            indx_port = UNT3$pointer$index
+            break
+           }
+       }
+    }
+else                    # no base name was entered
+    {
+    call smovv (" No port specified.",msg,msglen)
+    }
+ 
+if (indx_port == 0)
+   {
+    call smovv ("  No such port.",msg,msglen)
+   }
+else
+    {
+    unt3$pointer$to indx_port
+    unt3$type$i = Xunt3$type$i
+    unt3$view$i = Xunt3$view$i
+    unt3$SuperType$i   = Xunt3$SuperType$i
+ 
+    if ( unt3$type$i != $ShoreBase$code )
+        {
+        call smovv ("  Invalid destination.",msg,msglen)
+        }
+    }
+ 
+if  ( unt3$view$i != unt$view$i & xsave == msglen)
+   {
+    call smovv ("  Not in same view.",msg,msglen)
+   }
+ 
+# Refuse moor if already in port - joa 3/96
+if (Xunt$GuideIndx$i == indx_port &
+   (Xunt$Status$i == $InPort$code | Xunt$Status$i == $ShipReFuel$code))
+  {
+   call smovv ("  Already at requested base.", msg, msglen)
+  }
+ 
+if (xsave != msglen)
+    {
+    while (mod(msglen,4) != 0)
+        call smov ($null,msg,msglen)
+ 
+    call send_ (unt$view$i,0,msglen,msg)     # display message of failure
+    return                                  # drop out...
+    }
+ 
+#$%    -------------  order valid, proceed... --------------------
+ 
+call clear_maneuver_all (nord, id, xUNT$View$I, UNT$Pointer)
+ 
+PUTunt$GuideIndx$i       (indx_port)
+PUTunt$GuideBearing$f    (0.0)
+PUTunt$GuideRange$f      (0.0)
+PUTunt$GuideTrue$i       ($YES)
+PUTunt$RangeToNext$F     (2000.0)
+ 
+shc$Pointer = Xunt$shcpntr$i
+unt$OrderedSpeed$f = min(Xshc$cruisespeed$i,Xunt$speed$i)
+PUTunt$OrderedSpeed$f                       # put unit's new speed
+ 
+UNT$Status$i = $ReturningToBase$Code
+putUNT$Status$i
+ 
+return
+end

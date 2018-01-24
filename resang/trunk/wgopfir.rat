@@ -1,0 +1,3378 @@
+
+#####   FILE:WGOPFIR.rat
+
+#$%#############################################################
+#$%
+#$%   For subroutine listing and hierarchy, see WGMAIN.HIR  
+#$%   
+#$%##############################################################   
+
+include "bbctl.inc"         
+include "bbcode.inc"         
+include "bbunt.inc"         
+include "bbdeq.inc"                     # jb Replaces dyn$EQ subtable    4/3/89
+include "bbord.inc"         
+include "bbcmc.inc"         
+include "bbtat.inc"         
+include "bbtor.inc"         
+include "bbnav.inc"         
+include "bbrmt.inc"         
+include "bbpim.inc"                                     #               1/3/84
+include "orders.inc"         
+include "bbshc.inc"                     # Alex V. 8/93
+include "bbbtt.inc"                     # clk - 7/95 (E1419)
+include "bbacc.inc"                     # clk - 7/95 (E1419)
+include "ascii.inc"         
+include "macros.inc"         
+include "cenglog.inc"                   ## <RG> 8/85  Common Block for Engagement
+include "hseng.inc"         
+include "plplay.inc"         
+include "cm_fire.inc"                   # joa - 2/98 (E1864)
+
+define(BBImplicit, Implicit None)       # MJC 5/1/2000 (E-2143)
+                                        ## log data collection.  "ENcommon"
+define ($debug,)
+
+
+Subroutine OFIRE(IONUM,ID,UNT$POINTER,iWORD,ILEX) 
+ #               nord                 Nargs 
+#######################################################
+#$%
+#$% Purpose:   OFIRE processes fire cruise and
+#$%            fire torpedoes commands to fire
+#$%            the cruise missile or torpedo.
+#$%            Determines what type of command (FIRE
+#$%            or LAUNCH) was entered and what type
+#$%            of weapon (BALLISTIC, CRUISE, or
+#$%            TORPEDO) to shoot.
+#$%
+#$%            See ORDERS.SYN for the command layout.
+#$%
+#$% Called By: EXEORD
+#$%
+#$% Calls:     FNDORD     OFCRUM     OFTORP
+#$%
+#$% Tables:    ORD
+#$%
+#$% Date:      APRIL 80            1985         1993
+#$% Author:    Dana Wills       Joe Bryant      Alex Vagus
+#$%
+#$% Modified:  Jim Allen - 2/98 (E1864)
+#$%            Changed command argument processing so that the
+#$%            keywords are located in routine locate_fire_keywords
+#$%            and processing uses related keyword indexes to access
+#$%            command data.
+#$%
+#$%            Susan Miller - 5/98 (E1612)
+#$%            Removed unused variable i
+#$%
+#######################################################
+BBcommon
+RTcommon
+
+integer   IWORD,IONUM,ID,
+          ORD$Pointer,
+          ORD$Phase$I,
+          UNT$Pointer,
+          UNT$View$I                      # MJC 5/1/2000 (E2145)
+literal   CSTRIP8                         # MJC 5/3/2000 (E2145)
+literal   ILEX[iword],iaddr
+
+character msg[ARB]
+integer   msg_len
+
+call FNDORD (ID, ORD$POINTER)           # call to find order
+
+if (ORD$POINTER == 0) return            # if the order isn't found, return
+
+if (xUNT$Status$I == $Hiding$Code)      # clk 4/95 (E1393)
+  {
+   msg_len = 0
+   call smovhn (xUNT$Name$C, $$MaxLit, msg, msg_len)
+   call smovv  (" cannot fire weapons while in hiding", msg, msg_len)
+   call send_   (xUNT$View$I, 0, msg_len, msg)
+   putORD$Phase$I  (0)
+   return
+  }
+
+nord    = IONUM                         # into RTcommon 12/3/85
+Nargs   = iWORD                         # into RTcommon 12/3/85
+id_ord  = id                            # into RTcommon Alex V. 8/93
+
+call locate_fire_keywords (iword,ILEX) 
+
+numsent = fire_index + 1
+
+weapon_name = ilex[fire_index + 2]
+
+if (ilex[NUMsent] <= 0)       # if nothing to fire/launch
+  {
+    ord$phase$i = 0           # clear order phase,
+    PUTord$phase$i            # save, and
+    return                    # return
+  }
+
+UNT$View$I = xUNT$View$I
+iaddr      = xUNT$Name$C
+
+if (nuclear_index != 0)             # for calls to OFCRUM,OFCRU0,OFCRU1,
+    {                           # 
+    if (Nuclear$Capable == $NO)
+        {
+        call wgoerr (unt$View$i,iaddr,nord,Nargs,ilex,"Scenario not nuclear.")
+        return
+        }
+    }
+
+if (cruise_index != 0)
+     call OFCRUM(ord$pointer,unt$pointer,ilex)
+
+else if (ballistic_index != 0)
+     call OFBALLISTIC(ord$pointer,unt$pointer,ilex)
+
+else   # fire torpedo
+    {       # 5/90 - Smart Torpedo Model added
+    if (nargs >= 8)
+        call fire_smart_torpedo (nord,id,unt$pointer,nargs,ilex)   # 5/90
+    else
+        call OFTORP(ord$pointer,unt$pointer,ilex)
+    }
+
+return
+end
+
+
+Subroutine OFCRUM (ord$pointer,   # in:  The order pointer
+                   unt$pointer,   # in:  Unit to which order was given
+                   ilex)          # in:  command argument array
+#######################################################
+#$%
+#$% Purpose:   OFCRUM calls routines to validate and
+#$%            shoot cruise missiles based on the
+#$%            current phase of the order.
+#$%
+#$% Called By: OFIRE
+#$%
+#$% Calls:     OFCRU0     OFCRU1
+#$%
+#$% Tables:    ORD
+#$%
+#$% Date:      APRIL 80
+#$%
+#$% Author:    Dana Wills
+#$%
+#$% Modified:  Jim Allen - 2/98 (E1864)
+#$%            Removed the current command index (indx) and nuclear
+#$%            command flag from the argument list.  The routine
+#$%            locate_fire_keywords determines the index of each
+#$%            keyword.  The variables indexing the command arguments
+#$%            simplify the processing.
+#$%
+#######################################################
+
+BBcommon
+
+integer ORD$Pointer,UNT$Pointer             # MJC 5/1/2000 (E2145)
+
+literal ILEX[$max$args]
+
+#$% if order phase is zero, call to validate cruise missile orders
+if (xord$Phase$i == 0)
+   call OFCRU0 (ord$pointer,unt$pointer,ilex)
+
+#$% if order phase is greater than zero, call to execute cruise missile orders
+if (xord$Phase$i > 0)
+   call OFCRU1 (ord$pointer,unt$pointer,ilex)
+
+return
+end     # End Subroutine OFCRUM
+
+
+Subroutine OFCRU0 (ord$pointer,   # in:  The order pointer
+                   unt$pointer,   # in:  Unit to which order was given
+                   ilex)          # in:  command argument array
+#######################################################
+#$% 
+#$% Purpose:   OFCRU0 validates cruise missile
+#$%            orders and displays error mes-
+#$%            sages to the user.
+#$%
+#$% Called By: OFCRUM
+#$%
+#$% Calls:     GTUNT      SEND       WHSIDE
+#$%            DEQGET
+#$%
+#$% Tables:    UNT        ORD
+#$%
+#$% Date:      APRIL 80
+#$%
+#$% Author:    Dana Wills
+#$%
+#$% Modified:  Susan Miller 4/93 to allow cruise missiles to
+#$%            be launched at a position PER #E1165
+#$%
+#$%            Jim Allen - 2/98 (E1864)
+#$%            Removed the current command index (indx) from 
+#$%            the argument list.  The routine locate_fire_keywords
+#$%            determines the index of each keyword.  The variables
+#$%            indexing the command arguments simplify the processing.
+#$%
+#$%            Susan Miller - 5/98 (E1612)
+#$%            Removed unused variables at_ilex_index,
+#$%            at_type_ilex_index, and at_name_index
+#$%
+#######################################################
+BBcommon
+RTcommon
+
+literal ILEX[$max$args]
+integer nfound, eqlist[5,ARB]                   # jb    3/4/89
+Character msg[ARB]
+integer   msg_len, litcmp
+integer   ORD$DEQIndx$I, CMC$Pointer
+
+integer   ISIDE1,ISIDE2,
+          IBONLY,IFIND,N,
+          UNT2$Pointer,
+          RMT$Pointer,
+          ORD$Pointer,
+          ORD$Phase$I,
+          DEQ$Pointer,
+          UNT$Pointer,
+          UNT$View$I                            # MJC 5/3/2000 (E2145)
+literal   UNT$Name$C,
+          CSTRIP8,
+          CMC$Type$C                            # MJC 5/3/2000 (E2145)
+
+#$% get unit name and view
+unt$Name$c = Xunt$Name$c
+unt$view$i = Xunt$View$i
+
+if (base_index != 0)
+  {
+   call GTUNT ($ShoreBase$code, ilex[base_index+1], UNT2$Pointer)
+   if (UNT2$Pointer == 0)         # if the target base is not found
+     {
+      msg_len = 0
+      call smovhn (UNT$Name$C, $$MaxLit, msg, msg_len)
+      call smovv  (" cannot fire cruise missile at invalid base name ", msg, msg_len)
+      call smovhn (ilex[base_index+1], $$MaxLit, msg, msg_len)
+      call send_   (UNT$View$I, 0, msg_len, msg)
+      return
+     }
+
+   call whside (UNT$View$I, iside1)      # determine the sides of the
+   call whside (xUNT2$View$I, iside2)    # shooter and the target base
+
+   if (iside1 == iside2)      # if both are on the same side
+     {
+      msg_len = 0 
+      Call smovhn (UNT$Name$C, $$MaxLit, msg, msg_len)
+      Call smovv  (" cannot fire cruise missile at friendly base ", msg, msg_len)
+      call smovhn (ilex[base_index+1], $$MaxLit, msg, msg_len)
+      call send_   (UNT$View$I, 0, msg_len, msg)
+      return
+    }
+  }      # end of if shooting AT BASE
+else if (track_index != 0)    # else if command was FIRE AT TRACK    4/25/89
+  {
+   RMT$Pointer = 0
+   ibonly = NO
+
+   call GtAct (UNT$View$I, ilex[track_index+1], RMT$Pointer, ibonly) 
+   if (RMT$Pointer == 0)      # if no track with the entered track-number
+     {
+      msg_len = 0
+      call smovhn (UNT$Name$C, $$MaxLit, msg, msg_len)       
+      Call smovv  (" cannot fire cruise missiles at invalid track number ", msg, msg_len)
+      call smovhn (ilex[track_index+1], $$MaxLit, msg, msg_len)
+      call send_   (UNT$View$I, 0, msg_len, msg)
+      return
+     }
+   else if (ibonly == YES)    # if a passive track with no tma solution
+     {                                       
+      msg_len = 0
+      call smovhn (UNT$Name$C, $$MaxLit, msg, msg_len)       
+      Call smovv  (" cannot fire cruise missiles at passive track ", msg, msg_len)
+      call smovhn (ilex[track_index+1], $$MaxLit, msg, msg_len)
+      call send_   (UNT$View$I, 0, msg_len, msg)
+      return
+     }
+   else if (xRMT$DetectionAge$I == $Old$Code)   # if the track is old
+     {
+      msg_len = 0
+      call smovhn (UNT$Name$C, $$MaxLit, msg, msg_len)       
+      Call smovv  (" cannot fire cruise missiles at old track ", msg, msg_len)
+      call smovhn (ilex[track_index+1], $$MaxLit, msg, msg_len)
+      call send_   (UNT$View$I, 0, msg_len, msg)
+      return
+     }
+  }       # end if FIREd  TRACK
+
+nfound = 0        # jb    Set 0; not an iterative call        7/25/89
+call DEQGET (UNT$Pointer, $CruiseMissile$Code, nfound, eqlist)
+
+if (eqlist[1,1] == $NO)               #if equipment NOT found
+   {
+    msg_len = 0  
+    Call smovhn (unt$name$c, $$MaxLit, msg, msg_len)
+    Call smovv  (" has no ", msg, msg_len)
+    Call smovhn (weapon_name, $$MaxLit, msg, msg_len)
+    Call smovv  (" cruise missiles. ", msg, msg_len)
+    call send_   (unt$view$i, 0, msg_len, msg)
+    return
+   }
+
+##---------------------------------------- -start- jb 5/18/89
+iFind = $NO
+For (N=1; N <= nfound; N =N +1)
+  {
+   CMC$Pointer = eqlist[2,N]
+   if (litcmp(Xcmc$TYPE$C, weapon_name ) == 0)
+    {
+     iFind = $YES
+     ord$deqindx$i = eqlist[1,N]   #                            5/23/89
+     putord$deqindx$i              # for reference in OFCRU1    5/23/89
+     BREAK
+    }
+  }
+
+if( iFind != $YES )
+  {
+    msg_len = 0  
+    Call smovhn (unt$name$c, $$MaxLit, msg, msg_len)
+    Call smovv  (" has no ", msg, msg_len)
+    Call smovhn (weapon_name, $$MaxLit, msg, msg_len)
+    Call smovv  (" cruise missiles. ", msg, msg_len)
+    call send_   (unt$view$i, 0, msg_len, msg)
+    return
+  }
+
+# This code moved down here from top of routine         # DEW 1/19/2000
+# because the ORD$DEQindx$ is not set 'till two-IFs back
+
+ORD$DEQIndx$I = xORD$DEQIndx$I    # SMM 12/10/94 
+DEQ$Pointer$TO  (ORD$DEQIndx$I)   # check the type of weapon being fired
+CMC$Pointer = xDEQ$Pntr$I         
+
+if (xCMC$Cat$I == $BALL$Code)
+    {
+     CMC$Type$C = xCMC$Type$C
+     msg_len = 0
+     call smovhn (UNT$Name$C, $$MaxLit, msg, msg_len)
+     call smovv  (" cannot fire ", msg, msg_len)
+     call smovhn (CMC$Type$C, $$MaxLit, msg, msg_len)
+     call smovv  (", use FIRE <number>  ", msg, msg_len)
+     call smovhn (CMC$Type$C, $$MaxLit, msg, msg_len)
+     call smovv  (" BALLISTIC (missiles) command. ", msg, msg_len)
+     call send_   (unt$view$i, 0, msg_len, msg)
+     return
+    }
+
+##----------------------------------------- -end- jb    5/18/89
+
+#$% set order phase to one and store
+ord$Phase$i = 1
+PUTord$Phase$i
+
+return
+end        # End  OFCRU0
+
+
+Subroutine OFCRU1 (ord$pointer,   # in:  The order pointer
+                   unt$pointer,   # in:  Unit to which order was given
+                   ilex)          # in:  command argument array
+#######################################################
+#$% 
+#$% Purpose:   OFCRU1 shoots validated cruise missiles or
+#$%            displays error messages to the user..
+#$%
+#$% Called By: OFCRUM
+#$%
+#$% Calls:     SEND       UNTGET    GTACT
+#$%            GTUNT      BLDCM     RANDOM
+#$%            Log_successful_launch
+#$%            Log_unsuccessful_launch
+#$%
+#$% Tables:    UNT        ORD
+#$%            CMC
+#$%
+#$% Date:      APRIL 80         Tomhk 1985:
+#$% Author:    Dana Wills       Joe Bryant
+#$%
+#$% Modified:  Susan Miller 4/93 to allow cruise missiles
+#$%            to be launched at positions PER #E1165
+#$%
+#$%            Carol Kropp - 7/95 (E1419)
+#$%            Call Log_Unsuccessful_Launch and
+#$%            Log_Successful_Launch to do eng log.
+#$%
+#$%            Susan Miller - 6/97 (E1612)
+#$%            Added tgt_track_name to store target, which
+#$%            is passed to Log_Successful_Launch.
+#$%
+#$%            Jim Allen - 2/98 (E1864)
+#$%            Removed the current command index (indx) and nuclear
+#$%            command flag from the argument list.  The routine
+#$%            locate_fire_keywords determines the index of each
+#$%            keyword.  The variables indexing the command arguments
+#$%            simplify the processing.  Parameterized MaxFireRatePerCycle
+#$%            and removed advanced cruise missile references.
+#$%
+#$%            Susan Miller - 5/98 (E1612)
+#$%            Removed unused variables track_name, mode_ilex_index,
+#$%            at_ilex_index, at_type_ilex_index, & at_name_index.
+#$% 
+#$%            Susan Miller - 5/98 (E1992) 
+#$%            Fixed wrong if statement for nuclear missile order.
+#$%
+#$%            Susan Miller 6/98 (E2001)
+#$%            Declare track as a literal to get rid of
+#$%            garbage in postgame/eng track column.
+#$% 
+#$%            Tmb 8/17 
+#$%             Uniquely name salvoed missiles that had been given a
+#$%             mission <number>.
+#$%
+#######################################################
+BBcommon
+RTcommon
+ENcommon        # <RG> 8/85 - engagement log
+
+literal ILEX[$max$args]                
+literal rbl_size_text
+integer NFIND[arith($MaxFireRatePerCycle,+,1)] 
+integer NinInterval                     # Function converting n/min to n/interval
+Character msg[400]
+integer   msg_len
+
+Real*4     RANDOM, x, Rannum,Cmc$problaunch$f # jb E2145 (RANDOM)   8/7/00
+Integer*4  DEQ$Pointer
+literal    track             # SMM 6/98 (E2001)
+literal    tgt_track_name    # SMM 6/97 (E1612)
+literal    UNT2$Name$C       # tmb 8/17
+
+integer    INEED,NSTILL,ITARGINDX,IBONLY,NFIRED,
+           NABORTED,J,KK,IOK,KKLEN,I,
+           k, NWANTED,                                 # tmb 8/17
+           RMT$Pointer,
+           UNT$Pointer, UNT$View$I,
+           UNT2$Pointer, UNT2$Type$I, UNT3$Pointer,
+           ORD$Deqindx$I, ORD$Pointer,
+           ORD$Phase$I,
+           CMC$Pointer, CMC$Firerate$I,
+           CMC$RBL$Index, CMC$RBL$targetradius$I,
+           DEQ$Remaining$I                              # MJC 5/1/2000 (E2145)
+real       DEQ$Timelastused$F                           # MJC 5/1/2000 (E2145)
+literal    ORD$W02$C, ORD$W03$C, ORD$W04$C,
+           UNT$Name$C,
+           CSTRIP8                                      # MJC 5/3/2000 (E2145)
+data x/0.0/		# Get next random number in sequence
+
+kk = 0; call smovv ("        ", tgt_track_name, kk)
+
+if (order$minute > game$minute) return
+
+#$% get unit name and view
+unt$Name$c = Xunt$Name$c
+unt$view$i = Xunt$View$i
+
+ord$deqindx$i = Xord$deqindx$i    #                            5/23/89
+DEQ$Pointer$TO  (ord$deqindx$i)   #                            5/23/89
+
+deq$Remaining$i = Xdeq$Remaining$i                # jb         5/24/89
+if (deq$Remaining$i < 1)
+   {
+     #$% clear order phase and save, return
+    ord$Phase$i = 0
+    PUTord$Phase$i
+
+    msg_len = 0  
+    Call smovhn (unt$name$c, $$MaxLit, msg, msg_len)
+    Call smovv  (" has no ", msg, msg_len)
+    Call smovhn (weapon_name, $$MaxLit, msg, msg_len)
+    Call smovv  (" cruise missiles.", msg, msg_len)
+    call send_   (unt$view$i, 0, msg_len, msg)
+
+    return
+   }
+
+CMC$Pointer = Xdeq$Pntr$i          # jb                    5/23/89
+
+if(Xcmc$TYPE$C != weapon_name)   # Is this the REQUESTED missile?
+  {         
+   #$% Notify Player the REQUESTED missile isn't aboard..
+   #$% .. after clearing order phase to cancel..
+   ord$Phase$i = 0
+   PUTord$Phase$i
+
+   msg_len=0
+   Call smovhn (unt$name$c, $$MaxLit, msg, msg_len)
+   Call smovv  (" has no ", msg, msg_len)
+   Call smovhn (weapon_name, $$MaxLit, msg, msg_len)
+   Call smovv  (" cruise missiles.", msg, msg_len)
+   call send_   (unt$view$i, 0, msg_len, msg)
+   return
+  }
+
+#$% if nuclear ORDER and missile NOT nuclear, send error message..
+else if (nuclear_index == 1 & xCMC$Yield$I == 0)   # SMM 5/98 (E1992)
+  {
+    ORD$Phase$i = 0  
+    putORD$Phase$i
+
+    msg_len = 0
+    Call smovhn (weapon_name, $$MaxLit, msg, msg_len)
+    Call smovv  (" is not a nuclear cruise missile", msg, msg_len)
+    call send_   (UNT$View$I, 0, msg_len, msg)
+    return
+  }
+#$% else if ORDER is NOT nuclear but missile lacks CONVENTIONAL capability..
+else if (nuclear_index == 0 & xCMC$Weight$I == 0)   #       7/24/85
+  {
+    ORD$Phase$i = 0  
+    putORD$Phase$i
+
+    msg_len = 0
+    Call smovhn (weapon_name, $$MaxLit, msg, msg_len)
+    Call smovv  ("  is not a conventional cruise missile", msg, msg_len)
+    call send_   (UNT$View$I, 0, msg_len, msg)
+    return
+  }
+
+
+#$% if type is submarine and true altitude depth is greater than launch depth
+if (xunt$Type$i == $Sub$code & xUNT$TrueAltDepth$i > Xcmc$LaunchDepth$i)
+  {                      
+    PUTUNT$TrueAltDepth$I( Xcmc$LaunchDepth$i )
+    PUTUNT$OrderedAltDepth$I( Xcmc$LaunchDepth$i )
+ 
+    msg_len = 0
+    Call smovhn (unt$name$c, $$MaxLit, msg, msg_len)
+    Call smovv  (" set to cruise missile launch depth", msg, msg_len)
+    call send_view (UNT$VIEW$I, 0, msg_len, msg)
+    return
+  }
+
+cmc$FireRate$i = max0(1,Xcmc$FireRate$i)
+
+deq$TimeLastUsed$f = Xdeq$TimeLastUsed$f
+#ineed = NinInterval(deq$TimeLastUsed$f, 1, 
+#                    min0(int(ilex[NUMsent]),deq$remaining$i,10))
+# fix firerate from 1 to max of 10 SMM 7/98 (E1973)
+NWANTED = int(ilex[NUMsent])               # tmb 8/17
+ineed = NinInterval(deq$TimeLastUsed$f, 
+                    min0(NWANTED,deq$remaining$i,cmc$FireRate$i),
+                    deq$remaining$i)
+# Jim has this in his version - don't think it takes into account VTS
+#ineed = min0(cmc$FireRate$i, int(ilex[NUMsent]), deq$remaining$i,
+#             $MaxFireRatePerCycle)
+
+if (ineed == 0) return                  # No missiles can fire this interval
+
+#$% find empty UNT slots for (ineed) crsmsls
+call UNTGET(ineed,NFIND)  
+
+#$% if not enough slots found, ABORT:
+if (NFIND[1] < ineed)
+   {
+    ord$phase$i = 0
+    PUTord$phase$i
+
+    msg_len = 0
+    Call smovv ("Unit array full -- cannot launch cruise missiles. ", msg, msg_len)
+    call send_  (UNT$VIEW$I, 0, msg_len, msg)
+    return
+   }
+
+PUTdeq$TimeLastUsed$f
+
+#$% set number of these CruiseMissiles still remaining
+nstill = ilex[NUMsent] - ineed  # (NUMsent set in OFIRE)        6/24/85
+
+#$% if some still remaining, place how-many into order
+if (nstill > 0)
+   {    #$% enter into order and store:
+    if      (Numsent == 2)                      #               7/3/85
+     {
+      ORD$W02$C = nstill                        #               9/4/85
+      PUTORD$W02$C                              #               9/4/85
+     }
+    else if (Numsent == 3)                      #               7/3/85
+     {
+      ORD$W03$C = nstill                        #               9/4/85
+      PUTORD$W03$C                              #               9/4/85
+     }
+    else    #(Numsent = 4)                                      7/3/85
+     {
+      ORD$W04$C = nstill                        #               9/4/85
+      PUTORD$W04$C                              #               9/4/85
+     }
+   }
+else     # none remaining, clear order phase (order processing complete)
+   {
+    #$% clear order phase and store
+    ord$Phase$i = 0
+    PUTord$Phase$i
+   }
+
+itargindx = 0
+if (at_index != 0)
+  {
+   if (position_index != 0)
+      itargindx = UNT$Engaging$Position
+  }
+else if (base_index != 0)
+  {
+   #$% call to get shorebase name
+   call GTUNT ($ShoreBase$Code, ilex[base_index+1], UNT2$Pointer) # 4/25/89
+   itargindx = UNT2$Pointer$Index                    #       12/12/85
+   tgt_track_name = ilex[base_index+1]               # SMM 6/97 (E1612)
+  }
+else if (rbl_index != 0)
+  {
+   if (rbl_size == $lex$LARGE$)
+     {
+      cmc$rbl$Index = LargeAOU$Index
+      rbl_size_text = 'LARGE'
+     }
+   else if (rbl_size == $lex$MEDIUM$)
+     {
+      cmc$rbl$Index = MediumAOU$Index
+      rbl_size_text = 'MEDIUM'
+     }
+   else if (rbl_size == $lex$SMALL$)
+     {
+      cmc$rbl$Index = SmallAOU$Index
+      rbl_size_text = 'SMALL'
+     }
+   CMC$RBL$TargetRadius$I = xCMC$RBL$TargetRadius$I
+   if (CMC$RBL$TargetRadius$I == 0)        # Not defined
+     {
+      ORD$Phase$I = 0
+      putORD$Phase$I
+      msg_len = 0
+      call smovhn (UNT$Name$C, $$MaxLit, msg, msg_len)
+      call smovv  (" cannot fire cruise missile. No RBL ", msg, msg_len)
+      call smovhn (rbl_size_text, $$MaxLit, msg, msg_len)
+      call smovv  (" available for ", msg, msg_len)
+      call smovhn (xCMC$Type$C, $$MaxLit, msg, msg_len)
+      call smovv  (" cruise missile.", msg, msg_len)
+      call echoh (msg,msg_len)
+      call send_   (UNT$view$I, 0, msg_len, msg)
+      return
+     }
+
+   if (track_index != 0)   # FIRE AT TRACK ..check to see if the TRACK is still there..  4/19/89
+     {
+      RMT$Pointer = 0  # get active track
+      ibonly = NO
+      call GtAct (UNT$View$I, ilex[track_index+1], RMT$Pointer, ibonly) 
+      if (rmt$Pointer == 0) # not there anymore...
+        {
+         ORD$Phase$I = 0
+         putORD$Phase$I
+         msg_len = 0
+         call smovhn (UNT$Name$C, $$MaxLit, msg, msg_len)
+         call smovv  (" lost track ", msg, msg_len)
+         call smovhn (ilex[track_index+1], $$MaxLit, msg, msg_len)
+         call smovv  (", cannot fire cruise missiles", msg, msg_len)
+         call send_   (UNT$view$I, 0, msg_len, msg)
+         return
+        }
+      else # we found the track
+        {
+         itargindx = xrmt$detectee$I
+         UNT2$Pointer$to itargindx
+         UNT2$type$I = xUNT2$type$I
+         if ((xrmt$Class$I == $Surface$Code & xCMC$targship$I != $yes) |
+             (UNT2$type$I == $air$Code & xCMC$targaircraft$I != $yes) |
+             (UNT2$type$I == $Cruisemissile$Code & xCMC$targcruise$I != $yes))
+           {                  # type mismatch with target
+            ORD$Phase$I = 0
+            putORD$Phase$I
+
+            msg_len = 0
+            call smovhn (UNT$Name$C, $$MaxLit, msg, msg_len)
+            call smovv  (" cannot fire at ", msg, msg_len)
+            call smovhn (ilex[track_index+1], $$MaxLit, msg, msg_len)
+            call smovv  (", type mismatch with missile type", msg, msg_len)
+            call send_   (UNT$view$I, 0, msg_len, msg)
+            return
+           }
+          tgt_track_name = ilex[track_index+1]  # SMM 6/97 (E1612)
+        }    # end of track found
+     }  # end of fire a track
+  } # end RBL
+
+NFIRED = 0                              # initlz. no missiles fired
+naborted = 0                            # Number of aborted cruise missiles
+CMC$ProbLaunch$F = XCMC$ProbLaunch$F    #get launch probability
+
+#$% for each entry
+for (j=1; j <= ineed; j=j+1)
+  {
+   #$% if number is greater than launch probability, get next
+   Rannum = Random(x)                                   # 10/90 hdf
+   if  (Rannum > CMC$ProbLaunch$F)   
+     {
+      if (log$engage != $no)     # if engagement log desired - JFR 4/22/93 (E1118)
+        {
+         track    = 'CM' 
+         UNT3$Pointer$To  (itargindx)
+         call Log_Unsuccessful_Launch (UNT$Pointer, UNT3$Pointer,
+                                       xCMC$Type$C, track,
+                                       INT((CMC$ProbLaunch$F * 100.0) + 0.5),
+                                       ilex)
+        }  # end if Engagement Log desired
+      NEXT
+     }
+
+   UNT2$POINTER = NFIND[J+1]           #get empty slot pointer
+
+   #$% call to build cruise missile characteristics, \/       12/12/85
+   call BLDCM( UNT$Pointer,UNT2$Pointer,CMC$Pointer,itargindx,ilex,iok)
+
+   if (iok == $YES)
+     {
+      NFIRED = NFIRED + 1               #increment number fired
+      # name salvo uniquely     tmb 8-17
+      if (NWANTED > 1 )
+      {
+         k = 0
+         if (NWANTED > 9) call smovHn( XUNT2$Name$C, 5, UNT2$Name$C, k )
+         else call smovHn( XUNT2$Name$C, 6, UNT2$Name$C, k )
+         call smov ("-", UNT2$Name$C, k)
+         call smovi ( NWANTED-NFIRED+1, UNT2$Name$C, k)
+         if (k<8) call smov (" ", UNT2$Name$C, k)  #handle any garbage at end
+         PUTUNT2$Name$C
+      }
+      cnames[nfired] = XUNT2$Name$C
+
+      ## <rg> This code is used for engagement log data collection of
+      ##      cruise missile engagements.  August 1985
+      if ( log$engage != $no &  UNT2$POINTER$VALID )           #                       12/11/85
+           # add tgt_track_name to parameter list SMM 6/97 (E1612)
+           call Log_Successful_Launch (UNT$Pointer, UNT2$Pointer,tgt_track_name)
+     }
+   else
+     {
+      naborted = naborted + 1            # Missile cannot fire, so don't decrement
+      PUTUNT2$Status$I( $BeingDeleted$Code )   # Missile created but not fired
+
+      NEXT
+     }
+  }    # End    for each needed Crsmsl
+
+deq$remaining$I = deq$remaining$I - ineed + naborted
+PUTdeq$remaining$I   # decrement missiles 
+
+kklen = 0 
+call smovib (nfired,        2,msg,kklen) #insert nbr successful
+call smovv (" missiles fired by ",msg,kklen)
+call smovhn (UNT$Name$C,    $$MaxLit,msg,kklen) #insert platform name
+call smovv (". ",msg,kklen)
+
+if (ineed-nfired-naborted != 0)
+    {
+    call smovi ((ineed-nfired-naborted),msg,kklen) #insert num of failures
+    call smovv (" failed (",msg,kklen)
+	if (mission_index != 0) call smovhn (ilex[mission_index+1], $$MaxLit, msg, kklen)
+	call smovv (")", msg, kklen)
+    }
+
+if (naborted != 0)
+    {
+    call smovi ((naborted),msg,kklen) #insert num of failures
+    call smovv (" aborted (",msg,kklen)
+	if (mission_index != 0) call smovhn (ilex[mission_index+1], $$MaxLit, msg, kklen)
+	call smovv (")", msg, kklen)
+    }
+
+if (nfired > 0)
+    {
+    call smovv ("(",msg,kklen)
+
+    for ( i=1; i <= nfired; i = i +1 )
+        {
+        call smovhn (Cnames[i],$$MaxLit,msg,kklen)
+        if (i < nfired)
+            call smovv  (" ",msg,kklen)
+        }
+
+    call smovv  (")",msg,kklen)
+    }
+
+call send_ (UNT$View$I,0,kklen,MSG)
+
+return
+end        # End  OFCRU1
+
+
+Subroutine BLDCM (unt$pointer,    # in:  Unit shooting cruise missile
+                  unt2$pointer,   # in:  Cruise Missile UNT pointer
+                  cmc$pointer,    # in:  Characteristics of missile
+                  itargt,         # in:  Target UNT index
+                  ilex,           # in:  Command argument array
+                  iok)            # out: Missile successfully built flag
+#######################################################
+#$% 
+#$% Purpose:   BLDCM builds cruise missile charac-
+#$%            teristics into the UNT tables to be
+#$%            identified after launch.
+#$%
+#$% Called By: OFCRU1
+#$%
+#$% Calls:     NAVERR     GETRB_M   BLDCMPIM    PIMTIM
+#$%
+#$% Tables:    UNT        CMC
+#$%
+#$% Date:      APRIL 80
+#$%
+#$% Author:    Dana Wills
+#$%
+#$% Modified:  Carol Kropp - 2/94
+#$%            Added ability to FIRE .. CRUISE AT POS
+#$%            with optional TARGET specification.
+#$%
+#$%            Susan Miller - 1/94
+#$%            Moved code to Partial_CM_build so it
+#$%            could be used by advanced SAM model
+#$%
+#$% Modified:  Carol Kropp - 11/94
+#$%            Added optional TARGET specification for
+#$%            the FIRE ...CRUISE AT BASE command.
+#$%
+#$%            Carol Kropp - 12/94
+#$%            Added call to Record_C2_Flight_EQ_Expended for
+#$%            creating mission history files to send to WPC C2.
+#$%
+#$%            Carol Kropp - 7/95 (E1419) 
+#$%            Changed the way optional command arguments are
+#$%            handled to a loop (for new optional BE and TIN).
+#$%
+#$%            Jim Allen - 11/95 (E1422)
+#$%            CM at < 1000 ft. fly at relative altitudes.
+#$%
+#$%            Carol Kropp - 12/96 (E1726)
+#$%            Record_C2_Flight_EQ_Expended changed to
+#$%            Record_Flight_EQ_Expended.
+#$%
+#$%            Jim Allen - 2/98 (E1864)
+#$%            Removed the current command index (indx), nuclear
+#$%            command flag and "J" from the argument list.  The
+#$%            common block variable indexing of the command arguments
+#$%            is used to simplify the processing.  A PIM for each
+#$%            cruise missiles.  Added processing of RBL with a S/M/L
+#$%            acquisition circle.
+#$%
+#S%            John McCormick - 3/98 (E1957)
+#S%            Test for time to complete pim excluded when
+#S%            Bearing Only Launch. Target beyond missile
+#S%            range not appropriate for BOL.
+#S%
+#$%            Susan Miller - 5/98 (E1612)
+#$%            Removed unused variables cnam, 
+#$%            UNT2$AssumedLatitude$F, & UNT3$AssumedLatitude$F
+#$%
+#$%            Jim Allen - 8/98 (E2017)
+#$%            Allow waypoints in position and base cases
+#$%
+#######################################################
+BBcommon
+RTcommon #Ilaunch,Numsent,nord,Nargs,Cnames
+
+literal   ilex[$max$args]
+literal   be_part1, be_part2
+
+real*4    UNT2$AssumedCourse$F, UNT2$OrderedCourse$F, UNT2$TrueCourse$F
+real      pimlat[PIM$PTS$slots]
+real      pimlon[PIM$PTS$slots]
+real      cslat
+real      time_to_complete_pim    # jhm 3/98
+
+integer   target_priority_code    # integer function
+integer   CMC$AvgSpeed$I
+integer   jj
+integer   pimindx
+integer   iok
+real      jterm, mterm
+character msg[ARB]
+
+integer   NPOINTS,LAST_WAYPOINT_INDEX,I,
+          IBONLY,ITARGT,MAXPOINTS,NUCLEAR,
+          CMC$Pointer, CMC$Maxflightdur$I,
+          CMC$RBL$Index, CMC$RBL$targetradius$I,
+          UNT$Pointer, RMT$Pointer, NAV$Pointer,
+          UNT2$Type$I, UNT2$Pointer,
+          UNT2$Truealtdepth$I,
+          UNT2$Orderedaltdepth$I,
+          UNT2$Targettype$I,
+          UNT3$Pointer,
+          PIM$Pointer,
+          PIM$PTS$Index                                 # MJC 5/1/2000 (E2145)
+real      PIM$PTS$latitude$F, PIM$PTS$longitude$F,
+          UNT2$Timeterm$F, UNT2$Rangetonext$F,
+          UNT2$Timeseek$F,
+          RANGE,BEARING,DMS2RAD,
+          BRNG,RNGE,RADIUS_TIME,
+          SWATH_TIME,RNG_FROM_LAUNCH                    # MJC 5/1/2000 (E2145)
+literal   CSTRIP8                                       # MJC 5/3/2000 (E2145)
+
+CMC$AvgSpeed$I = xCMC$AvgSpeed$I
+
+iok = $YES
+
+UNT2$Type$I = $CruiseMissile$Code #type is cruise missile
+putUNT2$Type$I
+
+pimlat[1] = xUNT$TrueLatitude$F     # First pim point is launch position
+pimlon[1] = xUNT$TrueLongitude$F
+
+Range = xCMC$AvgSpeed$I * xCMC$MaxFlightDur$I * $Hours$Per$Minute
+
+# Build waypoints depending on fire arguments
+#--------------------------------------------------------------------
+if (bol_index != 0)
+  {
+   bearing = ILEX[bol_index+1] * $deg2rad
+   pimlat[2] = xUNT$TrueLatitude$F
+   pimlon[2] = xUNT$TrueLongitude$F
+   cslat = xUNT$CosTrueLat$F
+   
+   # Get point of max range on bearing
+   call RRB2LL (pimlat[2], pimlon[2], range, bearing, 0.0, cslat)
+   npoints = 2
+  }
+else if (rbl_index != 0)
+  {
+   npoints = 1
+   if (waypoints_index != 0)
+     {
+      if (execute_index != 0)
+        last_waypoint_index = execute_index - 2
+      else
+        last_waypoint_index = nargs - 1
+
+      for (i = waypoints_index+1; i <= last_waypoint_index; i=i+2)
+        {
+         npoints = npoints + 1
+         pimLAT[npoints] = DMS2rad(ilex[i])
+         pimLON[npoints] = DMS2rad(ilex[i+1])
+        }
+     }
+
+   npoints = npoints + 1
+   if (position_index != 0)
+     {
+      pimLAT[npoints] = DMS2rad(ilex[position_index+1])
+      pimLON[npoints] = DMS2rad(ilex[position_index+2])
+     }
+   else if (track_index != 0)
+     {
+      RMT$Pointer = 0  # get active track
+      ibonly = NO
+      call GtAct (xUNT$View$I, ilex[track_index+1], RMT$Pointer, ibonly) 
+      pimLAT[npoints] = xRMT$ApparentLat$F
+      pimLON[npoints] = xRMT$ApparentLon$F
+     }
+   else
+     {
+      iok = $NO
+      jj = 0
+      call smovhn (xUNT$Name$C,$$MaxLit,msg,jj)   
+      call smovv (" can't fire missile. Internal Logic error in bldcm. ",msg,jj)
+      call send_ (xUNT$View$I, 0,jj,msg)
+      return
+     }            
+  }
+else if (at_index != 0)
+  {
+   npoints = 1                                      # (E2017) JOA 8/98
+   if (waypoints_index != 0)
+     {
+      if (execute_index != 0)
+        last_waypoint_index = execute_index - 2
+      else
+        last_waypoint_index = nargs - 1
+
+      for (i = waypoints_index+1; i <= last_waypoint_index; i=i+2)
+        {
+         npoints = npoints + 1
+         pimLAT[npoints] = DMS2rad(ilex[i])
+         pimLON[npoints] = DMS2rad(ilex[i+1])
+        }
+     }
+
+   npoints = npoints + 1
+   pimLAT[npoints] = DMS2rad(ilex[position_index+1])
+   pimLON[npoints] = DMS2rad(ilex[position_index+2])
+  }
+else if (base_index != 0)
+  {
+   npoints = 1
+   if (waypoints_index != 0)                            # (E2017) joa 8/98
+     {
+      if (execute_index != 0)
+        last_waypoint_index = execute_index - 2
+      else
+        last_waypoint_index = nargs - 1
+
+      for (i = waypoints_index+1; i <= last_waypoint_index; i=i+2)
+        {
+         npoints = npoints + 1
+         pimLAT[npoints] = DMS2rad(ilex[i])
+         pimLON[npoints] = DMS2rad(ilex[i+1])
+        }
+     }
+
+   npoints = npoints + 1
+
+   UNT3$Pointer$TO ( itargt )
+   pimLAT[npoints] = xUNT3$TrueLatitude$F
+   pimLON[npoints] = xUNT3$TrueLongitude$F
+  }
+else
+  {
+   iok = $NO
+   jj = 0
+   call smovhn (xUNT$Name$C,$$MaxLit,msg,jj)   
+   call smovv (" can't fire missile. Internal Logic error in bldcm. ",msg,jj)
+   call send_ (xUNT$View$I, 0,jj,msg)
+   return
+  }
+
+if ((xCMC$MaxWayPoints$I + 2) < npoints)      # Exceed missile waypoints
+  {
+   # Eliminate last waypoints that exceed limit and send warning
+
+   jj = 0
+   call smovhn (xUNT$Name$C,$$MaxLit,msg,jj)   
+   call smovv (" is warned that trailing waypoints "//"truncated to missile limit. ",msg,jj)
+   call send_ (xUNT$View$I, 0,jj,msg)
+
+   maxpoints = xCMC$MaxWayPoints$I + 2
+   pimlat[maxpoints] = pimlat[npoints]
+   pimlon[maxpoints] = pimlon[npoints]
+   npoints = maxpoints
+  }
+
+#--------------------------------------------------------------------------
+
+call BLDCMPIM (UNT2$Pointer, CMC$AvgSpeed$I, pimlat, pimlon, npoints, PIMIndx)
+
+if (PIMIndx == 0)                # No pim slot available
+  {
+   iok = $NO
+   return
+  }
+
+if (nuclear_index != 0)
+    nuclear = $YES
+else
+    nuclear = $NO
+
+call Partial_CM_build (UNT$Pointer, UNT2$Pointer,
+                       CMC$Pointer, nuclear, ilex)
+
+CMC$MaxFlightDur$I = XCMC$MaxFlightDur$I #get flight duration
+
+call pimtim (pimindx, time_to_complete_pim)
+
+# Dead Reckon track using time to reach current position
+if (rbl_index != 0 & track_index != 0)
+  {
+   PIM$Pointer$to pimindx
+   PIM$Pts$Index = npoints
+   PIM$Pts$Latitude$F = XPIM$Pts$Latitude$F
+   PIM$Pts$Longitude$F = XPIM$Pts$Longitude$F
+   cslat = cos(PIM$Pts$Latitude$F)
+   brng = xRMT$course$I * $Deg2Rad
+   rnge = xRMT$Speed$I * time_to_complete_pim * $Hours$Per$Minute
+   call RRB2LL(PIM$Pts$Latitude$F, PIM$Pts$Longitude$F, rnge, brng, 0.0, cslat)
+   putPIM$Pts$Latitude$F
+   putPIM$Pts$Longitude$F
+
+   call pimtim (pimindx, time_to_complete_pim)
+  }
+
+if (bol_index == 0) # added this exclusion for bol
+  {                 # to avoid launch problems  jhm 3/98 (E1957) 
+   if (time_to_complete_pim > float(CMC$MaxFlightDur$I))
+     {
+      iok = $NO
+      jj = 0
+      call smovhn (xUNT$Name$C, $$MaxLit, msg, jj)   
+      call smovv  (" cannot fire cruise missile  ", msg, jj)
+      call smovhn (xCMC$Type$C, $$MaxLit, msg, jj)   
+      call smovv  (". Target beyond missile range. ", msg, jj)
+      call send_   (xUNT$View$I, 0, jj, msg)
+    
+      return
+     } 
+  }  # end if not bearing only launch  # jhm 3/98
+
+PIM$Pointer$to pimindx
+PIM$Pts$Index = npoints
+PIM$Pts$Latitude$F = XPIM$Pts$Latitude$F
+PIM$Pts$Longitude$F = XPIM$Pts$Longitude$F
+cslat = cos(PIM$Pts$Latitude$F)
+
+#$% get range from missile launch position to target
+call RLL2RB(xUNT$TrueLatitude$F, xUNT$TrueLongitude$F,
+            xUNT$CosTrueLat$F,
+            PIM$Pts$Latitude$F, PIM$Pts$Longitude$F,
+            cslat, rng_from_launch, brng)
+
+if (rng_from_launch < xCMC$MinEngageRange$I)
+  {
+   iok = $NO
+   jj = 0
+   call smovhn (xUNT$Name$C,$$MaxLit,msg,jj)   
+   call smovv (" cannot fire cruise missile  ",msg,jj)
+   call smovhn (XCMC$Type$C,$$MaxLit,msg,jj)   
+   call smovv (". Target within minimum missile range. ",msg,jj)
+   call send_ (xUNT$View$I, 0,jj,msg)
+    
+   return
+  } 
+
+UNT2$TimeTerm$F = CMC$MaxFlightDur$I + ORDER$MINUTE + 1.0
+putUNT2$TimeTerm$F
+
+NAV$Pointer = xCMC$HdgPntr$I      #get missile heading sensor
+if (NAV$Pointer != 0)     #if a sensor specified, determine its error
+   call NAVERR(NAV$Pointer,UNT2$Pointer) 
+
+NAV$Pointer = xCMC$SpdPntr$I      #get missile speed sensor
+if (NAV$Pointer != 0)  #if a sensor specified, determine its error 
+   call NAVERR(NAV$Pointer,UNT2$Pointer)
+
+NAV$Pointer = xCMC$NavPntr$I      #get missile nav sensor
+if (NAV$Pointer != 0)              #if a sensor specified
+   call NAVERR(NAV$Pointer, UNT2$Pointer)      
+
+UNT2$TrueAltDepth$I = xCMC$FlightAlt$I  #enter flight altitude
+putUNT2$TrueAltDepth$I 
+
+if (xCMC$FlightAlt$I < 1000)                    # CM that fly under 1000 ft
+   putUNT2$AltAboveGround$I (xCMC$FlightAlt$I)  # go relative - joa 11/95 (E1422)
+
+UNT2$OrderedAltDepth$I = UNT2$TRUEALTDEPTH$I
+putUNT2$OrderedAltDepth$I
+
+UNT2$RangeToNext$F = CMC$AvgSpeed$I * CMC$MaxFlightDur$I * $Hours$Per$Minute
+putUNT2$RangeToNext$F 
+
+if (at_index != 0)
+  {
+   putUNT2$CMFireMode$I ($CMPos$code)          
+   putUNT2$AssignedTarget$I (UNT$Engaging$Position)
+   UNT2$TimeSeek$F = Order$Minute + 1.0
+  }      # end of if fired at a position
+
+if (base_index != 0)
+  {
+   putUNT2$CMFireMode$I($CMBase$code)
+   UNT2$timeseek$F = (range - xCMC$seekerrange$I)*60./_
+                     float(CMC$avgspeed$I) + ORDER$MINUTE #set seeker delay
+   putUNT2$AssignedTarget$I( itargt )
+# jhm fd98 E2043  putUNT2$AttackIndx$I( itargt )
+  }
+
+if (bol_index != 0)                    # if BOL launch
+  {
+   putUNT2$CMFireMode$I($CMBOL$code)
+   UNT2$TrueCourse$F = FLOAT(int(ILEX[bol_index+1])) * $Deg2Rad
+   putUNT2$TrueCourse$F
+
+   UNT2$AssumedCourse$F = UNT2$TrueCourse$F #enter assumed course
+   putUNT2$AssumedCourse$F 
+
+   UNT2$OrderedCourse$F = UNT2$AssumedCourse$F
+   putUNT2$OrderedCourse$F 
+
+   if (delay_index != 0)
+     {
+      UNT2$TimeSeek$F = ILEX[delay_index+1] + ORDER$MINUTE
+      UNT2$TimeSeek$F = min(UNT2$TimeSeek$F, UNT2$TimeTerm$F)
+     }
+   else if (range_index != 0)
+     {
+#      TravelPerCycle = XCMC$AvgSpeed$i * $Hours$Per$Minute * Time$Step
+#      AdjustRange = int(ILEX[range_index+1] / TravelPerCycle) * TravelPerCycle
+#      UNT2$TimeSeek$F = (AdjustRange / XCMC$AvgSpeed$I) *
+#                        $Minutes$Per$Hour + ORDER$MINUTE
+
+      # get real time required for the range requested      # DEW 8/99
+      UNT2$TimeSeek$F = (ILEX[range_index+1] / XCMC$AvgSpeed$I) * $Minutes$Per$Hour + 
+                            ORDER$MINUTE
+      UNT2$TimeSeek$F = min(UNT2$TimeSeek$F, UNT2$TimeTerm$F)
+     }
+
+   if (seeker_index != 0)
+     {               
+      jterm = (ILEX[seeker_index+1] / XCMC$AvgSpeed$I) * $Minutes$Per$Hour +
+              ORDER$MINUTE + 1.0       # ordered termination time
+      if (jterm < UNT2$TimeSeek$F)
+        {
+         iok = $NO
+         jj = 0
+         call smovhn (xUNT$Name$C,$$MaxLit,msg,jj)   
+         call smovv (" cannot fire cruise missile  ",msg,jj)
+         call smovhn (XCMC$Type$C,$$MaxLit,msg,jj)   
+         call smovv (". Seeker activation range is greater than destruct range.",msg,jj)
+         call send_ (xUNT$View$I, 0,jj,msg)
+        
+         return
+        }
+      mterm = UNT2$TimeSeek$F + 2.0     #at least 2 min after TimeSeek
+      mterm = max(jterm,mterm)
+      UNT2$TimeTerm$F = min(UNT2$TimeTerm$F,mterm)
+      putUNT2$TimeTerm$F
+     }
+
+$DEBUG  if (trace$engage != $no)
+$DEBUG     {
+$DEBUG      call echor
+$DEBUG      call echov ('!')
+$DEBUG      call echohn  (xUNT2$Name$C,$$MaxLit)
+$DEBUG      call echov  (" BOL CM #")
+$DEBUG      call echoi  (unt2$pointer$index)
+$DEBUG      call echov  (", seek=")
+$DEBUG      call echof  (unt2$timeseek$f, 3)
+$DEBUG      call echov  (", term=")
+$DEBUG      call echof  (unt2$timeterm$f, 3)
+$DEBUG      call echov  (", g_time=")
+$DEBUG      call echof  (game$time, 3)
+$DEBUG     }
+
+  }
+
+if (rbl_index != 0)
+  {
+   if      (rbl_size == $lex$LARGE$)  CMC$rbl$Index = LargeAOU$Index
+   else if (rbl_size == $lex$MEDIUM$) CMC$rbl$Index = MediumAOU$Index
+   else if (rbl_size == $lex$SMALL$)  CMC$rbl$Index = SmallAOU$Index
+
+   putUNT2$CMFireMode$I ($CMRBL$code)
+
+   CMC$RBL$TargetRadius$I = xCMC$RBL$TargetRadius$I
+   putUNT2$CMRBLIndx$I (CMC$RBL$Index)
+
+   # Activate seeker when trailing edge of seeker coverage crosses leading
+   #  edge of acquisition circle
+   radius_time = float(CMC$RBL$TargetRadius$I) / CMC$AvgSpeed$I *
+                 $Minutes$Per$Hour
+   swath_time = float(xCMC$SeekerRange$I) / CMC$AvgSpeed$I * $Minutes$Per$Hour
+   UNT2$TimeSeek$F = order$minute + time_to_complete_pim - swath_time - radius_time
+   UNT2$TimeSeek$F = MAX (FLOAT (ORDER$MINUTE),UNT2$TimeSeek$F)
+  }
+
+UNT2$TimeSeek$F = MAX (0.0,UNT2$TimeSeek$F)
+putUNT2$TimeSeek$F
+
+if (target_index != 0)
+  {
+   if (bridge_index != 0)
+     {
+      UNT2$TargetType$I = target_priority_code (INT(ilex[bridge_index]),
+                                                INT(ilex[bridge_index+1]))
+     }
+   else 
+     {
+      UNT2$TargetType$I = target_priority_code (INT(ilex[target_index+1]),
+                                                $NoTarget$TargetCode)
+     }
+   putUNT2$TargetType$I
+  }   # end of if a target was entered
+
+if (be_index != 0)
+  {
+   be_part1 = ilex[be_index+1]
+   if (tin_index == 0 & ((be_index+2) == nargs))
+     be_part2 = ilex[be_index+2]
+   else
+     be_part2 = $Blank_Literal
+
+   call Store_BE_Info (UNT2$Pointer, be_part1, be_part2)
+  }   # end of if a BE was entered
+
+if (tin_index != 0)
+   call Store_TIN_Info (UNT2$Pointer, ilex[tin_index + 1])
+
+#if (iok != $no)
+   call Record_Flight_EQ_Expended (UNT$Pointer, CMC$Pointer, 1)
+
+return
+end        # End  BLDCM
+
+
+
+
+Subroutine OFTORP(ord$pointer,unt$pointer,ilex) 
+#######################################################
+#$%
+#$% Purpose:   OFTORP selectively executes fire
+#$%            orders for torpedoes based on
+#$%            order validation.
+#$%
+#$% Called By: OFIRE
+#$%
+#$% Calls:     OFTOR0     OFTOR1
+#$%
+#$% Tables:    ORD
+#$%
+#$% Date:      APRIL 80
+#$%
+#$% Author:    Dana Wills
+#$%
+#######################################################
+
+BBcommon
+
+literal ILEX[$max$args]
+
+integer ORD$Pointer,UNT$Pointer             # MJC 5/1/2000 (E-2145)
+
+#$% if order phase not valid, call to validate torpedo orders
+if (xord$Phase$i == 0) call OFTOR0(ord$pointer,unt$pointer,ilex)
+#$% if order phase is valid, call to execute torpedo orders
+if (xord$Phase$i >  0) call OFTOR1(ord$pointer,unt$pointer,ilex)
+
+return
+end
+
+
+Subroutine OFTOR0(ord$pointer,unt$pointer,ilex) 
+#######################################################
+#$%
+#$% Purpose:   OFTOR0 validates torpedo orders and
+#$%            displays error messages to the user.
+#$%
+#$% Called By: OFTORP
+#$%
+#$% Calls:     GTACT      SEND       DEQGET
+#$%
+#$% Tables:    UNT        RMT
+#$%
+#$% Date:      APRIL 80
+#$%
+#$% Author:    Dana Wills
+#$%
+#$% Modified:  Jim Allen - 2/98 (E1864)
+#$%            Removed the current command index (indx) from 
+#$%            the argument list.  The routine locate_fire_keywords
+#$%            determines the index of each keyword.  The variables
+#$%            indexing the command arguments simplify the processing.
+#$%
+#$%            Susan Miller - 5/98 (E1992)
+#$%            Fixed sending wrong info to GtAct because
+#$%            of track_index.
+#$%
+#$%            Susan Miller - 5/98 (E1993)
+#$%            Disallow air tracks as a valid target for 
+#$%            dumb torpedo.
+#$%
+#######################################################
+BBcommon
+RTcommon
+
+integer   nfound, eqlist[5,ARB]                       # jb    4/3/89
+literal   ilex[$max$args]
+Character msg[ARB]
+integer   UNT2$Pointer, UNT2$Type$I                   # SMM 5/98 (E1993)
+
+integer   IBONLY,IOLD,JJ,ISAV_RMT, litcmp,
+          KKLEN,IFIND,N,
+          TOR$Pointer,
+          UNT$Pointer, UNT$View$I,
+          RMT$Pointer, RMT$Detectionage$I,
+          ORD$Deqindx$I, ORD$Pointer, ORD$Phase$I     # MJC 5/1/2000 (E2145)
+literal   CSTRIP8,
+          UNT$Name$C                                  # MJC 5/3/2000 (E2145)
+
+#$% get unit name and view
+UNT$Name$C = XUNT$Name$C
+UNT$View$I = XUNT$View$I
+
+RMT$Pointer     = 0             ### new logic inserted by tpa 10/19/83
+ibonly          = NO
+iold            = NO
+
+# changed ilex[track_index + 1] to ilex[track_index] SMM 5/21/98 (E1992)
+call GtAct (UNT$View$I,ilex[track_index],RMT$Pointer,ibonly) ## pass unit/track code
+                                                        ## rec pntr/bear only
+RMT$DetectionAge$I = xRMT$DetectionAge$I
+
+if (RMT$Pointer == 0)                                   ## if no track
+    {                                                   ## output invalid track
+    jj = 0
+    call smovhn (UNT$Name$C,$$MaxLit,msg,jj)   
+    call smovv (" can't fire torpedoes at invalid track number ",msg,jj)
+                                  # SMM 8/99 E2141
+    call smovhn (ilex[track_index],$$MaxName,msg,jj)   # SMM 5/21/98 (E1992)
+    call send_ (UNT$View$I, 0,jj,msg) # formerly tmsg1
+    return
+    }
+else if (ibonly == YES)                                 ## passive track
+    {                                   
+    isav_RMT = RMT$Pointer                              ## save RMT Pointer
+                        # SMM 5/21/98 (E1992)
+    call GtTrk_TMA (ilex[track_index],RMT$Pointer,iold)      ## pass track code
+                                                        ## rec pntr/old for TMA
+    if (RMT$Pointer == 0) RMT$Pointer = isav_RMT        ## old/bear only track
+    else                  ibonly      = NO              ## pass TMA'd
+    }
+else if (RMT$DetectionAge$I == $Old$Code)               ## active track old
+    {
+    iold = YES
+    }
+
+if (iold == YES)                                        ## output old track
+    {
+    jj = 0
+    call smovhn (UNT$Name$C,$$MaxLit,msg,jj)
+    call smovv (" cannot fire torpedoes at old track ",msg,jj)
+                                   # SMM 8/99 E2141
+    call smovhn (ilex[track_index],$$MaxName,msg,jj)         # SMM 5/21/98 (E1992)
+    call send_ (UNT$View$I, 0,jj,msg)  # formerly tmsg3
+    return
+    }
+else if (ibonly == YES)                                 ## output passive track
+    {
+    jj = 0
+    call smovhn (UNT$Name$C,$$MaxLit,msg,jj)
+    call smovv (" cannot fire torpedoes at passive track ",msg,jj)
+                                  # SMM 8/99 E2141
+    call smovhn (ilex[track_index],$$MaxName,msg,jj)     # SMM 5/21/98 (E1992)
+    call send_ (UNT$View$I,0,jj,msg)  # formerly tmsg2
+    return
+    }
+else # check for air tracks SMM 5/21/98 (e1993)
+    {
+     UNT2$Pointer$to xRMT$Detectee$I
+     UNT2$Type$I = xUNT2$Type$I
+    
+     # torpedos can't target aircraft or cruise miss.
+     if (UNT2$Type$i == $air$Code |
+         UNT2$Type$i == $CruiseMissile$Code )
+        {
+         jj = 0
+         call smovhn(UNT$name$c,$$MaxLit,msg,jj) 
+         call smovv (" cannot fire torpedoes at air track ",msg,jj)
+         call smovhn(ilex[track_index],$$MaxName,msg,jj) # SMM 8/99 E2141
+         call send_(UNT$View$I,0,jj,msg)
+         return
+        }
+    } # end of test for air tracks 
+
+#$% if shorebase
+if (xUNT$TYPE$I == $shorebase$CODE) # 7/31/90 - hdf
+   {
+    #$% call to display error message, return
+    jj = 0
+    call smovv ("Torpedo from invalid platform.",msg,jj)
+    call send_ (UNT$VIEW$I,0,jj,MSG)
+    return
+   }
+
+#$% call to get equipment ID torpedo
+#-------------------------------------------------------------
+nfound = 0        # jb    Set 0; not an iterative call        7/25/89
+call DEQGET(UNT$Pointer, # vice SURGET  # send UNT pointer
+                 $Torpedo$Code,         # send ident code
+                  nfound,                       # send/receive nbr items fnd
+                  eqlist)                       # send/receive list of EQ
+if (eqlist[1,1] == $NO)               #if equipment NOT found
+   {
+    #$% enter unit name in message
+    kklen = 0
+    call smovhn (UNT$name$C,$$MaxLit,msg,kklen)
+    call smovv (" has no ",msg,kklen)
+    #$% call to display error message 3, return
+    call smovhn (ILEX[fire_index+2],$$MaxLit,msg,kklen)
+    call smovv (" dumb torpedoes.",msg,kklen)
+    call send_ (UNT$VIEW$I,0,kklen,MSG) # formerly mcmsg3
+    return
+   }
+
+##---------------------------------------- -start- jb 5/18/89
+iFind = $NO
+For (N=1; N <= nfound; N =N +1)
+  {
+   TOR$Pointer = eqlist[2,N]
+   if (litcmp(xTOR$TYPE$C, ilex[fire_index+2] ) == 0)
+    {
+     iFind = $YES
+     ord$deqindx$I = eqlist[1,N]   #                            5/24/89
+     putord$deqindx$I              # for reference in OFCRU1    5/24/89
+     BREAK
+    }
+  }
+
+if( iFind != $YES )
+  {
+    #$% enter unit name and track number in message
+   kklen = 0
+   call smovhn (UNT$name$C,$$MaxLit,msg,kklen)
+    call smovv (" has no ",msg,kklen)
+    #$% call to display error message 3, return
+   call smovhn (ILEX[fire_index+2],$$MaxLit,msg,kklen)
+    call smovv (" dumb torpedoes.",msg,kklen)
+   call send_ (UNT$VIEW$I,0,kklen,MSG) # formerly mcmsg3
+   return
+  }
+##---------------------------------------- -end- jb 5/18/89
+
+#$% set order phase to one and store
+ord$Phase$I = 1
+PUTord$Phase$I
+
+return
+end        # End  OFTOR0
+
+
+Subroutine OFTOR1(ord$pointer,unt$pointer,ilex) 
+#######################################################
+#$% Purpose:   OFTOR1 executes torpedo orders based
+#$%            on validity of the order phase.  It
+#$%            then displays error messages to the
+#$%            user.    deq$ tor$ remaining
+#$% Called By: OFTORP
+#$% Calls:     GTACT      GETEQ      SEND
+#$%            GETRB_M    ECHOH      ECHOR
+#$% Tables:    UNT        RMT
+#$%            ORD        TOR
+#$%            TAT
+#$% Date:      APRIL 80
+#$% Author:    Dana Wills
+#$% Modifed:   Susan Miller 3/28/95  removed some unused variables
+#$%            and removed use of eqlist[3,nfound] in calculation of
+#$%            ifire since nfound and eqlist are not set in this
+#$%            routine and aren't necessary.
+#$%
+#$%            Jim Allen - 2/98 (E1864)
+#$%            Removed the current command index (indx) from 
+#$%            the argument list.  The routine locate_fire_keywords
+#$%            determines the index of each keyword.  The variables
+#$%            indexing the command arguments simplify the processing.
+#$%
+#$%            Susan Miller - 5/98 (E1992)
+#$%            Fixed sending wrong info to GtAct because
+#$%            of track_index.
+#$%
+#$%            Susan Miller - 8/98 (E1995)
+#$%            Filled in required info for postgame eng log.
+#######################################################
+BBcommon
+ENcommon                                #       1/16/86
+RTcommon
+
+literal ILEX[$max$args]
+Real*4 PH,Rand_Num
+Character msg[ARB]
+real   ntime
+
+integer IBONLY,ISAV_RMT,JOLD,ISTMA,KKLEN,IFIRE,
+        NSTILL,IOUT_DEG,IRNG,IPH,NHITS,N,     # jb E2145 (x)  8/7/00
+        RMT$Pointer, RMT$Tmaflag$I, RMT$Lastdettype$I,
+        ORD$Phase$I, ORD$Pointer, ORD$Deqindx$I,
+        TAT$Yield$I, TAT$Weight$I, TAT$Pointer,
+        TAT$Targetindx$I, TAT$Sourceindx$I,
+        TAT$Hits$I,
+        DEQ$Pointer, DEQ$Remaining$I,
+        TOR$Firerate$I, TOR$Pointer,
+        TOR$PH$Index,
+        UNT2$Pointer, UNT2$Type$I,
+        UNT$Pointer, UNT$View$I                         # MJC 5/1/2000 (E2145)
+real    UNT$Costruelat$F, UNT$Truelatitude$F,
+        UNT$Truelongitude$F,
+        RMT$Tmalat$F, RMT$Tmalon$F,
+        TAT$Time$F, 
+        RANGE_TRUE,RANGE_TMA,
+        BEARING_TRUE,BEARING_TMA,
+        FCOSTMA,DIFF,RANGE,BRG,
+        RANDOM, x                                          # MJC 5/1/2000 (E2145)
+literal UNT$Name$C,
+        CSTRIP8,
+        ORD$W02$C                                       # MJC 5/3/2000 (E2145)
+data x/0.0/		# Get next random number in sequence
+
+if (order$minute > game$minute) return
+
+#$% get unit name and view
+UNT$Name$C = xUNT$Name$C
+UNT$View$I = xUNT$View$I
+
+#$% clear RMT pointer and call to get active track
+RMT$Pointer = 0
+
+# SMM 5/21/98 (E1992) 
+call gtact(UNT$View$I,ilex[track_index],RMT$Pointer,ibonly)
+
+isav_RMT = RMT$Pointer                                  ## tpa 8/23/83
+jold     = YES
+
+if (ibonly == YES)                      #if bearing-only track tpa 8/23/83
+    {
+    call gttrk_TMA(ilex[track_index+1],RMT$Pointer,jold)
+
+    if (jold == YES)            ## if old track flag it
+        {
+        isTMA       = 0
+        ibonly      = NO
+        RMT$Pointer = isav_RMT          ## restore old RMT
+        }
+    else if (RMT$Pointer == 0)  ## if esm/pasNON-TMA detection
+        {
+        isTMA  = 0
+        RMT$Pointer = isav_RMT
+        }
+    else                        ## otherwise pasTMA detection
+        {
+        isTMA  = RMT$Pointer
+        }
+    }
+else
+    {
+    isTMA = NO
+    }
+
+if (RMT$Pointer == 0)                    #if track number invalid
+   {
+    #$% clear ORDer phase and store, return
+    ORD$Phase$I = 0
+    putORD$Phase$I
+    return
+   }
+
+
+ORD$DEQindx$I = xORD$DEQindx$I  #                            5/24/89
+DEQ$Pointer$TO (ORD$DEQindx$I)  #                            5/24/89
+TOR$Pointer   = xDEQ$Pntr$I     #                            5/24/89
+
+DEQ$Remaining$I = xDEQ$Remaining$I                # jb         5/24/89
+if (DEQ$Remaining$I < 1)
+   {
+    #$% clear ORDer phase and store, return
+    ORD$Phase$I = 0
+    putORD$Phase$I
+ 
+     #$% enter unit name in message            # jb send msg    5/18/89
+    kklen = 0
+    Call SMOVHN(UNT$name$C,$$MaxLit,msg,kklen)
+    Call SMOVV(" has no ",msg,kklen)
+    Call SMOVHN(ILEX[fire_index+2],$$MaxLit,msg,kklen)
+    Call SMOVV(" dumb torpedoes.",msg,kklen)
+    call send_(UNT$VIEW$I,0,kklen,MSG)    # formerly mcmsg3
+
+    return
+   }
+
+UNT2$POINTER$To xRMT$Detectee$I   # tgt UNT pntr: moved up here 1/23/86
+
+    #$% Inhibit firing ASW-only torpedo at surface target
+UNT2$type$I = xUNT2$type$I                              #       1/23/86
+if (xTOR$subs$I == $yes & UNT2$type$I != $sub$Code)     #       1/23/86
+        {
+        kklen = 0
+        Call SMOVHN(ILEX[fire_index+2],$$MaxLit,msg,kklen)
+        Call SMOVV(" is an ASW-only torpedo.",msg,kklen)
+        call send_(UNT$View$I,0,kklen,MSG)  # formerly mcmsg8
+        ORD$Phase$I = 0  
+        putORD$Phase$I
+        return
+        }
+                # end of Inhibit code                           1/23/86
+
+#$% if nuclear ORDer and torpedo not nuclear sent error message
+if (nuclear_index != 0)
+ {
+  TAT$Yield$I = xTOR$Yield$I
+  if (TAT$Yield$I == 0)
+        {
+        kklen = 0
+        Call SMOVHN(ILEX[fire_index+2],$$MaxLit,msg,kklen)
+        Call SMOVV(" is not a nuclear torpedo.",msg,kklen)
+        call send_(UNT$View$I,0,kklen,MSG) #formerly mcmsg6
+        ORD$Phase$I = 0  
+        putORD$Phase$I
+        return
+        }
+  TAT$Weight$I = 0                                      #       7/24/85
+ }
+else    # Nuclear is NO                                 7/24/85
+ {
+  TAT$Weight$I  = xTOR$WEIGHT$I #warhead weight of the torp     9/11/85
+  if (TAT$Weight$I == 0)                # IF statement added    7/24/85
+   {
+    kklen = 0
+    Call SMOVHN(ILEX[fire_index+2],$$MaxLit,msg,kklen)          #       7/24/85
+    Call SMOVV(" is not a conventional torpedo.",msg,kklen)
+    call send_(UNT$View$I,0,kklen,MSG)  # formerly mcmsg7
+    ORD$Phase$I = 0  
+    putORD$Phase$I
+    return
+   }
+  TAT$yield$I = 0
+ }
+
+#$% if aircraft and true altitude depth is greater than maximum altitude
+if (xUNT$Type$I == $Air$Code & xUNT$TrueAltDepth$I > XTOR$MaxAlt$I)
+   {                   
+    #$% enter unit name and call to display too high to fire torpedos message
+    kklen = 0
+    Call SMOVHN(UNT$name$C,$$MaxLit,msg,kklen)
+    Call SMOVV(" too high to fire torpedoes.",msg,kklen)
+    call send_(UNT$VIEW$I,0,kklen,MSG) # formerly mcmsg4
+    ORD$Phase$I = 0
+    putORD$Phase$I
+    return
+   }
+
+#$% set torpedo fire rate
+tor$FireRate$I = max0(1,XTOR$FireRate$I)
+
+ifire = min0(tor$FireRate$I,int(ilex[fire_index+1]),DEQ$Remaining$I)       # SMM 3/95
+
+#$% get equipment remaining and store
+DEQ$remaining$I = DEQ$remaining$I - ifire                # jb        5/22/89    
+putDEQ$remaining$I                            
+
+#$% set number still remaining
+nstill = ilex[fire_index+1] - ifire
+
+#$% if greater than zero
+if (nstill > 0)
+   {
+    #$% enter number in ORDer and store
+    ORD$W02$C = nstill
+    putORD$W02$C
+   }
+else
+   {
+    #$% clear ORDer phase and store
+    ORD$Phase$I = 0
+    putORD$Phase$I
+   }
+
+
+RMT$TMAFlag$I = xRMT$TMAFlag$I
+RMT$LastDetType$I = xRMT$LastDetType$I 
+
+#if(RMT$TMAFlag$I == YES & xRMT$LastDetSonar$I == YES)   ## tpa 8/23/83
+if ( RMT$TMAFlag$I == YES &  ( RMT$LastDetType$I == $Sonar$type | 
+                               RMT$LastDetType$I == $Lidar$type |
+                               RMT$LastDetType$I == $Bistatic$type |
+                               RMT$LastDetType$I == $Mad$type    )) # DEW 2/1/91
+    {        # \/ jb                                           8/29/89
+    call GetRB_M (UNT$Pointer,          #get target range/pass attacker pointer
+               UNT2$Pointer,            #pass target pointer
+               Range_True,              #receive true rng
+               Bearing_True)            #receive true brg
+
+
+    UNT$CosTrueLat$F    = xUNT$CosTrueLat$F
+    UNT$TrueLatitude$F  = xUNT$TrueLatitude$F
+    UNT$TrueLongitude$F = xUNT$TrueLongitude$F
+    RMT$TMALat$F        = xRMT$TMALat$F
+    RMT$TMALon$F        = xRMT$TMALon$F
+    fCOStma             = COS(RMT$TMALat$F)
+
+    call RLL2RB(UNT$TrueLatitude$F,     #range to TMA position
+                UNT$TrueLongitude$F,    # pass attacker position
+                UNT$CosTrueLat$F,       #    and COS(lat)
+                RMT$TMALat$F,           # pass TMA target po-
+                RMT$TMALon$F,           #   sition and
+                fCOStma,                #  approx. COS(lat)
+                Range_TMA,              # RETURN: rng to TMA position
+                Bearing_TMA)            #     and brg to TMA position
+
+    DIFF = Bearing_True - Bearing_TMA   # If TMA brg. differs from true 
+    $angpi(DIFF)                        # brg. by more than 15 degrees
+
+    if (abs(DIFF) > $PI/12.) 
+        {
+        PH = 0.0        ## set prob to ZERO(0) 
+        iout_deg = YES
+        }
+    else
+        {
+        PH   = 1.0                      #set probability to 100%
+        iout_deg = NO
+        }
+
+    iRNG = Range_TMA * 2027.        # convert to yards
+    }
+else
+    {
+    call GETRB_M(UNT$POINTER,   #$% call to get range and bearing to target
+               UNT2$POINTER,
+               RANGE,
+               BRG)
+
+    IRNG = RANGE * 2027.                    # convert to yards
+
+    PH = 1.0                                # set probability to 100%
+    }
+
+do TOR$PH$INDEX = 1, TOR$PH$SLOTS       #search probability ranges
+   {
+    #$% if range is less than torpedo probability hit range,
+    #$% set probability hit
+    if (IRNG <= xTOR$PH$Range$I) break
+
+    if (iout_deg != YES) PH = PH - 0.1
+   }
+
+$DEBUG  if (trace$engage != $no)
+$DEBUG     {
+$DEBUG      call echor
+$DEBUG      call echoV  ('!')           # jb E2144  (echoV) 8/2/00
+$DEBUG      call echohn  (xUNT$Name$C,$$MaxLit)
+$DEBUG      call echov  (" firing ")    # jb E2144  5/22/00
+$DEBUG      call echoi  (ifire)
+$DEBUG      call echo   ($space)
+$DEBUG      call echohn (xTOR$Type$C,$$MaxLit)
+$DEBUG      call echov  (" at ")        # jb E2144  5/22/00
+$DEBUG      call echohn (xUNT2$Name$C,$$MaxLit)
+$DEBUG      if (isTMA != 0)
+$DEBUG          {
+$DEBUG          call echov (" w/TMA rng(Y)=")    # jb E2144  5/22/00
+$DEBUG          }
+$DEBUG      else
+$DEBUG          {
+$DEBUG          call echov (" rng(Y)=") # jb E2144  5/22/00
+$DEBUG          }
+$DEBUG      call echoi (irng)
+$DEBUG      call echov (" Ph=")         # jb E2144  5/22/00
+$DEBUG      iph = ph*100
+$DEBUG      call echoi (iph)
+$DEBUG      call echo ($PERCENT)
+$DEBUG      call echo ($SPACE)
+$DEBUG     }
+
+NHITS = 0                               # clear sum of hits
+
+do N = 1, IFIRE                         # do for number to fire
+   {
+    $DEBUG  if (trace$engage != $no) call echo ($Period)
+
+############# engagement log addition           1/16/86
+    if (log$engage != $no)                #     1/16/86
+      {
+# SMM 8/16/98 (E1995)
+       call engdata (UNT$Pointer, UNT2$Pointer)
+       putENG$Weapon$c(ilex[fire_index+2])
+       PUTeng$Range$f(irng / 2027. +0.5)
+       call MBURange(UNT2$Pointer)       # range to MBU
+      } 
+
+    #$% if number exceeds probability of hit, get next
+
+    Rand_Num = Random(X)                    # intra emi oftor1, 10/90 hdf
+    if (Rand_Num >= PH)       #  if not hit
+
+     {
+       if (log$engage != $no)               # if engagement log is desired
+         { # SMM 8/16/98 (E1995)
+          PUTeng$Result$i( eng$Miss$code )
+          PUTeng$Resultph$f( PH * 100. + .5 )
+          call write_eng_rec            # write a recORD before
+         }
+       NEXT
+     }
+
+    #$% increment number of hits
+    NHITS = NHITS + 1
+    if (log$engage != $no)                 # if engagement log is desired
+      {
+       PUTeng$Result$i( eng$Hit$code ) # SMM 8/16/98 (E1995)
+       call write_eng_rec
+      }
+
+    $DEBUG  if (trace$engage != $no) call echo ($aster)
+   }
+
+#$% for each torpedo at target entry
+for(TAT$POINTER$FIRST;TAT$POINTER$VALID;TAT$POINTER$NEXT)
+{
+    #$% if target exists, get next
+    if(xTAT$TARGETINDX$I != 0)  next
+
+    NTIME = (RANGE/(xTOR$SPEED$I * 60.0)) + ORDER$MINUTE #time to trgt
+
+    #$% set target pointer to detectee
+    TAT$TargetIndx$I = UNT2$POINTER$INDEX
+    putTAT$TargetIndx$I
+
+    putTAT$TORIndx$i( tor$pointer$index )
+
+    putTAT$Fired$i( ifire )
+
+    putTAT$SourceALSPID$i( Xunt$ALSPID$i )
+
+    #$% set source
+    TAT$SourceIndx$I = UNT$POINTER$INDEX
+    putTAT$SourceIndx$I
+
+    #$% set time to target
+    TAT$Time$F = NTIME
+    putTAT$Time$F
+
+    putTAT$Weight$I                         # conventional pounds of TNT
+    putTAT$Yield$I                          # nuclear yield
+    if (nuclear_index != 0)
+        putTAT$NucFlag$I ($YES)
+    else
+        putTAT$NucFlag$I ($NO)
+
+    #$% set number of hits
+    TAT$Hits$I       = NHITS
+    putTAT$Hits$I
+
+    puttat$IDENT$I  ($TORPEDO$Code)         # jb            7/9/87
+        
+    #$% set number of hits to zero
+    nhits = 0
+    break
+}
+
+#$% if hit
+if (nhits != 0)
+{
+    #$% call to send message
+    call echov ("TAT Table overflow for Fire command")  # jb E2144  5/22/00
+    call echor
+}
+
+#$% enter number fired and unit name in message, and call to display message
+
+kklen = 0
+Call SMOVIB(ifire,    2,msg,kklen)           ## tpa 8/23/83
+Call SMOVV(" torpedoes fired by ",msg,kklen)
+Call SMOVHN(UNT$name$C,$$MaxLit,msg,kklen)
+call send_ (UNT$VIEW$I,0,kklen,MSG)   # formerly mcmsg9
+
+return
+end        # End  OFTOR1
+
+
+Subroutine OFBALLISTIC(ord$pointer,unt$pointer,ilex) 
+#######################################################
+#$%
+#$% Purpose:   OFBALLISTIC selectively executes fire
+#$%            orders for ballistic missiles based
+#$%            on order validation.
+#$%
+#$% Called By: OFIRE
+#$%
+#$% Calls:     VALIDATE_BALLISTIC_ORD     EXECUTE_BALLISTIC_ORD
+#$%
+#$% Tables:    ORD
+#$%
+#$% Date:      JUNE 93
+#$%
+#$% Author:    Alex Vagus
+#$%
+#$% Modified:  Jim Allen - 2/98 (E1864)
+#$%            Removed the current command index (indx)
+#$%            and nuclear command flag from the
+#$%            argument list and calls.
+#$%
+#######################################################
+
+BBcommon
+
+integer ORD$Pointer,UNT$Pointer             # MJC 5/1/2000 (E-2145)
+
+literal ILEX[$max$args]
+
+#$% if order phase is zero, call to validate ballistic missile orders
+if (xord$Phase$i == 0)
+   call VALIDATE_BALLISTIC_ORD (ord$pointer,unt$pointer,ilex)
+
+#$% if order phase is greater than zero, call to execute cruise missile orders
+if (xord$Phase$i >  0) 
+   call EXECUTE_BALLISTIC_ORD (ord$pointer,unt$pointer,ilex)
+
+return
+end     # End Subroutine OFBALLISTIC
+
+
+            # jb E2208 Removed 4th dummy arg, INDX      12/12/00
+Subroutine VALIDATE_BALLISTIC_ORD (ord$pointer,unt$pointer,ilex) 
+                                                             #  4,5
+#######################################################
+#$% 
+#$% Purpose:   VALIDATE_BALLISTIC_ORD validates ballistic missile
+#$%            orders and displays error mes-
+#$%            sages to the user.
+#$%
+#$% Called By: OFBALLISTIC
+#$%
+#$% Calls:     GTUNT      SEND       WHSIDE
+#$%            DEQGET
+#$%
+#$% Tables:    UNT        ORD
+#$%
+#$% Date:      JUNE 93
+#$%
+#$% Author:    Alex Vagus
+#$%
+#$% Note:      A revamp version of OFCRU0
+#$%
+#$% Modified:  Jim Allen - 2/98 (E1864)
+#$%            Removed the current command index (indx) from 
+#$%            the argument list.  The routine locate_fire_keywords
+#$%            determines the index of each keyword.  The variables
+#$%            indexing the command arguments simplify the processing.
+#$%
+#######################################################
+BBcommon
+RTcommon #Ilaunch,Numsent,nord,Nargs,Cnames
+
+integer namLEX                              
+literal ILEX[$max$args]
+integer nfound, eqlist[5,ARB]              
+VMSchar msg*ARB
+integer kk, litcmp
+
+integer ISIDE1,ISIDE2,IBONLY,
+        IFIND,N,INDX,
+        UNT$Pointer, UNT$View$I,
+        UNT2$Pointer, RMT$Pointer,
+        CMC$Pointer, DEQ$Pointer,
+        ORD$Deqindx$I, ORD$Pointer,
+        ORD$Phase$I                         # MJC 5/1/2000 (E2145)
+literal UNT$Name$C,
+        CSTRIP8                             # MJC 5/3/2000 (E2145)
+
+#$% get unit name and view
+UNT$Name$C = xUNT$Name$C
+UNT$View$I = xUNT$View$I
+
+# Build a list of errors/problems
+kk = 0
+msg = ""
+
+#$% if ballistic missile is fired at BASE 
+if (base_index != 0)   # fired at BASE  
+    {
+    #$% get shorebase name and type
+    call GTUNT($ShoreBase$Code,ilex[base_index+1],UNT2$Pointer)
+
+    #$% if detectee not found
+    if (UNT2$Pointer == 0)
+        {
+        if (KK > 0) call vmovv (", ",msg,kk)
+        call vmovv ("Unknown base", msg,kk)
+        }
+    else
+        {
+        #$% determine which sides are missile and target (blue/orange)
+        call whside(UNT$View$I,iside1)
+        call whside(xUNT2$View$I,iside2)
+
+        #$% if missile and target on the same side
+        if (iside1 == iside2)
+            {
+            if (KK > 0) call vmovv (", ",msg,kk)
+            call vmovv ("Friendly base", msg,kk)
+            } # end same side
+        }
+    }  # End   if 'fire'd  AT a shorebase..
+
+else if (track_index != 0)  #fired at TRACK
+    {
+    RMT$Pointer = 0
+    ibonly = NO
+
+    call GtAct (UNT$View$I,ilex[track_index+1],RMT$Pointer,ibonly) 
+
+    if (RMT$Pointer == 0)            ## if no track
+        {
+        if (KK > 0) call vmovv (", ",msg,kk)
+        call vmovv ("No such track", msg,kk)
+        }
+    else if (ibonly == YES)         ## passive track
+        {                                       
+        if (KK > 0) call vmovv (", ",msg,kk)
+        call vmovv ("Passive track", msg,kk)
+        }
+    else if (xRMT$DetectionAge$I == $Old$Code)     ## active track old
+        {
+        if (KK > 0) call vmovv (", ",msg,kk)
+        call vmovv ("Old track", msg,kk)
+        }
+    }  # end else if fired at Track
+
+# get index into LEX for name of ballistic missile
+namLEX = fire_index + 2
+
+#----------------------------------------
+# see if it is Ballistic type
+
+ifind = $no
+for_all_ok (CMC)
+    {
+    if (xCMC$type$c != ilex[namLEX] ) next
+    ifind = $yes
+
+    if (xCMC$Cat$I == $Ball$Code)
+        {
+
+        if (nuclear_index != 0 & xCMC$Yield$I == 0) # if nuclear was entered
+            {                                       # and missile isn't
+            if (KK > 0) call vmovv (", ",msg,kk)
+            call vmovv ("Not a nuclear missile", msg,kk)
+            }
+        else if (nuclear_index == 0 & xCMC$Weight$I == 0) # if nuclear wasn't entered
+            {                                             # but missile is only nuclear
+            if (KK > 0) call vmovv (", ",msg,kk)
+            call vmovv ("Not a conventional missile", msg,kk)
+            }
+        }
+    else
+        {
+        if (KK > 0) call vmovv (", ",msg,kk)
+        call vmovv ("Not a ballistic missile", msg,kk)
+        }
+
+    break
+    }
+
+if (ifind == $NO)
+    {
+    if (KK > 0) call vmovv (", ",msg,kk)
+    call vmovv ("No such missile", msg,kk)
+    }
+
+#----------------------------------------
+# see if he has any 
+
+nfound = 0       
+call DEQGET(UNT$Pointer, # vice SURGET  # send UNT pointer
+            $CruiseMissile$Code,           # send ident code
+            nfound,                       # send/receive nbr items fnd
+            eqlist)                       # send/receive list of EQ
+
+if (eqlist[1,1] == $NO)               #if equipment NOT found
+    {
+    if (KK > 0) call vmovv (", ",msg,kk)
+    call vmovv ("Has no missiles", msg,kk)
+    }
+else if (ifind == $YES)                 # CMC exists, some CMC on board
+    {
+    iFind = $NO
+    For (N=1; N <= nfound; N =N +1)
+        {
+        CMC$Pointer = eqlist[2,N]
+        if (litcmp( xCMC$TYPE$C, ilex[namLEX] ) == 0)
+            {
+            iFind = $YES
+
+            ORD$deqindx$I = eqlist[1,N]   #                            5/23/89
+            putORD$deqindx$I              # for reference in OFCRU1    5/23/89
+
+            DEQ$Pointer$To  (ORD$DEQIndx$I)
+
+            if (xDEQ$Remaining$I < ilex[numSENT]) 
+                {
+                if (KK > 0) call vmovv (", ",msg,kk)
+                call vmovv ("Inventory too low (only ", msg,kk)
+                call vmovi (xDEQ$Remaining$I ,msg,kk)
+                call vmovv (")", msg,kk)
+                }
+
+            break
+            }
+        } # end for loop
+
+    if( iFind != $YES )
+        {
+        if (KK > 0) call vmovv (", ",msg,kk)
+        call vmovv ("None on board", msg,kk)
+        }
+    }
+
+
+if (xUNT$Type$I == $Sub$Code & ifind == $yes & # if shooter is a sub and
+    xUNT$TrueAltDepth$I > xCMC$LaunchDepth$I)  # below launch depth
+    {                      
+    if (KK > 0) call vmovv (", ",msg,kk)
+    call vmovv ("Too deep", msg,kk)
+    }
+
+#----------------------------------------
+# Any problems?
+
+if (kk > 0)
+    {
+    # There was some problem(s)...
+    call vmovv (".",msg,kk)
+    call wgoerr (unt$view$i,unt$name$c,nord,nargs,ilex,msg[1:kk])
+
+    ORD$Phase$I = 0
+    putORD$Phase$I
+    }
+else
+    {
+    #$% set ORDer phase to one and store
+    ORD$Phase$I = 1
+    putORD$Phase$I
+    }
+
+return
+end        # End  VALIDATE_BALLISTIC_ORD
+
+
+Subroutine EXECUTE_BALLISTIC_ORD (ord$pointer,unt$pointer,ilex) 
+#######################################################################
+#$% 
+#$% Purpose:   EXECUTE_BALLISTIC_ORD fires cruise missiles or
+#$%            displays error messages to the user..
+#$%
+#$% Called By: OFBALLISTIC
+#$%
+#$% Calls:     SEND       UNTGET
+#$%            GTUNT      BLDCM    
+#$%            Unit_Can_Launch_BM
+#$%
+#$% Tables:    UNT        ORD
+#$%            CMC
+#$%
+#$% Date:      JUNE 93
+#$%  
+#$% Author:    Alex Vagus
+#$%
+#$% Note:      A revamp version of OFCRU1
+#$%
+#$% Modified:  Carol Kropp - 7/95 (E1419)
+#$%            Moved code to complete initial checks to
+#$%            new function Unit_Can_Launch_BM.
+#$%            Recoded handling of optional keywords with the
+#$%            additional entry of BE and TIN.
+#$%
+#$%            Susan Miller - 6/97 (E1612)
+#$%            Added tgt_track_name to set the base/track # name
+#$%            for Log_Successful_Launch call. 
+#$%
+#$%            Jim Allen - 2/98 (E1864)
+#$%            Removed the current command index (indx) and nuclear
+#$%            command flag from the argument list.  The routine
+#$%            locate_fire_keywords determines the index of each
+#$%            keyword.  The variables indexing the command arguments
+#$%            simplify the processing.
+#$%
+#$%            Susan Miller - 5/98 (E1612)
+#$%            Removed unused variables indx, nuclear, ilex_index,
+#$%            and be_ilex_index.
+#$%
+#$%            Susan Miller 6/98 (E2001)
+#$%            Declare track as a literal to get rid of
+#$%            garbage in postgame/eng track column.
+#$%
+#######################################################################
+BBcommon
+RTcommon  # Ilaunch,Numsent,nord,Nargs,Cnames
+ENcommon
+
+integer    ORD$Pointer, UNT$Pointer
+literal    ilex[$max$args]
+
+integer    nfind[arith($MaxFireRatePerCycle,+,1)], namlex, msg_len
+character  msg[400]
+real       rnge, brng, lat, lon, aim_lat, aim_lon, aim_coslat, coslat
+
+real*4     Rannum, CMC$ProbLaunch$F
+integer*4  DEQ$Pointer
+
+integer    be_entered         # $yes/$no flag to indicate if a be nbr was entered
+literal    be1, be2           # the two parts of the entered be
+integer    tin_entered        # $yes/$no flag to indicate if a tin was entered
+literal    tin_nbr            # the entered tin
+literal    tgt_track_name     # SMM 6/97 (E1612)
+literal    track              # SMM 6/98 (E2001)
+
+integer    INEED,NSTILL,ITARGINDX,IRANGE,
+           IBONLY,IBRNG,NFIRED,J,I,KK,
+           UNT$View$I,
+           UNT2$Pointer, UNT2$Type$I,
+           ORD$Deqindx$I, ORD$Phase$I,
+           CMC$Pointer, CMC$Firerate$I,
+           CMC$Maxrange$I,
+           DEQ$Remaining$I,
+           RMT$Pointer                      # MJC 5/1/2000 (E2145)
+real       DMS2RAD,RANDOM , x                # MJC 5/1/2000 (E2145)
+literal    UNT$Name$C,
+           CSTRIP8,
+           ORD$W02$C,
+           ORD$W03$C,
+           ORD$W04$C                        # MJC 5/3/2000 (E2145)
+data x/0.0/		# Get next random number in sequence
+
+kk = 0; call smovv ("        ", tgt_track_name, kk)
+
+if (order$minute > game$minute) return
+
+UNT$Name$C = xUNT$Name$C
+UNT$View$I = xUNT$View$I
+
+namLEX = fire_index + 2
+
+#$% Set default fire-rate 
+ORD$DEQIndx$I = xORD$DEQIndx$I
+DEQ$Pointer$To  (ORD$DEQIndx$I)
+CMC$Pointer = xDEQ$Pntr$I
+cmc$FireRate$i = max0(1,Xcmc$FireRate$i)
+
+#$% set cruise missile need
+DEQ$Remaining$I = xDEQ$Remaining$I
+ineed = min0(cmc$FireRate$i,int(ilex[NUMsent]),deq$remaining$i,
+             $MaxFireRatePerCycle)
+ 
+if (ineed == 0)
+    {
+    call wgoerr (unt$view$i,unt$name$c,nord,nargs,ilex,"Out of inventory")
+
+    ORD$Phase$I = 0
+    putORD$Phase$I
+    return
+    }
+
+#$% get UNT slots for BMs (Limited to 10 by subroutine UNTGET)
+call UNTGET (ineed,NFIND)  
+
+if (nfind[1] < ineed)
+    {
+    msg_len = 0
+    call smovv ("Unit array full -- ", msg, msg_len)
+    call smovv ("cannot launch ballistic missiles. ", msg, msg_len)
+    call send_  (UNT$View$I, 0, msg_len, msg)
+
+    ORD$Phase$I = 0
+    putORD$Phase$I
+    return
+    }
+
+#$% set number of these Ballistic Missiles still remaining
+nstill = ilex[NUMsent] - ineed  # (NUMsent set in OFIRE)
+
+if (nstill > 0)   # if some still remaining, place how-many into order
+    {    #$% enter into order and store:
+    if (Numsent == 2)
+        {
+        ORD$W02$C = nstill
+        PUTORD$W02$C
+        }
+    else if (Numsent == 3)
+        {
+        ORD$W03$C = nstill
+        PUTORD$W03$C
+        }
+    else    #(Numsent = 4)
+        {
+        ORD$W04$C = nstill
+        PUTORD$W04$C
+        }
+    }    # end of if still some to shoot
+else   # else none remaining, clear order phase (order processing complete)
+    {
+    ORD$Phase$I = 0
+    putORD$Phase$I
+    }
+   
+CMC$MaxRange$I = xCMC$MaxRange$I 
+
+#$% if Ballistic missile fired AT (Base or Track or Position)
+if (base_index != 0)
+    {
+    call GTUNT ($ShoreBase$code, ilex[base_index+1], unt2$pointer)
+    itargindx = unt2$pointer$index
+
+    call getrb_M(unt$pointer, unt2$pointer, rnge, brng)
+    irange = int(rnge)      
+
+    if (irange > cmc$MaxRange$i)
+        {
+        call wgoerr (unt$view$i,unt$name$c,nord,nargs,ilex,"Base is out of range")
+
+        ORD$Phase$I = 0
+        putORD$Phase$I
+        return
+        }
+
+    tgt_track_name = ilex[base_index+1]  # SMM 6/97 (E1612)
+    } # end if AT base
+else if (track_index != 0)
+    {
+    RMT$Pointer = 0
+    ibonly = NO
+    call GtAct (UNT$View$I,ilex[track_index+1],RMT$Pointer,ibonly) 
+    if (rmt$pointer == 0) # not there anymore...
+        {
+        call wgoerr (unt$view$i,unt$name$c,nord,nargs,ilex,"Lost track")
+
+        ORD$Phase$I = 0
+        putORD$Phase$I
+        return
+        }
+    else # we found the track
+        {
+        itargindx = xrmt$detectee$i
+        unt2$pointer$to itargindx
+        unt2$type$i = xunt2$type$i
+        if ((unt2$type$i == $air$code) | 
+            (unt2$type$i == $sub$code) |
+            (unt2$type$i == $cruisemissile$code))
+            {
+            call wgoerr (unt$view$i,unt$name$c,nord,nargs,ilex,"Target type mismatch")
+
+            ORD$Phase$I = 0
+            putORD$Phase$I
+            return
+            }
+
+        call getrb_M(unt$pointer, unt2$pointer, rnge, brng)
+        irange = int(rnge)      
+
+        if (irange > cmc$MaxRange$i)
+            {
+            call wgoerr (unt$view$i,unt$name$c,nord,nargs,ilex,"Track out of range")
+
+             ORD$Phase$I = 0
+             putORD$Phase$I
+             return
+             }
+        tgt_track_name = ilex[track_index+1]  # SMM 6/97 (E1612)
+        }
+    }   # end of track located
+else if (position_index != 0)
+    {
+    #$% get launching platform coordinates
+    lat = Xunt$truelatitude$f
+    lon = Xunt$truelongitude$f
+    coslat = Xunt$costruelat$f
+
+    aim_lat = dms2rad (ilex[position_index+1])
+    aim_lon = dms2rad (ilex[position_index+2])
+    aim_coslat = COS(aim_lat)
+
+    call RLL2RB (lat,lon,coslat,aim_lat,aim_lon,aim_coslat,rnge,brng)
+
+    irange = int(rnge)      
+
+    if (irange > cmc$MaxRange$i)
+        {
+        call wgoerr (unt$view$i,unt$name$c,nord,nargs,ilex,"Out of range")
+
+        ord$phase$i = 0
+        putord$phase$i
+        return
+        }
+    } # end if AT position
+else if (bearing_index != 0)
+    {
+     #$% get range 
+     ibrng  = int(ilex[bearing_index+1])
+     irange = int(ilex[range_index+1]) 
+
+     if (irange > cmc$MaxRange$i)
+        {
+        call wgoerr (unt$view$i,unt$name$c,nord,nargs,ilex,"Out of range.")
+
+        ord$phase$i = 0
+        putord$phase$i
+        return
+        }
+    }   # end of if fired on a bearing
+else # None of the above
+    {
+    call wgoerr (unt$view$i,unt$name$c,nord,nargs,ilex,"Program fault.")
+
+    ord$phase$i = 0
+    putord$phase$i
+    return
+    } # end else NONE OF THE ABOVE
+
+
+be_entered  = $no
+tin_entered = $no
+if (be_index != 0)
+    {
+    be_entered = $yes
+    be1 = ilex[be_index+1]
+    if (tin_index == 0 & ((be_index+2) == nargs))
+        be2 = ilex[be_index+2]
+    else
+        be2 = $Blank_Literal
+    }   # end of if a BE was entered
+
+if (tin_index != 0)
+    {
+    tin_entered = $yes
+    tin_nbr = ilex[tin_index + 1]
+    }   # end of if a TIN was entered
+
+NFIRED = 0                              # initlz. no missiles fired
+
+CMC$PROBLAUNCH$F = XCMC$PROBLAUNCH$F    #get launch probability
+
+#$% for each entry
+for (j=1; j <= ineed; j=j+1)
+    {
+    #$% if number is greater than launch probability, get next
+    Rannum = Random(x)                                   # 10/90 hdf
+    if  (Rannum > CMC$PROBLAUNCH$F)   
+        {
+        if (log$engage != $no)     # if engagement log desired - JFR 4/22/93 (E1118)
+            {
+            track    = 'BM' 
+            call Log_Unsuccessful_Launch (UNT$Pointer, UNT2$Pointer, xCMC$Type$C,
+                                          track, INT((CMC$ProbLaunch$F * 100.0) + 0.5),
+                                          ilex)
+            }  # end if Engagement Log desired
+        NEXT
+        }   # if probability of launch not met
+
+    NFIRED = NFIRED + 1               #increment number fired
+    UNT2$POINTER = NFIND[J+1]           #get empty slot pointer
+
+    #$% call to build cruise missile characteristics, \/       12/12/85
+    call BLDCBALLM (unt$pointer,unt2$pointer,cmc$pointer,itargindx,ilex,
+                    J )     # J is the nth CRSMSL in this order
+
+    if (be_entered == $yes)
+        call Store_BE_Info (UNT2$Pointer, be1, be2)
+    if (tin_entered == $yes)
+        call Store_TIN_Info (UNT2$Pointer, tin_nbr)
+  
+    ## <rg> This code is used for engagement log data collection of
+    ##      ballistic missile engagements.  June 1993
+    if (log$engage != $no & UNT2$POINTER$VALID)
+    # add tgt_track_name to parameter list SMM 6/97 (E1612)
+    call Log_Successful_Launch (UNT$Pointer, UNT2$Pointer, tgt_track_name)
+    }    # end of loop through the number of requested missiles
+
+deq$remaining$i = deq$remaining$i -ineed
+PUTdeq$remaining$i   # decrement missiles 
+
+msg_len = 0 
+Call  SMOVIB(nfired,        2,msg,msg_len) #insert nbr successful
+Call SMOVV(" missiles launched by ",msg,msg_len)
+Call SMOVHN(unt$name$c,    $$MaxLit,msg,msg_len) #insert platform name
+Call SMOVV(". ",msg,msg_len)
+
+if (ineed-nfired != 0)
+    {
+    Call SMOVI((ineed-nfired),msg,msg_len) #insert num of failures
+    Call SMOVV(" failed. ",msg,msg_len)
+    }
+
+if (nfired > 0)
+    {
+    Call SMOVV("(",msg,msg_len)
+
+    for ( i=1; i <= nfired; i = i +1 )
+        {
+        call smovhn (cnames[i], $$MaxLit, msg, msg_len)
+        if (i < nfired)
+            call smovv  (" ", msg, msg_len)
+        }
+    
+    Call SMOVV(")",msg,msg_len)
+    }
+
+call send_ (UNT$View$I, 0, msg_len, msg)
+
+return
+end        # End  EXECUTE_BALLISTIC_ORD
+
+
+Subroutine BLDCBALLM(unt$pointer,unt2$pointer,cmc$pointer,itargt,ilex,
+                J ) # (The Jth BALLISTIC's in this order) 12/16/85 
+#######################################################
+#$% index
+#$% Purpose:   BLDCBALLM builds ballistic missile charac-
+#$%            teristics into the UNT tables to be
+#$%            identified after launch.
+#$%
+#$% Called By: EXECUTE_BALLISTIC_ORD
+#$%
+#$% Calls:     NAVERR     GETRB_M
+#$%
+#$% Tables:    UNT        CMC
+#$%
+#$% Date:      APRIL 80
+#$%
+#$% Author:    Alex Vagus
+#$% 
+#$% Modified:  Susan Miller - 6/97 (E1612)
+#$%            Set variables UNT2$FiredAtPosit$I and 
+#$%            UNT2$AssignedTarget$I so that postgame 
+#$%            information would be accurate.
+#$% 
+#$%            Jim Allen - 2/98 (E1864)
+#$%            Removed the current command index (indx) and nuclear
+#$%            command flag from the argument list.  The routine
+#$%            locate_fire_keywords determines the index of each
+#$%            keyword.  The variables indexing the command arguments
+#$%            simplify the processing.
+#$%
+#$%            Susan Miller - 4/98 (E1590)
+#$%            Set launching altitude to be the altitude
+#$%            of the launching unit.
+#$%             
+#$%            Susan Miller - 5/98 (E1612)
+#$%            Removed unused variable fmaxalt
+#$%
+#######################################################
+BBcommon
+ENCommon
+RTcommon #Ilaunch,Numsent,nord,Nargs,Cnames
+#               **      **
+literal ilex[$max$args]
+literal cnam
+real aim_lat, aim_lon, impact_lat, impact_lon, 
+     coslat_aimpoint, coslat_impactpoint, 
+     lat, lon, coslat, FCEP,
+     rnge, brng, ftemp
+
+integer CEP
+
+integer J,IMAXALT,ITARGT,
+        IRANGE,IALT,
+        CMC$Pointer, CMC$Avgspeed$I,
+        UNT$Pointer, UNT3$Pointer,
+        UNT2$Type$I, UNT2$Pointer,
+        UNT2$Status$I, UNT2$View$I,
+        UNT2$Hierarchyid$I, UNT2$Launchindx$I,
+        UNT2$Cmcpntr$I, UNT2$Attacktrue$I,
+        UNT2$Assignedtarget$I, UNT2$Attackindx$I,
+        UNT2$Missilerange$I, UNT2$Missilealtitude$I,
+        UNT2$Truealtdepth$I                                 # MJC 5/1/2000 (E2145)
+real    UNT2$Truelatitude$F, UNT2$Assumedlatitude$F,
+        UNT2$Truelongitude$F, UNT2$Assumedlongitude$F,
+        UNT2$Costruelat$F, UNT2$Truespeed$F,
+        UNT2$Assumedspeed$F, UNT2$Orderedspeed$F,
+        UNT2$Attackbearing$F, UNT2$Attackrange$F,
+        UNT2$Timeseek$F, UNT2$Orderedlatitude$F,
+        UNT2$Orderedlongitude$F, UNT2$Timeterm$F,
+        UNT2$Timemissilefired$F,
+        DMS2RAD,RN1,RANDN,RN2,
+        FMAXALT,FALT                                        # MJC 5/1/2000 (E2145)
+literal CSTRIP8                                             # MJC 5/3/2000 (E2145)
+
+UNT2$TYPE$I = $CRUISEMISSILE$CODE #type is cruise missile
+PUTUNT2$TYPE$I
+ 
+UNT2$STATUS$I = $PROCEEDING$CODE  #status is proceeding
+PUTUNT2$STATUS$I
+
+UNT2$VIEW$I = XUNT$VIEW$I          #view of launch platform
+PUTUNT2$VIEW$I
+
+UNT2$HierarchyId$i = XUNT$HierarchyId$i  #same heirarchy
+PUTUNT2$HierarchyId$i
+
+UNT2$LaunchIndx$I = UNT$Pointer$Index    # launching platform UNT index
+putUNT2$LaunchIndx$I
+
+UNT2$CMCPNTR$I = CMC$POINTER      #enter characteristics ptr
+PUTUNT2$CMCPNTR$I
+
+if (nuclear_index != 0)
+    putUNT2$Nuclear$I($YES)
+else
+    putUNT2$Nuclear$I($NO)
+
+##--------------------------------------------------------------
+##      Assign name to missile  
+
+call assign_unique_unit_name (unt2$pointer)             # DEW 5/90
+cnam = Xunt2$Name$C
+
+ Cnames[J] = cnam      # Name to common array for SEND in OFCRU1 12/16/85  
+
+unt2$TRUELATITUDE$F = Xunt$TRUELATITUDE$F #enter starting latitude
+lat = unt2$TRUELATITUDE$F
+PUTunt2$TRUELATITUDE$F 
+
+unt2$ASSUMEDLATITUDE$F = Xunt$ASSUMEDLATITUDE$F #enter assumed lat
+PUTunt2$ASSUMEDLATITUDE$F
+
+unt2$TRUELONGITUDE$F = Xunt$TRUELONGITUDE$F #enter starting longitd
+lon = unt2$TRUELONGITUDE$F
+PUTunt2$TRUELONGITUDE$F 
+
+unt2$ASSUMEDLONGITUDE$F = Xunt$ASSUMEDLONGITUDE$F #enter assumed lo
+PUTunt2$ASSUMEDLONGITUDE$F   
+
+unt2$COSTRUELAT$F = Xunt$COSTRUELAT$F  #enter cosine of latitude
+coslat = unt2$COSTRUELAT$F
+PUTunt2$COSTRUELAT$F  
+    
+CMC$AVGSPEED$I = XCMC$AVGSPEED$I  #get average speed
+
+unt2$TRUESPEED$F = 0.0    #enter missile speed at t=0 only
+PUTunt2$TRUESPEED$F 
+
+unt2$ASSUMEDSPEED$F = 0.0  # enter assumed speed at t=0 only
+PUTunt2$ASSUMEDSPEED$F 
+
+unt2$ORDEREDSPEED$F = 0.0  # enter ordered speed at t=0 only
+PUTunt2$ORDEREDSPEED$F 
+
+unt2$ATTACKBEARING$F = 0.0
+PUTunt2$ATTACKBEARING$F 
+
+unt2$ATTACKRANGE$F = 0.0
+PUTunt2$ATTACKRANGE$F 
+
+unt2$ATTACKTRUE$I = $YES
+PUTunt2$ATTACKTRUE$I 
+
+# PER #E1273    set value so that no erroneous esm detections are made SMM 6/94
+UNT2$TimeSeek$F = $Hi_UNT$TimeSeek$F
+putUNT2$TimeSeek$F
+
+imaxalt = XCMC$MAXALT$I     # get default maximum altitude
+
+if (itargt >= 0) # If FIRE 
+    { 
+    if (bearing_index != 0)
+        {
+        #$% get bearing and range 
+        brng = float(int(ilex[bearing_index+1]))/180. * $PI  # convert to radians
+        rnge = ilex[range_index+1] 
+        irange = int(rnge)     
+        PUTeng$Range$f( rnge )
+
+        aim_lat = lat
+        aim_lon = lon
+        coslat_aimpoint = coslat
+   
+        #$% get aim point
+        call RRB2LL(aim_lat, aim_lon, rnge, brng, 0.0, coslat_aimpoint)
+ 
+        if (altitude_index != 0) imaxalt = int(ilex[altitude_index+1])
+        }
+    if (position_index != 0)
+        {
+        aim_lat = DMS2rad(ilex[position_index+1])
+        aim_lon = DMS2rad(ilex[position_index+2])
+        coslat_aimpoint = COS(aim_lat)
+      
+        UNT2$AssignedTarget$I = UNT$Engaging$Position
+        putUNT2$AssignedTarget$I
+
+        if (altitude_index != 0) imaxalt = int(ilex[altitude_index+1])
+        }
+    else if (base_index != 0 | track_index != 0)
+        {
+        unt3$Pointer$TO (itargt)
+        aim_lat = xUNT3$TRUELATITUDE$F
+        aim_lon = xUNT3$TRUELONGITUDE$F
+        coslat_aimpoint = COS(aim_lat)
+
+        if (altitude_index != 0) imaxalt = int(ilex[altitude_index+1])
+
+        unt2$assignedtarget$i = itargt
+        putunt2$assignedtarget$i
+    
+        unt2$attackindx$i = itargt
+        putunt2$attackindx$i
+        }
+
+    rn1 = RANDN(0.0,1.0)
+    rn2 = RANDN(0.0,1.0) 
+
+    CEP = xCMC$CirErrProb$I
+    # convert the computed cep yds into radians
+    # cep radians = (cep yds / (yds/nmi)) * (radians/nmi)
+    FCEP = (float(CEP)/2025.37)* 0.0002908
+
+    impact_lat = (rn1*FCEP*1.5) + aim_lat
+    impact_lon = (rn2*FCEP*1.5)/COS(aim_lat) + aim_lon
+
+    unt2$ORDEREDLATITUDE$F = impact_lat
+    PUTunt2$ORDEREDLATITUDE$F  
+
+    unt2$ORDEREDLONGITUDE$F = impact_lon
+    PUTunt2$ORDEREDLONGITUDE$F  
+
+    coslat_impactpoint = COS(impact_lat)
+
+    putUNT2$BallisticImpactLat$F (impact_lat)
+    putUNT2$BallisticImpactLon$F (impact_lon)
+
+    #$% get range from platform to impact point
+    call RLL2RB(lat,lon,coslat,impact_lat,impact_lon,coslat_impactpoint,rnge,brng)
+   
+    #$% get termination time
+    #$% the (60*Range/speed) part comes from the altitude formula
+    #$% specified in the model description 
+    #$% assume alt = 0 and solve for t, simplify terms and  you get
+    #$% that part.
+
+    irange = int(rnge)  
+    PUTeng$Range$f( rnge )
+
+#   time to target (min) = 60 (min/hour) * dist (nmi) / spd (nmi/hour)
+    ftemp = ($Minutes$Per$Hour * rnge) / float(CMC$AVGSPEED$I)
+
+#   Set missile initial course		-- clf 7/21/94
+    putUNT2$TrueCourse$F    (brng)		# Insert    
+    putUNT2$AssumedCourse$F (brng)		#  launch-  
+    putUNT2$OrderedCourse$F (brng)		#    course 
+
+    # clk 2/96 (E1539) - when the range to target is short, the TBM 
+    # requires at least one cycle (after the "boost" phase) to arrive.
+    unt2$TimeTerm$f = ftemp + (time$step * 2.0) + Order$Minute
+    PUTunt2$TimeTerm$f
+
+    unt2$TimeMissileFired$f = Order$Minute
+    putunt2$TimeMissileFired$f
+
+    UNT2$MissileRange$I = max(1, irange) # E2291joa UFL02 - set minimum range to 1
+    putUNT2$MissileRange$I
+
+    UNT2$MissileAltitude$I = imaxalt
+    putUNT2$MissileAltitude$I
+
+    # enter flight altitude at time t=0, set alt to alt of launching platform
+    UNT2$TrueAltDepth$I = xUNT$TrueAltDepth$I # SMM 4/98 (E1590)
+    putUNT2$TrueAltDepth$I 
+  
+    # Per Lee Gill - semi simulate the boost phase, so override
+    # the altitude climb computation
+    #$% compute altitude at time t=1 and set to ordered altitude
+    #$% for the next game cycle
+    # Remove the boost phase SMM 6/96 (E1590)
+    #$% compute altitude at time t=1 and set to ordered altitude
+    #$% for the next game minute
+    fmaxalt = float(imaxalt)
+    ftemp = 60.0 * rnge
+    falt = ((-4.0 * fmaxalt * float(CMC$AvgSpeed$I))/ftemp) * 
+                             (float(CMC$AvgSpeed$I)/ftemp - 1.0)
+    ialt = int(falt)
+    putUNT2$OrderedAltDepth$I  (ialt)
+    }   #end if FIRE
+
+
+return
+end        # End  BLDCBALLM
+
+define (BBImplicit, Implicit None)
+
+Subroutine Partial_CM_build(UNT$Pointer,    # receive firing UNT pointer
+                            UNT2$Pointer,   # receive missile UNT pointer
+                            CMC$Pointer,    # receive missile characteristic pointer
+                            nuclear,        # receive flag whether nuclear
+                            ilex)
+#######################################################
+#$% 
+#$% Purpose:   Partial_CM_build fills in part of the UNT data
+#$%            needed for a complete cruise missile or advanced
+#$%            SAM
+#$%
+#$% Called By: BLDCM   Build_advanced_SAM
+#$%
+#$% Calls:     assign_unique_unit_name
+#$%
+#$% Tables:    UNT        CMC
+#$%
+#$% Author:    removed from BLDCM by Susan Miller 1/94 
+#$%            so it could be used by advanced SAM model
+#$%
+#######################################################
+BBCommon
+RTcommon #Ilaunch,Numsent,nord,Nargs,Cnames
+
+literal ilex[$max$args]
+
+integer UNT$Pointer, UNT2$Pointer, CMC$Pointer, nuclear
+
+integer UNT2$Status$I, UNT2$View$I, UNT2$HierarchyId$i, UNT2$LaunchIndx$I
+integer UNT2$CMCPntr$I, UNT2$Nuclear$I, CMC$AvgSpeed$I, UNT2$AttackTrue$I
+real*4  UNT2$TrueLatitude$F, UNT2$TrueLongitude$F, UNT2$AssumedLongitude$F
+real*4  UNT2$AssumedLatitude$F, UNT2$OrderedLatitude$F, UNT2$COSTrueLat$F
+real*4  UNT2$TrueSpeed$F, UNT2$AssumedSpeed$F, UNT2$OrderedSpeed$F
+real*4  UNT2$AttackBearing$F, UNT2$AttackRange$F, UNT2$TimeSeek$F
+
+UNT2$Status$I = $Proceeding$code    # proceeding status
+putUNT2$Status$I
+
+UNT2$View$I = xUNT$View$I           # view same as firing platform
+putUNT2$View$I
+
+UNT2$HierarchyId$i = xUNT$HierarchyId$i # same heirarchy
+putUNT2$HierarchyId$i
+
+UNT2$LaunchIndx$I = UNT$Pointer$Index    # launching platform UNT index
+putUNT2$LaunchIndx$I
+
+UNT2$CMCPntr$I = CMC$Pointer        # characteristics pointer
+putUNT2$CMCPntr$I
+
+UNT2$Nuclear$I = nuclear
+putUNT2$Nuclear$I
+
+if (mission_index != 0)
+{
+    PUTunt2$name$c (ilex[mission_index+1])
+}
+else
+{
+    call assign_unique_unit_name(UNT2$Pointer)
+}
+
+UNT2$TrueLatitude$F = xUNT$TrueLatitude$F   # starting latitude
+putUNT2$TrueLatitude$F
+UNT2$TrueLongitude$F = xUNT$TrueLongitude$F # starting longitude
+putUNT2$TrueLongitude$F
+UNT2$COSTrueLat$F = xUNT$CosTrueLat$F
+putUNT2$COSTrueLat$F
+
+UNT2$AssumedLatitude$F = xUNT$AssumedLatitude$F # assumed latitude
+putUNT2$AssumedLatitude$F
+UNT2$AssumedLongitude$F = xUNT$AssumedLongitude$F # assumed longitude
+putUNT2$AssumedLongitude$F
+
+UNT2$OrderedLatitude$F = $PI    # negate position order
+putUNT2$OrderedLatitude$F
+
+CMC$AvgSpeed$I = xCMC$AvgSpeed$I         # get average speed
+
+UNT2$TrueSpeed$F = FLOAT(CMC$AvgSpeed$I) # enter missile speed
+putUNT2$TrueSpeed$F
+
+UNT2$AssumedSpeed$F = UNT2$TrueSpeed$F   # enter assumed speed
+putUNT2$AssumedSpeed$F
+
+UNT2$OrderedSpeed$F = UNT2$TrueSpeed$F   # enter ordered speed
+putUNT2$OrderedSpeed$F
+
+UNT2$AttackBearing$F = 0.0
+putUNT2$AttackBearing$F
+
+UNT2$AttackRange$F = 0.0
+putUNT2$AttackRange$F
+
+UNT2$AttackTrue$I = $Yes
+putUNT2$AttackTrue$I
+
+# PER #E1273    set value so that no erroneous esm detections are made SMM 6/94
+if (xUNT2$Type$I == $SAMissile$code)
+    {
+     UNT2$TimeSeek$F = $Hi_UNT$TimeSeek$F
+     putUNT2$TimeSeek$F
+    }
+
+puTUNT2$TimeLaunched$F (Game$Time)
+
+return
+end # partial_cm_build
+
+integer function Unit_Can_Launch_BM (_
+                    ORD$Pointer,     # in:  the order entry pointer
+                    UNT$Pointer,     # in:  firing UNT pointer
+                    bm_type_name)    # in:  entered missile characteristic name
+##########################################################################
+#$% 
+#$% Purpose:   Function Unit_Can_Launch_BM will perform several checks
+#$%            to determine if specified platform can launch/fire
+#$%            ballistic missiles.  The function will return $yes or $no.
+#$%            The code was previously in Execute_Ballistic_Ord.
+#$%
+#$% Called By: Execute_Ballistic_Ord
+#$%
+#$% Calls:     smov..
+#$%            send
+#$%
+#$% Tables:    ORD     UNT     DEQ     CMC
+#$%
+#$% Modified:  Jim Allen - 2/98 (E1864)
+#$%            Removed the current nuclear flag from the
+#$%            argument list.  The routine uses the keyword
+#$%            indexing from RTCommon.
+#$%
+#######################################################
+BBCommon
+RTcommon
+
+integer    ORD$Pointer, UNT$Pointer
+literal    bm_type_name
+
+literal    cstrip8      # literal function used in extracts
+
+integer    launch_flag
+literal    UNT$Name$C
+integer    UNT$View$I
+integer    ORD$DEQIndx$I, ORD$Phase$I
+integer    DEQ$Pointer
+integer    CMC$Pointer
+integer    msg_len
+character  msg[arb]
+
+  launch_flag = $yes
+  UNT$Name$C = xUNT$Name$C
+  UNT$View$I = xUNT$View$I
+
+  ORD$DEQIndx$I = xORD$DEQIndx$I
+  DEQ$Pointer$To  (ORD$DEQIndx$I)
+
+  CMC$Pointer = xDEQ$Pntr$I
+  if ((xDEQ$Remaining$I < 1) |
+      (xCMC$Type$C != bm_type_name | xCMC$Cat$I != $Ball$Code))
+    {
+     msg_len = 0  
+     call smovhn (UNT$Name$C, $$MaxLit, msg, msg_len)
+     call smovv  (" has no ", msg, msg_len)
+     call smovhn (bm_type_name, $$MaxLit, msg, msg_len)
+     call smovv  (" ballistic missiles." ,msg, msg_len)
+     call send_   (UNT$View$I, 0, msg_len, msg)
+     launch_flag = $no
+    }
+
+  if (nuclear_index != 0 & xCMC$Yield$I == 0)   # if nuclear was entered
+    {                                        # and missile isn't
+     msg_len = 0  
+     call smovhn (bm_type_name, $$MaxLit, msg, msg_len)
+     call smovv  (" is not a nuclear ballistic missile", msg, msg_len)
+     call send_   (UNT$View$I, 0, msg_len, msg)
+     launch_flag = $no
+    }
+  else if (nuclear_index == 0 & xCMC$Weight$I == 0)  # if nuclear wasn't entered
+    {                                            # but missile is only nuclear
+     msg_len = 0  
+     call smovhn (bm_type_name, $$MaxLit, msg, msg_len)
+     call smovv  (" is not a conventional ballistic missile", msg, msg_len)
+     call send_   (UNT$View$I, 0, msg_len, msg)
+     launch_flag = $no
+    }
+
+  if (xUNT$Type$I == $Sub$Code &                 # if shooter is a sub and
+      xUNT$TrueAltDepth$I > xCMC$LaunchDepth$I)  # below launch depth
+    {                      
+     msg_len = 0  
+     call smovhn (UNT$Name$C, $$MaxLit, msg, msg_len)
+     call smovv  (" is too deep to launch ballistic missiles", msg, msg_len)
+     call send_   (UNT$View$I, 0, msg_len, msg)
+     launch_flag = $no
+    }
+
+  if (launch_flag == $no)
+    {
+     ORD$Phase$I = 0
+     putORD$Phase$I
+    }
+
+  Unit_Can_Launch_BM = launch_flag
+
+return
+end    # end function Unit_Can_Launch_BM
+
+
+Subroutine Log_Successful_Launch (_
+                 UNT$Pointer,     # in:  The launching platform
+                 UNT2$Pointer,    # in:  The cruise missile
+                 tgt_track_name)  # in:  the target track name
+##########################################################################
+#$%
+#$% Purpose:    Log_Successful_Launch will record in the engagement
+#$%             log the missile launch (if an engagement log is desired).
+#$%
+#$% Called By:  
+#$%             
+#$% Calls:      MBURange
+#$%             write_eng_rec
+#$%
+#$% Tables:     UNT     BTT
+#$%
+#$% Date:       July 1995
+#$%
+#$% Author:     Carol L. Kropp
+#$%
+#$% Modified:   Susan Miller - 6/97 (E1612)
+#$%             Added parameter tgt_track_name, so that the target
+#$%             base or track number is recorded in the engagement log.
+#$%
+##########################################################################
+BBCommon
+ENCommon
+
+integer  UNT$Pointer, UNT2$Pointer
+literal  tgt_track_name             # SMM 7/96 (E1612)
+
+literal  cstrip, cstrip8      # literal functions use when extracting names 
+
+integer  UNT$Type$I
+integer  UNT2$AssignedTarget$I, UNT2$BTTIndx$I
+integer  UNT3$Pointer
+integer  CMC$Pointer
+integer  TBL$Pointer, BTT$Pointer
+
+# engagement log record variables
+literal  ENG$Platform$C, ENG$PlatformType$C
+literal  ENG$Track$C
+literal  ENG$Target$C
+literal  ENG$Weapon$C
+literal  ENG$BEPart1$C, ENG$BEPart2$C, ENG$TIN$C
+
+  if (log$engage != $no)     # if engagement log desired - JFR 4/22/93 (E1118)
+    {
+     call engdata (unt$pointer, unt2$pointer)
+
+     UNT$Type$I = xUNT$Type$I
+     if (UNT$Type$I == $Air$Code)
+        TBL$Pointer = xUNT$AccPntr$I
+     else if (UNT$Type$I == $CruiseMissile$Code)
+        TBL$Pointer = xUNT$CmcPntr$I
+     else   # sub, ship or boat
+        TBL$Pointer = xUNT$ShcPntr$I
+     ENG$PlatformType$C = xTBL$Name$C
+     putENG$PlatformType$C
+
+     ENG$Track$C = xUNT2$Name$C
+     putENG$Track$C
+
+     ENG$Target$C = tgt_track_name
+     putENG$Target$C
+
+     UNT2$AssignedTarget$I = xUNT2$AssignedTarget$I
+     if (xUNT2$CMFireMode$I == $CMPos$code |
+         UNT2$AssignedTarget$I == UNT$Engaging$Position)
+        putENG$TargetType$C  ("POSITION")
+     else
+       {
+        UNT3$Pointer$To  (UNT2$AssignedTarget$I)
+        if (xUNT3$Type$I == $ShoreBase$Code)
+          putENG$TargetType$C  ("BASE    ")
+        else if (tgt_track_name != $Blank_Literal)
+          putENG$TargetType$C  ("TRACK   ")
+        else # fired on a bearing 
+          putENG$TargetType$C  ("BEARING ")
+       }
+
+     CMC$Pointer = xUNT2$CMCPntr$I
+     ENG$Weapon$C = xCMC$Type$C
+     putENG$Weapon$C
+     putENG$Result$I  (ENG$Launch$Code)
+
+     UNT2$BTTIndx$I = xUNT2$BTTIndx$I
+     if (UNT2$BTTIndx$I != 0)
+       {
+        BTT$Pointer$To  (UNT2$BTTIndx$I)
+        ENG$BEPart1$C = xBTT$BEnumber1$C
+        putENG$BEPart1$C
+        ENG$BEPart2$C = xBTT$BEnumber2$C
+        putENG$BEPart2$C
+        ENG$TIN$C     = xBTT$TINnumber$C
+        putENG$TIN$C
+       }
+
+     call write_eng_rec
+    }  # end if Engagement Log desired
+
+return
+end
+
+
+Subroutine Log_Unsuccessful_Launch (_
+                 UNT$Pointer,     # in:  The launching platform
+                 UNT2$Pointer,    # in:  The target
+                 weapon_name_in,  # in:  literal name of the weapon
+                 weapon_type,     # in:  literal type name (i.e. CM, BM)
+                 prob_launch,     # in:  integer probability of launch
+                 ilex)            # in:  command arguments
+##########################################################################
+#$%
+#$% Purpose:    Log_Unsuccessful_Launch will recorder in the engagement
+#$%             log the failed launch (if an engagement log is desired).
+#$%
+#$% Called By:  
+#$%             
+#$% Calls:      MBURange
+#$%             write_eng_rec
+#$%
+#$% Tables:     UNT     BTT
+#$%
+#$% Date:       July 1995
+#$%
+#$% Author:     Carol L. Kropp
+#$%
+#$% Modified:  Jim Allen - 2/98 (E1864)
+#$%            Removed the current command index (indx) from 
+#$%            the argument list.  The routine locate_fire_keywords
+#$%            determines the index of each keyword.  The variables
+#$%            indexing the command arguments simplify the processing.
+#$%
+#$%            Susan Miller - 5/98 (E1612)
+#$%            Removed unused variable i
+#$%
+##########################################################################
+BBCommon
+ENCommon
+RTcommon
+
+integer  UNT$Pointer, UNT2$Pointer
+literal  weapon_name_in, weapon_type
+integer  prob_launch
+literal  ilex[$max$args]
+
+literal  cstrip8      # literal functions use when extracting names 
+
+integer  UNT$Type$I
+integer  TBL$Pointer
+
+# engagement log record variables
+literal  ENG$Platform$C, ENG$PlatformType$C
+literal  ENG$Track$C
+literal  ENG$Weapon$C
+real     ENG$ResultPh$F
+literal  ENG$BEPart1$C, ENG$BEPart2$C, ENG$TIN$C
+
+  if (log$engage != $no)     # if engagement log desired - JFR 4/22/93 (E1118)
+    {
+     call engdata (unt$pointer, unt2$pointer)
+
+     UNT$Type$I = xUNT$Type$I
+     if (UNT$Type$I == $Air$Code)
+        TBL$Pointer = xUNT$AccPntr$I
+     else if (UNT$Type$I == $CruiseMissile$Code)
+        TBL$Pointer = xUNT$CmcPntr$I
+     else   # sub, ship, boat or base
+        TBL$Pointer = xUNT$ShcPntr$I
+     ENG$PlatformType$C = xTBL$Name$C
+     putENG$PlatformType$C
+
+     if (!UNT2$Pointer$Valid)
+       putENG$TargetType$C  ("POSITION")
+     else if (xUNT2$Type$I == $ShoreBase$Code)
+       putENG$TargetType$C  ("BASE    ")
+     else
+       putENG$TargetType$C  ("TRACK   ")
+
+     ENG$Track$C = weapon_type
+     putENG$Track$C
+     ENG$Weapon$C = weapon_name_in
+     putENG$Weapon$C
+
+     putENG$Result$I  (ENG$Unsuccessful$Code)
+
+     ENG$ResultPh$F = float (prob_launch)
+     putENG$ResultPh$F
+
+     if (be_index != 0)
+       {
+        ENG$BEPart1$C = ilex[be_index+1]
+        putENG$BEPart1$C
+        if (tin_index == 0 & ((be_index+2) == nargs))
+           ENG$BEPart2$C = $Blank_Literal
+        else
+           ENG$BEPart2$C = ilex[be_index+2]
+        putENG$BEPart2$C
+       }
+     if (tin_index != 0)
+       {
+        ENG$TIN$C = ilex[tin_index + 1]
+        putENG$TIN$C
+       }
+
+     call write_eng_rec
+    }  # end if Engagement Log desired
+
+return
+end
+
+
+
+
+subroutine pimtim_begin_end (_  # Compute time to execute pim
+                   pimindx,             # Pim Index: In: Int
+                   time_to_execute_pim)# Minutes to complete plan: Out: Real
+##########################################################################
+#$%
+#$% Purpose:    Compute time from beginning to end to execute a PIM.
+#$%
+#$% Called By:  get_cm_ph
+#$%             
+#$% Calls:      RLL2RB
+#$%
+#$% Tables:     UNT     PIM
+#$%
+#$% Date:       February 1998 (E1864)
+#$%
+#$% Author:     James O. Allen
+#$%
+#$% Modified:   Susan Miller - 5/98 (E1612)
+#$%             Removed unused variable UNT$Pointer
+#$%
+##########################################################################
+BBcommon
+
+integer pimindx
+real    time_to_execute_pim, cum_pim_time
+integer pim$pointer
+real    flats, flons, cslats
+real    flatf, flonf, cslatf
+integer pim$LegNumber$i
+integer pim$Nlegs$i, npoints
+integer pim$pts$index
+real    rngsf, brngsf
+
+pim$pointer$to pimindx
+
+# Get first leg
+pim$LegNumber$i = 1
+pim$Nlegs$i     = Xpim$Nlegs$i
+npoints         = pim$NLegs$i + 1
+pim$pts$index = pim$LegNumber$i
+
+fLATs = Xpim$pts$Latitude$f       # latitude  of next waypoint
+fLONs = Xpim$pts$Longitude$f      # longitude of next waypoint
+csLATs = cos(fLATs)
+
+
+# Current leg could still have some delay
+cum_pim_time    = MAX(0.0, (xPIM$TimeStart$F - Game$Time - Time$Step))
+
+# Loop thru remainder of legs
+for (pim$pts$index = pim$LegNumber$i+1; pim$pts$index <= npoints;
+     pim$pts$index = pim$pts$index + 1)
+{
+    #  Calculate r&b to next leg
+    fLATf = Xpim$pts$Latitude$f       # latitude  of next waypoint
+    fLONf = Xpim$pts$Longitude$f      # longitude of next waypoint
+    csLATf = cos(fLATf)
+
+    call RLL2RB( _                #Rhumb line Lat/Lon to Rng/Bearing
+                   Flats,            #latitude  of waypnt  (input)
+                   FLONs,            #longitude of waypnt  (input)
+                   CsLATs,           #cos of lat of waypnt (input)
+                   FLATf,            #lat  of next waypnt  (input)
+                   FLONf,            #long of next waypnt  (input)
+                   CSLAtf,           #cos lat next waypnt  (input)
+                   RNGsf,            #rng  between waypnts (output)
+                   BRNGsf)           #brg  between waypnts (output)
+
+    #  Add delay time, if any
+    cum_pim_time = cum_pim_time + Xpim$pts$delay$i
+
+    #  Time for leg = r/pim_leg_speed
+    cum_pim_time = cum_pim_time + RNGsf/ Xpim$pts$Speed$i * $Minutes$Per$Hour
+
+    # Move current pim poistion to last position
+    flats = flatf
+    flons = flonf
+    cslats = cslatf
+}
+
+time_to_execute_pim = cum_pim_time
+
+return
+end
+

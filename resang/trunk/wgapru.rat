@@ -1,0 +1,2037 @@
+#$%  NOTE:  For initial prototyping, only air units are being ghosted.
+ 
+##############################################################################
+#                                                                            #
+#  File:     ALSP_RECEIVE_UPDATE.RAT                                         #
+#                                                                            #
+#  Created:  May 14, 1992                                                    #
+#                                                                            #
+#  Author:   Carol L. Kropp                                                  #
+#            Modified Reused - Los Alamos National Labratory (AWSIMS)        #
+#                                                                            #
+#  Purpose:  A collection of routines used by RESA and the generic ALSP      #
+#            translator when joined to an ALSP conferation for processing    #
+#            incoming ALSP update messages.                                  #
+#                                                                            #
+##############################################################################
+ 
+include "alsp.inc"
+include "alsp_resa.inc"
+include "plplay.inc"
+include "bbswp.inc"
+ 
+define (BBImplicit, Implicit None) # SMM 3/00
+ 
+
+ 
+subroutine alsp_receive_update (_
+      n_args,         # maximum number of attributes
+      param_flag,     # array - indicates presence of attributes (0=No & 1=Yes)
+      int_params,     # array - contains integer values of integer attributes
+      f_params,       # array - contains real values of floating pt attributes
+      num_of_emitters,# int - number of emitters
+      emitcategory_list,# array - contains emitter category, JAMMER or RADAR
+      emittype_list,  # array - contains emitter enumeration number
+      emitstatus_list,# array - contains emitter status, ON or OFF
+      emitindex_list, # array - contains emitter index
+      emitorient_list,# array - contains emitter orientation real number
+      emitmode_list,  # array - contains emitter mode string
+      num_of_sonars,
+      sonartype_list,
+      sonarstatus_list,
+      sonarmode_list,
+      sonardepth_list,
+      num_of_positions,
+      positionlat_list,
+      positionlon_list,
+      unit_ew_acq,    # array - contains 8 sector acquisition pk factor float vals
+      unit_ew_launch, # array - contains 8 sector launch pk factor float vals
+      unit_ew_guide,  # array - contains 8 sector self guiding pk factor float vals
+      unit_ew_power,  # array - contains 8 sector jammer power float vals
+      unit_ew_surf,   # array - contains 8 sector surf jam power float vals
+      iffmode_params_list,  # array - contains IFF param data - smp 2/98 (E1907)
+      iffmode_status_list,  # array - contains IFF status data - smp 2/98 (E1907)
+      iffmode_value_list,   # array - contains IFF mode data - smp 2/98 (E1907)
+      strlens,        # array - contains lengths of string values passed in
+      string_params)  # array - contains the character strings of string attributes
+ 
+#$% Note:  The input arrays are index matched to the attributes'
+#$%        enumerated values specified in ALSP.INC.
+#########################################################################
+#$%
+#$% Purpose:   Processes the incoming ALSP update message.  Updates
+#$%            ghost unit values for RESA.
+#$%
+#$% Called By: HANDLE_AT_UPDATE <at_mess_handler.c>
+#$%
+#$% Calls:     ALSP_Update_Error
+#$%            ALSP_Get_UNT_Pointer
+#$%            ALSP_Create_Request           <transifsend.c>
+#$%            ALSP_Translate_ALSP_Mission   <wgalsp.rat>
+#$%            ALSP_Set_UNT_Side             <wgalsp.rat>
+#$%            ALSP_Translate_ALSP_Status    <wgalsp.rat>
+#$%            ALSP_Handle_Air_Type          <wgalsp.rat>
+#$%            ALSP_Receive_Delete           <wgalsp.rat>
+#$%            ALSP_Receive_Update_IFF
+#$%            RadToDMS                      <wgalsp.rat>
+#$%            oOrbit                        <wgoppim.rat>
+#$%            Motion                        <wgmdmot.rat>
+#$%
+#$% Tables:    UNT          DEQ
+#$%
+#$% Date:      May 1992
+#$%
+#$% Author:    Carol L. Kropp
+#$%            Modified reused code from AWSIMS model translator.
+#$%            Added additional code for handling air units.
+#$%
+#$% Modified:  Carol L. Kropp - Sept. 1993
+#$%            Added alsp classes $sea_surface_boat, $sea_surface_ship
+#$%            and $sea_subsurface and added new attribute $depth.
+#$%
+#$%            Carol L. Kropp - Dec. 1993
+#$%            Added alsp classes $air_cruise_missile and
+#$%            $air_ballistic_missile.
+#$%
+#$%            Susan Miller - 10/94
+#$%            Added new emitter characteristics as specified in JECEWSI ICD
+#$%            SMM 12/94 - allowed processing of updates to RESA ships and A/C
+#$%            for C2W factors
+#$%
+#$%            Susan Miller - 12/94 (JECEWSI Interface)
+#$%            Allowed processing of updates to RESA ships and A/C
+#$%            for C2W factors.
+#$%
+#$%            Susan Miller - 8/95 (E1454)
+#$%            Don't change the side of an AEW a/c that has been chopped
+#$%            (by control) to another view (AEW Sharing).
+#$%
+#$%            Carol Kropp - 9/95 (E1455)
+#$%            When an update is received on a base, need to make sure
+#$%            that the value can be updated (Shared Bases).
+#$%
+#$%            Carol Kropp - 9/95 (E1456)
+#$%            Added for display only ghosting of ground based air
+#$%            defense units (HIMAD, ALLRAD and RADAR).
+#$%
+#$%            Carol Kropp - 10/95 (E1483)
+#$%            When a create is received for SEA.SURFACE.AAV or
+#$%            SEA.SURFACE.LANDING_CRAFT, change the class to
+#$%            SEA.SURFACE.BOAT and process normally.
+#$%
+#$%            Susan Miller - 9/95 (E1453)
+#$%            Don't change the side of an AIRTANKER or STTANKER a/c that has
+#$%            been chopped (by control) to another view (Air Tanker Sharing).
+#$%
+#$%            Susan Miller - 10/95 (E1486)
+#$%            Handle the new C2W factor array - unit_ew_surf.
+#$%
+#$%            Jim Allen - 7/97
+#$%            Flip order of nilex and ilex arguments to oorbit
+#$%
+#$%            Carol Kropp - 9/97 (E1890)
+#$%            AWSIM/R sends aircraft which are on a two point orbit out
+#$%            with a single orbit point at the current speed each
+#$%            time the aircraft moves.  AWSIM/R also sends aircraft at
+#$%            speed 0 with a single orbit point at cruise speed, not speed
+#$%            0.  The change to handle the lack of speed 0, causes the
+#$%            aircraft on a true orbit to show a speed of 0.  Since RESA
+#$%            does not want to move these aircraft, only the setting of
+#$%            UNT$AssumedSpeed$F to 0.0 was removed when on a single point
+#$%            orbit.
+#$%
+#$%            Stephanie Paden - 2/98 (E1907)
+#$%            Added IFF related arguments to process incoming IFF() data.
+#$%
+#########################################################################
+BBCommon
+include "alsp_io_rat.inc"
+ 
+#$% Parameters
+integer  n_args, param_flag [max_param]
+integer  int_params [max_param], strlens[max_param]
+real     f_params[max_param]
+integer  num_of_emitters, emitcategory_list[Max$Alsp$Emitters],
+         emittype_list[Max$Alsp$Emitters], emitstatus_list[Max$Alsp$Emitters],
+         emitindex_list[Max$Alsp$Emitters], emitmode_list[Max$Alsp$Emitters]
+integer  num_of_sonars,
+         sonartype_list[Max$Alsp$Sonars], sonarstatus_list[Max$Alsp$Sonars],
+         sonarmode_list[Max$Alsp$Sonars], sonardepth_list[Max$Alsp$Sonars]
+integer  num_of_positions
+real     positionlat_list[Max$Alsp$Positions],
+         positionlon_list[Max$Alsp$Positions]
+real     emitorient_list[Max$Alsp$Emitters]
+real     unit_ew_acq[Number$EW$Sectors]
+real     unit_ew_launch[Number$EW$Sectors]
+real     unit_ew_guide[Number$EW$Sectors]
+real     unit_ew_power[Number$EW$Sectors]
+real     unit_ew_surf[Number$EW$Sectors]
+integer  iffmode_status_list[Max$Alsp$Iffmodes]
+integer  iffmode_value_list[Max$Alsp$Iffmodes]
+integer  iffmode_params_list[Max$Alsp$Iffmodes]
+vaxcharacter*max_str_len  string_params[max_param]
+ 
+ 
+#$% Local variables
+integer  id_found            # flag for alspid check
+integer  alspid              # ALSP id number
+integer  attribute           # loop control variable for attribute lists
+integer  unit_type_status    # success flag for finding proper unit class
+integer  ALSPPropulsion2localPropulsion
+real     speed               # for converting speed from km to knots per hour
+ 
+literal  l_call_sign         # call sign in literal form
+literal  l_ac_event_name     # aircraft event name in literal form
+ 
+integer  number_of_orbit_positions
+real     orbit_lat1,         # latitude and
+         orbit_long1,        # longitude for
+         orbit_lat2,         # orbit positions
+         orbit_long2
+literal  ilex [$max$args]    # for processing orbit points
+integer  nilex               # number of arguments in ilex
+character c_call_sign[8]     # SMM 12/7/94
+integer  c_index
+integer  UNT$Type$I, UNT$ALSPChopped$I, UNT$Mission$I
+integer  shared_mission
+ 
+literal  UNT$Event$C, cstrip8, UNT$Name$C			    # SMM 3/00
+integer  UNT$Pointer, SHC$Pointer,I_SWITCH_1, UNT$Nbrac$I           # SMM 3/00
+integer  UNT$Status$I, length                                       # SMM 3/00
+real     UNT$Fltsoktime$F, UNT$Timebingo$F, UNT$Truecourse$F        # SMM 3/00
+real     UNT$Truelatitude$F, UNT$Costruelat$F, UNT$Truelongitude$F  # SMM 3/00
+real     UNT$Orderedlatitude$F, UNT$Orderedlongitude$F, RADTODMS    # SMM 3/00
+real     elapsed_time             # jb E2208 & E2145 (for MOTION arg) 12/12/00
+ 
+equivalence (l_call_sign, c_call_sign)
+ 
+  elapsed_time = Model$Interval  # jb E2208 (for MOTION second arg)   12/12/00
+  alspid = int_params [$id]
+ 
+  if (alspid == 0)    # if ALSP id in message is zero
+    {
+     call ALSP_Update_Error (alspid, $zero_id)
+     return
+    }
+ 
+  if (int_params [$class] == $alsp_class_ground_maneuver_himad  |    # clk - 9/95 (E1456)
+      int_params [$class] == $alsp_class_ground_maneuver_allrad |
+      int_params [$class] == $alsp_class_ground_maneuver_radar  |
+      int_params [$class] == $alsp_class_ground_maneuver_combat |
+      int_params [$class] == $alsp_class_ground_maneuver_tel    |
+      int_params [$class] == $alsp_class_ground_maneuver_support_convoy |
+      int_params [$class] == $alsp_class_ground_maneuver_support_unit   |
+      int_params [$class] == $alsp_class_ground_maneuver_support_unit_tcu)
+    {
+     call Update_ALSP_Ground_Unit_Entry (param_flag,
+                                         int_params [$id], int_params [$class],
+                                         int_params [$unit_type], int_params [$side],
+                                         int_params[$size_attr], int_params [$speed],
+                                         int_params [$heading], f_params [$latitude],
+                                         f_params [$longitude], string_params[$name])
+     return
+    }
+  else if (int_params [$class] == $sea_sonobuoy)
+    {
+     call Update_ALSP_Sonobuoy_Entry (_
+ 
+      n_args,         # maximum number of attributes
+      param_flag,     # array - indicates presence of attributes (0=No & 1=Yes)
+      int_params,     # array - contains integer values of integer attributes
+      f_params,       # array - contains real values of floating pt attributes
+      num_of_emitters,# int - number of emitters
+      emitcategory_list,# array - contains emitter category, JAMMER or RADAR
+      emittype_list,  # array - contains emitter enumeration number
+      emitstatus_list,# array - contains emitter status, ON or OFF
+      emitindex_list, # array - contains emitter index
+      emitorient_list,# array - contains emitter orientation real number
+      emitmode_list,  # array - contains emitter mode string
+      num_of_sonars,
+      sonartype_list,
+      sonarstatus_list,
+      sonarmode_list,
+      sonardepth_list,
+      unit_ew_acq,    # array - contains 8 sector acquisition pk factor float vals
+      unit_ew_launch, # array - contains 8 sector launch pk factor float vals
+      unit_ew_guide,  # array - contains 8 sector self guiding pk factor float vals
+      unit_ew_power,  # array - contains 8 sector jammer power float vals
+      unit_ew_surf,   # array - contains 8 sector surf jam power float vals
+      iffmode_params_list,  # array - contains IFF param data - smp 2/98 (E1907)
+      iffmode_status_list,  # array - contains IFF status data - smp 2/98 (E1907)
+      iffmode_value_list,   # array - contains IFF mode data - smp 2/98 (E1907)
+      strlens,        # array - contains lengths of string values passed in
+      string_params)  # array - contains the character strings of string attributes
+ 
+     return
+    }
+  else if (int_params [$class] == $sea_sweeparea)
+    {
+     call Update_ALSP_Sweeparea_Entry (_
+ 
+      n_args,         # maximum number of attributes
+      param_flag,     # array - indicates presence of attributes (0=No & 1=Yes)
+      int_params,     # array - contains integer values of integer attributes
+      f_params,       # array - contains real values of floating pt attributes
+      num_of_positions,
+      positionlat_list,
+      positionlon_list,
+      strlens,        # array - contains lengths of string values passed in
+      string_params)  # array - contains the character strings of string attributes
+ 
+     return
+    }
+  else if (int_params [$class] == $alsp_class_sea_surface_aav |      # clk - 10/95 (E1483)
+           int_params [$class] == $alsp_class_sea_surface_landing_craft)
+    int_params [$class] = $sea_surface_boat
+ 
+  else if (int_params [$class] == $sea_mine) return  # Ignore minefield updates
+ 
+  call ALSP_Get_UNT_Pointer (UNT$Pointer, alspid, id_found)
+ 
+  UNT$Type$I = xUNT$Type$I
+  if (id_found == $No)      # if matching id was not found
+    {# Note - This really shouldn't happen, as ACM is supposed to send a create.
+     #        If there was an error during the creation, then we will be receiving
+     #        update messages for units not ghosted.
+     call ALSP_Update_Error (alspid, $no_id_match)
+ 
+     if (int (alspid /100000) != actor)             # Not RESA Units (dew 1/01)
+        call ALSP_Create_Request (alspid)
+ 
+     return
+    }
+  else if (xUNT$GhostedUnit$I == $no)      # if a RESA unit and
+    {
+     if (UNT$Type$I == $ShoreBase$Code)    # if a shore base, check
+       {                                   # to see if it's shared
+        SHC$Pointer = xUNT$SHCPntr$I
+        if (xSHC$ALSPSharedBase$I == $yes &
+            xSHC$ALSPOwnedBase$I  == $no  )
+          {
+           if (param_flag [$alsp_attr_flight_ops] != 0)
+             {
+              for (attribute = 2; attribute <= n_args; attribute = attribute + 1)
+                  param_flag [attribute] = 0
+              param_flag [$alsp_attr_flight_ops] = $yes
+             }
+           else   # the flight ops attribute is not being updated
+             {
+              call ALSP_Update_Error (alspid, $unit_is_not_a_ghost)
+              return
+             }
+          }  # end of if a shared/not owned base
+        else
+          {
+           call ALSP_Update_Error (alspid, $unit_is_not_a_ghost)
+           return
+          }
+       }     # end of if a base
+     else if (UNT$Type$I != $Surface$Code       &   # not a ship, air or cm,     SMM
+              UNT$Type$I != $Air$Code           &   # reject update!             12/9/94
+              UNT$Type$I != $CruiseMissile$Code )   # We want the c2w updates for these
+       {
+        call ALSP_Update_Error (alspid, $unit_is_not_a_ghost)
+        return
+       }
+    }
+ 
+ 
+  if (param_flag [$latitude]  == $yes |
+      param_flag [$longitude] == $yes )
+    putUNT$ALSPPosChgTime$F (Game$Time)
+  else
+    call Motion (UNT$Pointer,elapsed_time) # jb E2208 add 2ng arg  12/12/00
+ 
+  number_of_orbit_positions = 0     # reset the number of positions included in the message to zero
+  for (attribute = 2; attribute <= n_args; attribute = attribute + 1)
+    {
+     if (param_flag [attribute] != 0)       # if the attribute is being updated
+       {
+        switch (attribute)
+          {
+           case $altitude:         # aircraft units
+             {
+              putUNT$TrueAltDepth$I     (int_params [attribute])
+              putUNT$OrderedAltDepth$I  (int_params [attribute])
+             }
+           case $depth:             # subsurface units
+             {
+              putUNT$TrueAltDepth$I     (int_params [attribute])
+              putUNT$OrderedAltDepth$I  (int_params [attribute])
+             }
+ 
+           case $propulsion_mode:             # subsurface units
+             {
+              PUTunt$PropulsionMode$i(_
+                 ALSPPropulsion2localPropulsion(int_params[attribute]))
+             }
+ 
+           case $alsp_attr_flight_ops:
+             {
+              if (int_params [attribute] == $alsp_flight_ops_open)
+                {
+                 UNT$FltsokTime$F = $Lo_UNT$FltsokTime$F
+                 UNT$TimeBingo$F  = $Lo_UNT$TimeBingo$F
+                }
+              else  # int_params [attribute] == $alsp_flight_ops_closed
+                {
+                 UNT$FltsokTime$F = $Hi_UNT$FltsokTime$F
+                 UNT$TimeBingo$F  = $Hi_UNT$TimeBingo$F
+                }
+              putUNT$FltsokTime$F
+              putUNT$TimeBingo$F
+             }
+ 
+           case $heading:
+             {
+              UNT$TrueCourse$F = (int_params [attribute] * $PI) / 180.0
+              putUNT$TrueCourse$F
+              putUNT$OrderedCourse$F  (UNT$TrueCourse$F)
+              putUNT$AssumedCourse$F  (UNT$TrueCourse$F)
+             }                 # end case $heading
+ 
+           case $latitude:
+             {
+              UNT$TrueLatitude$F = (f_params [attribute] * $PI) / 180.0
+              putUNT$TrueLatitude$F
+              UNT$COSTrueLat$F = cos(UNT$TrueLatitude$F)
+              putUNT$COSTrueLat$F
+              putUNT$AssumedLatitude$F  (UNT$TrueLatitude$F)
+             }               # end of latitude case
+ 
+           case $longitude:
+             {
+              UNT$TrueLongitude$F = (f_params [attribute] * $PI) / 180.0
+              putUNT$TrueLongitude$F
+              putUNT$AssumedLongitude$F  (UNT$TrueLongitude$F)
+             }               # end of longitude case
+ 
+           case $mission:
+             {
+              call alsp_translate_alsp_mission (int_params [attribute], UNT$Mission$I)
+              putUNT$Mission$I
+             }
+ 
+        case $name:   # Convert to literal form
+          {
+           if (xUNT$Type$I == $Air$Code)
+             {
+              call move_str_lit (string_params[$name],      l_ac_event_name)
+              call move_str_lit (string_params[$call_sign], l_call_sign)
+              UNT$Event$C = xUNT$Event$C
+ 
+              if (UNT$Event$C != l_call_sign &     # if the real call sign isn't stored
+                  UNT$Event$C != l_ac_event_name)  # in the event name or the event name
+                {                                  # wasn't already set, store the event name
+                 putUNT$Event$C (l_ac_event_name)   # dew 1/9/2001 fix Alpha HP Error ???
+                }
+             }
+          }
+ 
+        case $call_sign:      # Convert the call sign characters to literal form
+          {
+           if (int_params [$class] == $air_fixedwing  |      # call sign applies
+               int_params [$class] == $air_helicopter |      # to aircraft flights
+               int_params [$class] == $air_helicopter_airlift)
+             {
+              l_call_sign = $BLANKLIT
+              call move_str_lit (string_params[$call_sign], l_call_sign)
+ 
+              UNT$Name$C = xUNT$Name$C
+              UNT$Event$C = xUNT$Event$C
+              if (UNT$Name$C != l_call_sign &     # if the flight leader call sign
+                  UNT$Event$C != l_call_sign)     # has changed for some reason
+                {
+                 UNT$NbrAC$I = xUNT$NbrAC$I
+                 call AC_Duplicate_Name_Check (UNT$Pointer, l_call_sign, UNT$NbrAC$I)
+                 putUNT$Name$C  (l_call_sign)
+                }
+             }
+          }     # end of $call_sign case
+ 
+        case $emitter:  # $emitter, $radar, $jammer, $emitter_status,
+          {             # $emitter_index, $emitter_orient, $emitter_mode
+           #$% Sets up the sensor_list ( a common block )
+           call ALSP_Map_Incoming_Emitters (num_of_emitters, emitcategory_list,
+                                            emittype_list, emitstatus_list,
+                                            emitindex_list, emitorient_list,
+                                            emitmode_list)
+ 
+           if (int_params [$class] == $air_cruise_missile)
+             call ALSP_Handle_CM_Emitter (UNT$Pointer)
+           else
+             call ALSP_Update_Emitter_Eq (UNT$Pointer)
+          }
+        case $sonar: # $sonar, $sonar_type, $sonar_status, $sonar_mode
+          {            # $sonar_depth
+           #$% Sets up the sonar_list ( a common block )
+           call ALSP_Map_Incoming_Sonars (num_of_sonars,
+                                          sonartype_list,
+                                          sonarstatus_list,
+                                          sonarmode_list,
+                                          sonardepth_list)
+           call ALSP_Update_Sonar_Eq (UNT$Pointer)
+          }
+ 
+        case $iff:  # master(on/off), mode1(on/off value),
+                    # mode2(on/off value), mode3(on/off value),
+                    # mode4(on/off), modec(on/off altitude)
+          {
+           call ALSP_Receive_Update_IFF (UNT$Pointer,iffmode_params_list,
+                                         iffmode_status_list, iffmode_value_list)
+          }
+           case $orb_lat1:
+              {
+                 orbit_lat1  = (f_params [attribute] * $PI) / 180.0
+                 number_of_orbit_positions = number_of_orbit_positions + 1
+              }
+           case $orb_lon1:   orbit_long1 = (f_params [attribute] * $PI) / 180.0
+           case $orb_lat2:
+              {
+                 orbit_lat2  = (f_params [attribute] * $PI) / 180.0
+                 number_of_orbit_positions = number_of_orbit_positions + 1
+              }
+           case $orb_lon2:   orbit_long2 = (f_params [attribute] * $PI) / 180.0
+ 
+           case $side:
+                {
+                 UNT$Mission$I = xUNT$Mission$I
+                 UNT$ALSPChopped$I = xUNT$ALSPChopped$I
+                 shared_mission = $NO
+ 
+                 # if aircraft has a mission of AEW, AIRTANKER, or STTANKER,
+                 # it can be a shared aircraft.
+                 if ((UNT$Mission$I == $AEW$Code) |         # SMM 8/95 (E1454)
+                     (UNT$Mission$I == $AirTanker$Code) |   # SMM 9/95 (E1453)
+                     (UNT$Mission$I == $STtanker$Code))
+                    shared_mission = $YES
+ 
+                 # if not a shared mission or
+                 # if it is an a/c with a shared mission
+                 # and ghosted unit has not been chopped... set the side
+                 if ((shared_mission == $NO) |
+                     ((shared_mission == $YES) &
+                      (UNT$Type$I == $Air$Code) &
+                      (UNT$ALSPChopped$I != $yes)))
+                    call alsp_set_unt_side (UNT$Pointer,
+                                            int_params [attribute])
+                }
+ 
+           case $size_attr:
+             {
+              putUNT$NbrAC$I     (int_params [attribute])
+              putUNT$NbrAcTot$I  (int_params [attribute])
+             }
+ 
+           case $speed:
+             {# speed is in km/hour, so convert to knots first
+              speed = int_params [attribute] / $knots_to_km
+              putUNT$TrueSpeed$F     (speed)
+              putUNT$AssumedSpeed$F  (speed)
+              putUNT$OrderedSpeed$F  (speed)
+             }                 # end case $speed
+ 
+           case $status:
+             {
+              call alsp_translate_alsp_status (int_params [attribute], UNT$Status$I)
+              putUNT$Status$I
+ 
+              if (UNT$Status$I == $ACAwaitingLaunch$Code)
+                putUNT$MarshallStatus$I  ($AwaitLaunch$Code)
+              else
+                putUNT$MarshallStatus$I  ($InFlight$Code)
+             }
+ 
+           case $target_lat:
+              {
+               UNT$OrderedLatitude$F = f_params [attribute] * ($PI / 180.0)
+               putUNT$OrderedLatitude$F
+              }
+            case $target_long:
+              {
+               UNT$OrderedLongitude$F = f_params [attribute] * ($PI / 180.0)
+               putUNT$OrderedLongitude$F
+              }
+ 
+           case $unit_type:
+             {
+              if (int_params [$class] == $air_fixedwing  |
+                  int_params [$class] == $air_helicopter |
+                  int_params [$class] == $air_helicopter_airlift)
+                {
+                 call alsp_handle_air_type (UNT$Pointer,
+                                            int_params [$class],
+                                            int_params [attribute],
+                                            unit_type_status)
+                 if (unit_type_status == $yes)
+                   {
+                    putUNT$Type$I  ($Air$Code)
+                    putUNT$RulesOfEngage$I  ($IfAttacked$Code)
+                   }
+                }
+              else if (int_params [$class] == $sea_surface_boat |
+                       int_params [$class] == $sea_surface_ship |
+                       int_params [$class] == $sea_subsurface   )
+                {
+                 call alsp_handle_vessel_type (UNT$Pointer,
+                                               int_params [$class],
+                                               int_params [attribute],
+                                               unit_type_status)
+                }
+              else if (int_params [$class] == $air_cruise_missile   |
+                       int_params [$class] == $air_ballistic_missile)
+                {
+                 call alsp_handle_Missile_type (UNT$Pointer,
+                                                int_params [$class],
+                                                int_params [attribute],
+                                                unit_type_status)
+                }
+              else
+                {
+                 call alsp_update_error (alspid, $incorrect_class)
+                 return
+                }
+ 
+              if (unit_type_status == $No)
+                {
+                 call alsp_receive_delete (xUNT$ALSPId$I)
+                 return
+                }
+             }             #end of case $unit_type
+ 
+#           case $arty_supp     |               # Do nothing with these fields
+#                $awsim_status  |               # at this time, as only
+#                $cbs_status    |               # aircraft are being ghosted
+#                $elect_deg     |               # and these do not apply.
+#                $fire_cont     :     {}
+ 
+#           case $old_id :       # Not quite sure how this applies
+#           case $percent_attr:  # Not quite sure how this applies
+ 
+#           case $supply_launcher   |         # Do nothing with these
+#                $supply_missile    |           # at this time, as only
+#                $supply_radar      : {}          # aircraft are being ghosted.
+ 
+#           case $posture     |             # Not quite sure how these
+#                $orient      |             # fit into the picture yet.
+#                $time        :     {}
+ 
+           # takes care of $alsp_attr_unit, $alsp_attr_emtr, $alsp_attr_ew_c3,
+           # $alsp_attr_ew_acq, $alsp_attr_ew_launch, $alsp_attr_eq_guide,
+           # or $alsp_attr_eq_power
+           case $alsp_attr_cw2_factors:
+             {
+                call ALSP_Map_CW2_Factors(UNT$Pointer, unit_ew_acq,
+                                   unit_ew_launch,unit_ew_guide, unit_ew_power,
+                                   unit_ew_surf,
+                                   f_params [$alsp_attr_ew_c3])  # number 47
+             }
+          }
+       }        # end of if attribute present
+    }           # end of for loop
+ 
+  # If orbit points were part of the message, process them
+  if (number_of_orbit_positions == 1)   # if a single point orbit
+    {                                   # clk 2/96 (E1552)
+     putUNT$TrueSpeed$F     (0.0)       # AWSIM/R is not sending
+     putUNT$OrderedSpeed$F  (0.0)       # speed 0
+    }
+  else if (number_of_orbit_positions == 2)   # process orbit points
+    {
+     ilex [1] = $lex$Orbit$
+     ilex [2] = 0
+     ilex [3] = RadToDMS (orbit_lat1)
+     ilex [4] = RadToDMS (orbit_long1)
+     ilex [5] = RadToDMS (orbit_lat2)
+     ilex [6] = RadToDMS (orbit_long2)
+     nilex = 6
+     call oOrbit (Orbit$Order, UNT$Pointer, nilex, ilex)
+    }
+ 
+return
+end
+
+ 
+subroutine update_alsp_sonobuoy_entry (_
+      n_args,         # maximum number of attributes
+      param_flag,     # array - indicates presence of attributes (0=No & 1=Yes)
+      int_params,     # array - contains integer values of integer attributes
+      f_params,       # array - contains real values of floating pt attributes
+      num_of_emitters,# int - number of emitters
+      emitcategory_list,# array - contains emitter category, JAMMER or RADAR
+      emittype_list,  # array - contains emitter enumeration number
+      emitstatus_list,# array - contains emitter status, ON or OFF
+      emitindex_list, # array - contains emitter index
+      emitorient_list,# array - contains emitter orientation real number
+      emitmode_list,  # array - contains emitter mode string
+      num_of_sonars,
+      sonartype_list,
+      sonarstatus_list,
+      sonarmode_list,
+      sonardepth_list,
+      unit_ew_acq,    # array - contains 8 sector acquisition pk factor float vals
+      unit_ew_launch, # array - contains 8 sector launch pk factor float vals
+      unit_ew_guide,  # array - contains 8 sector self guiding pk factor float vals
+      unit_ew_power,  # array - contains 8 sector jammer power float vals
+      unit_ew_surf,   # array - contains 8 sector surf jam power float vals
+      iffmode_params_list,  # array - contains IFF param data - smp 2/98 (E1907)
+      iffmode_status_list,  # array - contains IFF status data - smp 2/98 (E1907)
+      iffmode_value_list,   # array - contains IFF mode data - smp 2/98 (E1907)
+      strlens,        # array - contains lengths of string values passed in
+      string_params)  # array - contains the character strings of string attributes
+ 
+#$% Note:  The input arrays are index matched to the attributes'
+#$%        enumerated values specified in ALSP.INC.
+#########################################################################
+#$%
+#$% Purpose:   Processes the incoming ALSP update message for sonobuoys.
+#$%            Updates ghost boy values for RESA.
+#$%
+#$% Called By: HANDLE_AT_UPDATE <at_mess_handler.c>
+#$%
+#$% Calls:     ALSP_Update_Error
+#$%            ALSP_Get_UNT_Pointer
+#$%            ALSP_Create_Request           <transifsend.c>
+#$%            ALSP_Translate_ALSP_Mission   <wgalsp.rat>
+#$%            ALSP_Set_UNT_Side             <wgalsp.rat>
+#$%            ALSP_Translate_ALSP_Status    <wgalsp.rat>
+#$%            ALSP_Handle_Air_Type          <wgalsp.rat>
+#$%            ALSP_Receive_Delete           <wgalsp.rat>
+#$%            ALSP_Receive_Update_IFF
+#$%            RadToDMS                      <wgalsp.rat>
+#$%            oOrbit                        <wgoppim.rat>
+#$%            Motion                        <wgmdmot.rat>
+#$%
+#$% Tables:    BOY
+#$%
+#$% Date:      July 24, 2006
+#$%
+#$% Author:    James O. Allen
+#$%
+#########################################################################
+BBCommon
+include "alsp_io_rat.inc"
+ 
+#$% Parameters
+integer  n_args, param_flag [max_param]
+integer  int_params [max_param], strlens[max_param]
+real     f_params[max_param]
+integer  num_of_emitters, emitcategory_list[Max$Alsp$Emitters],
+         emittype_list[Max$Alsp$Emitters], emitstatus_list[Max$Alsp$Emitters],
+         emitindex_list[Max$Alsp$Emitters], emitmode_list[Max$Alsp$Emitters]
+integer  num_of_sonars,
+         sonartype_list[Max$Alsp$Sonars], sonarstatus_list[Max$Alsp$Sonars],
+         sonarmode_list[Max$Alsp$Sonars], sonardepth_list[Max$Alsp$Sonars]
+real     emitorient_list[Max$Alsp$Emitters]
+real     unit_ew_acq[Number$EW$Sectors]
+real     unit_ew_launch[Number$EW$Sectors]
+real     unit_ew_guide[Number$EW$Sectors]
+real     unit_ew_power[Number$EW$Sectors]
+real     unit_ew_surf[Number$EW$Sectors]
+integer  iffmode_status_list[Max$Alsp$Iffmodes]
+integer  iffmode_value_list[Max$Alsp$Iffmodes]
+integer  iffmode_params_list[Max$Alsp$Iffmodes]
+vaxcharacter*max_str_len  string_params[max_param]
+ 
+ 
+#$% Local variables
+integer  id_found            # flag for alspid check
+integer  alspid              # ALSP id number
+integer  attribute           # loop control variable for attribute lists
+integer  unit_type_status    # success flag for finding proper unit class
+real     speed               # for converting speed from km to knots per hour
+ 
+integer  number_of_orbit_positions
+real     orbit_lat1,         # latitude and
+         orbit_long1,        # longitude for
+         orbit_lat2,         # orbit positions
+         orbit_long2
+literal  ilex [$max$args]    # for processing orbit points
+integer  nilex               # number of arguments in ilex
+character c_call_sign[8]
+integer  c_index
+integer  BOY$Type$I
+integer  shared_mission
+ 
+literal  cstrip8, BOY$Name$C
+integer  BOY$Pointer, BOY$View$I, I_SWITCH_1, I_Switch_2
+BBDeclare (SOB$pointer)
+integer  class_match
+integer   length
+real     BOY$TrueHeading$F
+real     BOY$Truelatitude$F, BOY$Costruelat$F, BOY$Truelongitude$F
+real     RADTODMS
+real     elapsed_time
+ 
+ 
+elapsed_time = Model$Interval
+alspid = int_params [$id]
+ 
+if (alspid == 0)    # if ALSP id in message is zero
+{
+    call ALSP_Update_Error (alspid, $zero_id)
+    return
+}
+ 
+call ALSP_Get_BOY_Pointer (BOY$Pointer, alspid, id_found)
+ 
+if (id_found == $No)      # if matching id was not found
+{# Note - This really shouldn't happen, as ACM is supposed to send a create.
+ #        If there was an error during the creation, then we will be receiving
+ #        update messages for units not ghosted.
+    call ALSP_Update_Error (alspid, $no_id_match)
+ 
+    if (int (alspid /100000) != actor)             # Not RESA Units (dew 1/01)
+        call ALSP_Create_Request (alspid)
+ 
+    return
+}
+ 
+putBOY$Type$I  ($ActiveBarrier$Code)      # Only type of sonobuoy for now
+ 
+number_of_orbit_positions = 0     # reset the number of positions included in the message to zero
+for (attribute = 2; attribute <= n_args; attribute = attribute + 1)
+{
+    if (param_flag [attribute] != 0)       # if the attribute is being updated
+    {
+        switch (attribute)
+        {
+            case $name:              #$% Convert the first 8 characters to literal form
+            {
+                call move_str_lit (string_params[$name], BOY$Name$C)
+                putBOY$Name$C
+            }
+            case $depth:             # subsurface units
+            {
+                putBOY$TrueDepth$I        (int_params [attribute])
+            }
+ 
+            case $heading:
+            {
+                BOY$TrueHeading$F = (int_params [attribute] * $PI) / 180.0
+                putBOY$TrueHeading$F
+            }                 # end case $heading
+ 
+            case $latitude:
+            {
+                BOY$TrueLatitude$F = (f_params [attribute] * $PI) / 180.0
+                putBOY$TrueLatitude$F
+                BOY$COSTrueLat$F = cos(BOY$TrueLatitude$F)
+                putBOY$COSTrueLat$F
+                putBOY$AssumedLatitude$F  (BOY$TrueLatitude$F)
+            }               # end of latitude case
+ 
+            case $longitude:
+            {
+                BOY$TrueLongitude$F = (f_params [attribute] * $PI) / 180.0
+                putBOY$TrueLongitude$F
+                putBOY$AssumedLongitude$F  (BOY$TrueLongitude$F)
+            }               # end of longitude case
+ 
+            case $side:
+            {
+                switch (int_params[attribute])
+                {
+                    case $blue:
+                        BOY$View$I = ALSP$BlueGhost$View
+                    case $red:
+                        BOY$View$I = ALSP$OrangeGhost$View
+                    case $neutral:
+                        BOY$View$I = $Neutral$View
+                }
+ 
+                putBOY$View$I
+            }
+ 
+            case $speed:
+            {# speed is in km/hour, so convert to knots first
+                speed = int_params [attribute] / $knots_to_km
+                putBOY$TrueSpeed$F     (speed)
+            }                 # end case $speed
+ 
+            case $unit_type:
+            {
+                call Map_Incoming_Sonobuoy_Type (_
+                    0,                      # in - the enumerated value of the class
+                    int_params[attribute],  # in - enumeration of Common ALSP name
+                    SOB$Pointer,            # out - the TRP pointer
+                    class_match)            # out - flag for if a match is made
+                putBOY$EQPntr$i (sob$pointer)
+                putBOY$Type$I  ($ActiveBarrier$Code)
+            }
+        }
+    }        # end of if attribute present
+}           # end of for loop
+ 
+return
+end
+ 
+
+ 
+subroutine update_alsp_sweeparea_entry (_
+      n_args,         # maximum number of attributes
+      param_flag,     # array - indicates presence of attributes (0=No & 1=Yes)
+      int_params,     # array - contains integer values of integer attributes
+      f_params,       # array - contains real values of floating pt attributes
+      num_of_positions,
+      positionlat_list,
+      positionlon_list,
+      strlens,        # array - contains lengths of string values passed in
+      string_params)  # array - contains the character strings of string attributes
+ 
+#$% Note:  The input arrays are index matched to the attributes'
+#$%        enumerated values specified in ALSP.INC.
+#########################################################################
+#$%
+#$% Purpose:   Processes the incoming ALSP update message for sweepareas.
+#$%            Updates ghost sweeparea values for RESA.
+#$%
+#$% Called By: HANDLE_AT_UPDATE <at_mess_handler.c>
+#$%
+#$% Calls:     ALSP_Update_Error
+#$%            ALSP_Get_UNT_Pointer
+#$%            ALSP_Create_Request           <transifsend.c>
+#$%            ALSP_Translate_ALSP_Mission   <wgalsp.rat>
+#$%            ALSP_Set_UNT_Side             <wgalsp.rat>
+#$%            ALSP_Translate_ALSP_Status    <wgalsp.rat>
+#$%            ALSP_Handle_Air_Type          <wgalsp.rat>
+#$%            ALSP_Receive_Delete           <wgalsp.rat>
+#$%            ALSP_Receive_Update_IFF
+#$%            RadToDMS                      <wgalsp.rat>
+#$%            oOrbit                        <wgoppim.rat>
+#$%            Motion                        <wgmdmot.rat>
+#$%
+#$% Tables:    SWP
+#$%
+#$% Date:      March 29, 2007
+#$%
+#$% Author:    James O. Allen
+#$%
+#########################################################################
+BBCommon
+include "alsp_io_rat.inc"
+ 
+#$% Parameters
+integer  n_args, param_flag [max_param]
+integer  int_params [max_param], strlens[max_param]
+real     f_params[max_param]
+vaxcharacter*max_str_len  string_params[max_param]
+ 
+ 
+#$% Local variables
+integer  id_found            # flag for alspid check
+integer  alspid              # ALSP id number
+integer  attribute           # loop control variable for attribute lists
+integer  unit_type_status    # success flag for finding proper unit class
+real     speed               # for converting speed from km to knots per hour
+ 
+integer  num_of_positions
+real     positionlat_list[Max$Alsp$Positions],
+         positionlon_list[Max$Alsp$Positions]
+literal  ilex [$max$args]    # for processing orbit points
+integer  nilex               # number of arguments in ilex
+character c_call_sign[8]
+integer  c_index
+integer  BOY$Type$I
+integer  shared_mission
+ 
+literal  cstrip8
+BBDeclare (SWP$Pointer, SWP$Name$c, SWP$Side$I, SWP$Status$i, swp$ver$index)
+integer  I_SWITCH_1, I_Switch_2
+integer  class_match
+integer   length
+real     RADTODMS
+real     elapsed_time
+ 
+ 
+elapsed_time = Model$Interval
+alspid = int_params [$id]
+ 
+if (alspid == 0)    # if ALSP id in message is zero
+{
+    call ALSP_Update_Error (alspid, $zero_id)
+    return
+}
+ 
+call ALSP_Get_SWP_Pointer (SWP$Pointer, alspid, id_found)
+ 
+if (id_found == $No)      # if matching id was not found
+{# Note - This really shouldn't happen, as ACM is supposed to send a create.
+ #        If there was an error during the creation, then we will be receiving
+ #        update messages for units not ghosted.
+    call ALSP_Update_Error (alspid, $no_id_match)
+ 
+    if (int (alspid /100000) != actor)             # Not RESA Units (dew 1/01)
+        call ALSP_Create_Request (alspid)
+ 
+    return
+}
+ 
+ 
+for (attribute = 2; attribute <= n_args; attribute = attribute + 1)
+{
+    if (param_flag [attribute] != 0)       # if the attribute is being updated
+    {
+        switch (attribute)
+        {
+            case $name:              #$% Convert the first 8 characters to literal form
+            {
+                call move_str_lit (string_params[$name], SWP$Name$C)
+                putSWP$Name$C
+            }
+            case $side:
+            {
+                switch (int_params[attribute])
+                {
+                    case $blue:
+                        SWP$Side$I = $Blue$code
+                    case $red:
+                        SWP$Side$I = $Orange$code
+                    case $neutral:
+                        SWP$Side$I = $Neutral$code
+                }
+ 
+                putSWP$Side$I
+            }
+            case $sweeparea_status:
+            {
+                swp$Status$i = int_params[$sweeparea_status]
+                putSWP$Status$I
+            }
+            case $sweeparea_location:
+            {
+                for (swp$ver$index=1; swp$ver$index <= num_of_positions;
+                     swp$ver$index = swp$ver$index+1)
+                {
+                    PUTswp$ver$Latitude$f (positionlat_list[swp$ver$index])
+                    PUTswp$ver$Longitude$f (positionlon_list[swp$ver$index])
+                }
+            }
+ 
+        }
+    }        # end of if attribute present
+}           # end of for loop
+ 
+return
+end
+ 
+
+ 
+subroutine ALSP_Get_UNT_Pointer (UNT$Pointer, alspid, located)
+#########################################################################
+#$%
+#$% Purpose:    ALSP_Get_UNT_Pointer locates the unit table entry which
+#$%             is associated with the ALSP id.
+#$%
+#$% Called by:  ALSP_Receive_Create
+#$%
+#$% Calls:      ALSP_Update_Error
+#$%
+#$% Tables:     UNT
+#$%
+#$% Date:       May 15, 1992
+#$%
+#$% Author:     Carol L. Kropp
+#$%
+#$% Modified:   Carol Kropp - May 6, 1993
+#$%             There may very well be two entries with the same ALSP
+#$%             id number, as the first may have a status of BeingDeleted.
+#$%             A second create may be received before REMOVE_UNITS is
+#$%             done and there is no guarantee that the two entries are
+#$%             in reference to the same unit (making the equipment chain
+#$%             invalid - so a new unit was created).
+#$%
+#########################################################################
+BBcommon
+ 
+integer  located, alspid
+integer  UNT$Pointer   # SMM 3/00
+integer  being_deleted_flag
+ 
+  being_deleted_flag = $no
+  located = $no
+  for (UNT$Pointer$First; UNT$Pointer$Valid; UNT$Pointer$Next)
+    {
+     if (xUNT$ALSPid$I == alspid)
+       {
+        if (xUNT$Status$I == $BeingDeleted$Code)
+            being_deleted_flag = $yes
+        else
+          {
+            located = $yes
+            being_deleted_flag = $no
+            break
+          }
+       }
+    }
+ 
+  if (being_deleted_flag == $yes)
+      call ALSP_Update_Error (alspid, $unit_deleted)
+ 
+return
+end
+
+ 
+subroutine ALSP_Get_BOY_Pointer (BOY$Pointer, alspid, located)
+#########################################################################
+#$%
+#$% Purpose:    ALSP_Get_BOY_Pointer locates the boy table entry which
+#$%             is associated with the ALSP id.
+#$%
+#$% Called by:  ALSP_Receive_Create
+#$%
+#$% Calls:      ALSP_Update_Error
+#$%
+#$% Tables:     BOY
+#$%
+#$% Date:       July 10, 2006
+#$%
+#$% Author:     James O. Allen
+#$%
+#########################################################################
+BBcommon
+ 
+integer  located, alspid
+integer  BOY$Pointer
+integer  being_deleted_flag
+ 
+being_deleted_flag = $no
+located = $no
+for (BOY$Pointer$First; BOY$Pointer$Valid; BOY$Pointer$Next)
+{
+    if (xBOY$ALSPid$I == alspid)
+    {
+        if (xBOY$KillTime$f <= game$time)
+            being_deleted_flag = $yes
+        else
+          {
+            located = $yes
+            being_deleted_flag = $no
+            break
+          }
+    }
+}
+ 
+  if (being_deleted_flag == $yes)
+      call ALSP_Update_Error (alspid, $boy_deleted)
+ 
+return
+end
+
+ 
+subroutine ALSP_Get_SWP_Pointer (SWP$Pointer, alspid, located)
+#########################################################################
+#$%
+#$% Purpose:    ALSP_Get_SWP_Pointer locates the SWP table entry which
+#$%             is associated with the ALSP id.
+#$%
+#$% Called by:  ALSP_Receive_Create
+#$%
+#$% Calls:      ALSP_Update_Error
+#$%
+#$% Tables:     SWP
+#$%
+#$% Date:       March 29, 2007
+#$%
+#$% Author:     James O. Allen
+#$%
+#########################################################################
+BBcommon
+ 
+integer  located, alspid
+integer  SWP$Pointer
+located = $no
+for (SWP$Pointer$First; SWP$Pointer$OK; SWP$Pointer$Next)
+{
+    if (xSWP$ALSPid$I == alspid)
+    {
+        located = $yes
+        break
+    }
+}
+ 
+  if (located == $no)
+      call ALSP_Update_Error (alspid, $swp_deleted)
+ 
+ 
+return
+end
+
+ 
+subroutine ALSP_Update_Error (alspid, error_code)
+#########################################################################
+#$%
+#$% Purpose:    ALSP_Update_Error send an error message to the swar
+#$%             terminal screen for an error occurring during update
+#$%             message processing.
+#$%
+#$% Called By:  ALSP_Receive_Update
+#$%
+#$% Calls:      Echo..
+#$%
+#$% Tables:     None
+#$%
+#$% Date:       May 15, 1992
+#$%
+#$% Author:     Carol L. Kropp
+#$%             Modified reused code from AWSIMS model translator.
+#$%
+#########################################################################
+BBcommon
+include "alsp_io_rat.inc"
+ 
+integer  alspid, error_code
+ 
+integer    msg_len, i
+character  message[100]
+vaxcharacter*100 v_message
+integer    i_switch_1  # SMM 3/00
+ 
+Equivalence  (message, v_message)
+ 
+  for (i = 1; i <= 100; i = i + 1)
+     message[i] = $SPACE
+ 
+  msg_len = 0
+  call smovv ("ALSP ERROR: Update for ALSPID = ", message, msg_len)
+  call smovi (alspid, message, msg_len)
+ 
+  switch(error_code)
+    {
+     case $incorrect_class: call smovv (" - Incorrect class type.", message, msg_len)
+     case $no_id_match:     call smovv (" - No matching ALSP id in unit table.",
+                                        message, msg_len)
+     case $unit_deleted:    call smovv (" - Only unit found has a status of being deleted.",
+                                        message, msg_len)
+     case $boy_deleted:    call smovv (" - Only buoy found has a status of being deleted.",
+                                        message, msg_len)
+     case $swp_deleted:    call smovv (" - Sweep Area not found.",
+                                        message, msg_len)
+     case $unit_is_not_a_ghost:
+                            call smovv (" - Unit is not a ghost, update rejected.",
+                                        message, msg_len)
+     case $zero_id:         call smovv (" - Zero ALSP id number.", message, msg_len)
+    }
+ 
+  if (ALSP$Logging == $ON)
+  {
+      write (msg_log_unit, fmt=*)
+      write (msg_log_unit, fmt=*) v_message         # write the message to the log file
+      write (msg_log_unit, fmt=*)
+  }
+ 
+return
+end
+
+ 
+subroutine ALSP_Update_Emitter_Eq (UNT$Pointer)
+#########################################################################
+#$%
+#$% Purpose:    ALSP_Update_Emitter_Eq updates the DEQ equipment chain for
+#$%             a ghosted unit, if an emitter is not present in the units
+#$%             DEQ chain, it is added.
+#$%
+#$% Called By:  ALSP_Receive_Update
+#$%
+#$% Calls:      Get_DEQ_Entry   <lbcommn.rat>
+#$%
+#$% Tables:     UNT     DEQ
+#$%
+#$% Date:       March 17, 1992
+#$%
+#$% Author:     Carol L. Kropp
+#$%
+#########################################################################
+BBCommon
+SensorCommon        # <alsp.inc>
+ 
+integer  UNT$Pointer
+ 
+integer  index, DEQ$Pointer, DEQ$Ident$I, DEQ$On$I, DEQ$Pntr$I
+integer  found_flag
+integer  DEQ$EmitterIndx$I
+real     JEW$OR$Bearing$F
+literal  cstrip8				  # SMM 3/00
+integer  DEQ$EM$Index, JEW$Pointer, JEW$OR$Index  # SMM 3/00
+integer  this_sensor_index
+ 
+    for (index = 1; index <= number_of_emitters; index = index + 1)
+    {
+        found_flag = $no
+        For_DEQ_Chain
+        {
+            DEQ$Pntr$I = xDEQ$Pntr$I
+            # if the sensor index matches the emitter index number then
+            # this is the one we want as opposed to pointer match since
+            # there may not be a pointer if this is not the first update
+            # message for this emitter
+            DEQ$EmitterIndx$I = xDEQ$EmitterIndx$I
+            this_sensor_index = mod(sensor_list_sensor_index[index], -
+                                jew$or$slots) + 1
+            if (DEQ$EmitterIndx$I == this_sensor_index)
+            {
+                # only change the state if it was part of the message
+                if (sensor_list_sensor_state[index] > -1)
+                {
+                    DEQ$On$I = sensor_list_sensor_state[index]
+                    putDEQ$On$I
+                }
+ 
+                DEQ$Ident$I = xDEQ$Ident$I
+                if (DEQ$Ident$I == $Jammer$Code |
+                    DEQ$Ident$I == $RadarJammer$Code |
+                    DEQ$Ident$I == $CommunicationJammer$Code |
+                    DEQ$Ident$I == $RadComJammer$Code)
+                {
+                    if (DEQ$On$I == $yes)
+                    {
+                       putDEQ$AllBands$I  ($yes)
+                       for (DEQ$EM$Index = 1; DEQ$EM$Index <= DEQ$EM$Slots;
+                                              DEQ$EM$Index = DEQ$EM$Index + 1)
+                          putDEQ$EM$Band$I ($yes)
+                    }
+                    else if (DEQ$On$I == $no)  # jammer equipment is off
+                    {
+                       putDEQ$AllBands$I  ($yes)
+                       for (DEQ$EM$Index = 1; DEQ$EM$Index <= DEQ$EM$Slots;
+                                              DEQ$EM$Index = DEQ$EM$Index + 1)
+                          putDEQ$EM$Band$I ($no)
+                    }
+ 
+                    JEW$Pointer$To (UNT$Pointer$Index)
+                    JEW$OR$Index = DEQ$EmitterIndx$I
+                    JEW$OR$Bearing$F = sensor_list_sensor_orient[index]
+                    putJEW$OR$Bearing$F
+                } # end if equipment is a jammer
+ 
+                found_flag = $yes
+                break
+            }
+        }
+ 
+        if (found_flag == $no)   # if the emitter was not present in the units
+        {                        # list of equipment - add it.
+            call Get_DEQ_Entry (UNT$Pointer, DEQ$Pointer) # updates UNT$NbrEQ$I
+ 
+            DEQ$Pntr$I  = sensor_list_characteristic_pointer[index]
+            if (DEQ$Pointer != 0)
+            {
+                putDEQ$Pntr$I
+ 
+                DEQ$Ident$I = sensor_list_sensor_code[index]
+                putDEQ$Ident$I
+ 
+                # only change the state if it was part of the message
+                # default to 0 - off
+                if (sensor_list_sensor_state[index] > -1)
+                {
+                    DEQ$On$I    = sensor_list_sensor_state[index]
+                    putDEQ$On$I
+                }
+ 
+                DEQ$EmitterIndx$I = mod(sensor_list_sensor_index[index], 10)+1
+                putDEQ$EmitterIndx$I
+ 
+                if (DEQ$Ident$I == $Jammer$Code |
+                    DEQ$Ident$I == $RadarJammer$Code |
+                    DEQ$Ident$I == $CommunicationJammer$Code |
+                    DEQ$Ident$I == $RadComJammer$Code)
+                {
+                    if (DEQ$On$I == $yes)
+                    {
+                       putDEQ$AllBands$I  ($yes)
+                       for (DEQ$EM$Index = 1; DEQ$EM$Index <= DEQ$EM$Slots;
+                                              DEQ$EM$Index = DEQ$EM$Index + 1)
+                          putDEQ$EM$Band$I ($yes)
+                    }
+                    else   # jammer equipment is off
+                    {
+                       putDEQ$AllBands$I  ($yes)
+                       for (DEQ$EM$Index = 1; DEQ$EM$Index <= DEQ$EM$Slots;
+                                              DEQ$EM$Index = DEQ$EM$Index + 1)
+                          putDEQ$EM$Band$I ($no)
+                    }
+ 
+                    JEW$Pointer$To (UNT$Pointer$Index)
+                    JEW$OR$Index = DEQ$EmitterIndx$I
+                    JEW$OR$Bearing$F = sensor_list_sensor_orient[index]
+                    putJEW$OR$Bearing$F
+                }
+            }
+            else
+            {
+                call echov  ("ALSP UPDATE EMITTER PROBLEM:")
+                call echov  ("  Unable to add emitter ")
+                call echohn ($$ExtLit(IBB[DEQ$Pntr$I],1,8),$$MaxLit) # jb E2208
+                call echov  (" to ")                        # /\  12/11/00
+                call echohn (xUNT$Name$C, $$MaxLit)
+                call echov  (" DEQ Table is full.")
+                call echor
+            }
+        }
+    }       # end of loop through emitter list
+ 
+return
+end
+
+ 
+subroutine ALSP_Update_Sonar_Eq (UNT$Pointer)
+#########################################################################
+#$%
+#$% Purpose:    ALSP_Update_Sonar_Eq updates sonars to the DEQ equipment chain for
+#$%             the ghosted unit.
+#$%
+#$% Called By:  ALSP_Receive_update
+#$%
+#$% Calls:
+#$%
+#$% Tables:     UNT     DEQ
+#$%
+#$% Date:       June 20, 2006
+#$%
+#$% Author:     James O. Allen
+#$%
+#########################################################################
+BBCommon
+SonarCommon        # <alsp.inc>
+ALSP$sonar_Common
+ 
+ BBDeclare  (UNT$Pointer,
+             DEQ$Pointer,
+             DEQ$Pntr$I,
+             DEQ$Ident$i,
+             DEQ$On$I,
+             DEQ$Lfapingindex$I,
+             DEQ$Emitterindx$I,
+             SON$Pulselengthsecs$I,
+             SON$Pulseintervalmin$I,
+             SON$Pointer,
+             PNG$Pointer,
+             PNG$Deqindx$I,
+             PNG$Untindx$I,
+             PNG$Pulselength$I,
+             PNG$Pinginterval$I,
+             PNG$Timeofnextping$F)
+ 
+ 
+integer  UNT$Type$I
+integer  index, iorder, kklen, found_flag
+literal  CSTRIP8
+Character msg[200]
+ 
+for (index = 1; index <= number_of_sonar_eq; index = index + 1)
+{
+    found_flag = $no
+    For_DEQ_Chain
+    {
+        DEQ$Pntr$I = xDEQ$Pntr$I
+        if (DEQ$Pntr$I != sonar_list_characteristic_pointer[index]) next
+        found_flag = $yes
+        break
+    }
+    if (found_flag == $NO)
+    {
+        call Get_DEQ_Entry (UNT$Pointer, DEQ$Pointer)   # updates UNT$NbrEQ$I
+        if (DEQ$Pointer == 0)
+        {
+            DEQ$Pntr$I  = sonar_list_characteristic_pointer[index]
+            call echov  ("ALSP SONAR PROBLEM:  ")
+            call echov  ("Unable to add sonar ")
+            call echohn ($$ExtLit(IBB[DEQ$Pntr$I],1,8),$$MaxLit)
+            call echov  (" to ")
+            call echohn (xUNT$Name$C, $$MaxLit)
+            call echov  (" DEQ Table is full.")
+            call echor
+            next
+        }
+ 
+        DEQ$Pntr$I  = sonar_list_characteristic_pointer[index]
+        putDEQ$Pntr$I
+ 
+        DEQ$Ident$I = sonar_list_code[index]
+        putDEQ$Ident$I
+    }
+ 
+    call ALSP_Update_Sonar_Eq_State (UNT$Pointer, index, deq$pointer)
+}
+ 
+return
+end
+
+ 
+subroutine ALSP_Update_Sonar_Eq_State (UNT$Pointer, index, deq$pointer)
+BBCommon
+SonarCommon        # <alsp.inc>
+ALSP$sonar_Common
+ 
+ BBDeclare  (UNT$Pointer,
+             DEQ$Pointer,
+             DEQ$Pntr$I,
+             DEQ$Ident$i,
+             DEQ$On$I,
+             DEQ$Lfapingindex$I,
+             DEQ$Emitterindx$I,
+             SON$Pulselengthsecs$I,
+             SON$Pulseintervalmin$I,
+             SON$Pointer,
+             PNG$Pointer,
+             PNG$Deqindx$I,
+             PNG$Untindx$I,
+             PNG$Pulselength$I,
+             PNG$Pinginterval$I,
+             PNG$Timeofnextping$F)
+ 
+ 
+integer  UNT$Type$I
+integer  index, iorder, kklen, found_flag
+literal  CSTRIP8
+Character msg[200]
+ 
+ 
+if (sonar_list_state[index] > -1)       # -1 means no value present
+{
+    call alsp_onoff(sonar_list_state[index],
+                    sonar_list_mode[index],
+                    DEQ$ON$I)
+    PUTDEQ$ON$I
+}
+ 
+# handle  VDS, LFA and sonar mode
+if (Xdeq$on$i != $NO)
+    iorder = $lex$activate$
+else
+    iorder = $lex$silence$
+ 
+son$pointer = Xdeq$Pntr$i
+ 
+if (XSON$VARIABLEDEPTH$I == $YES)    #if VDS
+{
+    #create/delete BOY table entry
+    call UPDBOY(unt$POINTER,
+                son$pointer,
+                iorder,           #iorder = activate or silence code
+                $vds$code)
+}
+ 
+if (xSON$ActiveLFA$I == $yes)         # if Active LFA source
+{
+    if (iorder == $lex$ACTIVATE$)     # if an activate command
+    {
+        kklen = 0
+        if (xDEQ$LFAPingIndex$I == 0)
+        {
+            for (PNG$Pointer$First; PNG$Pointer$Valid; PNG$Pointer$Next)
+            {
+                if (xPNG$InUse$I == $no)  # if available
+                    break
+            }
+            if (!PNG$Pointer$Valid)       # if no empty slots
+            {
+                call smovv ("No table space available", msg, kklen)
+                call smovv ("for ping information.", msg, kklen)
+                call send_ (xunt$view$i, 0, kklen, msg)
+            }
+            else
+            {
+                DEQ$LFAPingIndex$I = PNG$Pointer$Index
+                putDEQ$LFAPingIndex$I
+                PNG$DEQIndx$I = DEQ$Pointer$Index
+                putPNG$DEQIndx$I
+                PNG$UNTIndx$I = UNT$Pointer$Index
+                putPNG$UNTIndx$I
+            }
+        }
+        else
+            PNG$Pointer$To xDEQ$LFAPingIndex$I
+ 
+#               ALSP does not currently support pulse length and interval
+#                 Use limiting values in SON table
+ 
+        SON$PulseLengthSecs$I = xSON$PulseLengthSecs$I
+        PNG$PulseLength$I = SON$PulseLengthSecs$I
+        putPNG$PulseLength$I
+ 
+        SON$PulseIntervalMin$I = xSON$PulseIntervalMin$I
+        PNG$PingInterval$I = SON$PulseIntervalMin$I
+        putPNG$PingInterval$I
+ 
+        putPNG$PingSchedule$I ($no)
+        png$TimeOfNextPing$f = game$time
+        putpng$TimeOfNextPing$f
+    }
+    else            # Silence order
+    {
+        DEQ$LFAPingIndex$I = xDEQ$LFAPingIndex$I
+        if (DEQ$LFAPingIndex$I != 0)
+        {
+            PNG$Pointer$To  DEQ$LFAPingIndex$I
+            putPNG$PingSchedule$I ($no)
+            putpng$TimeOfNextPing$f (0)
+            putPNG$NmbrRemainingPings$I (0)
+            putPNG$NextScheduledPing$I (0)
+        }
+    }
+}
+ 
+return
+end
+ 
+
+ 
+subroutine ALSP_Map_CW2_Factors(UNT$Pointer,
+                                unit_ew_acq,
+                                unit_ew_launch,
+                                unit_ew_guide,
+                                unit_ew_power,
+                                unit_ew_surf,
+                                ew_c3)
+#########################################################################
+#$%
+#$% Purpose:    ALSP_Map_CW2_Factors updates the EW effectiveness data
+#$%             received from JECEWSI
+#$%
+#$% Called By:  ALSP_Receive_Update
+#$%
+#$% Calls:
+#$%
+#$% Tables:     UNT   JEW
+#$%
+#$% Date:       28 Oct. 1994
+#$%
+#$% Author:     Susan Miller
+#$%
+#$% Modified:   Susan Miller 10/95 (E1486)
+#$%             Added parameter unit_ew_surf for 1996 confed.
+#########################################################################
+BBCommon
+ 
+integer  UNT$Pointer
+real     unit_ew_acq[Number$EW$Sectors]
+real     unit_ew_launch[Number$EW$Sectors]
+real     unit_ew_guide[Number$EW$Sectors]
+real     unit_ew_power[Number$EW$Sectors]
+real     unit_ew_surf[Number$EW$Sectors]
+real     ew_c3
+ 
+integer  index
+real     JEW$C3Factor$F
+real     JEW$LaunchFactor1$F, JEW$LaunchFactor2$F, JEW$LaunchFactor3$F,
+         JEW$LaunchFactor4$F, JEW$LaunchFactor5$F, JEW$LaunchFactor6$F,
+         JEW$LaunchFactor7$F, JEW$LaunchFactor8$F
+real     JEW$SpjFactor1$F, JEW$SpjFactor2$F, JEW$SpjFactor3$F,
+         JEW$SpjFactor4$F, JEW$SpjFactor5$F, JEW$SpjFactor6$F,
+         JEW$SpjFactor7$F, JEW$SpjFactor8$F
+integer  JEW$Pointer, I_SWITCH_1
+ 
+# get the JEWEWSI pointer
+JEW$Pointer$To (UNT$Pointer$Index)
+ 
+JEW$C3Factor$F = ew_c3
+putJEW$C3Factor$F
+ 
+for (index = 1; index <= Number$EW$Sectors; index = index + 1)
+    {
+    switch (index)
+        {
+        case 1:
+            {
+            JEW$LaunchFactor1$F = unit_ew_launch[index]
+            JEW$SpjFactor1$F = unit_ew_guide[index]
+            putJEW$LaunchFactor1$F
+            putJEW$SpjFactor1$F
+            }
+        case 2:
+            {
+            JEW$LaunchFactor2$F = unit_ew_launch[index]
+            JEW$SpjFactor2$F = unit_ew_guide[index]
+            putJEW$LaunchFactor2$F
+            putJEW$SpjFactor2$F
+            }
+        case 3:
+            {
+            JEW$LaunchFactor3$F = unit_ew_launch[index]
+            JEW$SpjFactor3$F = unit_ew_guide[index]
+            putJEW$LaunchFactor3$F
+            putJEW$SpjFactor3$F
+            }
+        case 4:
+            {
+            JEW$LaunchFactor4$F = unit_ew_launch[index]
+            JEW$SpjFactor4$F = unit_ew_guide[index]
+            putJEW$LaunchFactor4$F
+            putJEW$SpjFactor4$F
+            }
+        case 5:
+            {
+            JEW$LaunchFactor5$F = unit_ew_launch[index]
+            JEW$SpjFactor5$F = unit_ew_guide[index]
+            putJEW$LaunchFactor5$F
+            putJEW$SpjFactor5$F
+            }
+        case 6:
+            {
+            JEW$LaunchFactor6$F = unit_ew_launch[index]
+            JEW$SpjFactor6$F = unit_ew_guide[index]
+            putJEW$LaunchFactor6$F
+            putJEW$SpjFactor6$F
+            }
+        case 7:
+            {
+            JEW$LaunchFactor7$F = unit_ew_launch[index]
+            JEW$SpjFactor7$F = unit_ew_guide[index]
+            putJEW$LaunchFactor7$F
+            putJEW$SpjFactor7$F
+            }
+        case 8:
+            {
+            JEW$LaunchFactor8$F = unit_ew_launch[index]
+            JEW$SpjFactor8$F = unit_ew_guide[index]
+            putJEW$LaunchFactor8$F
+            putJEW$SpjFactor8$F
+            }
+        } # end of case
+    } # end of for loop thru Number$EW$Sectors
+return
+end
+
+ 
+subroutine Update_ALSP_Ground_Unit_Entry (_
+                    param_flag,       # in: Array - presence of attributes (0=No)
+                    ALSP_Id,          # in: ID number
+                    ALSP_Class,       # in: CLASS enumeration code
+                    ALSP_Unit_Type,   # in: UNIT_TYPE enumeration code
+                    ALSP_Side,        # in: SIDE enumeration code
+                    ALSP_Size,        # in: SIZE enumeration code
+                    ALSP_Speed,       # in: Integer speed
+                    ALSP_Heading,     # in: Integer degree heading
+                    ALSP_Lat,         # in: Floating point d.ms
+                    ALSP_Long,        # in: Floating pointer d.ms
+                    ALSP_Name)        # in: String name
+#########################################################################
+#$%
+#$% Purpose:    To process ALSP UPDATE messages for GROUND.MANEUVER...
+#$%             units.  The information for these units is not part of
+#$%             the UNT table, since RESA is doing display only ghosting
+#$%             of the ground units.  The data is stored in the ALSP
+#$%             Ground Data (ADG) table.
+#$%
+#$% Called By:  ALSP_Receive_Update
+#$%
+#$% Calls:      ALSP_Update_Error
+#$%             Determine_Ground_Unit_MC
+#$%             Determine_Ground_Unit_RAD
+#$%             real
+#$%             read
+#$%
+#$% Tables:     AGD     MC     RAD
+#$%
+#$% Date:       Sept. 1995
+#$%
+#$% Author:     Carol L. Kropp
+#$%
+#########################################################################
+BBCommon
+ 
+integer  param_flag [MAX_PARAM]
+integer  ALSP_Id, ALSP_Class, ALSP_Unit_Type, ALSP_Side
+integer  ALSP_Size,  ALSP_Speed, ALSP_Heading
+real     ALSP_Lat, ALSP_Long
+vaxcharacter*max_str_len  ALSP_Name
+ 
+integer  AGD$Pointer
+integer  attr         # loop control variable
+integer  unit_type_translation
+integer  MC$Pointer
+integer  category, success
+integer  RAD$Pointer
+literal  AGD$Name$C					      # SMM 3/00
+integer  I_SWITCH_1, I_SWITCH_2, AGD$Side$I, AGD$Alspsize$I   # SMM 3/00
+integer  AGD$Mcpntr$I, AGD$Radpntr$I                          # SMM 3/00
+integer  find_agd_slot, indx
+real     AGD$Truecourse$F, AGD$Truelatitude$F, AGD$Truelongitude$F  # SMM 3/00
+real     AGD$Truespeed$F                                      # SMM 3/00
+BBDeclare (agd$alspid$i)
+ 
+indx = find_agd_slot (ALSP_Id,$NO)
+if (indx == 0)
+{
+    return
+}
+agd$pointer$to indx
+agd$ALSPID$i = Xagd$ALSPID$i
+if (agd$ALSPID$i == 0)              # Did not find alspid
+{
+    call ALSP_Update_Error (ALSP_Id, $no_id_match)
+}
+else
+{
+  if (param_flag [$latitude]  == $no &
+      param_flag [$longitude] == $no )
+    call Motion_Ground (AGD$Pointer,Model$Interval)
+ 
+    for (attr = 1; attr <= MAX_PARAM; attr = attr + 1)
+    {
+        if (param_flag[attr] != $no)
+        {
+            switch (attr)
+            {
+                case  $heading:
+                {
+                    AGD$TrueCourse$F = (ALSP_Heading * $PI) / 180.0
+                    putAGD$TrueCourse$F
+                }   # end case $heading
+                case  $latitude:
+                {
+                    AGD$TrueLatitude$F = (ALSP_Lat * $PI) / 180.0
+                    putAGD$TrueLatitude$F
+                }   # end case $latitude
+                case  $longitude:
+                {
+                    AGD$TrueLongitude$F = (ALSP_Long * $PI) / 180.0
+                    putAGD$TrueLongitude$F
+                }   # end case $longitude
+                case  $name:
+                {
+                    call move_str_lit (ALSP_Name, AGD$Name$C)
+                    putAGD$Name$C
+                }   # end case $name
+                case  $side:
+                {
+                    switch (ALSP_Side)
+                    {
+                       case $blue:      AGD$Side$I = $Blue$Code
+                       case $red:       AGD$Side$I = $Orange$Code
+                       case $neutral:   AGD$Side$I = $Neutral$Code
+                    }
+                    putAGD$Side$I
+                }   # end case $side
+                case  $size_attr:
+                {
+                    AGD$ALSPSize$I = ALSP_Size
+                    putAGD$ALSPSize$I
+                }   # end case $size_attr
+                case  $speed:
+                {
+                    AGD$TrueSpeed$F = REAL (ALSP_Speed / $knots_to_km)
+                    putAGD$TrueSpeed$F
+                }   # end case $speed
+                case $unit_type:
+                {
+                    call ALSP_Ground_Type_Translation (ALSP_Class, ALSP_Unit_Type,
+                                                       unit_type_translation)
+                    if (ALSP_Class == $alsp_class_ground_maneuver_himad |
+                        ALSP_Class == $alsp_class_ground_maneuver_allrad)
+                    {
+                       call ALSP_Map_Incoming_Weapon (ALSP_id, 0,
+                                                      unit_type_translation,
+                                                      $ground_to_air,
+                                                      MC$Pointer,
+                                                      category, success)
+                       if (success == $no)
+                         MC$Pointer$First
+                       AGD$MCPntr$I = MC$Pointer
+                       putAGD$MCPntr$I
+                    }
+                    else  # (ALSP_Class == $alsp_class_ground_maneuver_radar)
+                    {
+                       call Determine_Ground_Unit_RAD (unit_type_translation, RAD$Pointer)
+                       AGD$RADPntr$I = RAD$Pointer
+                       putAGD$RADPntr$I
+                    }
+                }   # end case $unit_type
+            }   # end of switch on the attribute
+        }   # end of if there is data for the attribute
+    }   # end of loop through the parameters
+} # end else
+ 
+return
+end
+
+ 
+subroutine alsp_receive_update_iff (_
+          UNT$Pointer,
+          iffmode_params_list,   # array - contains yes/no if the parameter is there
+          iffmode_status_list,   # array - contains the on/off codes for the iffmodes
+          iffmode_value_list)    # array - contains the values for iffmodes
+#########################################################################
+#$%
+#$% Purpose:    Stores IFF info in DEQ table
+#$%
+#$% Called By:  ALSP_RECEIVE_UPDATE
+#$%
+#$% Calls:      None
+#$%
+#$% Tables:     IFF    UNT
+#$%
+#$% Date:       February 1998
+#$%
+#$% Author:     Stephanie M. Paden
+#$%
+#$% Modified:   Carol Kropp - 2/98 (E1907)
+#$%             When looking for an appropriate IFF system, made sure it
+#$%             was a transponder.  Also handle the data in the message
+#$%             regardless of the master switch status.  A mode value can
+#$%             change even when the master switch is off.  Dropped the
+#$%             loop since it was really a series of if statements.
+#$%
+#########################################################################
+BBCommon
+ 
+integer   UNT$Pointer,
+          iffmode_status_list[Max$Alsp$Iffmodes],
+          iffmode_value_list[Max$Alsp$Iffmodes],
+          iffmode_params_list[Max$Alsp$Iffmodes]
+ 
+integer   base_8_to_base_10
+ 
+integer   found_iff
+integer   IFF$Pointer
+integer   mode1_digit[2]
+integer   DEQ$Pointer, DEQ$On$I, DEQ$Pntr$I
+integer   DEQ$IFFMODE1_digit1$I, DEQ$IFFMODE1_digit2$I # SMM 3/00
+integer   DEQ$Iffmode2$I, DEQ$Iffmode3$I, UNT$Type$I   # SMM 3/00
+integer   UNT$Truealtdepth$I                           # SMM 3/00
+ 
+ 
+  found_iff = $no
+ 
+  # get the status of MASTER
+  if (iffmode_params_list[1] != 0)
+    {
+     if (iffmode_status_list[1] == $iffmode_on)
+          DEQ$On$I = $yes
+     else DEQ$On$I = $no
+    }
+  #$%   Go thru DEQ table and search for an IFF entry
+  for_DEQ_Chain
+    {
+     if (xDEQ$Ident$I == $IFF$Code)
+        {
+         IFF$Pointer = xDEQ$Pntr$i     # make sure it is a transponder
+         if (xIFF$Function$i != $Interrogator$Code)
+           {
+            putDEQ$On$I
+            found_iff = $yes
+            break
+           }   # end of if the equipment is a transponder
+        }   # end of if the equipment is an IFF
+    }   # end of loop looking for a transponder
+ 
+  #$%   No entry is found so add an entry to the DEQ table
+  if (found_iff == $no)
+     {
+      for (IFF$Pointer$First; IFF$Pointer$OK; IFF$Pointer$Next)
+        {
+         if (xIFF$Function$I == $Transponder$Code)
+           {
+            call Get_DEQ_Entry (UNT$Pointer, DEQ$Pointer)
+            putDEQ$Ident$I  ($IFF$Code)
+            DEQ$Pntr$I = IFF$Pointer
+            putDEQ$Pntr$I
+            putDEQ$On$I
+            break
+           }
+        }
+      if (!IFF$Pointer$Ok)   # needs to be set in the database
+          return             # because it should never get to this point
+     }  #$%   end if found_iff == no
+ 
+  if (iffmode_params_list[2] != 0)    # Mode 1
+    {
+     mode1_digit[2] = MOD((iffmode_value_list[2]),10)
+     mode1_digit[1] = MOD((INT(iffmode_value_list[2]/10)),10)
+     DEQ$IFFMode1_Digit1$I = mode1_digit[1]
+     DEQ$IFFMode1_Digit2$I = mode1_digit[2]
+     if ((DEQ$IFFMode1_Digit1$I <= 7 & DEQ$IFFMode1_Digit1$I >= 0) &
+         (DEQ$IFFMode1_Digit2$I <= 3 & DEQ$IFFMode1_Digit2$I >= 0))
+       {
+        putDEQ$IFFMode1_Digit1$I
+        putDEQ$IFFMode1_Digit2$I
+       }   # end of if a legal mode 1 value
+    }  # end of if mode1 was in the message
+  if (iffmode_params_list[3] != 0)    # Mode 2
+    {
+     DEQ$IFFMode2$I = base_8_to_Base_10(iffmode_value_list[3])
+     putDEQ$IFFMode2$I
+    }
+  if (iffmode_params_list[4] != 0)    # Mode 3
+    {
+     DEQ$IFFMode3$I = base_8_to_Base_10(iffmode_value_list[4])
+     putDEQ$IFFMode3$I
+    }
+  if (iffmode_params_list[5] != 0)    # Mode C
+    {
+     UNT$Type$I = xUNT$Type$I
+     UNT$TrueAltDepth$I = xUNT$TrueAltDepth$I
+     if (iffmode_value_list[5] != UNT$TrueAltDepth$I & UNT$Type$I == $Air$Code)
+       {
+        UNT$TrueAltDepth$I = iffmode_value_list[5]
+        putUNT$TrueAltDepth$i
+       }
+    }
+  if (iffmode_params_list[6] != 0)    # Mode 4
+    {
+     if (iffmode_status_list[6] == $iffmode_off)
+       putDEQ$IFFMode4$I ($no)
+     else
+       putDEQ$IFFMode4$I ($yes)
+   }
+ 
+return
+end
+ 
+
+ 
+Subroutine MOTION_Ground (AGD$Pointer,    # in: unit AGD pointer
+                          elapsed_time)   # in: time since motion was processed
+#######################################################
+#$%
+#$% Purpose:   MOTION_Ground dead reckons ground units.
+#$%
+#$% Called By:
+#$%
+#$% Calls:     RRB2LL
+#$%
+#$% Tables:    AGD
+#$%
+#$% Date:      Jan 2007
+#$%
+#$% Author:    James O. Allen
+#$%
+#$%
+#######################################################
+BBcommon
+ 
+real     elapsed_time
+real     range, start_lat, start_lon
+real     cosTrueLat, rngdum
+ 
+BBDeclare  (agd$pointer,
+            agd$TrueLatitude$F,
+            agd$TrueLongitude$F,
+            agd$TrueCourse$F,
+            agd$TrueSpeed$F)
+ 
+range = xagd$TrueSpeed$F * ($Hours$Per$Minute * elapsed_time)  # get range unit can travel
+ 
+if (range > 0.0)    # if the unit can travel any distance - clk 3/7/94
+{
+    agd$TrueLatitude$F  = xagd$TrueLatitude$F   # get current latitude
+    agd$TrueLongitude$F = xagd$TrueLongitude$F  # get current longitude
+    CosTrueLat          = cos(agd$TrueLatitude$F)
+    agd$TrueCourse$F    = xagd$TrueCourse$F     # get current course
+ 
+    start_lat = agd$TrueLatitude$F              # save latitude
+    start_lon = agd$TrueLongitude$F             # save longitude
+ 
+    rngdum = 0.0
+    call RRB2LL (agd$TrueLatitude$F, agd$TrueLongitude$F,
+                    range, agd$TrueCourse$F,
+                    rngdum, CosTrueLat)
+ 
+    putagd$TrueLatitude$F        # store new latitude
+    putagd$TrueLongitude$F       # store new longitude
+}
+ 
+return
+end

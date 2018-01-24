@@ -1,0 +1,1041 @@
+# March 1993
+# WGOPATTACK.rat
+ 
+include "ascii.inc"              # include ascii constants
+include "orders.inc"             # $LEX$ definitions...
+include "bbcode.inc"             # def for blackboard & miscellaneous constants
+include "bbctl.inc"              # def for basic blackboard parameters
+include "bbord.inc"              # def for ORDERs
+include "bbrmt.inc"              # def for remote detections
+include "bbunt.inc"              # def for units
+include "bbdeq.inc"              # def for dynamic equipment
+include "bbmc.inc"               # def for missile characteristics
+include "bbbom.inc"              # def for bomb characteristics
+include "bbacc.inc"              # def for aircraft characteristics
+ 
+define (BBImplicit, Implicit None)
+ 
+define (Attack_common,
+        literal UNT$Name$C
+        integer UNT$View$I, UNT$Type$I
+        common /attack_com/ UNT$Name$C, UNT$View$I, UNT$Type$I)
+ 
+Subroutine OATTACK (ionum,        # Receive order number. (nord)
+                    unt$pointer,  # Receive addressee pointer. (upnt)
+                    iword,        # Receive word count. (nargs)
+                    ilex,         # Receive command string. (args)
+                    id)           # Receive order id number. (id)
+ 
+################################################################
+#$%
+#$% Purpose:   OATTACK processes the multiphase ATTACK order
+#$%
+#$% Called By: EXEORD
+#$%
+#$% Calls:     FNDORD   DEQGET  Bingo  Switch_ORD  Weap_ready
+#$%            save_station
+#$%            clear_maneuver_all
+#$%            restore_station
+#$%
+#$% Tables:    UNT  ORD
+#$%
+#$% Date:      March 1993
+#$%
+#$% Author:    Susan Miller
+#$%
+#$% Modified:  James Allen - 12/97 (E1370)
+#$%            Calls to save_station, clear_maneuver_all and
+#$%            restore_station added to clear current orders
+#$%            when the attack command is validated - to prevent
+#$%            unit "beamings".
+#$%
+################################################################
+BBcommon
+Attack_common
+ 
+# parameters
+integer ionum, UNT$Pointer, iword, id
+literal ILEX[iword]
+ 
+# locals
+character msg[ARB]
+literal cstrip8, ORD$W02$C
+integer ORD$Pointer, ORD$Phase$I, UNT$MultipleTarget$I, ORD$NbrofTracks$I
+integer msglen, nfound, ACC$Pointer
+integer eqlist[5,ARB]
+real    UNT$OrderedCourse$F, UNT$OrderedSpeed$F
+ 
+# Get attacker's name, type and view.
+UNT$Name$C = xUNT$Name$C
+UNT$Type$i = xUNT$Type$I
+UNT$View$i = xUNT$View$I
+ 
+UNT$MultipleTarget$I = xUNT$MultipleTarget$I
+ 
+# Get the order.
+call FNDORD (id,ORD$pointer)
+ 
+ORD$Phase$I = xORD$Phase$I
+ 
+if (ORD$Phase$I == 0)
+    {
+     if (UNT$Type$i != $Air$code)
+        {
+         #"XXXXX cannot perform attack; only aircraft can accept that command."
+         msglen = 0
+         call smovh (UNT$Name$c,$$MaxLit,msg,msglen)
+         call smovv (" cannot perform attack;",msg,msglen)
+         call smovv (" only aircraft can accept that command.",msg,msglen)
+         call send_ (UNT$View$I,0,msglen,msg)
+ 
+ 
+         ORD$Phase$I = 0 # delete the order
+         putORD$Phase$I
+ 
+         return
+        }
+ 
+    # if a UNT has the multiple target flag set to yes, then it
+    # is already processing an ATTACK order, so send an error message.
+    if (UNT$MultipleTarget$I == $yes)
+        {
+         #"XXXXX is already processing an ATTACK order.  Order ignored."
+         msglen = 0
+         call smovh (UNT$Name$c,$$MaxLit,msg,msglen)
+         call smovv (" is already processing an ATTACK order.  ",msg,msglen)
+         call smovv ("Order ignored.",msg,msglen)
+         call send_ (UNT$View$I,0,msglen,msg)
+ 
+         ORD$Phase$I = 0 # delete the order
+         putORD$Phase$I
+ 
+         return
+        }
+ 
+    }
+ 
+# does the A/C have any ASMs?
+nfound = 0
+call DEQGET(UNT$Pointer,    # receive UNT pointer
+            $ASM$CODE,      # receive equipment ident code
+            nfound,         # receive/return nbr items fnd
+            eqlist)         # receive/return list of EQ
+ 
+# does the A/C have any bombs?
+call DEQGET(UNT$Pointer,    # receive UNT pointer
+            $BOMB$CODE,     # receive equipment ident code
+            nfound,         # receive/return nbr items fnd
+            eqlist)         # receive/return list of EQ
+ 
+# if the A/C doesn't have any bombs or ASMs, send a message
+if (nfound == 0)
+    {
+     if (ORD$Phase$I == 0)
+        {
+         #"XXXXX cannot attack tracks.  No ASM/BOMB on board."
+         msglen = 0
+         call smovh (UNT$Name$c,$$MaxLit,msg,msglen)
+         call smovv (" cannot attack tracks.  No ASM/BOMB on board.",msg,msglen)
+         call send_ (UNT$View$I,0,msglen,msg)
+        }
+     else
+        {
+         #"XXXXX all ASM/BOMB expended.  Discontinuing attack.  RTB"
+         msglen = 0
+         call smovh (UNT$Name$c,$$MaxLit,msg,msglen)
+         call smovv (" all ASM/BOMB expended.  ",msg,msglen)
+         call smovv ("Discontinuing attack.  RTB",msg,msglen)
+         call send_ (UNT$View$I,0,msglen,msg)
+ 
+         call bingo (UNT$Pointer)
+        }
+ 
+     ORD$Phase$I = 0 # delete the order
+     putORD$Phase$I
+ 
+     return
+    }
+else # A/C has bombs or ASMs
+    {
+     if (ORD$Phase$I == 0) # if this is the beginning of the order
+        {
+         ORD$Phase$I = 1
+         putORD$Phase$I
+ 
+         call save_station (UNT$Pointer)       # joa - 12/97 (E1370/E1246)
+         call clear_maneuver_all (xORD$Code$I, xORD$Id$I, xORD$View$I, UNT$Pointer)
+         call restore_station (UNT$Pointer)
+ 
+         putUNT$MultipleTarget$I ($yes)
+         if (ilex[iword-1] == $lex$STANDOFF$)
+             putORD$NbrofTracks$I (iword - 3)
+         else
+             putORD$NbrofTracks$I (iword - 1)
+        }
+     else # the order phase is not 0, some part of the order has
+        { # already been executed...
+         ORD$NbrofTracks$I = xORD$NbrofTracks$I
+         ORD$W02$C = xORD$W02$C
+ 
+         if (xUNT$AttackedTarget$I == $Yes) # previous track has been attacked
+            {
+             if (ORD$NbrofTracks$I > 1) # more tracks to attack
+                {
+                 call switch_ORD(ORD$Pointer, ORD$NbrofTracks$I, ORD$W02$C)
+                 putUNT$AttackedTarget$I ($no)   # reset
+ 
+                 ORD$Phase$I = 1
+                 putORD$Phase$I
+                }
+             else if (ORD$NbrofTracks$I == 1) # already prosecuted the only track
+                {
+                 if (xUNT$engageStatus$I == $EngagementOver$Code)
+                    {
+                     #"XXXXX has completed ordered attacks."
+                     msglen = 0
+                     call smovh (UNT$Name$c,$$MaxLit,msg,msglen)
+                     call smovv (" has completed ordered attacks.  ",msg,msglen)
+                     call send_ (UNT$View$I,0,msglen,msg)
+ 
+                     putUNT$MultipleTarget$I ($no)
+ 
+                     ACC$Pointer = xUNT$AccPntr$i # get aircraft pointer
+                     UNT$OrderedSpeed$F = xACC$CruiseSpeed$i
+                     putUNT$OrderedSpeed$F
+ 
+                     putUNT$RulesOfEngage$I ($IfAttacked$code)
+                     putUNT$status$i ($proceeding$code)
+                     putUNT$AssignedTarget$I ($NO)
+                     putUNT$AttackIndx$I ($NO)
+ 
+                     putUNT$LastManeuverOrderCode$I (NO$order)   # Remove maneuver restrictions - joa 12/97 (E1370/E1832)
+ 
+                     ORD$Phase$I = 0
+                     putORD$Phase$I
+ 
+                     return
+                    } # end if engagement is over
+                } # end if there is only one track
+            } # end if track has been attacked
+        } # end if the order phase is not 0
+    } # end if the A/C has bombs or ASMs
+ 
+if ((ORD$Phase$I >= 1) & (xORD$NbrofTracks$I > 0))
+    call Weap_ready(ilex,iword,eqlist,nfound,
+                    ORD$Pointer,UNT$Pointer)
+ 
+return
+end
+
+ 
+ 
+Subroutine Weap_ready (ilex,        # receive command string
+                       iword,       # receive word count
+                       eqlist,      # receive equipment list
+                       nfound,      # receive total # of weapons found
+                       ORD$Pointer, # receive pointer into order table
+                       UNT$Pointer) # receive A/C pointer
+ 
+################################################################
+#$%
+#$% Purpose:   Weap_ready loops through the list of tracks, finds
+#$%            a valid track and assigns the target to the attacker
+#$%
+#$% Called By: OATTACK
+#$%
+#$% Calls:     Verify_track  switch_ORD  Valid_track
+#$%
+#$% Tables:    UNT  ORD  RMT
+#$%
+#$% Date:      March 1993
+#$%
+#$% Author:    Susan Miller
+#$%
+#$% Modified:  Susan Miller 8/6/96 (E1475)
+#$%            Made changes to handle problem when the track being
+#$%            processed is out of range and the next track is not
+#$%            valid, which caused the wargame to loop.
+#$%
+#$%            James Allen - 12/97 (E1852)
+#$%            When the engagement maneuver is complete, clear the
+#$%            LastManeiverOrderCode in the UNT table.
+#$%
+################################################################
+BBcommon
+Attack_common
+ 
+# parameters
+integer iword, eqlist[5,ARB], nfound
+literal ILEX[iword]
+integer ORD$Pointer, UNT$Pointer
+ 
+# locals
+literal   ORD$W02$C, cstrip8
+integer   msglen, invalid_track, sent_message
+integer   ORD$Phase$I, RMT$Pointer, ORD$NbrofTracks$I
+character msg[ARB]
+ 
+invalid_track = $yes
+sent_message = $no
+msglen = 0
+ORD$NbrofTracks$I = xORD$NbrofTracks$I
+ 
+while (invalid_track == $yes)
+    {
+     ORD$W02$C = xORD$W02$C
+     RMT$Pointer = 0
+     call verify_track(ORD$W02$C, msg, msglen, invalid_track,
+                        UNT$Pointer, RMT$Pointer)
+ 
+     # if track was invalid
+     if (invalid_track == $yes)
+        {
+         # if there is another track in the command, dump current
+         # track and check the next track
+         if (ORD$NbrofTracks$I > 1)
+            {
+             call switch_ORD(ORD$Pointer, ORD$NbrofTracks$I, ORD$W02$C)
+ 
+             call smovv(".  Attacking ",msg,msglen)
+             call smovhn(ORD$W02$C,$$MaxLit,msg,msglen)
+             call send_(UNT$View$i,0,msglen,msg)
+ 
+             ORD$Phase$I = 1
+             putORD$Phase$I
+            } # end if more than one track to attack
+         else
+            break
+        } # end if track was invalid
+ 
+     # if it is a valid target, it may still be out of intercept
+     # range so need to check whether it can be intercepted and if
+     # not and there is another target in the que, test that one
+     else    # invalid_track != $yes
+        {
+         call Valid_track (eqlist, nfound,
+                           UNT$Pointer, RMT$Pointer, ORD$Pointer,
+                           invalid_track, sent_message)
+ 
+         # if track was outside of range and there are more tracks to
+         # attack, attack the next track number # SMM 8/96 (E1475)
+         if (invalid_track != 0)
+           {
+            if (xORD$NbrofTracks$I > 1)
+               {
+                call smovv  (" cannot intercept ",msg,msglen)
+                call smovhn (ORD$W02$C,$$MaxLit,msg,msglen)
+                call smovv  (".  Attacking ",msg,msglen)
+ 
+                call switch_ORD (ORD$Pointer, ORD$NbrofTracks$I, ORD$W02$C)
+ 
+                call smovhn (ORD$W02$C,$$MaxLit,msg,msglen)
+                call smovv  (".  ",msg,msglen)
+                call send_   (UNT$View$i,0,msglen,msg)
+ 
+                ORD$Phase$I = 1
+                putORD$Phase$I
+ 
+                sent_message = $yes
+                break
+               } # end if more than one track to attack
+            if (sent_message == $yes)
+              break
+           } # end if not a valid track
+        } # end if this is a valid track
+    } # end while invalid_track
+ 
+if (sent_message == $no & invalid_track == $yes)   # delete the order
+   {                                               # smm 8/96 (E1475)
+    call smovv (".  Discontinuing attack.  ", msg, msglen)
+    call send_  (UNT$View$i, 0, msglen, msg)
+    ORD$Phase$I = 0
+    putORD$Phase$I
+ 
+    putUNT$AssignedTarget$I ($no)
+    putUNT$MultipleTarget$I ($no)
+    putUNT$Attackindx$I     ($no)
+    putUNT$AttackedTarget$I ($no)
+    putUNT$InterceptTime$F  (0.0)
+    putUNT$Status$I         ($Proceeding$Code)
+    putUNT$LastManeuverOrderCode$I (NO$order)   # Remove maneuver restrictions - joa 12/97 (E1852)
+   }
+ 
+return
+end
+
+ 
+ 
+Subroutine Verify_track (track_name,       # receive track name
+                         msg,              # return error message
+                         msglen,          # return length of msg
+                         invalid_track,    # return yes or no
+                         UNT$Pointer,      # receive A/C unit pointer
+                         RMT$Pointer)      # return RMT pointer
+ 
+################################################################
+#$%
+#$% Purpose:   Verify_track checks to see whether a track has a
+#$%            valid RMT pointer, checks the age of the track,
+#$%            checks to see if it is a passive track, returns
+#$%            invalid_track = $yes if track is invalid.
+#$%
+#$% Called By: Weap_ready
+#$%
+#$% Calls:     GtAct
+#$%
+#$% Tables:    UNT  RMT
+#$%
+#$% Date:      March 1993
+#$%
+#$% Author:    Susan Miller
+#$%
+################################################################
+BBcommon
+Attack_common
+ 
+# parameters
+literal   track_name
+integer   msglen, invalid_track, UNT$Pointer, RMT$Pointer
+character msg[ARB]
+ 
+# locals
+integer   is_it_old, bearing_only
+integer   RMT$Detectee$I, RMT$DetectionAge$I
+integer   UNT2$Pointer
+integer   target, target_type
+ 
+msglen = 0
+is_it_old = 0
+invalid_track = $no
+ 
+# check to see if track is valid, returns RMT$Pointer and bearing_only
+call GtAct(UNT$View$I,track_name,RMT$Pointer,bearing_only)
+ 
+if (RMT$Pointer != 0)                           # if track found
+    {
+     RMT$DetectionAge$I = xRMT$DetectionAge$I
+ 
+     if (RMT$DetectionAge$I == $Old$Code)       # active track old
+        {
+         is_it_old = YES
+        }
+ 
+     call smovhn(UNT$Name$C,$$MaxLit,msg,msglen)
+     if (is_it_old == YES)                      # output old track
+        {
+         # "xxxxx cannot attack old track xxxxx"
+         call smovv(" cannot attack old track ",msg,msglen)
+         invalid_track = $yes
+        }
+ 
+     else if (bearing_only == YES)              # output passive track
+        {
+         # "xxxxx cannot attack passive track xxxxx"
+         call smovv(" cannot attack passive track ",msg,msglen)
+         invalid_track = $yes
+        }
+ 
+     else if (xrmt$targetid$i==$friendly$code)  # output friendly trk
+        {
+         # "xxxxx cannot attack friendly track xxxxx"
+         call smovv(" cannot attack friendly track ",msg,msglen)
+         invalid_track = $yes
+        }
+ 
+     else if (xrmt$OverHoriz$i == $YES)         # output OTH track
+        {
+         # "xxxxx cannot attack OTH track xxxxx"
+         call smovv(" cannot attack OTH track ",msg,msglen)
+         invalid_track = $yes
+        }
+ 
+    else # valid track number, need to check the type of the detectee
+        {
+         RMT$Detectee$I = xRMT$Detectee$I
+         UNT2$Pointer$To RMT$Detectee$I
+         # get unit detected & class
+         target = RMT$Detectee$I
+         target_type = xRMT$Class$I
+ 
+         if ((UNT$Type$i == $Air$code) & (target_type != $Surface$Code))
+            {
+             # "xxxxx cannot attack non-surface track xxxxx"
+             call smovhn(UNT$Name$C,$$MaxLit,msg,msglen)
+             call smovv(" cannot attack non-surface track ",msg,msglen)
+             invalid_track = $yes
+            }
+        }
+    } # end if RMT$Pointer != 0
+ 
+else # (rmt$pointer == 0)                       #if invalid track number
+    {
+     # move message to array for display
+     call smovhn(UNT$Name$C,$$MaxLit,msg,msglen)
+     call smovv(" cannot attack invalid track ",msg,msglen)
+     invalid_track = $yes
+    }
+ 
+if (invalid_track == $yes)
+    {
+     call smovhn(track_name,$$MaxLit,msg,msglen)
+    }
+ 
+return
+end
+
+ 
+Subroutine Longest_weap_range (eqlist,      # receive equipment list
+                               number_found,# receive total # of weapons found
+                               Max_range,   # return longest range
+                               equip_index) # return index of longest range
+                                            # weapon
+################################################################################
+#$%
+#$% Purpose:    Longest_weap_range loops through the array Eqlist, which was
+#$%             filled in DEQGET as follows:
+#$%                  eqlist[1,nfound] = DEQ$Pointer$index # save index of eqpmt
+#$%                  eqlist[2,nfound] = Xdeq$pntr$i       # equipment pointer
+#$%                  eqlist[3,nfound] = deq$remaining$i   # equipment count
+#$%                  eqlist[4,nfound] = 0                 #
+#$%                  eqlist[5,nfound] = 0                 #
+#$%             and finds the ASM or BOMB with the longest range and returns
+#$%             the index of that weapon in the eqlist.
+#$%
+#$% Called By:  Valid_track
+#$%
+#$% Tables: DEQ  MC  BOM
+#$%
+#$% Date:   9 March 1993
+#$%
+#$% Author: Susan Miller
+#$%
+################################################################################
+BBCommon
+ 
+#parameters
+integer eqlist[5,ARB], Number_found, max_range, equip_index
+ 
+#locals
+integer DEQ$Pointer, DEQ$Ident$I
+integer MC$Pointer, BOM$Pointer
+integer N, range
+ 
+max_range = -1   # initialize max range
+ 
+for (N=1; N <= Number_found; N=N+1)       # do for all missiles found
+    {
+     if (Eqlist[3,N] <= 0) next           # out of stock
+ 
+     Deq$Pointer$TO eqlist[1,N]
+     DEQ$Ident$I = xDEQ$Ident$I           # is it an ASM or BOMB?
+ 
+     if (DEQ$Ident$I == $ASM$CODE)
+        {
+         MC$Pointer = Eqlist[2,N]         # get missile pointer
+         range = xMC$MaxRange$I           # get missile max range
+        }
+     if (DEQ$Ident$I == $BOMB$CODE)
+        {
+         BOM$Pointer = Eqlist[2,N]        # get missile pointer
+         range = xBOM$DropRange$I         # get missile max range
+        }
+ 
+     Eqlist[4,N] = range          # save the range
+     if(range > Max_range)        # if a longer range weapon
+        {
+         Max_range = range        # save new weapon range
+         equip_index = N        # save weapon index
+        }   # end if closer range
+    }   # end do all missiles
+ 
+return
+end     # end of Longest_weap_range
+
+ 
+Subroutine Switch_ORD (_
+                  ORD$Pointer,        # receive pointer into ORD table
+                  ORD$NbrofTracks$I,  # receive/return number of args in order
+                  ORD$W02$C)          # receive/return current target
+ 
+################################################################################
+#$%
+#$% Purpose:    Switch_ORD moves the target names up in the ORD list overwriting
+#$%             the first invalid target and resets the number of arguements
+#$%
+#$% Called By:  Weap_ready
+#$%
+#$% Tables:     ORD
+#$%
+#$% Date:       15 March 1993
+#$%
+#$% Author:     Susan Miller
+#$%
+################################################################################
+BBCommon
+ 
+# parameters
+integer ORD$Pointer, ORD$NbrofTracks$I
+literal ORD$W02$C
+ 
+# locals
+integer switch_cnt, i_switch_1
+literal cstrip8, ORD$W03$C, ORD$W04$C, ORD$W05$C, ORD$W06$C
+ 
+switch_cnt = ORD$NbrofTracks$I
+ 
+switch (switch_cnt)
+    {
+     case 2:
+        {
+         ORD$W02$C = xORD$W03$C
+         putORD$W02$C
+        }
+     case 3:
+        {
+         ORD$W02$C = xORD$W03$C
+         ORD$W03$C = xORD$W04$C
+         putORD$W02$C
+         putORD$W03$C
+        }
+     case 4:
+        {
+         ORD$W02$C = xORD$W03$C
+         ORD$W03$C = xORD$W04$C
+         ORD$W04$C = xORD$W05$C
+         putORD$W02$C
+         putORD$W03$C
+         putORD$W04$C
+        }
+     case 5:
+        {
+         ORD$W02$C = xORD$W03$C
+         ORD$W03$C = xORD$W04$C
+         ORD$W04$C = xORD$W05$C
+         ORD$W05$C = xORD$W06$C
+         putORD$W02$C
+         putORD$W03$C
+         putORD$W04$C
+         putORD$W05$C
+        }
+     case 6:
+        {
+         ORD$W02$C = xORD$W03$C
+         ORD$W03$C = xORD$W04$C
+         ORD$W04$C = xORD$W05$C
+         ORD$W05$C = xORD$W06$C
+         ORD$W06$C = xORD$W07$C
+         putORD$W02$C
+         putORD$W03$C
+         putORD$W04$C
+         putORD$W05$C
+         putORD$W06$C
+        }
+    } # end of switch statement
+ 
+ORD$NbrofTracks$I = ORD$NbrofTracks$I - 1
+putORD$NbrofTracks$I
+ 
+return
+end     # end of Switch_ORD
+
+ 
+Subroutine Valid_track (eqlist,         # receive equipment list
+                        nfound,         # receive total # of weapons found
+                        UNT$Pointer,    # receive A/C pointer
+                        RMT$Pointer,    # receive RMT pointer
+                        ORD$Pointer,    # receive ORD pointer
+                        invalid_track,  # return whether track is valid
+                        sent_message)   # return whether message was sent
+ 
+################################################################################
+#$%
+#$% Purpose:    Valid_track calls longest_weap_range to calculate the range
+#$%             at which the A/C has to close before it can fire an ASM or
+#$%             bomb.  Vector_attacker is called to find the intercept time
+#$%             for the closest point before firing.  If the returned intercept
+#$%             time is greater than or equal 0 or -3, then the track is still
+#$%             valid, so set the A/C assigned target, intercepttime and status.
+#$%             If the intercept time is any other negative number, then the
+#$%             track is no longer valid and if this is the last or only track,
+#$%             send a message that the A/C is discontinuing the attack and set
+#$%             the ORD$phase to 0 so the order will be deleted.
+#$%
+#$% Called By:  Weap_ready
+#$%
+#$% Calls:      Longest_weap_range  Vector_attacker  OACTIV
+#$%
+#$% Tables:     UNT  RMT  ORD
+#$%
+#$% Date:       March 1993
+#$%
+#$% Author:     Susan Miller
+#$%
+#$% Modified:   Susan Miller 8/96 (E1475)
+#$%             Added clearing of variables MultipleTarget, InterceptTime
+#$%             and setting Status to proceeding when the last track is
+#$%             not valid.
+#$%
+#$%            James Allen - 12/97 (E1852)
+#$%            When the engagement maneuver is complete, clear the
+#$%            LastManeiverOrderCode in the UNT table.
+#$%
+################################################################################
+BBCommon
+Attack_common
+ 
+# parameters
+integer eqlist[5,ARB], nfound, invalid_track, sent_message
+integer UNT$Pointer, UNT2$pointer, RMT$Pointer, ORD$Pointer, ORD$Phase$I
+ 
+# locals
+integer   ord$wrd$index
+integer   msglen, Max_range, equip_index, shortest_range, i
+integer   UNT$AssignedTarget$I, acc$pointer
+real      intercept_time, unt$InterceptTime$f
+real      standoff_range, intercept_range
+real      rng, brg
+integer   UNT$AttackIndx$I, RMT$Detectee$I
+literal   ORD$W02$C, cstrip8, act_surf[5]
+character msg[ARB]
+ 
+data act_surf/$lex$ACTIVATE$, $lex$SURFACE$, 0, 0, 0/
+ 
+max_range = 0
+standoff_range = 0.0
+ 
+# find standoff range if any in order            joa 2/05 per_sor
+for (ord$wrd$index = 1; ord$wrd$index <= Xord$NbrArgs$i;
+     ord$wrd$index = ord$wrd$index + 1)
+{
+    # look for RANGE lex code and if found set standoff range
+    if (Xord$Wrd$$C == $lex$STANDOFF$)
+    {
+        ord$wrd$index = ord$wrd$index + 1
+        standoff_range = Xord$Wrd$$C
+        break
+    }
+}
+ 
+# Standoff range priority is order, air characteristic, and loaded weapons
+ACC$Pointer = xUNT$AccPntr$i       # get aircraft pointer
+if (standoff_range == 0.0) standoff_range = Xacc$StandoffRange$f
+ 
+# find the weapon with the longest range
+call Longest_weap_range (_
+                        eqlist,      # send equipment list
+                        nfound,      # send total # of weapons found
+                        Max_range,   # receive longest range
+                        equip_index) # receive index of longest range weapon
+shortest_range = 1024
+for (i = 1; i <= nfound; i = i + 1)
+{
+    if (eqlist[4,i] < shortest_range) shortest_range = eqlist[4,i]
+}
+ 
+# Use standoff_range as intercept range if entered, else weapon max range
+if (standoff_range != 0.0)  intercept_range = standoff_range
+else                        intercept_range = shortest_range
+ 
+# Send warning message if standoff_range greater than max range weapon
+if (standoff_range > max_range)     # joa 2/04 per_sor
+{
+    msglen = 0
+    call smovv ("WARNING: ",msg,msglen)
+    call smovh (UNT$Name$c,$$MaxLit,msg,msglen)
+    call smovv (" standoff range of ",msg,msglen)
+    call smovf (standoff_range, 501, msg, msglen)
+    call smovv (" nmi exceeds max weapon range of ",msg,msglen)
+    call smovi (max_range, msg, msglen)
+    call smovv (" nmi.",msg,msglen)
+    call send_(UNT$View$i,0,msglen,msg)
+}
+ 
+# can the target be intercepted?  if so, vector A/C toward
+# target at vector speed, set ordered speed, ordered course,
+# intercept time, range to next
+intercept_time = -1.
+call Vector_attacker (UNT$Pointer,      # send unit pointer
+                      RMT$Pointer,      # send target remote pointer
+                      ORD$Pointer,      # send order pointer
+                      intercept_range,  # send intercept range
+                      intercept_time)   # receive time of intercept
+ 
+# if intercept_time is returned as >= 0, # of minutes to intercept
+if ((intercept_time >= 0) | (intercept_time == -3))
+    {
+     call OACTIV(ATTACK$order,UNT$Pointer,2,act_Surf)
+ 
+     RMT$Detectee$I = xRMT$Detectee$I
+     UNT$AssignedTarget$I = RMT$Detectee$I
+     UNT$AttackIndx$I = RMT$Detectee$I
+     unt$InterceptTime$f = game$Time + MAX(0.,intercept_time)
+ 
+     putunt$InterceptTime$f
+     putUNT$AssignedTarget$I
+     putUNT$AttackIndx$I
+     putUNT$Status$I ($PROCEEDING$CODE)
+     putUNT$AttackedTarget$I ($no)
+     putUNT$LastManeuverOrderCode$I (NO$order)   # Remove maneuver restrictions - joa 12/97 (E1852)
+ 
+     # If no station, Assign station to current position from launching base
+     if (Xunt$GuideIndx$i == 0 & Xunt$LaunchIndx$i != 0)
+     {
+        unt2$pointer$to Xunt$LaunchIndx$i
+        call getrb_m (unt2$pointer, unt$pointer, rng, brg)
+ 
+        call ang2PI(brg)
+ 
+        PUTunt$GuideIndx$i(Xunt$LaunchIndx$i)
+        PUTunt$GuideRange$F(rng)
+        PUTunt$GuideBearing$F(brg)
+        PUTunt$GuideTrue$i($YES)
+     }
+ 
+     return
+    } # end if track can be intercepted
+ 
+else # else track cannot be intercepted
+    {
+     invalid_track = $yes
+     # if ORD$NbrofTracks$I is 1, then this is the last or only target
+     # in the entered order, so send a failure message and return
+     if (xORD$NbrofTracks$I == 1)
+        {
+         ORD$W02$C = xORD$W02$C
+         msglen = 0
+         call smovh (UNT$Name$c,$$MaxLit,msg,msglen)
+         call smovv (" cannot intercept ",msg,msglen)
+         call smovhn(ORD$W02$C,$$MaxLit,msg,msglen)
+         call smovv(".  Discontinuing attack.  ",msg,msglen)
+         call send_(UNT$View$i,0,msglen,msg)
+         sent_message = $yes
+ 
+         ORD$Phase$I = 0 # delete the order
+         putORD$Phase$I
+ 
+         UNT$AssignedTarget$I = 0 # deassign target
+         putUNT$AssignedTarget$I
+         putUNT$MultipleTarget$I ($no)
+         putUNT$AttackIndx$I (0)
+         putUNT$AttackedTarget$I ($no)
+         putUNT$InterceptTime$F  (0.0)
+         putUNT$Status$I         ($Proceeding$Code)
+         putUNT$LastManeuverOrderCode$I (NO$order)   # Remove maneuver restrictions - joa 12/97 (E1852)
+         return
+        }
+    } # end if track cannot be intercepted
+ 
+return
+end     # end of valid_track
+
+ 
+Subroutine Vector_attacker (_
+              UNT$Pointer,    # in: Attacker's UNT pointer
+              RMT$Pointer,    # in: Remote Detection pointer
+              ORD$Pointer,    # in: Attack command ORD pointer
+              intercept_rng,  # in: intercept range in nmi
+              int_time)       # in: amt of time in minutes to intercept
+################################################################################
+#$%
+#$% Purpose:    Vector_attacker sets up variables in the attackers UNT slot
+#$%             to vector the attacker to the target
+#$%
+#$% Called By:  Valid_track
+#$%
+#$% Calls:      ang2PI  RRB2LL  RLL2RB  rmin_to_target
+#$%
+#$% Tables:     UNT  RMT
+#$%
+#$% Date:       March 1993
+#$%
+#$% Author:     Susan Miller
+#$%
+#$% Modified:   Carol Kropp - 11/93 (Variable Time Step)
+#$%
+################################################################################
+BBCommon
+Attack_common
+ 
+# parameters
+integer UNT$Pointer, RMT$Pointer, ORD$Pointer
+real    intercept_rng
+real    int_time
+ 
+# locals
+literal cstrip8
+real    att_lat, att_lon, att_cos, tar_lat, tar_lon, tar_cos
+real    range, brng, spdmax, tar_crs, tar_spd
+real    int_lat, int_lon, int_cos, prng, hdng, range_togo
+real    UNT$OrderedCourse$F, UNT$RangetoNext$F, travel
+integer msglen
+integer ACC$Pointer
+real    det_age, rmt$LastDetTime$f, unt$InterceptTime$f
+integer UNT2$Pointer, UNT2$Type$I, ORD$Phase$I
+integer display_speed, display_course, display_travel, display_time
+character msg[ARB]
+real    min_to_intercept    # clk 11/93
+ 
+# get attacker's true position
+att_lat = XUNT$TrueLatitude$f
+att_lon = XUNT$TrueLongitude$f
+att_cos = XUNT$CosTrueLat$f
+ 
+if (xRMT$TMAFlag$I == YES)              # if tma target
+    {
+    tar_lat = xRMT$TMALat$F             # get TMA position
+    tar_lon = xRMT$TMALon$F
+    tar_cos = COS(tar_lat)
+    }
+else                                    # active/visual target
+    {
+    tar_lat = xRMT$Apparentlat$F         # get apparent position
+    tar_lon = xRMT$ApparentLon$F
+    tar_cos = COS(tar_lat)
+    }
+ 
+tar_crs = xRMT$Course$I * ($PI/180.)    # get target course & speed
+call ang2PI(tar_crs)
+tar_spd = xRMT$Speed$I
+ 
+rmt$LastDetTime$f = xrmt$LastDetTime$f
+det_age = Game$Time - rmt$LastDetTime$f - 1
+ 
+# if target track is not too old, calculate
+# how far the target has traveled
+if (det_age > 0 & det_age < Minutes$To$Old)
+    {
+     travel = tar_spd * det_age/$Minutes$Per$Hour  # nmi/hour * hour = nmi
+     call RRB2LL(tar_lat, tar_lon, travel, 0.0, tar_crs, tar_cos)
+    }
+ 
+# find the rhumb line lat/lon range and bearing btwn attacker and target
+call RLL2RB(tar_lat,        # latitude of TARGET
+            tar_lon,        # longitude of TARGET
+            tar_cos,        # cos of lat of TARGET
+            att_lat,        # latitude of Interceptor
+            att_lon,        # longitude of Interceptor
+            att_cos,        # cos of lat of Interceptor
+            range,          # range (output)
+            brng)           # bearing (output) Tgt to Interceptor
+ 
+call ang2PI(brng)
+ 
+UNT2$Pointer$To xRMT$Detectee$I    # get target
+UNT2$Type$I = xUNT2$Type$I         # get target type
+ 
+ACC$Pointer = xUNT$AccPntr$i       # get aircraft pointer
+spdmax = xACC$VectorSpeed$i        # get max speed
+spdmax = MIN (spdmax,float(xACC$MaxSpeed$I))
+ 
+call rmin_to_target(_
+         intercept_rng,  # send range to close
+         tar_crs,  # send target course (radians)
+         tar_spd,  # send target speed (knots)
+         spdmax,   # send attacker speed (knots)
+         range,    # send init. range btwn units (nmi)
+         brng,     # send init. brg from target to attacker (radians)
+         min_to_intercept) # receive value elapsed time to reach target
+ 
+if (min_to_intercept > $Minutes$Per$Hour)    # time to intercept greater than 1 hour
+    {
+     int_time = -7    # Flag no intercept for longtime
+     return
+    }
+ 
+ 
+if (min_to_intercept > 0)     # find intercept point and heading
+    {
+     int_time = min_to_intercept
+     int_lat = tar_lat                # Target initial latitude
+     int_lon = tar_lon                # Target initial longitude
+     int_cos = tar_cos                # cos of tgt init. latitude
+ 
+     # range target travels to intercept point
+     prng = tar_spd * (min_to_intercept * $Hours$Per$Minute)
+ 
+     call RRB2LL( _  # Find Lat/Long of the intercept point
+                 int_lat,        # send target latitude -> receive inter. lat
+                 int_lon,        # send target longitude -> receive inter. long
+                 prng,           # send target range to intercept point
+                 0.0,            # send relative bearing
+                 tar_crs,        # send target heading
+                 int_cos)        # cosine of target latitude (old and new)
+ 
+     call RLL2RB( _  # Find interceptor heading & distance to travel
+                 att_lat,     # send attacker latitude
+                 att_lon,     # send attacker longitude
+                 att_cos,     # send attacker's cos of lat
+                 int_lat,     # send latitude of intercept point
+                 int_lon,     # send longitude of intercept point
+                 int_cos,     # send cos of lat of intercept point
+                 range_togo,  # receive range range_togo to intercept point
+                 hdng)        # receive hdng of Interceptor to intercept point
+     call ang2PI(hdng)
+ 
+     UNT$RangeToNext$F   = range_togo
+     PUTUNT$AttackRange$F(intercept_rng)          # joa 2/05 per_sor
+     hdng = hdng + $pi                            # find brg from attackee
+     call ang2PI(hdng)                            # mad 7/06
+     PUTUNT$AttackBearing$F(hdng)
+     hdng = hdng + $pi                            # reset to attacker hdng
+     call ang2PI(hdng)                            # mad 7/06
+     PUTUNT$AttackTrue$I($YES)                    # true brg standoff
+     UNT$OrderedCourse$F = hdng
+     putUNT$OrderedSpeed$F (spdmax) # store interceptor speed
+    } # end of int_time > 0
+ 
+else if ((min_to_intercept == -1) |
+         (min_to_intercept == -7) )    # no intercept
+    {
+     int_time = min_to_intercept
+     return
+    }
+ 
+else  # (min_to_intercept = -3 or 0) within weapon range
+    {
+     int_time = 0
+     UNT$RangeToNext$f = range       # approximate it as current range
+     UNT$OrderedCourse$f = tar_crs   # in CLOSE formation with tgt
+#     putUNT$OrderedSpeed$F (tar_spd) # match intrcptr speed to tgt
+     putUNT$OrderedSpeed$F (spdmax) # set to spdmax since tgt speed could be 0
+    }                                # SMM 8/11/93
+ 
+unt$InterceptTime$f = Game$Time + MAX(0.,int_time)
+putunt$InterceptTime$f
+ 
+putUNT$RangeToNext$F      # As computed in cases above,
+putUNT$OrderedCourse$F    # wherein (int_time > 0)  or  (int_time = -3 or 0)
+ 
+ORD$Phase$I = xORD$Phase$I
+if (ORD$Phase$I != 2)   # haven't sent vectoring message
+    {
+     # send following vectoring message
+     # XXXXX attacking XXXXX;
+     # vector to XXX SPD XXX to travel XXXX NMI in XX min.
+     msglen = 0
+     call smovhn (UNT$Name$C,$$MaxLit,msg,msglen)
+     call smovv (" attacking ",msg,msglen)
+     call smovhn(xORD$W02$C,$$MaxLit,msg,msglen)
+     call smovv ("; vector to ",msg,msglen)
+     display_course  = (UNT$OrderedCourse$F * Deg$Per$Rad) + 0.5
+     call smoviz (display_course,3,msg,msglen)
+     call smovv  (" SPD ",msg,msglen)
+     display_speed = max(spdmax, 2.0) + 0.5
+     call smovi  (display_speed,msg,msglen)
+     call smovv (" to travel ",msg,msglen)
+     display_travel = (UNT$RangeToNext$F - intercept_rng) + 0.5
+     display_travel = max(0, display_travel)
+     call smovi (display_travel,msg,msglen)
+     call smovv (" NMI in ",msg,msglen)
+     display_time = MAX(0,INT(min_to_intercept+0.5))
+     call smovi  (display_time,msg,msglen)
+     call smovv  (" min.",msg,msglen)
+ 
+     call send_ (UNT$View$I,0,msglen,msg)
+ 
+     ORD$Phase$I = 2 # indicate that vector message was sent
+     putORD$Phase$I
+    } # end if vector message had not been sent yet
+ 
+return
+end     # end of Vector_attacker

@@ -1,0 +1,3235 @@
+####################### Program RGMAIN.RAT #############################
+#
+#
+# Changed as of 12/7/99 to include /ASYNC option
+#   If the user specifies "/ASYNC" on the command line, then GLINK/RAIN
+#   will not utilize the "lock-step" syncronize mechanism.
+#       DEW
+#
+# Changed as of 2/12/85 to include following from PAX development:
+#    
+#     a. Reorganized common areas.
+#     b. Installed RAINFORM GOLD and associate subroutines.
+#     c. Added fields in POSLN, MSGHD.
+#     d. Updated numerous fields.
+#
+# Further changes made for realistic EW reporting
+#
+#     a. Added radar parametric and other EW related fields to RADID
+#        and RADPA lines.
+#     b. Added RAD and LOB lines to RAINFORM GOLD messages.
+#     c. Provided for random variation in RADAR parametric values.
+#     d. Incorporated capability to report RADAR multimode operation.
+#
+# Other additions:
+#
+#     a. HFDF and SELOR GOLD messages.
+#     b. OSIS RED messages.
+#     c. OSIS RED split random messages.
+#     d. GOLD split random messages.
+#     e. Garbled messages.
+#     f. Delayed messages according to platform type.
+#     g. Delayed Message Database saved when Wargame Blackboard saved.
+#     h. Messages go to designated file or are allocated to an output 
+#        port for TFCC or both.
+#     i. Current DTG label put on messages displayed and on messages going
+#        to a designated file but not on messages going to a port for TFCC.
+#     j. OSIS WHITE messages.
+#     k. TMARK - trademark in or out (for TFCC).
+#     m. Put in view track number (of view indicated in init file) into name 
+#        field for CCN.
+#     h. Added unique radio call sign for each unit for HFDF detection lines.
+#
+#     i. Added JNTCCS TACELINT messages.
+#     j. Added ELINT portion of JNTCCS TACREP messages.
+#     k. Modified MSGID line for following fields: Message Serial Number, 
+#        Qualifier (AMP) and Qualifier Serial Number.
+#     l. Modified TRADEMARK to track with Message Serial Number.
+#     m. Added track number to field 1 in Gold CTC line same as BGTT Wargame
+#        track number.
+#     n. Deleted use of TRADEMARK in CTC line of Gold messages.
+#     o. All msgs are generated at interval set in Initialization plus:
+#          
+#        1) RED & RED SELOR when initial contact is made.
+#        2) RED when target is classified.
+#     p. Modified msg delays using standard distribution plus entering Mean
+#        and standard deviation.
+#
+############################################################################
+
+include "rgmain.inc"         
+
+define (bbimplicit, implicit none)
+
+
+
+Program ggmain
+###################################################################
+#
+#  Pulls data from NWISS blackboard and 1) passes data to Link-11
+#  message generator via network 2) generates Rainform messages and
+#  passes them to 'ASCII to BAUDOT' conversion program via network or
+#  3) Both
+#
+##################################################################
+BBCommon
+rgcommon
+rfcommon
+msgcommon
+tmpcommon
+whocommon
+ptr1common
+ptr2common
+ID_Common
+servercommon
+character    save[3], genmode[7]
+VMSchar*30     bbname, genname  # jb E2144 (VMSchar; 30 vs ARB) 8/10/00 
+character   msgfilename[15], dtg[8]
+VMSchar     tdate*23
+character   outname[40]
+integer     char, itime/3000/, Game_DTG, prompt, open_, idelay
+integer     tcp_client_close, rc
+real        current_game_time, current_msg_time
+integer     current_game_minute, last_game_minute
+
+integer     igame, dummy, k, isave, igentype, kk, klen, idtg, ii
+integer     ibflcfirst, l, iairtype, isurftype, itype
+
+string  g_save   "Starting From A RAINFORM Save? [Y/N]: "
+#string a_restore "Resume Previous Message Audit? [Y/N]: "
+
+string turnON  "[1;7m"         ## ESCAPE CHARACTERS TO ACTIVATE REV/BOLD
+string turnOFF "[0m"           ## TURNS OFF REV/BOLD
+#string up_line "[A"            ## go up a line      
+
+#data turnON [1] /27/
+#data turnOFF[1] /27/
+#data up_line[1] /27/
+
+call initr4                        # init Software tools package
+
+call who_is_this (igame,bbname,genname)  
+
+call echor
+
+call cmdfile_in (outname)     # initialize DMDB from the begining
+
+if (msgstatcnt == YES) 
+   {
+    kk = 0
+
+    if      (rgpost$out == YES)  call smovv ("msgdatap",msgfilename,kk) 
+    else if (rgpshot$out == YES) call smovv ("msgdataf",msgfilename,kk) 
+    else                         call smovv ("msgdata",msgfilename,kk)
+
+    call smovv ("_", msgfilename, kk) 
+    call smovi (game$minute, msgfilename, kk)
+	call smovv (".dat",msgfilename,kk)
+    call smov  (EOS, msgfilename, kk)
+
+    msgstat = open_ (msgfilename, WRITE)
+
+    if (msgstat == ERR) 
+       {
+        if      (rgpost$out == YES) 
+           call remark_v ("Could Not Open The msgdatap.dat File.")
+        else if (rgpshot$out == YES) 
+           call remark_v ("Could Not Open The msgdataf.dat File.")
+        else
+           call remark_v ("Could Not Open The msgdata.dat File.")
+
+        call rgexit 
+       }
+	call setchtype(RAW, msgstat)
+
+    call putlin (NEWLINE, msgstat)
+    call putlin_v ("FILE OF MESSAGE STATISTICS", msgstat)
+
+    klen = 0
+    if      (rgtfcc$out == YES) call smovv ("TFCC", genmode, klen)
+    else if (rgpost$out == YES) call smovv ("POST", genmode, klen)
+    else if (rgpshot$out == YES) call smovv ("FOTC", genmode, klen)
+
+    call putlin_v ("     Generator Mode ------> ", msgstat)
+    call putlin (genmode, msgstat)
+    call putlin (NEWLINE, msgstat)
+    call putlin (NEWLINE, msgstat)
+    call putlin_v ("This File Is ", msgstat)
+    call putlin (msgfilename, msgstat)
+    call putlin (NEWLINE, msgstat)
+    call putlin_v ("The Actual Messages Are In File ", msgstat)
+    call putlin (outname, msgstat)
+
+    call putlin (NEWLINE, msgstat)
+    call putlin (NEWLINE, msgstat)
+
+    call putlin_v ("Generator Started:  ", msgstat)
+    call lib$Date_time (tdate)  # SMM 7/00
+    call putlin_V (tdate, msgstat)
+    call putlin_v (" (Real Time)", msgstat)
+    call putlin_v (" --- ", msgstat)
+    idtg = Game_DTG (game$time)
+    ii = 0
+    call smoviz (idtg, 6, dtg, ii)              
+    call smovv ("Z", dtg, ii)                
+    call putlin (dtg, msgstat)
+    call putlin_v (" (Game Time)", msgstat)
+
+    call putlin (NEWLINE, msgstat)
+    call putlin (NEWLINE, msgstat)
+
+    call putlin_v ("                       --------  SLOTS  "//"--------     ---  MESSAGES  ---", msgstat)
+    call putlin (NEWLINE, msgstat)
+    call putlin_v ("GAME DTG    MSG DTG    FILLED   EMPTIED "//"  IN USE     SENT/GM   TOT SENT", msgstat)
+    call putlin (NEWLINE, msgstat)
+    call putlin (NEWLINE, msgstat)
+   }
+
+ibflcfirst = $yes
+
+msg_minute = INT (Game$Time)       # keep game min constant while gen msgs
+
+call clear_buf (NO)                
+                                   # start receiving from V6
+#call echoff
+call tty_set_echo (NO)          # turn off keyboard echoing
+
+#call getfch (char,$no,itime) # get anything typed (allow nulls)
+# getfch allows a typescript capability (when the user types ^E)
+
+last_game_minute = 0
+
+call echor
+
+repeat
+   {
+    if (char == $Control(Z))    # if the message generator is
+      break                     # to be stopped
+    if (halt$request == YES)    # if the wargame has ENDed
+      break
+
+    current_game_minute  = INT(Game$Time)
+
+    if (last_game_minute == current_game_minute)
+    {
+        call echoh (turnON, 6)      # turn off reverse video
+
+        call echov ("Waiting For WARGAME To Finish....................")
+        call echor
+        call echoh (turnOFF,4)      # turn off reverse video
+        idelay = 3000
+    	call delay (idelay)
+        next
+    }
+    last_game_minute = current_game_minute
+
+    current_game_time = Game$Time          # keep the game time constant
+    current_msg_time = Game$Time
+    ioldmin = current_game_minute
+    msg_minute = current_game_minute
+    imin = current_game_minute
+
+    #===================================================================
+    #   Intervals of GOLD msgs determined in INGLDUNIT by type of GOLD
+    #   message.
+    #===================================================================
+
+    call ingoldall                      
+
+    #===================================================================
+    #   Intervals of RED msgs determined in INREDUNIT by type of RED
+    #   message.
+    #===================================================================
+
+    call inrfmsg
+
+    #===================================================================
+    #  At first game minute a BFLOC message will be initiated (delays 
+    #  change when it will be received) for each air and surf/sub unit.
+    #  Then when game minute is some multiple of RGIntAir$BFL, a BLUE FORCE
+    #  LOCATOR message is generated for AIR units.
+    #===================================================================
+     
+    if ((RGIntAir$BFL == 999 | RGIntAir$BFL == 9999) &
+        (RGIntShp$BFL == 999 | RGIntShp$BFL == 9999))
+       {
+        l = 999
+        ibflcfirst = $no              # cancel first bflc msg with 999 intv
+       }
+    else
+       {
+        if ((Game$Time - RGLastTimeAir$BFL) >= RGIntAir$BFL)
+        {
+            l = 0
+            RGLastTimeAir$BFL = Game$Time
+        }
+        else
+            l = 1
+                                          
+        if (l == 0 | ibflcfirst == $yes) iairtype = YES
+        else                             iairtype = NO
+
+    #=======================================================================
+    #  At first game minute a BFLOC message will be initiated (delays 
+    #  change when it will be received) for each air and surf/sub unit.
+    #  Then when game minute is some multiple of RGIntShp$BFL, a BLUE FORCE
+    #  LOCATOR message is generated for SURFACE and SUB units.
+    #=======================================================================
+
+        if ((Game$Time - RGLastTimeShp$BFL) >= RGIntShp$BFL)
+        {
+            l = 0
+            RGLastTimeShp$BFL = game$time
+        }
+        else
+            l = 1
+                                          
+        if (l == 0 | ibflcfirst == $yes) isurftype = YES
+        else                             isurftype = NO
+       }
+
+    if      (isurftype == YES & iairtype == NO)  itype = $Surf$RType
+    else if (isurftype == NO & iairtype == YES)  itype = $Air$RType
+    else if (isurftype == YES & iairtype == YES) itype = $AirSurf$RType
+    else                                         itype = $None$RType
+
+    if (itype != $None$RType) call inbflmsg (itype)
+
+    ibflcfirst = $no
+
+    #=============================================================
+    #  When game minute is some multiple of RGIntv$ROS, a RED OSIS
+    #  message is generated at random.
+    #==============================================================
+
+    # for VTS it is assumed that reports are emitted on integer minute boundary - JFR 1/13/94
+    if (RGIntv$ROS == 999 | RGIntv$ROS == 9999) l = 999
+    else
+    {
+        if ((Game$Time - RGLastTime$ROS) >= RGIntv$ROS)
+        {
+            l = 0
+            RGLastTime$ROS = game$time
+        }
+        else
+            l = 1
+    }                                          
+    if (l == 0) call inredosis
+
+    #================================================================
+    #  When game minute is some multiple of RGIntv$WOS, a WHITE OSIS
+    #  message is generated at random.
+    #================================================================
+
+    # for VTS it is assumed that reports are emitted on integer minute boundary - JFR 1/13/94
+    if (RGIntv$WOS == 999 | RGIntv$WOS == 9999) l = 999
+    else
+    {
+        if ((Game$Time - RGLastTime$WOS) >= RGIntv$WOS)
+        {
+            l = 0
+            RGLastTime$WOS = game$time
+        }
+        else
+            l = 1
+    }                                          
+                                          
+    if (l == 0) call inwhtosis
+
+
+    call buildmsg    # gets delayed msgs from DMDB to buffer
+
+    call clear_buf (YES) # clears msgs out of buffer
+
+
+
+    } until (halt$request == YES)              #debug $YES
+
+call echor
+call echor
+
+if (RGDevice$TTY == $$PORTOUT)
+	rc = tcp_client_close(sockfd)
+
+if (RGFile$NBR != ERR)
+	call close_(RGFILE$NBR)
+
+if (char == $Control(Z)) call echov ("     As you requested...")
+else                     call echov ("     *** WARGAME has stopped ***")
+call echor
+
+call rgexit 
+
+end
+
+
+
+subroutine who_is_this (igame, bbname, genname)
+###########################################################
+#$%
+#$% Purpose:   WHO_AM_I determines Game Number via Command
+#$%            line input.
+#$%
+#$% Called By: RGMAIN
+#$%            
+#$%
+#$% Calls:     READ_PNAME_INDEX   GETARG   MAKE_CSF_BB_NAME 
+#$%
+#$% Tables:    NONE
+#$%
+#$% Date:      FEB 83
+#$%
+#$% Author:    Dane Wills
+#$%
+#$%
+#$% Modified:  Carol Kropp 4/19/94
+#$%            Moved the mapping of the BB and RG into here.
+#$%            After the BlackBoard is mapped, the pid
+#$%            of the message generator is determined and
+#$%            registered in the PID table.  Also made the
+#$%            default generator number 1 vice 0, for
+#$%            indexing into the PID$OTG sub table and
+#$%            added check to see if number entered is valid.
+#$%
+#$% Modified:   Dane Wills, 12/7/99, E2131
+#$%             Added /ASYNC command line modifier to allow
+#$%             asynchronous processing with WARGAME.
+#$%
+###########################################################
+
+bbcommon
+rgcommon
+ID_Common   # clk 4/94 - for otg_msg_gen_number
+
+##character       BBname[ARB], genname[ARB]
+VMSchar*(*)     bbname, genname # jb E2144 (VMSchar)    8/10/00 
+
+integer         igame, ctoi
+
+Integer*4           Arg_Lens[4], n
+VaxCharacter*80     Args[4], Param, Params
+
+integer		k
+
+#--------------------------------------------------
+
+otg_msg_gen_number = 1              # clk 4/94 - made default be 1 vice zero
+
+
+call get_mode                       # Load Config file....
+
+
+BBmap                               # map Blackboard into memory
+
+
+#if (RGPOST$OUT == YES)
+#    call make_RG_bb_name (igame, otg_msg_gen_number, $$RGPNAME, genname)
+#else
+#    call make_RG_bb_name (igame, otg_msg_gen_number, $$RGNAME, genname) 
+#RGmap (genname)                    # map RG records into memory
+
+
+return
+end
+
+
+
+Subroutine rgexit 
+######################################################################
+###
+### This is Subroutine (rgexit) is used to exit the program when called.
+###
+########################################################################
+bbcommon
+rgcommon
+rfcommon
+bufcommon
+msgcommon
+ID_Common
+
+integer    Game_DTG
+character  dtg[8]
+VMSchar    tdate*23
+integer	   idtg, ii
+
+if (msgstatcnt == YES) 
+   {
+    call putlin (NEWLINE, msgstat)
+    call putlin_v ("Generator Stopped:  ", msgstat)
+    call lib$Date_time (tdate)  # SMM 7/00
+    call putlin_v (tdate, msgstat)
+    call putlin_v (" (Real Time)", msgstat)
+    call putlin_v (" --- ", msgstat)
+    idtg = Game_DTG (game$time)
+    ii = 0
+    call smoviz (idtg, 6, dtg, ii)              
+    call smovv ("Z", dtg, ii)                
+    call putlin (dtg, msgstat)
+    call putlin_v (" (Game Time)", msgstat)
+   }
+
+#if (RGAudit$Msg == YES) call file_audit ($save)
+
+call echor
+call echov ("RAINFORM GENERATOR HAS SHUT DOWN")
+
+call echor 
+
+call endr4
+
+call exit
+
+return
+end
+
+
+
+Subroutine get_mode
+###########################################################################
+###
+### This is subroutine (cmd_file) is used to get certain data from the
+### user originated Command Input File, Initialization File and Radar File
+### in order to get data to initialize the RAINFORM Message Generator
+### process.
+###
+############################################################################
+bbcommon
+rgcommon
+rfcommon
+bufcommon
+msgcommon
+tmpcommon
+whocommon
+ptr1common
+ptr2common
+
+external close
+integer         prompt, length, equal_hv, getlin, getarg3
+character       buf[$maxline]
+character       field[16], line[$maxline], tline[ARB], server_name[ARB], server_port[ARB]
+integer		k, isize, kk, ifd_cmd, open_
+integer		tcp_client_connect
+
+string  g_cmdfile       "Enter Initialization Command File Name: "
+
+RGTFCC$OUT = NO
+RGV6$OUT = NO
+RGPOST$OUT = NO
+RGPSHOT$OUT = NO
+
+ call help_pgm(1,
+              "rmg: resa message generator",
+              "rmg Tags: C4I, OTH-Gold, Blackboard",
+              "Usage: rmg <config file>",
+              "",
+              "",
+              "",
+              "",
+              "Example: rmg portc.dat")
+
+call echor; call echor
+
+k = getarg3(1,buf,49)
+
+
+if (k == EOF) call rgexit 
+
+if (buf[k] == NEWLINE) buf[k] = EOS
+
+isize = length(buf) 
+if (isize == 0) 
+   {
+    call remark_v ("You must enter an Command Input File Name.")
+    call rgexit 
+   }
+else if (isize > $maxname) 
+   {
+    call echov ("The Command Input File Name cannot exceed ")
+    call echoi ($maxname)
+    call echov (" characters.")
+    call rgexit 
+   }
+
+kk = 0
+isize = length(buf)
+call smovh (buf, isize, filename, kk)
+call smov (EOS, filename, kk)
+call fold(filename)
+
+ifd_cmd = open_ (filename, READ)
+
+if (ifd_cmd == ERR) 
+   {
+    call remark_v ("Could not open the Initialization Command File.")
+    call rgexit 
+   }
+
+while (getlin(line, ifd_cmd) != EOF)
+   {
+    call getfld (1,line,field,ARB)
+
+    call upper (field)
+
+    if (equal_hv(field,"SERVER") == YES)          # GCCS-M server name and port
+       {                                             
+        call upper (line)
+        call echor
+        call echov ("Message Generator Mode ---> ")
+
+        call getfld (2, line, tline, 9)            
+
+        isize = length (tline)
+        if (isize > 8)
+           {
+            call echor
+            call echov ("The Output Name Cannot Exceed 8 Characters!")
+            call echor
+            call rgexit 
+           }
+
+        call echoh (tline, 5)
+        call echor
+
+        if      (equal_hv(tline, "TFCC") == YES)   RGTFCC$OUT = YES
+        else if (equal_hv(tline, "POST") == YES)   RGPOST$OUT = YES
+        else if (equal_hv(tline, "PSHOT") == YES)  RGPSHOT$OUT = YES
+        else if (equal_hv(tline, "FOTC") == YES)   RGPSHOT$OUT = YES
+
+        break
+       }
+    else next
+   }   
+
+call close (ifd_cmd)
+
+return
+end
+
+
+
+
+Subroutine CmdFile_In (outname)
+###########################################################################
+###
+### This is subroutine (cmd_file) is used to get certain data from the
+### user originated Command Inpur File, Initialization File and Radar File
+### in order to get data to initialize the RAINFORM Message Generator
+### process.
+###
+############################################################################
+bbcommon
+rgcommon
+rfcommon
+bufcommon
+msgcommon
+tmpcommon
+whocommon
+ptr1common
+ptr2common
+
+integer     open_
+external    CLOSE   # jb E2149  1/11/00
+character   outname[40]
+integer     ifd_cmd, istat
+
+
+used$rg$slots = 0
+
+Max$RG$Words = $$rg$BeginTables                 
+
+#$% allocate and zero msgdelay tables
+call rgaloc ($$MSG,"MSG",$yes,MSG$slots,MSG$entry)    # Delayed DATA
+call rgzapt ($$MSG)
+call rgaloc ($$TCR,"TCR",$yes,TCR$slots,TCR$entry)    # TN cross ref
+call rgzapt ($$TCR)                                   # clf 10/16/92
+
+last$rg$page = (Max$RG$Words-1)/128     # DMDB page = 128 words
+
+ifd_cmd = open_ (filename, READ)
+
+if (ifd_cmd == ERR) 
+{
+    call remark_v ("Could not open the Input Command File.")
+    call rgexit 
+}
+
+call load_cmd_file (ifd_cmd, istat, outname)
+
+call mthday(julian$day)         # put current month into common (mnth & imnth)
+
+call close (ifd_cmd)
+
+return
+end
+
+
+
+Subroutine load_cmd_file (ifd_cmd, istat, outname)
+######################################################################
+###
+### Loads the Initalization Command File entered to provide data for 
+### initialization.
+###
+########################################################################
+
+bbcommon
+rgcommon
+rfcommon
+servercommon
+
+external   close
+literal    initfile, outfile, outdevice
+integer    ifd_cmd, istat, getlin, equal_hv, ctoi, open_, device_open
+integer    dotloc, file_open                          # clf 8/6/92
+integer    tcp_client_connect, tcp_client_close       # C routine
+character  line[$maxline], field[16], buf[12], shortname[12]
+VMSchar    tdate*23
+character  name1[$maxname],name2[$maxname],name[$maxname],outname[40] 
+character  sfilename[10], buf1[13], julian[8]
+character  toutline[12], tline[4], fmode[3]
+integer	   ifile, icnt, length, k, kk, i, ifd_init, jcnt
+integer    inw_init, iview_side, ipos
+integer	   iview_number, isign, isize, jlen, l, prompt, ipnt
+integer    icase, itoutstat, idevice, index, old_char[2], ii
+integer    rc
+character  vside[3], vnumber[3], cyear[4], savsfile[ARB], trpline[ARB]
+
+string  g_format        "Enter 1, or 2: "
+
+ifile = NO
+
+RGFile$OUT = NO
+RGTFCC$OUT = NO
+RGPOST$OUT = NO          # used for POST
+RGV6$OUT = NO            # used for V6 satallite simulator
+RGPSHOT$OUT = NO         # used for POTSHOT exercises
+RGAudit$Msg = NO
+RGWatch$Out = NO
+RGDevice$TTY = NO
+RGTMark$IN = NO
+RGClass$Wzd = NO
+RGNtds$Vue = NO
+RGTruePos$Rmks = NO     # True lat/long of ctcs in a RMKS line?
+RGDetector$Rmks = NO    # Detector in a RMKS line?
+RGTruPos$Out = NO       # True lat/long of ctcs in a separate file?
+#RGTPQFile$Out = NO         # Do not activate a TPQ file
+
+RGName$Blu = NO
+RGClass$Blu = NO
+RGName$Tgt = NO
+RGClass$Tgt = NO
+
+RGTACELINT$JNTCS = NO
+RGtcpmar$JNTCS = NO
+RGtcpair$JNTCS = NO
+RGtcpelnt$JNTCS = NO
+
+RGIntv$ESM   = 999                # Default eliminates interval
+RGIntv$Red   = 999
+RGIntv$SOS   = 999
+RGIntv$SEL   = 999
+RGIntv$HFD   = 999
+RGIntv$ROS   = 999
+RGIntv$WOS   = 999
+RGIntAir$BFL = 999
+RGIntShp$BFL = 999
+RGIntv$Golds = 999
+RGIntv$Golda = 999
+RGIntv$GESMs = 999
+RGIntv$GESMa = 999
+RGIntv$GSELs = 999
+RGIntv$GSELa = 999
+RGIntv$GSOS  = 999
+RGIntv$GHFD  = 999
+RGIntv$STS   = 999
+RGIntv$GSWABS= 999
+RGIntv$GROTHR= 999
+RGIntv$GIR   = 999              # clf - 10/8/92
+
+RGLastTime$ESM   = 0.0             
+RGLastTime$Red   = 0.0
+RGLastTime$SOS   = 0.0
+RGLastTime$SEL   = 0.0
+RGLastTime$HFD   = 0.0
+RGLastTime$ROS   = 0.0
+RGLastTime$WOS   = 0.0
+RGLastTimeAir$BFL = 0.0
+RGLastTimeShp$BFL = 0.0
+RGLastTime$Golds = 0.0
+RGLastTime$Golda = 0.0
+RGLastTime$GESMs = 0.0
+RGLastTime$GESMa = 0.0
+RGLastTime$GSELs = 0.0
+RGLastTime$GSELa = 0.0
+RGLastTime$GSOS  = 0.0
+RGLastTime$GHFD  = 0.0
+RGLastTime$STS   = 0.0
+RGLastTime$GSWABS= 0.0
+RGLastTime$GROTHR= 0.0
+RGLastTime$GIR   = 0.0              # clf - 10/8/92
+
+RGYear       = 1999
+RGtrkpre     = 7                # clf - 10/14/92
+
+RGradb       = $YES             # assume radb lines 8/8/91 clf
+RGcase_no    = 1                # next lima case number 8/8/91 clf
+RGlive       = $NO              # not sending to live unit -- clf 8/6/92
+RGex_trk     = $NO              # Exercise tracks -- clf 7/17/93
+RGjitter     = $NO              # radar jitter -- clf 10/16/92
+RGcorr       = $NO              # perfect correlation -- clf 10/16/92
+RGjulian_off = 0                # clf - 9/28/93
+
+while (getlin(line, ifd_cmd) != EOF)
+    {
+     call getfld (1,line,field,12)
+
+     call upper (field)
+
+     if (equal_hv(field,"INITFILE") == YES)    
+        {
+         call remark (line)
+
+         ifile = YES
+         call getfld (2, line, buf, 12)
+
+         icnt = min($$MaxLit, length (buf))
+         if (icnt == 0) 
+            {
+             call echor
+             call echov ("An Initialization File is NOT in the Command File")
+             call echor
+             call rgexit 
+            }
+         call fold(buf)    
+         initfile = $BLANKLIT
+         k = 1
+         kk = 0
+         for (i = 1; i <= icnt; i = i + 1)
+            {
+             if (buf[i] == $PERIOD) break
+             shortname[k] = buf[i]
+             k = k + 1
+            }
+         call smovh (shortname, k, initfile, kk)        
+         RGinit$File = initfile
+
+         ifd_init = open_ (buf,READ)
+
+         if (ifd_init == ERR) 
+            {
+             call remark_v ("Could Not Open The Initialization File.")
+             call rgexit 
+            }
+
+         jcnt = 0
+         call smovh (shortname,icnt,buf1,jcnt)
+         call smovv ("n.dat",buf1,jcnt)
+	 	 call smov  (EOS, buf1,jcnt)
+
+         inw_init = open_ (buf1,WRITE)
+
+         if (inw_init == ERR) 
+            {
+             call remark_v ("Could Not Open The New Initialization File.")
+             call rgexit 
+            }
+		 call setchtype(RAW, inw_init)
+         call rg_load_init (ifd_init,inw_init,istat)
+
+         call close (ifd_init)
+         call close (inw_init)
+        }
+
+     #-----------------------------------------------------------------------
+     #   When used, gives view that will provide an NTDS track number in
+     #   the name field for OTH-T GOLD messages.  Default is 0 (not in use).
+     #-----------------------------------------------------------------------
+     else if (equal_hv(field,"NTDSCODE") == YES)       
+        {
+         call upper (line)
+         call remark (line)
+ 
+         call getfld (2,line,RGNtds$Vue,3)          # get NTDS (view) track code
+        }
+     else if (equal_hv(field,"VIEW") == YES)            # View NTDS units are in
+        {
+         call upper (line)
+         call remark (line)
+ 
+         call getfld (2,line,vside,3)          # get view side (Blue/Orange)
+
+         call upper (vside)
+
+         if      (equal_hv(vside,"B") == YES) iview_side = $Blue$Code
+         else if (equal_hv(vside,"O") == YES) iview_side = $Orange$Code
+         else 
+            {
+             call remark_v ("View side must be 'B' [BLUE] or 'O' [ORANGE]")
+             istat = NO
+            }
+
+         call getfld (3,line,vnumber,3)        # get view number
+
+         call upper (vnumber)
+
+         ipos = 1
+         iview_number = ctoi (vnumber,ipos) 
+
+         if (iview_number < 1 | iview_number > 6)
+            {
+             call remark_v ("View number must be between 1 and 6")
+             istat = NO
+            }
+
+         call init_view (iview_side, iview_number) # view data into lkcommon
+        }
+     
+     else if (equal_hv(field,"YEAR") == YES)      # Exercise year
+        {
+         call upper (line)
+         call remark (line)
+ 
+         call getfld (2,line,cyear,4)          # year in ascii
+         ipos = 1
+         RGyear = ctoi (cyear,ipos) 
+        }
+
+     else if (equal_hv(field,"JULIAN_OFF") == YES) # Julian day offset
+        {
+         call upper (line)
+         call remark (line)
+ 
+         isign = 1
+         call getfld (2,line,julian,4)          # year in ascii
+         ipos = 1
+         if (julian[1] == $MINUS)
+           {
+           ipos = 2
+           isign = -1
+           }
+         RGjulian_off = isign * ctoi(julian,ipos)
+        }
+     else if (equal_hv(field,"TNPRE") == YES)     # Track Number prefix
+        {
+         call upper (line)
+         call remark (line)
+ 
+         call getfld (2,line,cyear,4)          # year in ascii
+         ipos = 1
+         RGtrkpre = ctoi (cyear,ipos)
+        }
+
+     else if (equal_hv(field,"JITTER") == YES)    # Radar jitter -- clf 10/16/92
+        {
+         call upper (line)
+         call remark (line)
+ 
+         call getfld (2,line,field,4)          # YES or NO
+         if      (field[1] == $LETY) RGjitter = YES     
+         else if (field[1] == $LETN) RGjitter = NO
+        }
+
+     else if (equal_hv(field,"CORR") == YES)      # Correlation -- clf 10/16/92
+        {
+         call upper (line)
+         call remark (line)
+ 
+         call getfld (2,line,field,4)          # YES or NO
+         if      (field[1] == $LETY) RGcorr = YES     
+         else if (field[1] == $LETN) RGcorr = NO
+        }
+
+    #------------------------------------------------------------
+    #   Add ground truth lat/long in a special RMKS line.
+    #------------------------------------------------------------     
+    else if (equal_hv(field,"TRUEPOSRMKS") == YES)         
+       {                                                
+        call upper (line)
+        call remark (line)
+
+        call getfld (2, line, field, 3) 
+
+        if      (field[1] == $LETY) RGTruePos$Rmks = YES     
+        else if (field[1] == $LETN) RGTruePos$Rmks = NO
+       }
+    #------------------------------------------------------------
+    #   Add detector in a special RMKS line.
+    #------------------------------------------------------------     
+    else if (equal_hv(field,"DETECTORRMKS") == YES)         
+       {                                                
+        call upper (line)
+        call remark (line)
+
+        call getfld (2, line, field, 3) 
+
+        if      (field[1] == $LETY) RGDetector$Rmks = YES     
+        else if (field[1] == $LETN) RGDetector$Rmks = NO
+       }
+    #------------------------------------------------------------------
+    #   Add ground truth lat/long to a file named in the initialization
+    #-------------------------------------------------------------------     
+    else if (equal_hv(field,"TRUEPOSFILE") == YES)         
+       {                                                
+        call upper (line)
+        call remark (line)
+
+        call getfld (2, line, name1, 9)            
+	call fold(name1)
+
+        isize = min($$MAXLIT, length (name1))
+        if (isize <= 0)
+          {
+           call echor
+           call echov ("A True Position File Name Has Not Been Listed")
+           call echor
+           call rgexit 
+          }
+
+        outfile = $BLANKLIT
+        k = 1
+        for (i = 1; i <= isize; i = i + 1)
+           {
+            if (name1[i] == $PERIOD) break
+            sfilename[k] = name1[i]
+            k = k + 1
+           }
+
+        #-----------------------------------------
+        #   GOLD Track File
+        #-----------------------------------------
+        kk = 0
+        call smovh (sfilename, k, name1, kk) 
+        call smovv ("_", name1, kk) 
+        call smovi (game$minute, name1, kk)
+        call smovv (".gtk", name1, kk)
+		call smov  (EOS, name1, kk)
+
+        RGTruTrk$File = open_ (name1, WRITE)
+
+        if (RGTruTrk$File == ERR) 
+           {
+            call echov ("Cannot Open TRU Track (TRUEPOSFILE) File: ")
+            call echoh (name1, kk)
+            call echor; call echor
+            call rgexit 
+           }
+		call setchtype(RAW, RGTruTrk$File)
+
+        RGTruPos$Out = YES
+
+        call putlin (NEWLINE, RGTruTrk$File)
+        call putlin_v ("File: ", RGTruTrk$File)
+        call putlin (name1, RGTruTrk$File)
+        call putlin (NEWLINE, RGTruTrk$File)
+        call putlin (NEWLINE, RGTruTrk$File)
+
+        call putlin_v ("This file contains:", RGTruTrk$File)
+        call putlin (NEWLINE, RGTruTrk$File)
+	call putlin_v ("   DETECTEE TRUE (TLAT/TLON) & APPARENT "//"(ALAT/ALON) POSITIONS FOR OTH-T GOLD MESSAGES", RGTruTrk$File)
+        call putlin (NEWLINE, RGTruTrk$File)
+	call putlin_v ("BNG/RNG is the DIRECTION & AMOUNT of ERROR"//" FROM the TRUE to APPARENT POSITIONS", RGTruTrk$File)
+        call putlin (NEWLINE, RGTruTrk$File)
+        call putlin_v ("Date File Created = ", RGTruTrk$File)
+        call lib$Date_time (tdate)  # SMM 7/00
+        call putlin_v (tdate, RGTruTrk$File)
+        call putlin (NEWLINE, RGTruTrk$File)
+        call putlin (NEWLINE, RGTruTrk$File)
+          
+	call putlin_v ("AUDIT    DCTEE      TLAT       TLON    "//"    ALAT       ALON       BNG     ", RGTruTrk$File)
+	call putlin_v ("RNG      DCTOR     CAT       TOE"//"         TOR", RGTruTrk$File)
+        call putlin (NEWLINE, RGTruTrk$File)
+        call putlin (NEWLINE, RGTruTrk$File)
+
+        #-----------------------------------------
+        #   GOLD Blue Force File
+        #-----------------------------------------
+        kk = 0
+        call smovh (sfilename, k, name2, kk) 
+        call smovv ("_", name2, kk) 
+        call smovi (game$minute, name2, kk)
+        call smovv (".gbl", name2, kk)
+		call smov  (EOS, name2, kk)
+
+        RGTruBlu$File = open_ (name2, WRITE)
+
+        if (RGTruBlu$File == ERR) 
+           {
+            call echov ("Cannot Open TRU POS (TRUEPOSFILE) File: ")
+            call echoh (name2, kk)
+            call echor; call echor
+            call rgexit 
+           }
+		call setchtype(RAW, RGTruBlu$File)
+
+        RGTruPos$Out = YES
+
+        call putlin (NEWLINE, RGTruBlu$File)
+        call putlin_v ("File: ", RGTruBlu$File)
+        call putlin (name2, RGTruBlu$File)
+        call putlin (NEWLINE, RGTruBlu$File)
+        call putlin (NEWLINE, RGTruBlu$File)
+
+        call putlin_v ("This file contains: ", RGTruBlu$File)
+        call putlin (NEWLINE, RGTruBlu$File)
+	call putlin_V ("   DETECTEE TRUE (TLAT/TLON) & APPARENT"//" (ALAT/ALON) POSITIONS FOR OTH-T GOLD ", 
+RGTruBlu$File)
+        call putlin (NEWLINE, RGTruBlu$File)
+	call putlin_V ("BNG/RNG is the DIRECTION & AMOUNT of "//"ERROR FROM the TRUE to APPARENT POSITIONS", RGTruBlu$File)
+        call putlin (NEWLINE, RGTruBlu$File)
+        call putlin_V ("Date File Created = ", RGTruBlu$File)
+        call lib$Date_time (tdate)  # SMM 7/00
+        call putlin_v (tdate, RGTruBlu$File)
+        call putlin (NEWLINE, RGTruBlu$File)
+        call putlin (NEWLINE, RGTruBlu$File)
+          
+	call putlin_V ("AUDIT    DCTEE      TLAT       TLON    "//"    ALAT       ALON       BNG     ",RGTruBlu$File)
+	call putlin_V ("RNG      DCTOR     CAT       TOE         TOR", RGTruBlu$File)
+        call putlin (NEWLINE, RGTruBlu$File)
+        call putlin (NEWLINE, RGTruBlu$File)
+
+        #--------------------------------------------------------------------
+        #   Determine if output file format should be the normal readable
+        #   with "......." between columns or for input to a data base where
+        #   data is separated by commas.
+        #--------------------------------------------------------------------
+        call echor; call echor
+        call echov ("Format For File ")
+        jlen = length (savsfile)
+        call echoh (savsfile, jlen)
+        call echor
+        call echov ("   (1) Normal Readable Format")
+        call echor
+        call echov ("   (2) Data Base Input Format")
+        call echor; call echor
+
+        l = prompt(g_format, fmode, STDIN)
+        if (l == EOF) call rgexit
+ 
+        if (fmode[l] == NEWLINE) fmode[l] = EOS
+
+        ipnt = 1
+        iform = ctoi (fmode, ipnt)             # convert to integer
+        }
+
+    else if (equal_hv(field,"SEEMSGS") == YES)             # See messages?
+       {
+        call upper (line)
+        call remark (line)
+
+        call getfld (2, line, field, 3)                 # watch output? (Y/N)
+        if      (field[1] == $LETY) RGWatch$Out = YES 
+        else if (field[1] == $LETN) RGWatch$Out = NO
+       }
+
+    else if (equal_hv(field,"RADARLINEB") == YES)          # Use RADB line
+       {                                                # (default = YES)
+        call upper (line)
+        call remark (line)
+
+        call getfld (2, line, field, 3)
+        if      (field[1] == $LETY) RGradb = YES 
+        else if (field[1] == $LETN) RGradb = NO
+       }
+
+    else if (equal_hv(field,"CASELIMA") == YES)            # Initial case lima
+       {                                                # (default = 1)
+        call upper (line)
+        call remark (line)
+
+        call getfld (2, line, field, 3)
+        k = 1
+        icase = ctoi (field,k)
+        if      (icase > 1) RGcase_no = icase
+       }
+
+    else if (equal_hv(field,"TMARKIN") == YES)             # Trademark included?
+       {
+        call upper (line)
+        call remark (line)
+
+        call getfld (2, line, field, 3)                 # Include Trademark in
+        if      (field[1] == $LETY) RGTMark$IN = YES      # appropriate msgs, Y/N
+        else if (field[1] == $LETN) RGTMark$IN = NO
+       }
+
+    else if (equal_hv(field,"LIVE") == YES)                # Output to live ship?
+       {                                                #     clf 8/5/92
+        call upper (line)
+        call remark (line)
+
+        call getfld (2, line, field, 3)                 # Include Live output 
+        if      (field[1] == $LETY) RGlive = YES          # indicator
+        else if (field[1] == $LETN) RGlive = NO
+       }
+
+    else if (equal_hv(field,"EX_TRK") == YES)              # Output exercise track
+       {                                                #     clf 7/17/93
+        call upper (line)
+        call remark (line)
+
+        call getfld (2, line, field, 3)                 # Include Live output 
+        if      (field[1] == $LETY) RGex_trk = YES        # indicator
+        else if (field[1] == $LETN) RGex_trk = NO
+       }
+
+    else if (equal_hv(field,"MSGDATA") == YES)             # Message statistics 
+       {
+        call upper (line)
+        call remark (line)
+
+        call getfld (2, line, field, 3)               # record skipped game mins
+        if      (field[1] == $LETY) msgstatcnt = YES      
+        else if (field[1] == $LETN) msgstatcnt = NO
+       }
+
+    else if (equal_hv(field,"SERVER") == YES)        # GCCS-M Sever name and port
+       {                                             # output port to TFCC
+        itoutstat = YES
+
+        call upper (line)
+        call remark (line)
+
+        call getfld (2, line, tline, 10)            
+
+        isize = length (tline)
+        if (isize > $maxname)
+          {
+           call echor
+           call echov ("The Output Name Cannot Exceed ")
+           call echoi ($maxname)
+           call echov (" Characters!")
+           call echor
+           call rgexit 
+          }
+        else if (isize <= 0)
+          {
+           call echor
+           call echov ("An Output Name Has Not Been Listed")
+           call echor
+           call rgexit 
+          }
+
+        if      (equal_hv(tline, "TFCC") == YES)   
+           {
+            RGTFCC$OUT = YES
+            idevice = YES
+           }
+        else if (equal_hv(tline, "POST") == YES)   
+           {
+            RGPOST$OUT = YES
+            idevice = YES
+           }
+        else if (equal_hv(tline, "PSHOT") | equal_hv (tline, "FOTC") == YES) 
+           {
+            RGPSHOT$OUT = YES
+            idevice = YES
+           }
+        else idevice = NO
+
+        if (idevice == YES)        
+           {
+	    	RGDevice$TTY = $$PORTOUT			# output to server port
+            call getfld (3,line,server_name,$maxname)
+            call upper (server_name)
+
+            call getfld (4,line,server_port,$maxname)
+            RGDevice$NBR = 0
+
+			# Verify tcp/ip connection.  clear_buf will connect, write, close for msg buffer in cycle
+            sockfd = tcp_client_connect(server_name, server_port)
+
+	  		if (sockfd != -1)
+				{
+				call echov("Successful TCP/IP connect to GCCS-M server ")
+				call echohn(server_name, ARB)
+				call echov(" Port ")
+				call echohn(server_port, ARB)
+				call echor
+				}
+			rc = tcp_client_close(sockfd)
+           }
+       }
+
+    else if (equal_hv(field,"AUDIT_TRAIL") == YES)         # Want an audit trail
+       {
+        call upper (line)
+        call remark (line)
+
+        call getfld (2, line, field, 3)                 # Audit trail (Y/N)
+        if      (field[1] == $LETY) RGAudit$Msg = YES 
+        else if (field[1] == $LETN) RGAudit$Msg = NO
+       }
+
+    else if (equal_hv(field,"FILEOUT") == YES)             # Name of file/device
+       {
+        call upper (line)
+        call remark (line)
+
+        call getfld (2, line, name, 9)            
+		call fold(name)
+
+        isize = min($$Maxlit, length (name))
+        if (isize <= 0)
+          {
+           call echor
+           call echov ("An Output File Has Not Been Listed")
+           call echor
+           call rgexit 
+          }
+
+        RGFile$OUT = YES
+
+        outfile = $BLANKLIT
+        k = 1
+        kk = 0
+        for (i = 1; i <= isize; i = i + 1)
+           {
+            if (name[i] == $PERIOD) break
+            sfilename[k] = name[i]
+            k = k + 1
+           }
+        call smovh (sfilename, 8, outfile, kk)        
+        RGOut$File = outfile
+
+        call getfld (3, line, field, 4)
+		if (length(field) > 0)
+		{	                 
+	        ipnt = 1
+       		RGFile$Out$duration = ctoi (field, ipnt)
+		}
+		else
+			RGFile$Out$duration = 99999			# Default out file duration     
+       }
+
+    else if (equal_hv(field,"JNTCS") == YES)            # For JINTACCS msgs
+       {                                             
+        call upper (line)
+        call remark (line)
+
+        call getfld (2, line, tline, 10)            
+
+        isize = length (tline)
+
+        if (isize > $maxname)
+          {
+           call echor
+           call echov ("The JNTCS Output File Name Cannot Exceed ")
+           call echoi ($maxname)
+           call echov (" Characters!")
+           call echor
+           call rgexit 
+          }
+        if (isize <= 0)
+          {
+           call echor
+           call echov ("A JINTACCS Field In The Pregame Command"//" File is NOT Complete")
+           call echor
+           call rgexit 
+          }
+
+        if (equal_hv(tline, "TACELINT") == YES) 
+           {
+            RGTACELINT$JNTCS = YES
+           }
+        else if (equal_hv(tline, "TACREP") == YES) 
+           {
+            call getfld (3,line,trpline,ARB)
+            call upper (trpline)
+
+             isize = length (tline)
+             if (isize <= 0)
+                {
+                 call echor
+                 call echov ("A JINTACCS Field In The Pregame "//"Command File is NOT Complete")
+                 call echor
+                 call rgexit 
+                }
+
+            if      (equal_hv(trpline, "MAROP") == YES) RGtcpmar$JNTCS = YES
+            else if (equal_hv(trpline, "AIROP") == YES) RGtcpair$JNTCS = YES
+            else if (equal_hv(trpline, "ELINT") == YES) RGtcpelnt$JNTCS = YES
+           }            
+        }
+    else if (equal_hv(field,"GRBLMSGS") == YES)            # % of garbled msgs
+        {
+        call upper (line)
+        call remark (line)
+
+        call getfld (2, line, field, 4)                 
+        ipnt = 1
+        RGGrbl$Msgs = ctoi (field, ipnt)                
+        }
+    else if (equal_hv(field,"GRBLCHAR") == YES)            # % of garbled msgs
+        {
+        call upper (line)
+        call remark (line)
+
+        call getfld (2, line, field, 4)                 
+        ipnt = 1
+        RGGrbl$Char = ctoi (field, ipnt)
+        }
+    else if (equal_hv(field,"GBLU_NAME") == YES)           # ambig BLUE units
+        {
+        call upper (line)
+        call remark (line)
+
+        call getfld (2, line, field, 4)                 
+        ipnt = 1
+        RGName$Blu = ctoi (field, ipnt)
+        }
+    else if (equal_hv(field,"GBLU_CLASS") == YES)          # ambig tgt units
+        {
+        call upper (line)
+        call remark (line)
+
+        call getfld (2, line, field, 4)                 
+        ipnt = 1
+        RGClass$Blu = ctoi (field, ipnt)
+        }
+    else if (equal_hv(field,"GTGT_CLASS") == YES)          # ambig tgt units
+        {
+        call upper (line)
+        call remark (line)
+
+        call getfld (2, line, field, 4)                 
+        ipnt = 1
+        RGClass$Tgt = ctoi (field, ipnt)
+        }
+    else if (equal_hv(field,"GTGT_NAME") == YES)           # ambig tgt units
+        {
+        call upper (line)
+        call remark (line)
+
+        call getfld (2, line, field, 4)                 
+        ipnt = 1
+        RGName$Tgt = ctoi (field, ipnt)
+        }
+    else if (equal_hv(field,"MISSPOS") == YES) # Miss posit in pos line OTH GOLD
+        {
+        call upper (line)
+        call remark (line)
+
+        RGMiss$Pos = YES
+
+        call getfld (2, line, field, 4)                 
+        ipnt = 1
+        RGMiss$Lat = ctoi (field, ipnt)
+
+        call getfld (3, line, field, 4)                 
+        ipnt = 1
+        RGMiss$Long = ctoi (field, ipnt)
+        }
+    else if (equal_hv(field,"CLASSWZRD") == YES)           # Classify WIZARD ctcs
+        {
+        call upper (line)
+        call remark (line)
+
+        call getfld (2, line, field, 3)                 
+        ipnt = 1
+        RGClass$Wzd = ctoi (field, ipnt)
+        }
+    else if (equal_hv(field,"REDINTV") == YES)             # RED msg interval
+        {
+        call upper (line)
+        call remark (line)
+
+        call getfld (2, line, field, 4)                 
+        ipnt = 1
+        RGIntv$Red = ctoi (field, ipnt)
+        if (RGIntv$Red < 1) RGIntv$Red = 1
+
+        call get_reporter (line, $Red$Rmsg)
+        }
+    else if (equal_hv(field,"ESMINTV") == YES)             # ESM msg interval
+        {
+        call upper (line)
+        call remark (line)
+
+        call getfld (2, line, field, 4)                 
+        ipnt = 1
+        RGIntv$ESM = ctoi (field, ipnt)
+        if (RGIntv$ESM < 1) RGIntv$ESM = 1
+
+        call get_reporter (line, $ESM$Rmsg)
+        }
+    else if (equal_hv(field,"SOSINTV") == YES)             # SOSUS msg interval
+        {
+        call upper (line)
+        call remark (line)
+
+        call getfld (2, line, field, 4)                 
+        ipnt = 1
+        RGIntv$SOS = ctoi (field, ipnt)
+        if (RGIntv$SOS < 1) RGIntv$SOS = 1
+
+        call get_reporter (line, $SOSUS$Rmsg)
+        }
+    else if (equal_hv(field,"SWBINTV") == YES)             # SWABS msg interval
+        {
+        call upper (line)
+        call remark (line)
+
+        call getfld (2, line, field, 4)                 
+        ipnt = 1
+        RGIntv$GSWABS = ctoi (field, ipnt)
+        if (RGIntv$GSWABS < 1) RGIntv$GSWABS = 1
+
+        call get_reporter (line, $GSWABS$Rmsg)
+        }
+    else if (equal_hv(field,"HFDINTV") == YES)             # HFDF msg interval
+        {
+        call upper (line)
+        call remark (line)
+
+        call getfld (2, line, field, 4)                 
+        ipnt = 1
+        RGIntv$HFD = ctoi (field, ipnt)
+        if (RGIntv$HFD < 1) RGIntv$HFD = 1
+
+        call get_reporter (line, $HFDF$Rmsg)
+        }
+    else if (equal_hv(field,"SELINTV") == YES)             # SELOR msg interval
+        {
+        call upper (line)
+        call remark (line)
+
+        call getfld (2, line, field, 4)                 
+        ipnt = 1
+        RGIntv$SEL = ctoi (field, ipnt)
+        if (RGIntv$SEL < 1) RGIntv$SEL = 1
+
+        call get_reporter (line, $SELOR$Rmsg)
+        }
+    else if (equal_hv(field,"ROSINTV") == YES)             # RED OSIS msg interval
+        {
+        call upper (line)
+        call remark (line)
+
+        call getfld (2, line, field, 4)                 
+        ipnt = 1
+        RGIntv$ROS = ctoi (field, ipnt)
+        if (RGIntv$ROS < 1) RGIntv$ROS = 1
+
+        call get_reporter (line, $OSRed$Rmsg)
+        call get_reporter (line, $OSRedP$Rmsg)
+        }
+    else if (equal_hv(field,"WOSINTV") == YES)     # WHITE OSIS msg interval
+        {
+        call upper (line)
+        call remark (line)
+
+        call getfld (2, line, field, 4)                 
+        ipnt = 1
+        RGIntv$WOS = ctoi (field, ipnt)
+        if (RGIntv$WOS < 1) RGIntv$WOS = 1
+
+        call get_reporter (line, $OSWht$Rmsg)
+        call get_reporter (line, $OSWhtP$Rmsg)
+        }
+    else if (equal_hv(field,"BFLAINTV") == YES)            # BFL Air msg interval
+        {
+        call upper (line)
+        call remark (line)
+
+        call getfld (2, line, field, 4)                
+        ipnt = 1
+        RGIntAir$BFL = ctoi (field, ipnt)
+        if (RGIntAir$BFL < 1) RGIntAir$BFL = 1
+        else if (RGIntAir$BFL >= 999) RGIntAir$BFL = 999    # clf  7/10/91
+
+        call get_reporter (line, $Special$Rmsg)
+        }
+    else if (equal_hv(field,"BFLSINTV") == YES)        # BFL Surface msg interval
+        {
+        call upper (line)
+        call remark (line)
+
+        call getfld (2, line, field, 4)                
+        ipnt = 1
+        RGIntShp$BFL = ctoi (field, ipnt)
+        if (RGIntShp$BFL < 1) RGIntShp$BFL = 1
+        else if (RGIntShp$BFL >= 999) RGIntShp$BFL = 999    # clf  7/10/91
+
+        call get_reporter (line, $Special$Rmsg)
+        }
+    else if (equal_hv(field,"GOLDS_INTV") == YES)  #GOLD Non-ESM Surf msg interval
+        {
+        call upper (line)
+        call remark (line)
+
+        call getfld (2, line, field, 4)   
+        ipnt = 1
+        RGIntv$Golds = ctoi (field, ipnt)
+        if (RGIntv$Golds < 1) RGIntv$Golds = 1
+
+        call get_reporter (line, $GOLD$Rmsg)
+        call get_reporter (line, $GOLDP$Rmsg)
+        }
+    else if (equal_hv(field,"GOLDA_INTV") == YES)  #GOLD Non-ESM Air msg interval
+        {
+        call upper (line)
+        call remark (line)
+
+        call getfld (2, line, field, 4)                
+        ipnt = 1
+        RGIntv$Golda = ctoi (field, ipnt)
+        if (RGIntv$Golda < 1) RGIntv$Golda = 1
+
+        call get_reporter (line, $GOLD$Rmsg)
+        call get_reporter (line, $GOLDP$Rmsg)
+        }
+    else if (equal_hv(field,"GESMS_INTV") == YES)    # GOLD ESM Surf msg interval
+        {
+        call upper (line)
+        call remark (line)
+
+        call getfld (2, line, field, 4)                
+        ipnt = 1
+        RGIntv$GESMs = ctoi (field, ipnt)
+        if (RGIntv$GESMs < 1) RGIntv$GESMs = 1
+
+        call get_reporter (line, $GESM$Rmsg)
+        }
+    else if (equal_hv(field,"GESMA_INTV") == YES)    # GOLD ESM Surf msg interval
+        {
+        call upper (line)
+        call remark (line)
+
+        call getfld (2, line, field, 4)                
+        ipnt = 1
+        RGIntv$GESMa = ctoi (field, ipnt)
+        if (RGIntv$GESMa < 1) RGIntv$GESMa = 1
+
+        call get_reporter (line, $GESM$Rmsg)
+        }
+    else if (equal_hv(field,"GSELS_INTV") == YES)    # GOLD SELOR Surf msg interval
+        {
+        call upper (line)
+        call remark (line)
+
+        call getfld (2, line, field, 4)                
+        ipnt = 1
+        RGIntv$GSELs = ctoi (field, ipnt)
+        if (RGIntv$GSELs < 1) RGIntv$GSELs = 1
+
+        call get_reporter (line, $GSELOR$Rmsg)
+        call get_reporter (line, $GWIZARD$Rmsg)
+        }
+    else if (equal_hv(field,"GSELA_INTV") == YES)    # GOLD SELOR Air msg interval
+        {
+        call upper (line)
+        call remark (line)
+
+        call getfld (2, line, field, 4)                
+        ipnt = 1
+        RGIntv$GSELa = ctoi (field, ipnt)
+        if (RGIntv$GSELa < 1) RGIntv$GSELa = 1
+
+        call get_reporter (line, $GSELOR$Rmsg)
+        call get_reporter (line, $GWIZARD$Rmsg)
+        }
+    else if (equal_hv(field,"GSOSINTV") == YES)    # GOLD SOSUS msg interval
+        {
+        call upper (line)
+        call remark (line)
+
+        call getfld (2, line, field, 4)                
+        ipnt = 1
+        RGIntv$GSOS = ctoi (field, ipnt)
+        if (RGIntv$GSOS < 1) RGIntv$GSOS = 1
+
+        call get_reporter (line, $GSOSUS$Rmsg)
+        }
+    else if (equal_hv(field,"GHFDINTV") == YES)    # GOLD HFDS msg interval
+        {
+        call upper (line)
+        call remark (line)
+
+        call getfld (2, line, field, 4)                
+        ipnt = 1
+        RGIntv$GHFD = ctoi (field, ipnt)
+        if (RGIntv$GHFD < 1) RGIntv$GHFD = 1
+
+        call get_reporter (line, $GHFDF$Rmsg)
+        }
+    else if (equal_hv(field,"TASSINTV") == YES)            # SURTASS msg intv
+        {
+        call upper (line)
+        call remark (line)
+
+        call getfld (2, line, field, 4)                
+        ipnt = 1
+        RGIntv$STS = ctoi (field, ipnt)
+        if (RGIntv$STS < 1) RGIntv$STS = 1
+
+        call get_reporter (line, $STS$Rmsg)
+        }
+    else if (equal_hv(field,"OTRINTV") == YES)            # ROTHR msg intv
+        {
+        call upper (line)
+        call remark (line)
+
+        call getfld (2, line, field, 4)                
+        ipnt = 1
+        RGIntv$GROTHR = ctoi (field, ipnt)
+        if (RGIntv$GROTHR < 1) RGIntv$GROTHR = 1
+
+        call get_reporter (line, $GOLD$Rmsg)
+        call get_reporter (line, $GOLDP$Rmsg)
+        }
+    else if (equal_hv(field,"IRINTV") == YES)             # IR msg intv
+        {                                              # clf 10/8/92
+        call upper (line)
+        call remark (line)
+
+        call getfld (2, line, field, 4)                
+        ipnt = 1
+        RGIntv$GIR = ctoi (field, ipnt)
+        if (RGIntv$GIR < 1) RGIntv$GIR = 1
+ 
+        call get_reporter (line, $GIR$Rmsg)
+        }
+#
+#---------------- Start Means ---------------------------------
+#
+    else if (equal_hv(field,"AIRCMEAN") == YES)      # RED Air Commcen delay
+        {
+        call upper (line)
+        call remark (line)
+
+        call getfld (2, line, field, 4)                
+        ipnt = 1
+        RGCMean$Air = ctoi (field, ipnt)
+        }
+    else if (equal_hv(field,"AIRTMEAN") == YES)     # RED Air Transmission delay
+        {
+        call upper (line)
+        call remark (line)
+
+        call getfld (2, line, field, 4)                
+        ipnt = 1
+        RGTMean$Air = ctoi (field, ipnt)
+        }
+    else if (equal_hv(field,"SUBCMEAN") == YES)    # RED Sub Commcen delay
+        {
+        call upper (line)
+        call remark (line)
+
+        call getfld (2, line, field, 4)                
+        ipnt = 1
+        RGCMean$Sub = ctoi (field, ipnt)
+        }
+    else if (equal_hv(field,"SUBTMEAN") == YES)    # RED Sub Transmission delay
+        {
+        call upper (line)
+        call remark (line)
+
+        call getfld (2, line, field, 4)                
+        ipnt = 1
+        RGTMean$Sub = ctoi (field, ipnt)
+        }
+    else if (equal_hv(field,"SHIPCMEAN") == YES)   # RED Ship Commcen delay
+        {
+        call upper (line)
+        call remark (line)
+
+        call getfld (2, line, field, 4)                
+        ipnt = 1
+        RGCMean$Shp = ctoi (field, ipnt)
+        }
+    else if (equal_hv(field,"SHIPTMEAN") == YES)   # RED Ship Trnsmission delay
+        {
+        call upper (line)
+        call remark (line)
+
+        call getfld (2, line, field, 4)                
+        ipnt = 1
+        RGTMean$Shp = ctoi (field, ipnt)
+        }
+    else if (equal_hv(field,"HFDCMEAN") == YES)            
+        {
+        call upper (line)
+        call remark (line)
+
+        call getfld (2, line, field, 4)                
+        ipnt = 1
+        RGCMean$Hfd = ctoi (field, ipnt)
+        }
+    else if (equal_hv(field,"HFDTMEAN") == YES)            
+        {
+        call upper (line)
+        call remark (line)
+
+        call getfld (2, line, field, 4)                
+        ipnt = 1
+        RGTMean$Hfd = ctoi (field, ipnt)
+        }
+    else if (equal_hv(field,"SOSCMEAN") == YES)            
+        {
+        call upper (line)
+        call remark (line)
+
+        call getfld (2, line, field, 4)                
+        ipnt = 1
+        RGCMean$Sos = ctoi (field, ipnt)
+        }
+    else if (equal_hv(field,"SOSTMEAN") == YES)            
+        {
+        call upper (line)
+        call remark (line)
+
+        call getfld (2, line, field, 4)                
+        ipnt = 1
+        RGTMean$Sos = ctoi (field, ipnt)
+        }
+    else if (equal_hv(field,"GSWBCMEAN") == YES)            
+        {
+        call upper (line)
+        call remark (line)
+
+        call getfld (2, line, field, 4)                
+        ipnt = 1
+        RGCMean$GSWB = ctoi (field, ipnt)
+        }
+    else if (equal_hv(field,"GSWBTMEAN") == YES)            
+        {
+        call upper (line)
+        call remark (line)
+
+        call getfld (2, line, field, 4)                
+        ipnt = 1
+        RGTMean$GSWB = ctoi (field, ipnt)
+        }
+    else if (equal_hv(field,"SELCMEAN") == YES)            
+        {
+        call upper (line)
+        call remark (line)
+
+        call getfld (2, line, field, 4)                
+        ipnt = 1
+        RGCMean$Sel = ctoi (field, ipnt)
+        }
+    else if (equal_hv(field,"SELTMEAN") == YES)            
+        {
+        call upper (line)
+        call remark (line)
+
+        call getfld (2, line, field, 4)                
+        ipnt = 1
+        RGTMean$Sel = ctoi (field, ipnt)
+        }
+    else if (equal_hv(field,"ROSCMEAN") == YES)            
+        {
+        call upper (line)
+        call remark (line)
+
+        call getfld (2, line, field, 4)                
+        ipnt = 1
+        RGCMean$Ros = ctoi (field, ipnt)
+        }
+    else if (equal_hv(field,"ROSTMEAN") == YES)            
+        {
+        call upper (line)
+        call remark (line)
+
+        call getfld (2, line, field, 4)                
+        ipnt = 1
+        RGTMean$Ros = ctoi (field, ipnt)
+        }
+    else if (equal_hv(field,"WOSCMEAN") == YES)            
+        {
+        call upper (line)
+        call remark (line)
+
+        call getfld (2, line, field, 4)                
+        ipnt = 1
+        RGCMean$Wos = ctoi (field, ipnt)
+        }
+    else if (equal_hv(field,"WOSTMEAN") == YES)            
+        {
+        call upper (line)
+        call remark (line)
+
+        call getfld (2, line, field, 4)                
+        ipnt = 1
+        RGTMean$Wos = ctoi (field, ipnt)
+        }
+    else if (equal_hv(field,"BFLCMEAN") == YES)            
+        {
+        call upper (line)
+        call remark (line)
+
+        call getfld (2, line, field, 4)                
+        ipnt = 1
+        RGCMean$Bfl = ctoi (field, ipnt)
+        }
+    else if (equal_hv(field,"BFLTMEAN") == YES)            
+        {
+        call upper (line)
+        call remark (line)
+
+        call getfld (2, line, field, 4)                
+        ipnt = 1
+        RGTMean$Bfl = ctoi (field, ipnt)
+        }
+    else if (equal_hv(field,"GLDCMEANA") == YES)           
+        {
+        call upper (line)
+        call remark (line)
+
+        call getfld (2, line, field, 4)                
+        ipnt = 1
+        RGCMean$GLDa = ctoi (field, ipnt)
+        }
+    else if (equal_hv(field,"GLDTMEANA") == YES)           
+        {
+        call upper (line)
+        call remark (line)
+
+        call getfld (2, line, field, 4)                
+        ipnt = 1
+        RGTMean$GLDa = ctoi (field, ipnt)
+        }
+    else if (equal_hv(field,"GLDCMEANS") == YES)           
+        {
+        call upper (line)
+        call remark (line)
+
+        call getfld (2, line, field, 4)                
+        ipnt = 1
+        RGCMean$GLDs = ctoi (field, ipnt)
+        }
+    else if (equal_hv(field,"GLDTMEANS") == YES)           
+        {
+        call upper (line)
+        call remark (line)
+
+        call getfld (2, line, field, 4)                
+        ipnt = 1
+        RGTMean$GLDs = ctoi (field, ipnt)
+        }
+    else if (equal_hv(field,"GESM_CMEANA") == YES)         
+        {
+        call upper (line)
+        call remark (line)
+
+        call getfld (2, line, field, 4)                
+        ipnt = 1
+        RGCMean$GESMa = ctoi (field, ipnt)
+        }
+    else if (equal_hv(field,"GESM_TMEANA") == YES)         
+        {
+        call upper (line)
+        call remark (line)
+
+        call getfld (2, line, field, 4)                
+        ipnt = 1
+        RGTMean$GESMa = ctoi (field, ipnt)
+        }
+    else if (equal_hv(field,"GESM_CMEANS") == YES)         
+        {
+        call upper (line)
+        call remark (line)
+
+        call getfld (2, line, field, 4)                
+        ipnt = 1
+        RGCMean$GESMs = ctoi (field, ipnt)
+        }
+    else if (equal_hv(field,"GESM_TMEANS") == YES)         
+        {
+        call upper (line)
+        call remark (line)
+
+        call getfld (2, line, field, 4)                
+        ipnt = 1
+        RGTMean$GESMs = ctoi (field, ipnt)
+        }
+    else if (equal_hv(field,"GSELCMEAN") == YES)           
+        {
+        call upper (line)
+        call remark (line)
+
+        call getfld (2, line, field, 4)                
+        ipnt = 1
+        RGCMean$GSEL = ctoi (field, ipnt)
+        }
+    else if (equal_hv(field,"GSELTMEAN") == YES)           
+        {
+        call upper (line)
+        call remark (line)
+
+        call getfld (2, line, field, 4)                
+        ipnt = 1
+        RGTMean$GSEL = ctoi (field, ipnt)
+        }
+    else if (equal_hv(field,"GWIZCMEAN") == YES)           
+        {
+        call upper (line)
+        call remark (line)
+
+        call getfld (2, line, field, 4)                
+        ipnt = 1
+        RGCMean$GWiz = ctoi (field, ipnt)
+        }
+    else if (equal_hv(field,"GWIZTMEAN") == YES)           
+        {
+        call upper (line)
+        call remark (line)
+
+        call getfld (2, line, field, 4)                
+        ipnt = 1
+        RGTMean$GWiz = ctoi (field, ipnt)
+        }
+    else if (equal_hv(field,"GSOSCMEAN") == YES)           
+        {
+        call upper (line)
+        call remark (line)
+
+        call getfld (2, line, field, 4)                
+        ipnt = 1
+        RGCMean$GSOS = ctoi (field, ipnt)
+        }
+    else if (equal_hv(field,"GSOSTMEAN") == YES)           
+        {
+        call upper (line)
+        call remark (line)
+
+        call getfld (2, line, field, 4)                
+        ipnt = 1
+        RGTMean$GSOS = ctoi (field, ipnt)
+        }
+    else if (equal_hv(field,"GHFDCMEAN") == YES)           
+        {
+        call upper (line)
+        call remark (line)
+
+        call getfld (2, line, field, 4)                
+        ipnt = 1
+        RGCMean$GHFD = ctoi (field, ipnt)
+        }
+    else if (equal_hv(field,"GHFDTMEAN") == YES)           
+        {
+        call upper (line)
+        call remark (line)
+
+        call getfld (2, line, field, 4)                
+        ipnt = 1
+        RGTMean$GHFD = ctoi (field, ipnt)
+        }
+    else if (equal_hv(field,"TASSCMEAN") == YES)           
+        {
+        call upper (line)
+        call remark (line)
+
+        call getfld (2, line, field, 4)                
+        ipnt = 1
+        RGCMean$STS = ctoi (field, ipnt)
+        }
+    else if (equal_hv(field,"TASSTMEAN") == YES)           
+        {
+        call upper (line)
+        call remark (line)
+
+        call getfld (2, line, field, 4)                
+        ipnt = 1
+        RGTMean$STS = ctoi (field, ipnt)
+        }
+    else if (equal_hv(field,"MEANTASS") == YES)            
+        {
+        call upper (line)
+        call remark (line)
+
+        call getfld (2, line, field, 4)                
+        ipnt = 1
+        RGSTS$Mean = ctoi (field, ipnt)
+        }
+    else if (equal_hv(field,"STDEVTASS") == YES)           
+        {
+        call upper (line)
+        call remark (line)
+
+        call getfld (2, line, field, 4)                
+        ipnt = 1
+        RGSTS$STDev = ctoi (field, ipnt)
+        }
+    else if (equal_hv(field,"GOTRCMEAN") == YES)           
+        {
+        call upper (line)
+        call remark (line)
+
+        call getfld (2, line, field, 4)                
+        ipnt = 1
+        RGCMean$GRTH = ctoi (field, ipnt)
+        }
+    else if (equal_hv(field,"GOTRTMEAN") == YES)           
+        {
+        call upper (line)
+        call remark (line)
+
+        call getfld (2, line, field, 4)                
+        ipnt = 1
+        RGTMean$GRTH = ctoi (field, ipnt)
+        }
+    else if (equal_hv(field,"GIRCMEAN") == YES)       # IR mean -- clf 10/8/92
+        {
+        call upper (line)
+        call remark (line)
+ 
+        call getfld (2, line, field, 4)                
+        ipnt = 1
+        RGCMean$GIR = ctoi (field, ipnt)
+        }
+    else if (equal_hv(field,"GIRTMEAN") == YES)
+        {
+        call upper (line)
+        call remark (line)
+ 
+        call getfld (2, line, field, 4)                
+        ipnt = 1
+        RGTMean$GIR = ctoi (field, ipnt)
+        }
+    }
+
+if (ifile == NO)  
+   {
+    call echor
+    call echov ("An Initialization File is not listed"//" in the Pregame Command File")
+    call echor
+    call rgexit 
+   }
+
+call echor; call echor
+call echov ("Command Input File...")
+call echor
+call echov ("    Initialization File...")
+call echor
+call echov ("                  Radar File...         Loads Completed")
+call echor
+call echor
+call echov ("The New Initialization File Is: ")
+call echoh (buf1, 13)
+call echor
+
+
+return
+end
+
+
+
+Subroutine rg_load_init (ifd_init,inw_init,istat)
+######################################################################
+###
+### Loads the Initalization Table entered to provide data for RAINFORM
+### messages that is not available in NWISS or not available in the
+### required form.
+###
+### Modified:   Jim Allen - 8/98 (E2027)
+###             Accept unit class NAVNRU, for non reporting units./
+###
+###             Susan Miller - 6/99 (E1599)
+###             Change FOSIF PACIFIC PEARL HARBOR HI in the from/originator
+###             line in the OTG messages to JICPAC. 
+########################################################################
+
+bbcommon
+rgcommon
+rfcommon
+
+external        getfld
+integer         ifd_init, istat, getlin, equal_hv
+character       line[$maxline], field[ARB]
+external        scopy
+integer         ifull_hf
+integer         inw_init
+
+istat = YES                                             # init to OK status
+RGRmks$out = NO
+
+HFDSTA_count   = 0                                      # set default values
+ifull_HF   = NO
+
+
+call scopy ("CTG SEVEN ZERO PT EIGHT"      ,1,ACTADD_txt        ,1)
+call scopy ("FOSIF WESTPAC KAMISEYA JA"    ,1,RFORIG_txt        ,1)     
+call scopy ("NAVDATACEN PEARL HARBOR HI"   ,1,BFORIG_txt        ,1)     
+call scopy ("COS PACIFIC PEARL HARBOR HI"  ,1,STSORIG_txt       ,1)
+call scopy ("FOSIC PACIFIC PEARL HARBOR HI",1,GLDORIG_txt       ,1)
+call scopy ("JICPAC"                       ,1,GESMORIG_txt      ,1) # smm 6/99 (E1599)
+call scopy ("NONE"                         ,1,ALERT_code        ,1)
+call scopy ("BGTT TEST EXERCISE"           ,1,OPNAME_txt        ,1)
+call init_rptrs
+
+while (getlin(line,ifd_init) != EOF)
+    {
+     call getfld (1,line,field,ARB)
+
+     call upper (field)
+
+     if (equal_hv(field,"ACTADD") == YES)              # Action Addressee
+        {
+         call upper (line)
+         call remark (line)
+
+         call getfld (2,line,ACTADD_txt,ARB)
+        }
+     else if (equal_hv(field,"RFORIG") == YES)             # RainForm msgs
+        {
+        call upper (line)
+        call remark (line)
+
+        call getfld (2,line,RFORIG_txt,ARB)
+        }
+     else if (equal_hv(field,"BFORIG") == YES)             # Blue Force Loc msgs
+        {
+        call upper (line)
+        call remark (line)
+
+        call getfld (2,line,BFORIG_txt,ARB)
+        }
+     else if (equal_hv(field,"STSORIG") == YES)            # SURTASS msgs
+        {
+        call upper (line)
+        call remark (line)
+
+        call getfld (2,line,STSORIG_txt,ARB)
+        }
+     else if (equal_hv(field,"GLDORIG") == YES)            # GOLD (less ESM) msgs
+        {
+        call upper (line)
+        call remark (line)
+
+        call getfld (2,line,GLDORIG_txt,ARB)
+        }
+     else if (equal_hv(field,"GLDESM") == YES)            # GOLD ESM msgs
+        {
+        call upper (line)
+        call remark (line)
+
+        call getfld (2,line,GESMORIG_txt,ARB)
+        }
+     else if (equal_hv(field,"OPNAME") == YES)             # OPNAME
+        {
+        call upper (line)
+        call remark (line)
+
+        call getfld (2,line,OPNAME_txt,ARB)
+        }
+     else if (equal_hv(field,"ALERT") == YES)              # ALERT field
+        {
+        call upper (line)
+        call remark (line)
+
+        call getfld (2, line, ALERT_code, ARB)
+        }
+     else if (equal_hv(field,"RMKS") == YES)               # Remarks line 
+       {
+        call upper (line)
+        call remark (line)
+        
+        RGRmks$out = YES
+
+        call getfld (2, line, RMKS_txt, ARB) 
+       }
+     else if (equal_hv(field,"HFDSTA") == YES)             # HFDF Station
+        {
+        if (HFDSTA_count >= $max_hf)
+            {
+            if (ifull_hf == YES) next
+
+            call remark_v ("Attempt to use more HF Sites than Allowed.")
+        
+            ifull_hf = YES
+            next
+            }
+
+        HFDSTA_count = HFDSTA_count + 1
+
+        call getfld (2,line,HFDSTA_code[1,HFDSTA_count],ARB)
+        call upper (HFDSTA_code[1,HFDSTA_count])
+
+        call getfld (3,line,HFDSTA_txt [1,HFDSTA_count],ARB)
+        }
+      call putlin (line, inw_init)
+    }
+
+return
+end
+
+
+
+subroutine getfld (n,line,field,maxsize)
+######################################################################
+###
+###  Gets the field from a line which is n fields in the line.
+### 
+###
+########################################################################
+implicit none
+character       line[ARB], field[ARB]
+integer         n, maxsize
+integer		ifld, ilen, i
+
+ifld = 1
+ilen = 0
+
+for (i = 1; line[i] != EOS & line[i] != NEWLINE; i=i+1)
+    {
+    if (line[i] == $SLASH)
+        {
+        ifld = ifld + 1
+
+        if (ifld > n) break
+
+        while (line[i+1] == $SPACE) i=i+1
+        }
+    else if (ifld == n)
+        {
+        call smov (line[i],field,ilen)
+
+        if (ilen >= maxsize) break
+        }       
+    }
+
+#getfld = ilen
+
+call smov (EOS,field,ilen)
+
+return
+end
+
+
+
+Subroutine mthday(idat)
+###################################################################
+#
+#      Convert Julian date to Month & Day
+#
+###################################################################
+
+bbcommon
+rgcommon
+tmpcommon
+
+integer idat
+vmschar*8 Names_v[12] / "JAN", "FEB", "MAR", "APR", "MAY", "JUN",
+                        "JUL", "AUG", "SEP", "OCT", "NOV", "DEC"/
+literal Names[12]
+equivalence (names_v, names)
+
+call monday(_                   # Given julian date, calculate mon and day
+             RGyear,            # year like 1982
+             idat,              # Julian day
+             imnth,             # Month(out)
+             iday)              # Day(out)
+
+mnth = Names[imnth]
+
+return
+end
+
+
+
+Subroutine INIT_View (iview_side, iview_number)
+######################################################################
+#$%
+#$% Purpose:   INIT_View sets up view indicated in the Initialization
+#$%            File.
+#$%
+#$% Date:      August 1983
+#$%
+#$% Author:    Jim Kvederis
+#$%
+#############################################################
+
+BBcommon
+whocommon
+
+integer norng, nblue, iview_side, inmbr, iview_number, iside
+integer nmbrvu
+
+
+norng = $LastOrange$View - $FirstOrange$View + 1
+nblue = $LastBlue$View   - $FirstBlue$View   + 1
+
+if      (iview_side ==   $Blue$code) inmbr = min0(iview_number,nblue)
+else if (iview_side == $Orange$code) inmbr = min0(iview_number,norng)
+
+#$% get view name and number
+iside = iview_side
+rain_view = NMBRVU(iside,inmbr)
+
+return
+end
+
+
+
+Function NMBRVU(iside,inmbr)
+#############################################################
+#$%
+#$% Purpose:   NMBRVU loads view number for output.
+#$%
+#$% Date:      26 JAN 82
+#$%
+#$% Author:    F. Jones
+#$%
+#############################################################
+
+BBcommon
+whocommon
+
+integer iside, nmbrvu, inmbr
+
+#$% test for view number
+if (iside ==  $Blue$code) nmbrvu = $FirstBlue$View   - 1 + inmbr
+else                      nmbrvu = $FirstOrange$View - 1 + inmbr
+
+return
+end
+
+
+
+
+Subroutine get_name (index, name)
+###########################################################################
+###
+### This routine goes to position "index" in the UNT table to find 
+### the unit's full name and returns this as "name."
+### If the unit is not in the table, the unit's short name is returned.
+###
+###########################################################################
+
+bbcommon
+rfcommon
+rgcommon
+ptr2common
+
+character       name[32]
+integer		kk, index
+literal		cstrip8
+VMSchar*24      vstrip
+BBDeclare	(UNT$FullName$V)
+kk = 0
+
+unt$pointer$to index
+
+UNT$FullName$V = xUNT$FullName$V
+if (UNT$FullName$V > " ")          
+   {
+    call smovvt  (UNT$FullName$V, name, kk)
+   }
+else           
+   {
+    call smovhn (xUNT$Name$c, $$MaxLit, name, kk)
+   }
+call smov (EOS, name, kk)
+
+return
+end
+
+
+
+Subroutine get_Class (index, class)
+######################################################################
+###
+### This routine goes to position "index" in the UNT table to find 
+### the unit's class and returns this as "class."
+### If the unit is not in the table, "UNEQUATED" is returned.
+###
+########################################################################
+
+bbcommon
+rfcommon
+rgcommon
+
+character       class[32]
+integer		kk, index
+integer unt$pointer, unt$type$i
+integer         shc$pointer
+integer         acc$pointer
+VMSchar*ARB     vstrip
+literal         cstrip8
+
+kk = 0
+
+unt$pointer$to index
+
+unt$Type$i = Xunt$Type$i
+
+if (UNT$TYPE$I == $SURFACE$CODE | 
+    UNT$TYPE$I == $SURFACEWITHAC$CODE |
+    UNT$TYPE$I == $SUB$CODE)
+    {
+    SHC$Pointer = Xunt$ShcPntr$i
+    call smovhn (xSHC$Type$c, $$MaxLit, class, kk)
+    }
+else if (unt$Type$i == $Air$Code)
+    {
+    ACC$Pointer = Xunt$AccPntr$i
+    call smovhn (xACC$Type$c, $$MaxLit, class, kk)
+    }
+
+call smov (EOS, class, kk)
+
+return
+end
+
+Subroutine get_Flag (index, flag)
+######################################################################
+###
+### This routine goes to position "index" in the UNT table to find 
+### the unit's flag and returns this as "flag."
+### If the unit is not in the table, US is returned.
+###
+########################################################################
+
+bbcommon
+rfcommon
+rgcommon
+
+character       flag[4]
+integer		kk, index
+integer unt$pointer
+VMSchar*ARB     vstrip
+BBDeclare(unt$Flag$v)
+kk = 0
+
+unt$pointer$to index
+
+unt$Flag$v = Xunt$Flag$v
+if (unt$Flag$v == "" | unt$Flag$v == "XX")
+    call smovv  ("US",     flag, kk)
+else 
+    call smovvn  (unt$Flag$v, flag, kk) #e2241 WRONG NUMBER OF ARGS 
+
+call smov (EOS, flag, kk)
+
+return
+end
+
+
+Subroutine get_Type (index, type)
+######################################################################
+###
+### This routine goes to position "index" in the UNT table to find 
+### the unit's type and returns this as "type."
+###
+########################################################################
+
+bbcommon
+rfcommon
+rgcommon
+
+character       type[9]
+integer		kk, index
+integer unt$pointer
+VMSchar*8     vstrip
+BBDeclare(unt$HullType$V)
+kk = 0
+
+unt$pointer$to index
+
+unt$HullType$V = Xunt$HullType$V
+call smovvt (unt$HullType$V, type, kk)
+
+call smov (EOS, type, kk)
+
+return
+end
+
+
+
+
+Subroutine get_SCONUM (index, SCONUM)
+######################################################################
+###
+### This routine goes to position "index" in the UNT table to find 
+### the unit's SCONUM and returns this as "SCONUM."
+###
+### Author:     James O. Allen  E2348
+### Date:       9 June 2003
+########################################################################
+
+bbcommon
+rfcommon
+rgcommon
+
+character       SCONUM[8]
+integer		kk, index
+integer unt$pointer
+VMSchar*6     vstrip
+BBDeclare(unt$SCONUM$V)
+kk = 0
+
+unt$pointer$to index
+
+unt$SCONUM$V = Xunt$SCONUM$V
+if (unt$SCONUM$V != " ")
+    call smovvt (unt$SCONUM$V, SCONUM, kk)
+
+call smov (EOS, SCONUM, kk)
+
+return
+end
+
+
+
+Subroutine get_status (index, status)
+######################################################################
+###
+### This routine goes to position "index" in the UNT table to find 
+### the unit's status and returns this as "status."
+###
+########################################################################
+
+bbcommon
+rfcommon
+rgcommon
+
+integer   status
+integer   index
+integer   unt$pointer
+
+unt$pointer$to index
+
+status = Xunt$OTGCode$i
+
+return
+end
+
+Integer function get_case (index)
+######################################################################
+###
+### This routine goes to position "index" in the case_number table to find 
+### the unit's case number. If there is no case number, it assigns one.
+###
+########################################################################
+
+bbcommon
+rfcommon
+rgcommon
+
+integer index, icase
+
+if (index == notlisted |
+    index == 0)          icase = 999
+else
+    {
+    if (case_number[index] == 0)
+        {
+        case_number[index] = RGcase_no
+        RGcase_no = RGcase_no + 1
+        }
+    icase = case_number[index]
+    }
+
+return (icase)
+end
+
+
+
+Subroutine get_numb (index, numb)
+######################################################################
+###
+### This routine goes to position "index" in the UNT table to find 
+### the unit's hull number and returns this as "numb."
+###
+########################################################################
+
+bbcommon
+rfcommon
+rgcommon
+
+character       numb[8]
+integer		kk, index
+integer         unt$pointer
+
+kk = 0
+
+unt$pointer$to index
+
+if (Xunt$HullNumber$i == 0)
+    call smovvn ("UNKNOWN", numb, kk)
+else           
+    call smovi (Xunt$HullNumber$i, numb, kk)
+
+call smov (EOS, numb, kk)
+
+return
+end
+
+
+
+Subroutine get_callsign (index, call)  
+####################################################################
+#
+# This routine goes to position "index" in the UNIT_ID table to find 
+# the unit's call sign and returns this as "call."
+# If the unit is not in the table, "9999" is returned.
+#
+####################################################################
+
+bbcommon
+rfcommon
+rgcommon
+
+character       call[4]
+integer		kk, index
+integer         unt$pointer
+
+kk = 0
+
+unt$pointer$to index
+
+
+call smovv ("XXXX", call, kk)
+
+
+return
+end
+
+
+
+Subroutine get_nosic (index, nosic)  
+####################################################################
+#
+# This routine goes to position "index" in the UNT table to find 
+# the unit's nosic number and returns this as "nosic."
+#
+####################################################################
+bbcommon
+rfcommon
+rgcommon
+
+character       nosic[4]
+integer		kk, index
+integer     unt$pointer
+kk = 0
+
+unt$pointer$to index
+
+if (unt$pointer$ok)
+
+    call smoviz (Xunt$NosicId$i, 4, nosic, kk)
+else
+    call smovv  ("9999", nosic, kk)
+
+return
+end
+
+
+
+Subroutine get_sensor 
+####################################################################
+#
+#  Fills in the appropriate field for a given sensor.
+#
+####################################################################
+
+bbcommon
+rfcommon
+rgcommon
+ptr2common
+msgcommon
+
+integer isens
+
+if (xMSG$ROTHRtrk$I == $YES) isens = $RADAR$Rsens
+else                         isens = xmsg$sensor$i
+
+if (RGAudit$Msg == $yes)    # & (rgpost$out == $no))
+   {
+    if      (isens == $Visual$RSens) call smovv ("VI", cline, ilen)
+    else if (isens == $RADAR$RSens)
+        {
+        if (xMSG$ROTHRtrk$I == $YES) call smovv ("RO", cline, ilen)
+        else                         call smovv ("RD", cline, ilen)
+        }
+    else if (isens == $SonAct$RSens) call smovv ("SA", cline, ilen)
+    else if (isens == $SonPas$RSens) call smovv ("SP", cline, ilen)
+    else if (isens == $TASS$RSens)   call smovv ("SU", cline, ilen)
+    else if (isens == $ESM$RSens)    call smovv ("ES", cline, ilen)
+    else if (isens == $AESM$RSens)   call smovv ("AE", cline, ilen)
+    else if (isens == $LIDAR$RSens)  call smovv ("LA", cline, ilen)
+    else if (isens == $MAD$RSens)    call smovv ("MA", cline, ilen)
+   }
+else
+   {
+    if      (isens == $Visual$RSens) call smovv ("VISUAL", cline, ilen)
+    else if (isens == $RADAR$RSens)
+        {
+        if (xMSG$ROTHRtrk$I == $YES) call smovv ("ROTHR", cline, ilen)
+        else                         call smovv ("RADAR", cline, ilen)
+        }
+    else if (isens == $SonAct$RSens) call smovv ("SONACT", cline, ilen)
+    else if (isens == $SonPas$RSens) call smovv ("SONPAS", cline, ilen)
+    else if (isens == $TASS$RSens)   call smovv ("SURTAS", cline, ilen)
+    else if (isens == $ESM$RSens)    call smovv ("ESM", cline, ilen)
+    else if (isens == $AESM$RSens)   call smovv ("AESM", cline, ilen)
+    else if (isens == $LIDAR$RSens)  call smovv ("LASER", cline, ilen)
+    else if (isens == $MAD$RSens)    call smovv ("MAD", cline, ilen)
+   }
+
+return 
+end
+ 
+
+
+Subroutine get_rmtindx (msgname, idetectee)
+####################################################################
+#
+# Gets RMT table detectee index number 
+#
+####################################################################
+
+bbcommon
+rfcommon
+rgcommon
+whocommon
+
+literal msgname
+integer RVU$Pointer, ifirst, ilast, RMT$Pointer, UNT$Pointer
+integer idetectee
+literal cstrip8
+
+rvu$pointer$to $firstblue$view
+ifirst = xrvu$firstrmtindx$i
+
+rvu$pointer$to $lastblue$view
+ilast = xrvu$lastrmtindx$i
+
+for (rmt$pointer$to ifirst; rmt$pointer$index <= ilast; rmt$pointer$next)
+   {
+    if (xrmt$inuse$i == 0) next                   # if empty slot, skip it
+
+    idctor = xrmt$detector$i 
+    idctee = xrmt$detectee$i
+
+    if (idctor == 0) next                          # no detector
+    if (idctee == 0) next                          # no detectee
+
+    unt$pointer$to idctee
+
+    if (msgname != xunt$name$c) next
+
+    idetectee = idctee
+    break
+   }
+
+return
+end            
+
+
+
+Subroutine get_ssrindx (msgname, idetectee)
+####################################################################
+#
+# Gets RMT table detectee index number 
+#
+####################################################################
+
+bbcommon
+rfcommon
+rgcommon
+whocommon
+
+literal msgname
+integer SSR$Pointer, UNT$Pointer, idetectee
+literal cstrip8
+
+for (ssr$pointer$first; ssr$pointer$valid; ssr$pointer$next)
+   {
+    idctor = xssr$detectorindx$i        # save detector index
+    idctee = xssr$detecteeindx$i        # save detectee index
+
+    if (idctor == 0) next                          # no detector
+    if (idctee == 0) next                          # no detectee
+
+    unt$pointer$to idctee
+
+    if (msgname != xunt$name$c) next
+
+    idetectee = idctee
+    break
+   }
+
+return
+end            
+
+
+
+Subroutine get_sosindx (msgname, idetectee)
+####################################################################
+#
+# Gets SOS table detectee index number 
+#
+####################################################################
+
+bbcommon
+rfcommon
+rgcommon
+whocommon
+
+literal msgname
+integer SOS$Pointer, UNT$Pointer, idetectee
+literal cstrip8
+
+for (sos$pointer$first; sos$pointer$valid; sos$pointer$next)
+   {
+    idctee = xsos$detectee$i 
+
+    if (idctee == 0) next                          # no detectee
+
+    unt$pointer$to idctee
+
+    if (msgname != xunt$name$c) next
+
+    idetectee = idctee
+    break
+   }
+
+return
+end            
+
+
+
+Subroutine get_swdindx (msgname, idetectee)
+####################################################################
+#
+# Gets SWD table detectee index number 
+#
+####################################################################
+
+bbcommon
+rfcommon
+rgcommon
+whocommon
+
+literal msgname
+integer SWD$Pointer, UNT$Pointer, idetectee
+literal cstrip8
+
+for (swd$pointer$first; swd$pointer$valid; swd$pointer$next)
+   {
+    idctee = xswd$detectee$i 
+    if (idctee == 0) next                          # no detectee
+    unt$pointer$to idctee
+    if (msgname != xunt$name$c) next
+    idetectee = idctee
+    break
+   }
+
+return
+end            
+
+
+
+Subroutine transpose (name, isize, gblname, klen)
+####################################################################
+#
+#   Purpose: Transpose characters in a word
+#
+#   By:  Jim Kvederis
+#
+#   Date:  3 Feb 88
+#
+####################################################################
+bbcommon
+rfcommon
+rgcommon
+whocommon
+
+character  name[32], gblname[32]
+literal size
+integer isize, imid, inext, i, klen
+
+size = FLOAT(isize)             # find the mid point of the name
+imid = size/2. + .5
+inext = NO
+
+for (i = 1; i <= isize; i = i + 1)
+   {
+    if (imid == i | inext == YES)
+       {
+        if (name[i] == $SPACE | name[i+1] == $SPACE)
+           {
+            inext = YES
+            gblname[i] = name[i]
+           }
+        else
+           {
+            gblname[i] = name[i+1]
+            gblname[i+1] = name[i]
+            i = i + 1
+            inext = NO
+           }
+       }
+    else gblname[i] = name[i]
+   }
+
+klen = isize
+
+return
+end
+
+
+
+Subroutine dropchars (name, isize, gblname, klen)
+####################################################################
+#
+#   Purpose: Drops characters out of a word
+#
+#   By:  Jim Kvederis
+#
+#   Date:  3 Feb 88
+#
+####################################################################
+bbcommon
+rfcommon
+rgcommon
+whocommon
+
+character  name[32], gblname[32]
+integer	   i, isize, iproc, k, klen, iblank, x # jb E2145 (x) 9/25/00
+real	   random2
+
+for (i = 1; i <= isize; i = i + 1)
+   {
+    if      (name[i] == $SPACE)        
+       {
+        if ((isize - i) <= 2) iproc = 1
+        else                  iproc = 2
+        break
+       }
+    else if (name[i] == name[i+1])  
+       {
+        iproc = 3
+        break
+       }
+    else iproc = 4
+   }
+
+if (iproc == 1)
+#-------------------------------------------------------------------------
+#   For strings with two or more words, where shorter word is on the end,
+#   delete the last word, eg. DELTA I ---> DELTA, ECHO II ---> ECHO, etc.
+#--------------------------------------------------------------------------
+   {
+    k = 0
+    for (i = 1; i <= isize; i = i + 1)
+      {
+       if (name[i] == $SPACE) break
+       else
+          {
+           k = k + 1
+           gblname[k] = name[i]
+          }
+      }       
+    klen = k
+   }
+if (iproc == 2)
+#-------------------------------------------------------------------
+#   For strings with two or more words, delete all but last word
+#   eg. JOHN PAUL JONES ---> JONES.
+#--------------------------------------------------------------------
+   {
+    k = 0
+    for (i = 1; i <= isize; i = i + 1)
+      {
+       if (name[i] == $SPACE) 
+          {
+           k = 0
+           next
+          }
+       else
+          {
+           k = k + 1
+           gblname[k] = name[i]
+          }
+      }       
+    klen = k
+   }
+if (iproc == 3)
+#-------------------------------------------------------------------
+#   For words with two or more characters in a row that are the 
+#   same, delete the duplicate characters.  E.g. WADDELL ---> WADEL;
+#   POLTKYY ---> POLTKY; BEZZEVETNIY ---> BEZEVENTNIY; etc.
+#--------------------------------------------------------------------
+   {
+    k = 0
+    for (i = 1; i <= isize; i = i + 1)
+       {
+        if (name[i] == name[i+1])  next
+        else 
+           {
+            k = k + 1
+            gblname[k] = name[i]
+           }
+       }
+    klen = k
+   }
+
+if (iproc == 4)
+#-------------------------------------------------------------------
+#   Delete a character at random positions in a word.
+#---------------------------------------------------------------------
+   {
+    k = 0
+    iblank = random2(x) * isize
+    for (i = 1; i <= isize; i = i + 1)
+       {
+        if (iblank == i) next
+        else 
+           {
+            k = k + 1
+            gblname[k] = name[i]                
+           }
+       }
+    klen = k
+   }
+
+return
+end
+
+
+
+Subroutine garblechars (name, isize, gblname, klen)
+####################################################################
+#
+#   Purpose: Drops characters out of a word
+#
+#   By:  Jim Kvederis
+#
+#   Date:  3 Feb 88
+#
+####################################################################
+bbcommon
+rfcommon
+rgcommon
+whocommon
+
+character  name[32], gblname[32], randchar[1]
+integer    ichar, isize, i, klen, x # jb E2145 (x) 9/25/00
+real 	   random2
+
+ichar = random2(x) * isize
+for (i = 1; i <= isize; i = i + 1)
+   {
+    if (ichar == i) 
+       {
+        call gbl_alpha (randchar)
+        gblname[i] = randchar[1]
+       }
+    else gblname[i] = name[i]                
+   }
+
+klen = isize
+
+return
+end
+
+
+
+subroutine gbl_alpha (randchar)
+####################################################################
+#
+# Chooses random characters to insert in messages as garbles.
+#
+####################################################################
+implicit none
+character randchar[1]
+integer   irand, i_switch_1, x # jb E2145 (x) 9/25/00
+real	  random2
+
+irand = int(random2(x) * 26)
+
+switch (irand)           
+   {
+    case 1:   {randchar[1] = $LETA}                                         
+    case 2:   {randchar[1] = $LETB}
+    case 3:   {randchar[1] = $LETC}                                         
+    case 4:   {randchar[1] = $LETD}   
+    case 5:   {randchar[1] = $LETE}    
+    case 6:   {randchar[1] = $LETF}   
+    case 7:   {randchar[1] = $LETG}                                         
+    case 8:   {randchar[1] = $LETH}
+    case 9:   {randchar[1] = $LETI}                                         
+    case 10:  {randchar[1] = $LETJ}
+    case 11:  {randchar[1] = $LETK}                                         
+    case 12:  {randchar[1] = $LETL}                                         
+    case 13:  {randchar[1] = $LETM}                                         
+    case 14:  {randchar[1] = $LETN}                                         
+    case 15:  {randchar[1] = $LETO}                                         
+    case 16:  {randchar[1] = $LETP}                                         
+    case 17:  {randchar[1] = $LETQ}                                         
+    case 18:  {randchar[1] = $LETR}                                         
+    case 19:  {randchar[1] = $LETS}                                         
+    case 20:  {randchar[1] = $LETT}                                         
+    case 21:  {randchar[1] = $LETU}                                         
+    case 22:  {randchar[1] = $LETV}                                         
+    case 23:  {randchar[1] = $LETW}                                         
+    case 24:  {randchar[1] = $LETX}                                         
+    case 25:  {randchar[1] = $LETY}                                         
+    case 26:  {randchar[1] = $LETZ}                                         
+   }
+
+return
+end
+
+
+
+Subroutine init_rptrs
+###################################################################
+#
+#  Initializes the reporting unit for all message types. The reporting
+#  unit goes into the MSGID line.
+#
+###################################################################
+implicit none
+rfcommon
+external   scopy
+
+call scopy ("NCO PAC"         , 1, MSG_reporters[1,$HFDF$RMsg],     1)
+call scopy ("FOSIC PAC"       , 1, MSG_reporters[1,$SELOR$RMsg],    1)
+call scopy ("FOTC PAC"        , 1, MSG_reporters[1,$GOLD$RMsg],     1)
+call scopy ("FOTC PAC"        , 1, MSG_reporters[1,$GOLDP$RMsg],    1)
+call scopy ("FOSIC PAC"       , 1, MSG_reporters[1,$GESM$RMsg],     1)
+call scopy ("FOTC PAC"        , 1, MSG_reporters[1,$GSOSUS$RMsg],   1)
+call scopy ("FOTC PAC"        , 1, MSG_reporters[1,$GHFDF$RMsg],    1)
+call scopy ("FOSIC PAC"       , 1, MSG_reporters[1,$GSELOR$RMsg],   1)
+call scopy ("FOSIC PAC"       , 1, MSG_reporters[1,$GWIZARD$RMsg],  1)
+call scopy ("CINCPACFLTWEST"  , 1, MSG_reporters[1,$OSRed$RMsg],    1)
+call scopy ("CINCPACFLTWEST"  , 1, MSG_reporters[1,$OSRedP$RMsg],   1)
+call scopy ("CINCPACFLTWEST"  , 1, MSG_reporters[1,$OSWht$RMsg],    1)
+call scopy ("CINCPACFLTWEST"  , 1, MSG_reporters[1,$OSWhtP$RMsg],   1)
+call scopy ("CINCPACFLTWEST"  , 1, MSG_reporters[1,$White$RMsg],    1)
+call scopy ("FOTC PAC"        , 1, MSG_reporters[1,$Special$RMsg],  1)
+call scopy ("FOTC PAC"        , 1, MSG_reporters[1,$GSONBA$RMsg],   1)
+call scopy ("FOTC PAC"        , 1, MSG_reporters[1,$GSONBP$RMsg],   1)
+call scopy ("FOTC PAC"        , 1, MSG_reporters[1,$GSONTP$RMsg],   1)
+call scopy ("FOTC PAC"        , 1, MSG_reporters[1,$GSONP$RMsg],    1)
+call scopy ("FOTC PAC"        , 1, MSG_reporters[1,$GSWABS$RMsg],   1)
+call scopy ("FOTC PAC"        , 1, MSG_reporters[1,$GIR$RMsg],      1)
+
+return
+end
+
+
+
+Subroutine get_reporter(line,msgtype)
+implicit none
+rfcommon
+external getfld
+character rptr[16], line[ARB]
+integer   kk, k, msgtype, length
+
+kk = 0
+call getfld (3, line, rptr, 16)
+k = length(rptr)
+
+if (k > 0)
+    {
+    call smovh (rptr, k, MSG_reporters[1, msgtype], kk)
+    call smov (EOS, MSG_reporters[1, msgtype], kk)
+    }
+return
+end

@@ -1,0 +1,386 @@
+#### This set of routines is usefull for prompting the user for a command
+#### with a memory of the last N lines entered. i.e. Command Recall.
+ 
+include "macros.inc"
+include "ascii.inc"
+define ($recall_max_lines, 31)
+define ($recall_max_length, 255)
+ 
+define (delete$char, {call echo($cntlH);    # 02/24/1986 <SCC>
+                      call echo($space);    # ditto
+                      call echo($cntlH) })  # ditto
+define (cursor$left, {call echo ($ESC)
+				      call echo ($LBRACK)
+				      call echo ($LETD) })
+ 
+define (Recall$common,
+    implicit none
+ 
+        INTEGER*4    Recall_IO_Channel
+        INTEGER*4    Recall_Max_Lines
+        integer*4    Recall_Max_Length
+        integer*4    Recall_Line_Count
+        integer*4    Recall_Base_Address
+        integer*4    Recall_Byte_Count
+		character    Recall_Stack[$recall_max_length,$recall_max_lines]
+   common / Recall_common /_
+    Recall_IO_Channel,
+    Recall_Max_Lines,
+    Recall_Max_Length,
+    Recall_Line_Count,
+    Recall_Base_Address,
+    Recall_Byte_Count,
+	Recall_Stack
+    )
+ 
+define ($len$Entry , (4+Recall_Max_Length+1) )
+define ($pos$Length, (Recall_Base_Address + (@1-1)*$len$Entry) )
+define ($pos$Buffer, ($pos$Length(@1) + 4) )
+ 
+ 
+
+Subroutine Recall_Init (Handle,         # VM Pointer to remember
+                        TTY_Channel,    # TTY Channel to do I/O on
+                        Max_Lines,      # Number of lines to remember
+                        Max_Length)     # Size of each line to remember
+ 
+Recall$Common
+ 
+Integer*4    Handle
+Integer*2    TTY_Channel, Max_Lines, Max_Length
+ 
+recall_IO_Channel    = TTY_Channel            # save all these values
+recall_Max_Lines     = $recall_Max_Lines
+recall_Max_Length    = min(255, $recall_Max_Length)
+recall_Line_Count    = 0
+recall_Base_Address  = %%loc(Recall_Stack)
+recall_Byte_Count    = $recall_max_length * $recall_max_lines
+ 
+handle = recall_base_address
+return
+end
+ 
+
+Subroutine Recall_Line (Handle,         # VM Pointer returned by RECALL_INIT
+                        Prior_Line,     # 0 for blank line, -1 for Prior command
+                        Line_Buf,       # Where to read into
+                        Line_Len,       # Length of text read
+                        Prompt_Buf,     # any Prompt desired
+                        Prompt_Len)     # Length of prompt (or zero if NONE)
+ 
+Recall$Common
+ 
+Integer*4    Handle, Prior_Line, Line_Len, Prompt_Len
+character    line_buf[ARB], Prompt_buf[ARB]
+integer*4    rc, code, P_point, sys$qiow
+integer*4    Pos_len, pos_Old, Old_Len
+ 
+character    clear_Line[10]
+ 
+data Clear_Line[1] / $return /
+data Clear_Line[2] / $esc    /
+data Clear_Line[3] / $lbrack /
+data Clear_Line[4] / $letk   /
+ 
+Line_Len = 0
+line_buf[1] = EOS
+ 
+P_Point = max(1, Recall_Line_Count + 1 + Prior_Line )
+ 
+code = 0
+repeat
+    {
+    P_Point = min(Recall_Line_Count+1,max(1, P_Point + code))
+ 
+    pos_len = $pos$length(P_Point)
+    call lib$movc3 (4, %%val(pos_Len), Old_Len )
+    pos_old = $pos$buffer(P_Point)
+ 
+    if (code != 0)
+        {
+        call echoh(clear_line,4)
+        }
+ 
+    call Recall_Read (Recall_IO_Channel,
+                      Recall_ Max_Length,
+                      Line_Buf, Line_Len,
+                      %%val(pos_Old), Old_Len,
+                      Prompt_Buf, Prompt_Len,
+                      code)
+ 
+    } until (code == 0)
+ 
+return
+end
+ 
+
+Subroutine Recall_Add  (Handle,         # VM Pointer returned by RECALL_INIT
+                        Line_Buf,       # Text of line to add to recall stack
+                        Line_Len)       # Length of text
+ 
+Recall$Common
+ 
+Integer*4    Handle, Line_Len, recall_equal, temp_len
+character    line_buf[ARB]
+integer*4    k, pos_len, pos_buf, pos_len1, pos_len2
+ 
+#------------------------------------------------------------
+# If the line is empty do not add it
+ 
+if ( Line_Len == 0 ) return
+ 
+#------------------------------------------------------------
+# Check for duplicate adds (and not do them)
+ 
+if (recall_line_Count > 0)
+    {
+    pos_len = $pos$length( recall_line_Count )
+    call lib$movc3 (4, %%val(pos_Len), Temp_Len )            # get Length
+ 
+    if ( temp_len == line_len )
+        {
+        pos_buf = $pos$buffer( recall_line_Count )
+ 
+        if (recall_equal(temp_len,%%val(pos_buf), Line_buf) == YES) return
+        }
+    }
+#------------------------------------------------------------
+ 
+recall_Line_Count = recall_Line_Count + 1
+ 
+if (Recall_Line_Count > Recall_Max_Lines )   # is the stack full
+    {                                            # YES, move lines 2..n
+    Recall_Line_Count = Recall_Max_Lines     # into positions 1..n-1
+ 
+    pos_len1 = $pos$Length(2)
+    pos_len2 = $pos$Length(1)
+    call lib$Movc3 ($len$Entry * (Recall_Max_Lines),
+                    %%val(pos_len1), %%val(pos_len2))
+    }
+ 
+k = 0;
+pos_buf = $pos$Buffer(Recall_line_count)
+pos_len = $pos$Length(Recall_line_count)
+ 
+call smovh (Line_buf,min(Line_Len, Recall_Max_Length),          # Move string
+            %%val(pos_Buf), k )                                 # into place,
+call smov (EOS, %%val(pos_Buf), k )                             # Terminate it
+call lib$movc3 (4, K-1, %%val(pos_Len))                         # Move Length
+ 
+return
+end
+ 
+ 
+integer function recall_equal (len,str1,str2) 	# compare two strings for the
+implicit none
+character	str1[ARB], str2[ARB]		# length passed
+integer         len
+integer 	i
+ 
+for (i=1; i <= len; i=i+1)
+    {
+    if (str1[i] != str2[i]) return NO
+    }
+ 
+return YES
+end
+ 
+ 
+
+subroutine Recall_Read (IO_Chan,        # Channel for I/O
+                        Max_Len,        # Max length to read
+                        Line_Buf,       # Where to read into
+                        Line_Len,       # Length of text read
+                        Old_Buf,        # Text to use for Init
+                        Old_Len,        # Length of init text (or zero if NONE)
+                        Prompt_Buf,     # any Prompt desired
+                        Prompt_Len,     # Length of prompt (or zero if NONE)
+                        code)           # terminate mode (-1,0,+1)
+implicit none
+#Recall$Common
+ 
+integer*2    IO_Chan, iosb[4]
+Integer*4    Max_Len, Line_Len, Old_Len, Prompt_Len
+character    line_buf[ARB], Old_Buf[ARB], Prompt_buf[ARB]
+character	 char, char_2, char_3
+integer*4    code, rc, list_count, term_len, term_char
+integer      kk, i, itime, cupper, edit_pos
+#integer*4    sys$qiow
+ 
+ 
+# retrieve recall line from recall buffer
+kk = 0
+call smovh (Old_buf, Old_len, Line_buf, kk)
+call smov  (EOS, Line_buf, kk)
+Line_len = kk - 1
+edit_pos = line_len + 1
+code = 0		
+call echoh (Line_buf, Line_len)					# Echo recall line to terminal
+ 
+itime = 5
+repeat
+{
+	call get_ch (char,itime*1000)	# this routine may or may not pause.
+	char = cupper(char)
+	if (char == 0) next
+	else if (char == $ESC)           # up/down/left/right arrow
+	{
+        call get_ch (char_2,itime*1000)
+        call get_ch (char_3,itime*1000)
+        if (char_2 == $LBRACK  & char_3 == $LETA)	# Up arrow
+		{
+			code = -1
+			Line_len = 1
+			break
+		}
+       else if (char_2 == $LBRACK  & char_3 == $LETB)  # Down arrow
+		{
+			code = 1
+			Line_len = 1
+			break
+		}
+       else if (char_2 == $LBRACK  & char_3 == $LETC)  # Right arrow
+		{
+			if (edit_pos < line_len + 1)
+			{
+				edit_pos = min(line_len+1, edit_pos + 1)
+				call echo ($ESC)
+				call echo ($LBRACK)
+				call echo ($LETC)
+			}
+		}
+       else if (char_2 == $LBRACK  & char_3 == $LETD)  # Left arrow
+		{
+			if (edit_pos >= 1)
+			{
+				edit_pos = max(1, edit_pos - 1)
+                cursor$left
+			}
+		}
+	}
+	else if (char == $return)
+	{
+		break
+	}
+    else if (char == $DEL | char == $CNTLA | char == $CNTLH)
+	{
+		if (edit_pos > 1)			# remove char prior to edit pos
+		{
+			for (i = edit_pos; i <= line_len+1; i = i + 1) line_buf[i-1] = line_buf[i]
+			Line_len = line_len - 1
+			edit_pos = edit_pos - 1
+			delete$char			# Delete character
+			kk = line_len - edit_pos + 1
+			call echoh (line_buf[edit_pos], kk)
+			call echo ($space)
+			for (i = 1; i <= kk+1; i = i + 1)
+			{
+ 				cursor$left	
+			}	
+		}					
+	}	
+	else if (char == $space | (char >= BIGA & char <= BIGZ) | (char >= $DIG0 & char <= $DIG9))
+	{
+		if (edit_pos > line_len)
+		{
+			line_buf[edit_pos] = char
+			line_len = line_len + 1
+			edit_pos = edit_pos + 1
+			call echo(char)
+		}
+		else				# Insert char at edit pos
+		{
+			for (i = line_len; i >= edit_pos; i = i - 1) line_buf[i+1] = line_buf[i]
+			line_buf[edit_pos] = char
+			line_len = line_len + 1
+			kk = line_len - edit_pos + 1
+			call echoh (line_buf[edit_pos], kk)
+			edit_pos = edit_pos + 1
+			for (i = 1; i <= kk-1; i = i + 1)
+			{
+ 				cursor$left	
+			}	
+		}
+	}
+}
+line_buf[line_len+1] = EOS
+return			
+ 
+#STRUCTURE / item_entry /
+#    INTEGER*2    Buf_len
+#    INTEGER*2    item_code
+#    integer*4    Buf_addr
+#    integer*4    Ret_addr
+#END STRUCTURE
+ 
+#RECORD / item_entry / list [ 6 ]
+ 
+#i%nclude % "($trmdef)"
+#i%nclude % "($iodef)"
+ 
+#Line_Len = 0
+#line_buf[1] = EOS
+ 
+#list_count = 1
+#list[1] . item_Code = TRM$_Modifiers
+#list[1] . Buf_len   = 0
+#list[1] . Buf_addr  = TRM$M_TM_DsablMbx  |
+##                     TRM$M_TM_CvtLow    |
+#                      TRM$M_TM_NoRecall  |
+#                     TRM$M_TM_Purge     |
+#                      TRM$M_TM_TrmNoEcho |
+#                      TRM$M_TM_Escape
+#list[1] . Ret_addr  = 0
+ 
+#if (old_len > 0)
+#    {
+#    list_count = list_count + 1
+#    list[list_count] . item_Code = TRM$_IniStrng
+#    list[list_count] . Buf_len   = old_len
+#    list[list_count] . Buf_addr  = %%loc(old_buf)
+#    list[list_count] . Ret_addr  = 0
+#    }
+ 
+#if (prompt_len > 0)
+#    {
+#    list_count = list_count + 1
+#    list[list_count] . item_Code = TRM$_Prompt
+#    list[list_count] . Buf_len   = prompt_len
+#    list[list_count] . Buf_addr  = %%loc(prompt_buf)
+#    list[list_count] . Ret_addr  = 0
+#    }
+ 
+#rc = sys$qiow(,
+#              %%val(io_chan),
+#              %%val(IO$_ReadVBlk + IO$M_Extend ),
+#              iosb,,,
+#              %%ref(line_buf),
+#              %%val(max_len),
+#              ,
+#              ,
+#              %%Ref(list),
+#              %%val(list_count*12) )
+ 
+#if (!rc)
+#    {
+#    type *,"Error on read ", rc
+#    call exit (rc)
+#    }
+#else
+#    {
+#    line_len = iosb[2]
+#    term_char = iosb[3] & M8Bits
+#    term_len  = iosb[4] & M8Bits
+ 
+#    if      (term_len == 1 &
+#             line_buf[line_len+1] == 2    ) code = -1
+#    else if (term_len == 3 &
+#             line_buf[line_len+1] == 27 &
+#             line_buf[line_len+2] == 91 &
+#             line_buf[line_len+3] == 66  )  code = 1
+#    else                            code = 0
+#    line_buf[line_len+1] = EOS
+#    }
+ 
+return
+end

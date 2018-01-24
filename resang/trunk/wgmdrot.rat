@@ -1,0 +1,860 @@
+#####	FILE:	WGMDROT.rat
+ 
+### Record of modifications
+###
+###   date    prog     module          comments
+### ========= ==== ============== ============================================
+### 14-MAR-90 cml  rotmod         Extract rothr base lat/lon from UNT table
+###                               at this point.
+###                get_unit       Extract target lat/lon and compute range
+###                               and bearing from base to target. This
+###                               facilitates extracting cross-section of
+###                               target, including A/C, in this module.
+###                (various)      Changed references to POS, DUP, and DYN
+###                               tables so that they reference the UNT table.
+ 
+include "ascii.inc"
+include "bbctl.inc"
+include "bbcode.inc"
+include "bbunt.inc"
+include "bbdeq.inc"
+include "bbrth.inc"
+include "bbshc.inc"
+include "bbacc.inc"
+include "bbcmc.inc"
+include "wgmdrot.inc"
+ 
+define (BBImplicit,Implicit None)
+ 
+define ($mu,10.0)  # mu is used in signal-to-noise ratio calculation
+define ($sd,7.0)   # sd also is used in  "           "     "
+ 
+define ($debug,#)
+#define ($debug,)
+
+subroutine ROTMOD
+########################################################
+#$%
+#$% Purpose:   ROTMOD is the rothr detection model
+#$%
+#$% Called By: WARCYC
+#$%
+#$% Tables:    RTH    RTH$RCL    RTH$PCA
+#$%
+#$% Date:      June 87
+#$%
+#$% Author:    Richard Schauer
+#$%
+########################################################
+ 
+BBcommon
+ 
+integer compute_dop,dir_find,doppler,find_snr,idir,idirbase,idirloss,ifull,
+        iii,
+        ilast,        # last slot used in RTH$RCL table
+        irot,         # index of rothr base
+        irotas,       # flag for air/surface
+        irotdn,       # flag for day/night
+        isize,
+        islot,        # current slot in RTH$RCL table
+        isnr,iunit,iview,
+        RTH$DayNight$i,
+        RTH$Noise$i,
+        RTH$NumberRCL$i,
+        RTH$PCA$Index,
+        RTH$Pointer,
+        RTH$RCL$DetCounter$i,
+        RTH$RCL$DetFlag$i,
+        RTH$RCL$Index,
+        RTH$RCL$LostCounter$i,
+        RTH$UnitIndx$i,
+        UNT$Pointer
+ 
+real*4  baselat,baselon,brng,noise,noise_rot,range,rsn,tarlat,tarlon,xsect,
+        k1,scos,ssin,flat,flon,fcos,fsin,term,
+        RTH$PerformanceFactor$f,
+        rth$NextTranTime$f,
+        zulutime,
+        RTH$RCL$RadialSpeed$f
+ 
+data k1/-0.0151/
+ 
+$debug %      OPEN (UNIT=11, FILE='rcl.dat',status = 'NEW',ERR=1919)
+$debug %      REWIND 11
+$debug %1919  continue
+ 
+  for( RTH$Pointer$First; RTH$Pointer$OK; RTH$Pointer$Next)
+    {
+     if (XRTH$InUse$I == $NO) NEXT
+     rth$NextTranTime$f = Xrth$NextTranTime$f      # check to see if in transition
+     RTH$DayNight$I = XRTH$DayNight$I
+     if (rth$NextTranTime$f <= game$time)
+       {
+                  #   compute the time of next transition
+ 
+        scos = cos(sun$latitude)       #  compute cosine and sine of
+        ssin = sin(sun$latitude)       #  latitude of sun
+ 
+        zulutime = zulu$starttime + game$time
+ 
+        flat = Xrth$CentroidLatitude$f    #  extract latitude and longitude
+        flon = Xrth$CentroidLongitude$f   #  of rothr centroid
+        fsin = sin(flat)          #  compute sine of centroid latitude
+        fcos = cos(flat)          #  compute cosine of centroid latitude
+ 
+        term = (k1 - ssin * fsin)/(scos * fcos)
+ 
+        if (term > 1.0)  #  take care of extreme cases with the equation
+          term = 1.0
+        else if (term < -1.0)
+          term = -1.0
+        else
+          term = acos(term)
+ 
+        if (RTH$DayNight$I == day$rth)
+          {
+           PUTRTH$DayNight$I (night$rth)
+           #    compute next sunrise
+           rth$NextTranTime$f = 720/$PI * ($PI-flon-term) - 69
+           while (rth$NextTranTime$f >= $Minutes$Per$Day)
+             rth$NextTranTime$f = rth$NextTranTime$f - $Minutes$Per$Day
+           while (rth$NextTranTime$f <= zulutime)
+             rth$NextTranTime$f = rth$NextTranTime$f + $Minutes$Per$Day
+           rth$NextTranTime$f = rth$NextTranTime$f - zulu$starttime
+           PUTrth$NextTranTime$f
+          }
+        else
+          {
+           PUTRTH$DayNight$I (day$rth)
+           #    compute next sunset
+           rth$NextTranTime$f = 720/$PI * ($PI-flon+term) + 69
+           while (rth$NextTranTime$f >= $Minutes$Per$Day)
+             rth$NextTranTime$f = rth$NextTranTime$f - $Minutes$Per$Day
+           while (rth$NextTranTime$f <= zulutime)
+             rth$NextTranTime$f = rth$NextTranTime$f + $Minutes$Per$Day
+           rth$NextTranTime$f = rth$NextTranTime$f - zulu$starttime
+           PUTrth$NextTranTime$f
+          }
+ 
+        PUTRTH$Modified$I (1)
+       }
+     if (XRTH$Active$I == $NO)         # if not active then delete all tracks
+       {
+        RTH$NumberRCL$I = XRTH$NumberRCL$I
+        if (RTH$NumberRCL$I == 0) NEXT  # all tracks deleted previously
+        PUTRTH$FreeRCLslot$I (1)
+        PUTRTH$Modified$I (1)
+        for (iii = 1; iii <= RTH$RCL$slots - 1; iii = iii + 1)
+          {
+           RTH$RCL$index = iii
+           PUTRTH$RCL$Next$I (iii + 1)
+          }
+        PUTRTH$NumberRCL$I (0)
+        RTH$RCL$index = RTH$RCL$slots
+        PUTRTH$RCL$Next$I (0)
+        PUTRTH$FirstRCL$I (0)
+        NEXT
+       }
+ 
+ 
+     irot = RTH$Pointer$index
+     irotdn = XRTH$DayNight$I
+     RTH$Noise$I = XRTH$Noise$I
+     noise = noise_rot(float(RTH$Noise$I),irot)
+     RTH$PerformanceFactor$F = XRTH$PerformanceFactor$F
+     RTH$UnitIndx$I = XRTH$UnitIndx$I
+     UNT$Pointer$to RTH$UnitIndx$I
+     iview = Xunt$View$I
+     baselat = Xunt$TrueLatitude$f
+     baselon = Xunt$TrueLongitude$f
+     iunit = 0
+ 
+     repeat
+       {
+        iunit = iunit + 1
+        call get_unit(tarlat,tarlon,irotas,xsect,range,brng,baselat,baselon,
+                      iunit,iview) # get next unit
+        if (iunit != 0)  # find it and find the slot
+          {
+           call find_RCLslot(irot,islot,ilast,iunit)     # is it in RCL table?
+           UNT$Pointer$to iunit
+           if (Xunt$Status$I == $BeingDeleted$code)
+             {
+              if (islot != 0) call Del_RCLslot(irot,islot,ilast)
+              NEXT
+             }
+           idir = dir_find(irot,irotas,range,brng) # get dir
+           if (idir != 0)  # it's in the PCA, is it in the CSA???
+             {
+              if (irotas == air$pca)
+                idirbase = air$pca$base
+              else
+                idirbase = surf$pca$base
+              RTH$PCA$Index = idir + idirbase
+              if ((irotdn == day$rth) & (XRTH$PCA$DayOn$I == $NO) |   # check if
+                  (irotdn == night$rth) & (XRTH$PCA$NiteOn$I == $NO)) # the dir
+                idir = 0                                              # is active
+             }
+           if (idir == 0)  # not in CSA
+             {
+              if (islot != 0) # if he was in the RCL table delete him
+                call del_RCLslot(irot,islot,ilast)
+              NEXT
+             }
+           if (islot == 0) # is in CSA but first time
+             call add_RCLslot(ifull,tarlat,tarlon,irotas,irot,iunit,islot,ilast)
+           else
+             call up_poscours(tarlat,tarlon,iunit,irot,islot)
+ 
+           if (ifull != $YES) # test to see if RCL table full
+             {
+              RTH$RCL$Index = islot
+              RTH$RCL$DetFlag$I = XRTH$RCL$DetFlag$I
+ 
+              doppler = compute_dop(brng,irotas,rsn,irot,islot) # doppler check
+              if (doppler == $NO) # not enough
+                {
+                 if (RTH$RCL$DetFlag$I == $No) # reset detection counter
+                   PUTRTH$RCL$DetCounter$I (0)
+                 else                          # we lost it after he was reported
+                   {
+                    RTH$RCL$LostCounter$I = XRTH$RCL$LostCounter$I
+                    RTH$RCL$LostCounter$I = RTH$RCL$LostCounter$I + 1
+                    if (RTH$RCL$LostCounter$I > Minutes$to$Old)
+                      call del_RCLslot(irot,islot,ilast)
+                    else
+                      PUTRTH$RCL$LostCounter$I
+                   }
+                 PUTRTH$Modified$I (1)
+                 NEXT
+                }
+ 
+              RTH$RCL$RadialSpeed$F = XRTH$RCL$RadialSpeed$F # radical maneuver check
+              if (RTH$RCL$RadialSpeed$F == -1.0)
+                PUTRTH$RCL$RadialSpeed$F (rsn)
+              else if ((rsn - RTH$RCL$RadialSpeed$F) > (Rothr$Radical$Percent * RTH$RCL$RadialSpeed$F))
+                {
+                 call del_RCLslot(irot,islot,ilast)
+                 NEXT
+                }
+              else
+                PUTRTH$RCL$RadialSpeed$F (rsn)
+              PUTRTH$Modified$I (1)
+ 
+              if (irotdn == day$rth)
+                idirloss = XRTH$PCA$DayLoss$I
+              else
+                idirloss = XRTH$PCA$NiteLoss$I
+              isnr = find_snr(RTH$PerformanceFactor$F,xsect,range,idirloss,noise)
+              if (isnr == $NO)
+                {
+                 if (RTH$RCL$DetFlag$I == $No) # reset detection counter
+                   PUTRTH$RCL$DetCounter$I (0)
+                 else                          # we lost it after he was reported
+                   {
+                    RTH$RCL$LostCounter$I = XRTH$RCL$LostCounter$I
+                    RTH$RCL$LostCounter$I = RTH$RCL$LostCounter$I + 1
+                    if (RTH$RCL$LostCounter$I > Minutes$to$Old)
+                      call del_RCLslot(irot,islot,ilast)
+                    else
+                      PUTRTH$RCL$LostCounter$I
+                   }
+                 PUTRTH$Modified$I (1)
+                 NEXT
+                }
+              # we made it! we can see him!!!
+              PUTRTH$RCL$LostCounter$I (0)
+              PUTrth$RCL$DetTime$f (game$Time)
+              if (RTH$RCL$DetFlag$I == $YES) NEXT
+              RTH$RCL$DetCounter$I = XRTH$RCL$DetCounter$I
+              RTH$RCL$DetCounter$I = RTH$RCL$DetCounter$I + 1
+              if (((irotas == air$pca) & (RTH$RCL$DetCounter$I >= 7)) |
+                 ((irotas == surf$pca) & (RTH$RCL$DetCounter$I >= 20)))
+                {
+                 PUTRTH$RCL$DetFlag$I ($YES)
+                 PUTRTH$RCL$FirstTime$f (game$time)
+                 if (irotas == air$pca)
+                   {
+                    call oth_raidsiz(iunit,isize)
+                    PUTRTH$RCL$Raidsize$I (isize)
+                   }
+                }
+              PUTRTH$RCL$DetCounter$I
+              PUTRTH$Modified$I (1)
+             }
+          }
+       }
+     until (iunit == 0)
+$debug call printrcl(irot)
+    }
+$debug %      CLOSE(11)
+ 
+return
+end
+ 
+
+ 
+subroutine add_RCLslot(ifull,tarlat,tarlon,irotas,irot,iunit,islot,ilast)
+########################################################
+#$%
+#$% Purpose:   Add_RCLslot adds a slot at the first free
+#$%            position
+#$%
+#$% Called By: ROTMOD
+#$%
+#$% Tables:    RTH    RTH$RCL    UNT
+#$%
+#$% Date:      June 87
+#$%
+#$% Author:    Richard Schauer
+#$%
+########################################################
+ 
+BBcommon
+ 
+integer ifull,ilast,irot,irotas,islot,iunit,
+        RTH$FreeRCLslot$i,
+        RTH$NumberRCL$i,
+        RTH$Pointer,
+        RTH$RCL$Course$i,
+        RTH$RCL$Index,
+        RTH$RCL$Next$i,
+        RTH$RCL$Speed$i,
+        UNT$Pointer
+ 
+real*4 tarlat,tarlon
+ 
+  RTH$Pointer$to irot
+  UNT$Pointer$to iunit
+  ifull = $NO
+  RTH$FreeRCLslot$I = XRTH$FreeRCLslot$I
+  if (RTH$FreeRCLslot$I == 0)   # we are full
+    {
+     ifull = $YES
+     RETURN
+    }
+  ilast = XRTH$FirstRCL$I
+  if (ilast != 0)
+    while (ilast <= 250)
+      {
+       RTH$RCL$index = ilast
+       RTH$RCL$Next$I = XRTH$RCL$Next$I
+       if (RTH$RCL$Next$I == 0) BREAK
+       ilast = RTH$RCL$Next$I
+      }
+  RTH$RCL$Index = RTH$FreeRCLslot$I
+  RTH$RCL$Next$I = XRTH$RCL$Next$I
+  PUTRTH$FreeRCLslot$I (RTH$RCL$Next$I)
+ 
+  PUTRTH$RCL$UnitIndx$I    (iunit)
+  PUTRTH$RCL$DetCounter$I  (0)
+  PUTRTH$RCL$DetFlag$I     ($NO)
+  PUTRTH$RCL$Next$I        (0)
+  if (irotas == air$pca)
+    PUTRTH$RCL$Class$I     ($air$code)
+  else
+    PUTRTH$RCL$Class$I     ($Surface$code)
+  PUTRTH$RCL$Long$F        (tarlon)
+  PUTRTH$RCL$Lat$F         (tarlat)
+  PUTRTH$RCL$RadialSpeed$F         (-1.0)
+  PUTRTH$RCL$LostCounter$I (0)
+  RTH$RCL$Speed$I = int(Xunt$TrueSpeed$F + 0.5)
+  RTH$RCL$Course$I = int((Xunt$TrueCourse$F) * 180.0 / $PI)
+  PUTRTH$RCL$Course$I
+  PUTRTH$RCL$Speed$I
+ 
+  islot = RTH$RCL$Index
+  if (ilast == 0)    # no slots used
+    PUTRTH$FirstRCL$I (RTH$RCL$Index)
+  else
+    {
+     RTH$RCL$Index = ilast
+     PUTRTH$RCL$Next$I (islot)
+    }
+  RTH$NumberRCL$I = XRTH$NumberRCL$I
+  PUTRTH$NumberRCL$I (RTH$NumberRCL$I + 1)
+  PUTRTH$Modified$I (1)
+ 
+return
+end
+ 
+
+ 
+integer function compute_dop(brng,irotas,rsn,irot,islot)
+########################################################
+#$%
+#$% Purpose:   Compute_dop calculates the doppler for a
+#$%            rothr target to see if it can be detected
+#$%
+#$% Called By: ROTMOD
+#$%
+#$% Tables:    RTH    RTH$RCL
+#$%
+#$% Date:      June 87
+#$%
+#$% Author:    Richard Schauer
+#$%
+########################################################
+ 
+BBcommon
+ 
+integer irot,irotas,islot,
+        RTH$Pointer,
+        RTH$RCL$Index
+ 
+real*4 rsn,course,brng,speed
+ 
+  compute_dop = $NO
+  RTH$Pointer$to irot
+  RTH$RCL$Index = islot
+  course = (XRTH$RCL$Course$I) * $PI / 180.0
+  speed  = XRTH$RCL$Speed$I
+  rsn = cos(course - brng) * speed
+  rsn = abs(rsn)
+  if (((irotas == air$pca) & (rsn > Rothr$Min$Air$Doppler)) |
+      ((irotas == surf$pca) & (rsn > Rothr$Min$Surf$Doppler)))
+    compute_dop = $YES
+ 
+return
+end
+ 
+
+ 
+subroutine del_RCLslot (irot,islot,ilast)
+########################################################
+#$%
+#$% Purpose:   Del_RCLslot deletes the islot position
+#$%
+#$% Called By: ROTMOD
+#$%
+#$% Tables:    RTH    RTH$RCL
+#$%
+#$% Date:      June 87
+#$%
+#$% Author:    Richard Schauer
+#$%
+########################################################
+ 
+BBcommon
+ 
+integer ilast,irot,islot,
+        RTH$FirstRCL$i,
+        RTH$FreeRCLslot$i,
+        RTH$NumberRCL$i,
+        RTH$Pointer,
+        RTH$RCL$Index,
+        RTH$RCL$Next$i
+ 
+  RTH$pointer$TO irot
+ 
+  RTH$FreeRCLslot$I = XRTH$FreeRCLslot$I
+  RTH$NumberRCL$I = XRTH$NumberRCL$I
+  RTH$FirstRCL$I = XRTH$FirstRCl$I
+ 
+  RTH$RCL$Index = islot
+  PUTRTH$RCL$UnitIndx$I (0)
+  PUTRTH$RCL$DetCounter$I (0)
+  PUTRTH$RCL$DetFlag$I ($NO)
+  PUTRTH$RCL$RadialSpeed$F (0.0)
+  PUTRTH$RCL$LostCounter$I (0)
+ 
+  RTH$RCL$Next$I = XRTH$RCL$Next$I
+  PUTRTH$NumberRCL$I  (RTH$NumberRCL$I - 1)
+ 
+  if (islot == RTH$FirstRCL$I)
+    PUTRTH$FirstRCL$I (RTH$RCL$Next$I)
+  else
+    {
+     RTH$RCL$Index = ilast
+     PUTRTH$RCL$Next$I (RTH$RCL$Next$I)
+     RTH$RCL$Index = islot
+    }
+  PUTRTH$RCL$Next$I (RTH$FreeRCLslot$I)
+  PUTRTH$FreeRCLslot$I (islot)
+ 
+  PUTRTH$Modified$I (1)
+return
+end
+ 
+
+ 
+subroutine find_RCLslot (irot,islot,ilast,iunit)
+########################################################
+#$%
+#$% Purpose:   Find_RCLslot finds the slot that has the
+#$%            unit number in it
+#$%
+#$% Called By: ROTMOD
+#$%
+#$% Tables:    RTH    RTH$RCL
+#$%
+#$% Date:      June 87
+#$%
+#$% Author:    Richard Schauer
+#$%
+########################################################
+ 
+BBcommon
+ 
+integer ilast,irot,islot,iunit,
+        RTH$Pointer,
+        RTH$RCL$Index
+ 
+RTH$Pointer$to irot
+islot = XRTH$FirstRCL$I
+if (islot == 0) RETURN
+ 
+ilast = islot
+for (; islot != 0; islot = XRTH$RCL$Next$I)
+  {
+   RTH$RCL$index = islot
+   if (XRTH$RCL$UnitIndx$I == iunit)
+     BREAK
+   ilast = islot
+  }
+return
+end
+ 
+
+ 
+integer function find_snr(RTH$PerformanceFactor$F,xsect,range,idirloss,noise)
+########################################################
+#$%
+#$% Purpose:   find_snr determines if enough signal to noise
+#$%            ratio exists for a detection
+#$%
+#$% Called By: ROTMOD
+#$%
+#$% Tables:    RTH
+#$%
+#$% Date:      June 87
+#$%
+#$% Author:    Richard Schauer
+#$%
+########################################################
+ 
+BBcommon
+ 
+integer idirloss
+ 
+real*4 noise,randn,range,rothr_snr,rtest,snr,xsect,z,
+       RTH$PerformanceFactor$f
+ 
+  snr = rothr_snr(RTH$PerformanceFactor$F,xsect,range,1,idirloss,noise)
+  z = (snr - $mu) / $sd
+  if (z < -3.0)
+    find_snr = $NO
+  else if (z > 3.0)
+    find_snr = $YES
+  else
+    {
+     rtest = randn(0.0,$sd)
+     if (z > rtest)
+       find_snr = $YES
+     else
+       find_snr = $NO
+    }
+ 
+return
+end
+ 
+
+ 
+subroutine get_unit(tarlat,tarlon,irotas,xsect,range,brng,baselat,baselon,
+                    iunit,iview)
+########################################################
+#$%
+#$% Purpose:   Get_Unit finds the next unit that is not in
+#$%            the same view as the rothr base
+#$%
+#$% Called By: ROTMOD
+#$%
+#$% Tables:    RTH    UNT    CMC
+#$%            SHC    ACC
+#$%
+#$% Date:      June 87
+#$%
+#$% Author:    Richard Schauer
+#$%
+########################################################
+ 
+BBcommon
+ 
+integer ifound,indxCRS,irotas,iunit,iview,iUPI,
+        ACC$CRS$Index,
+        ACC$Pointer,
+        ACC$VrblXS$i,
+        CMC$Pointer,
+        DEQ$Pointer,
+        SHC$Pointer,
+        UNT$Pointer,
+        UNT$Type$i
+ 
+real*4 baselat,baselon,BRG,brng,HDG,range,Relbrng,tarlat,tarlon,
+       tcos1,tcos2,xsect
+ 
+  ifound = $NO
+  for (UNT$Pointer$to iunit; UNT$Pointer$OK; UNT$Pointer$Next)
+    {
+     if (Xunt$View$I == iview)
+       NEXT
+ 
+     if (Xunt$NeverDetect$i == YES) next        # joa 3/05 per_never
+ 
+     UNT$Type$I = Xunt$Type$I
+     if (UNT$Type$I == $Shorebase$Code |
+         xUNT$SuperType$i == $FALSEcontact$SuperCode)
+       NEXT                    # jb        2/12/91
+     else
+       {
+        iunit=UNT$Pointer$Index
+        UNT$Pointer$to iunit
+        tarlat = Xunt$TrueLatitude$f          # get target lat
+        tarlon = Xunt$TrueLongitude$f         #   and lon
+        tcos1 = cos(baselat)
+        tcos2 = cos(tarlat)
+ 
+      # get range and bearing from target to rothr base
+        call rll2rb(baselat,baselon,tcos1,tarlat,tarlon,tcos2,range,brng)
+        if ((UNT$Type$I == $Surface$Code) |
+            (UNT$Type$I == $SurfacewithAC$code))
+          {
+           irotas = surf$pca
+           ifound = $YES
+           shc$pointer = Xunt$SHCPntr$i
+           xsect = Xshc$CrossSect$I
+           BREAK
+          }
+        else if (UNT$TYPE$I == $Sub$Code)
+          {
+           shc$pointer = Xunt$SHCPntr$i
+           if(Xunt$TrueAltDepth$I == Xshc$KeelDepth$i)
+             {
+              irotas = surf$pca
+              ifound = $yes
+              xsect = Xshc$CrossSect$I
+              BREAK
+             }
+          }
+        else if ((UNT$TYPE$I == $CruiseMissile$Code) |
+                 (UNT$TYPE$I == $Air$Code))
+           {
+           if (UNT$Type$I == $Air$Code)
+             {
+             if (Xunt$ASMDactive$i == 1)       # ASMD added  jms 4/20/93
+                {
+                iUPI = unt$pointer$index
+                for_deq_chain (iUPI)
+                   {
+                   if (Xdeq$ident$i == $ASMD$code)
+                        {
+                        xsect = xDEQ$CrossSect$i
+                        }
+                   }
+                }
+             else
+                {
+                acc$pointer = Xunt$accpntr$i         # get ptr into char table
+                acc$crs$index = 1  # initialize index to cross-section subtable
+                acc$VrblXS$i = Xacc$VrblXS$i
+                if (acc$VrblXS$i == $YES)
+                   {            # reset index if cross-section is variable
+                   HDG = Xunt$TrueCourse$f       # heading of target A/C
+                   BRG = brng + $PI              # brg from target A/C to radar
+                   if (BRG > $TWOPI) BRG = BRG - $TWOPI # adjust brg <=360
+                   RelBrng = BRG - HDG           # Rel. brg from A/C to radar
+                   $ANGPI(RelBrng)               # Adjust so if RelBrg is
+                                                 #   between -PI and PI,
+                   if (RelBrng < 0.0)            # it is now between 0 and PI
+                      RelBrng = -1.0 * RelBrng
+                   indxCRS = 1.5 + (6. * RelBrng/$PI)
+                   acc$crs$index = min(indxCRS,acc$crs$slots)
+                   }
+                xsect = Xacc$CRS$Sect$I
+                }
+             }
+           else        # cruise missile
+             {
+             cmc$pointer = Xunt$CMCPntr$I
+             xsect = Xcmc$CrossSect$F
+             }
+           ifound = $YES
+           irotas = air$pca
+           BREAK
+           }
+       }
+    }  # end FOR
+  if (ifound == $no)
+    {
+     iunit = 0
+     tarlat = 0.0
+     tarlon = 0.0
+    }
+ 
+return
+end
+ 
+
+ 
+subroutine oth_raidsiz(iunit,isize)
+########################################################
+#$%
+#$% Purpose:   Oth_raidsiz determines the size of the raid
+#$%
+#$% Called By: ROTMOD
+#$%
+#$% Tables:    RTH    RTH$RCL    UNT
+#$%
+#$% Date:      June 87
+#$%
+#$% Author:    Richard Schauer
+#$%
+########################################################
+ 
+BBcommon
+ 
+integer isize,iunit,
+        UNT$NbrAC$I,
+        UNT$Pointer
+ 
+real*4 r,random,x
+data x/0.0/		# Get next random number in sequence
+ 
+  UNT$Pointer$to iunit
+  UNT$NbrAC$I = Xunt$NbrAC$I
+ 
+  if (UNT$NbrAC$I > 4)
+    isize = 3
+  else if (UNT$NbrAC$I > 1)
+    isize = 2
+  else
+    isize = 1
+ 
+  r = random(X)
+  if (r > 0.75)
+    {
+     if (isize != 2)
+       isize = 2
+     else if ((r < 0.9) & (r > .75))
+       isize = 1
+     else if (r >= 0.9)
+       isize = 3
+    }
+ 
+return
+end
+
+ 
+subroutine up_poscours(tarlat,tarlon,iunit,irot,islot)
+########################################################
+#$%
+#$% Purpose:   Up_poscours updates the position, course,
+#$%            and speed in the RCL table at the islot position
+#$%
+#$% Called By: ROTMOD
+#$%
+#$% Tables:    RTH    RTH$RCL    UNT
+#$%
+#$% Date:      June 87
+#$%
+#$% Author:    Richard Schauer
+#$%
+########################################################
+ 
+BBcommon
+ 
+integer irot,islot,iunit,
+        RTH$Pointer,
+        RTH$RCL$Course$i,
+        RTH$RCL$Index,
+        RTH$RCL$Speed$i,
+        UNT$Pointer
+ 
+real*4 tarlat,tarlon
+ 
+  UNT$Pointer$to iunit
+  RTH$Pointer$to irot
+  RTH$RCL$Index = islot
+  RTH$RCL$Course$I = int((Xunt$TrueCourse$F) * 180.0 / $PI)
+  RTH$RCL$Speed$I = int(Xunt$TrueSpeed$F + 0.5)
+  PUTRTH$RCL$Long$F        (tarlon)
+  PUTRTH$RCL$Lat$F         (tarlat)
+  PUTRTH$RCL$Course$I
+  PUTRTH$RCL$Speed$I
+ 
+  PUTRTH$Modified$I (1)
+ 
+return
+end
+ 
+
+subroutine printrcl(irot)
+######################################################################
+#$%
+#$% Purpose:   Printrcl prints the data in the RTH$RCL table
+#$%            when in debug mode.
+#$%
+#$% Called By: ROTMOD
+#$%
+#$% Tables:    RTH     RTH$RCL
+#$%
+#$% Date:      June 87 (?)
+#$%
+#$% Author:    Richard Schauer
+#$%
+#####################################################################
+ 
+BBcommon
+ 
+integer irot,
+        RTH$FirstRCL$i,
+        RTH$FreeRCLslot$i,
+        RTH$Pointer,
+        RTH$RCL$Course$i,
+        RTH$RCL$DetCounter$i,
+        RTH$RCL$DetFlag$i,
+        RTH$RCL$Index,
+        RTH$RCL$LostCounter$i,
+        RTH$RCL$Next$i,
+        RTH$RCL$Speed$i,
+        RTH$RCL$UnitIndx$i
+ 
+real*4 RTH$RCL$Lat$f,
+       RTH$RCL$Long$f,
+       RTH$RCL$RadialSpeed$f
+ 
+ 
+%      WRITE (11,1918) 'Ind',irot
+RTH$pointer$to irot
+RTH$FreeRCLslot$i = XRTH$FreeRCLslot$i
+%      WRITE (11,1918) 'Fre',I_RTH_FreeRCLslot
+RTH$FirstRCL$i = XRTH$FirstRCL$i
+%      WRITE (11,1918) 'Fir',I_RTH_FirstRCL
+for (RTH$RCL$Index = RTH$FirstRCL$I; RTH$RCL$Index$ok;
+     RTH$RCL$index = XRTH$RCL$Next$I)
+  {
+       RTH$RCL$UnitIndx$i = XRTH$RCL$UnitIndx$i
+%      WRITE (11,1918) 'Unt',I_RTH_RCL_UnitIndx
+       RTH$RCL$DetCounter$i = XRTH$RCL$DetCounter$i
+%      WRITE (11,1918) 'Dco',I_RTH_RCL_DetCounter
+       RTH$RCL$DetFlag$i = XRTH$RCL$DetFlag$i
+%      WRITE (11,1918) 'Dfl',I_RTH_RCL_DetFlag
+       RTH$RCL$Next$i = XRTH$RCL$Next$i
+%      WRITE (11,1918) 'Nex',I_RTH_RCL_Next
+       RTH$RCL$RadialSpeed$f = XRTH$RCL$RadialSpeed$f
+%      WRITE (11,1920) 'Rsn',F_RTH_RCL_RadialSpeed
+       RTH$RCL$LostCounter$i = XRTH$RCL$LostCounter$i
+%      WRITE (11,1918) 'Lco',I_RTH_RCL_LostCounter
+       RTH$RCL$Lat$f = XRTH$RCL$Lat$f
+%      WRITE (11,1920) 'Lat',F_RTH_RCL_Lat
+       RTH$RCL$Long$f = XRTH$RCL$Long$f
+%      WRITE (11,1920) 'Lon',F_RTH_RCL_Long
+       RTH$RCL$Speed$i = XRTH$RCL$speed$i
+%      WRITE (11,1918) 'Spe',I_RTH_RCL_Speed
+       RTH$RCL$Course$i = XRTH$RCL$Course$i
+%      WRITE (11,1918) 'Crs',I_RTH_RCL_Course
+  }
+return
+1918 format(x,a3,x,i3)
+1920 format(x,a3,x,f12.4)
+end

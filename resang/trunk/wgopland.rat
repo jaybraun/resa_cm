@@ -1,0 +1,918 @@
+ 
+define(HALF$Surfwidth,0.2)     # used for computing landing location
+ 
+ 
+include "orders.inc"             # $LEX$ definitions...
+include "bbcode.inc"             #def for blackboard & miscellaneous constants
+include "bbctl.inc"              #def for basic blackboard parameters
+include "bbacc.inc"              #def for aircraft characteristics
+include "bbalz.inc"              #def for Landing Zones (with GND objects)
+include "bbaml.inc"              #def for Air Maintenance Log
+include "bbdeq.inc"              #def for loading/offloading GND objects
+include "bbord.inc"              #def for ORDERs
+include "bbgnd.inc"              #def for Ground Units
+include "bbshc.inc"              #def for Ships
+include "bbunt.inc"              #UNiT table definitions
+ 
+define(BBImplicit, Implicit NONE)           # MJC 5/2/2000 (E-2145)
+ 
+Subroutine oLanding (nord,iview,nargs,args)
+ 
+########################################################
+#$%
+#$% Purpose:   oLanding performs creation and deletion of Landing Zones
+#$%            The data is recorded in the ALZ table.
+#$%            Errors are generated that echo the text of the order
+#$%            back to the operator terminal
+#$%
+#$% Called By: EXEORD
+#$%
+#$% Calls:
+#$%
+#$% Tables:    ALZ      UNT
+#$%
+#$% Date:      22 Nov 89
+#$%
+#$% Author:    Dane Wills
+#$%
+########################################################
+ 
+ BBcommon
+ 
+ integer    iview, nord, nargs
+ literal    args[nargs], No_Name
+ 
+ integer    Match_ALZ, Empty_ALZ, iside, pargs, litcmp
+ literal    ALZ_Name
+ real       DMS2rad, range, bearing
+ real       lon[ALZ$BND$Slots],lat[ALZ$BND$Slots]
+ data       No_Name / 0.0 /
+ integer    sum_qty
+ 
+ integer    II,INFLAG,
+            ALZ$Pointer,
+            ALZ$GU$Index,
+            ALZ$Side$I,
+            ALZ$Nvert$I,
+            ALZ$BND$Index                   # MJC 5/2/2000 (E2145)
+ real       ALZ$Centerlatitude$F,
+            ALZ$Centerlongitude$F,
+            ALZ$Problandok$F,
+            ALZ$Radius$F,
+            ALZ$BND$latitude$F,
+            ALZ$BND$longitude$F             # MJC 5/2/2000 (E2145)
+ literal    CSTRIP8,
+            ALZ$Name$C                      # MJC 5/4/2000 (E2145)
+ 
+#----------------------------------------------------------------------
+# DELETE LANDING (zone) <zone-name> [ BLUE | ORANGE ];
+# DEFINE LANDING (zone) <zone-name>
+#                (centered at) <latitude> <longitude>
+#                (probability of landing) <percent>
+#                (bounded by) <latitude> <longitude>
+#                (point 2) <latitude> <longitude>
+#                (point 3) <latitude> <longitude>
+#                (point 4)
+#                   [ | <latitude> <longitude> (point 5)
+#                       [ | <latitude> <longitude> (point 6)
+#                           [ | <latitude> <longitude> ] ] ]
+#                [ BLUE | ORANGE ];
+#----------------------------------------------------------------------
+ 
+ 
+if (args[nargs] == $lex$blue$ )
+    {
+    iside = $Blue$Code
+    pargs = nargs - 1
+    }
+else if (args[nargs] == $lex$Orange$ )
+    {
+    iside = $Orange$Code
+    pargs = nargs - 1
+    }
+else
+    {
+    call whside(iview,iside) # determine side
+    pargs = nargs
+    }
+ 
+ALZ_name = args[3]
+Match_ALZ = 0
+Empty_ALZ = 0
+ 
+FOR_ALL_VALID(ALZ)
+    {
+    if (Empty_ALZ == 0 & xALZ$Nvert$i == 0)
+        {
+        Empty_ALZ = ALZ$Pointer
+        }
+ 
+    if (litcmp(ALZ_name, Xalz$name$c) == 0 &
+               iside  == Xalz$Side$i  )
+        {
+        Match_ALZ = ALZ$Pointer
+ 
+        break
+        }
+    }
+ 
+if (args[1] == $lex$DELETE$)        # here to delete landing zone
+    {
+    if (Match_ALZ == 0 )
+        {
+        call wgoerr (iview,No_Name,nord,nargs,args,"Zone does not exist.")
+        return
+        }
+ 
+    ALZ$pointer = Match_ALZ
+    if (xALZ$BeenHere$i != 0)
+        {
+        # check if all quantities are zero...
+ 
+        sum_qty = 0
+        for(ALZ$GU$Index = 1 ;
+            ALZ$GU$Index <= ALZ$GU$Slots ;
+            ALZ$GU$Index = ALZ$GU$Index + 1 )
+            {
+            sum_qty = sum_qty + Xalz$GU$Quantity$i
+            }
+ 
+        if (sum_qty > 0)
+            {
+            call wgoerr (iview,No_Name,nord,nargs,args,"Zone is in use.")
+            return
+            }
+        }
+    ALZ$Zero
+    putALZ$Modified$i ($yes)
+    }
+else # DEFINE landing zone
+    {
+    if (Match_ALZ != 0)
+        {
+        call wgoerr (iview,No_Name,nord,nargs,args,"Zone already exists.")
+        return
+        }
+ 
+    if (Empty_ALZ == 0)
+        {
+        call wgoerr (iview,No_Name,nord,nargs,args,"Too many Zones.")
+        return
+        }
+ 
+    ALZ$name$C = ALZ_Name                       # name it
+    ALZ$Side$I = iside                          # pick sides
+ 
+    ALZ$CenterLatitude$F = DMS2rad(args[4])     # Locate center Latitude
+    ALZ$CenterLongitude$F =  DMS2rad(args[5])   #   and Longitude
+ 
+    ALZ$ProbLandOK$F = args[6]                  # save the Pb of safe landing
+ 
+    ALZ$Nvert$I = 0                             # init at 0 boundary points
+ 
+    for (ii = 7; ii <= pargs; ii = ii + 2)      # loop through each pair of ARGs
+        {
+        ALZ$Nvert$I = ALZ$Nvert$I + 1           # Increment total count
+ 
+        lat[ALZ$Nvert$I] = DMS2rad (args[ii])
+        lon[ALZ$Nvert$I] = DMS2rad (args[ii+1])
+        }
+ 
+    call inout(ALZ$CenterLongitude$F,ALZ$CenterLatitude$F,
+               ALZ$Nvert$i,lon,lat,inflag)      # note LON before LAT!..
+    if( inflag != $YES )
+        {
+        call wgoerr (iview,No_Name,nord,nargs,args,
+            "Center point not within boundaries.")
+        return
+        }
+ 
+    ALZ$pointer = Empty_ALZ                     # here is an empty slot
+    ALZ$Zero                                    # make sure it is empty
+ 
+    putALZ$Name$C                               # store all of the fields
+    putALZ$Side$I
+    putALZ$Nvert$I
+    putALZ$ProbLandOK$F
+    putALZ$CenterLatitude$F
+    putALZ$CenterLongitude$F
+ 
+    ALZ$Radius$F = 0.0
+ 
+    for (ii = 1; ii <= ALZ$Nvert$i; ii = ii+1)  # loop through each lat/lon
+        {
+        ALZ$BND$index = ii
+        ALZ$BND$Latitude$F = lat[ii]
+        ALZ$BND$Longitude$F = lon[ii]
+ 
+        putALZ$BND$Latitude$F                   # save the specified Lat/Long
+        putALZ$BND$Longitude$F
+ 
+        call RLL2RB( _               # Rhumb line Lat/Lon to Range/Bearing
+                    ALZ$CenterLatitude$F,
+                    ALZ$CenterLongitude$F,
+                    cos(ALZ$CenterLatitude$F),
+                    lat[ii],
+                    lon[ii],
+                    cos(lat[ii]),
+                    Range,           # range (output)
+                    Bearing)         # bearing (output)
+ 
+        ALZ$Radius$F = max(ALZ$Radius$F, Range)    # range to farthest point
+        }
+ 
+    putALZ$Radius$F
+ 
+    IF ( ALZ$Pointer > ALZ$Last )                  # 1/19/90, reh, set high mark
+        {
+        ALZ$Used = ALZ$Pointer + ALZ$ENTRY - ALZ$Base
+        }
+ 
+    } # end if DEFINE LANDING
+ 
+end # OLANDING
+ 
+
+ 
+Subroutine oland (nord,unt$pointer,nargs,args,id)
+ 
+########################################################
+#$%
+#$% Purpose:   oLand will process LAND & WITHDRAW orders.
+#$%
+#$% Called By: EXEORD
+#$%
+#$% Calls:     WHERE_LAND
+#$%
+#$% Tables:    ALZ      UNT        ORD
+#$%
+#$% Date:      27 Nov 89
+#$%
+#$% Author:    Dane Wills
+#$%
+#$% Modified:  James Allen - 6/08
+#$%            Make land order a multi-phase order like withdraw
+#$% Modified:  James Allen - 12/97 (E1370)
+#$%            Added call to clear_maneuver_all after
+#$%            the command is validated (removed clearing
+#$%            of GuideIndx, AttackIndx, and MotionFlags).
+#$%
+########################################################
+ 
+BBcommon
+ 
+integer     nord, nargs, id, unt$pointer
+integer     iside, iview, litcmp
+literal     args[nargs], No_Name
+integer     maxSpeed
+ 
+integer     ORD$Pointer,
+            ORD$Phase$I,
+            ALZ$Pointer,
+            ACC$Pointer,
+            UNT$Type$I,
+            UNT$Status$I,
+            UNT$Alzindx$I               # MJC 5/2/2000 (E2145)
+real        UNT$Orderedspeed$F,
+            WLAT,WLON                   # MJC 5/2/2000 (E2145)
+literal     CSTRIP8,
+            UNT$Name$C                  # MJC 5/4/2000 (E2145)
+ 
+BBDeclare    (shc$pointer, shc$MaxSpeed$i)
+ 
+data        No_Name / 0.0 /
+ 
+#---------------------------------------------------------------------------
+# LAND (amphibious forces at) <zone-name> [ | SPEED <knots> ]
+# WITHDRAW (amphibious forces from) <zone-name> (of) <number> <name>
+#          [ | <number> <name> |
+#              <number> <name> <number> <name> ]
+#          [ | <number> <name> <number> <name>
+#              <number> <name> <number> <name> ]
+#---------------------------------------------------------------------------
+ 
+ord$pointer = 0         # save this for later (if LAND vs WITHDRAW)
+ 
+Call FNDORD (id,ord$pointer) # find order # id
+ 
+if (ord$pointer == 0)
+{
+    call echor
+    call echov ("<OLand> LAND or WITHDRAW order lost. Id=")
+    call echoi (id)
+    return
+}
+ 
+ord$phase$i = Xord$phase$i
+ 
+if (ord$phase$i == 1)         # this means we are heading for the zone
+{
+    return
+}
+else if (Xord$phase$i >= 2)   # this means motion processed the arrival
+{
+    PUTord$phase$i (0)        # remove the order from the ORD table
+    RETURN
+}
+# else it was phase 0 which means first time thru.... (continue)
+ 
+unt$Name$C  = Xunt$Name$C
+iview = xUNT$View$i
+call whside(iview,iside)                # determine side
+ 
+for (ALZ$Pointer$First;ALZ$Pointer$Valid;ALZ$Pointer$Next)
+   {
+    if (xALZ$Side$i != iside ) next
+ 
+    if (litcmp(xALZ$NAME$C, args[2]) == 0)   BREAK
+   }
+ 
+if (! ALZ$Pointer$VALID)
+   {
+    call wgoerr (iview,unt$name$c,nord,nargs,args,"Zone does not exist.")
+    return
+   }
+ 
+unt$type$i    = Xunt$type$i
+unt$Status$i  = Xunt$Status$i
+ 
+IF (UNT$Status$I == $Sinking$Code   |
+    UNT$Status$I == $UnderTow$Code  |
+    UNT$Status$I == $DeadinWater$Code)
+   {
+    call wgoerr (iview,unt$name$c,nord,nargs,args,"Unable to maneuver.")
+    return
+   }
+ 
+call clear_maneuver_all (nord, id, xUNT$View$I, UNT$Pointer)
+ 
+putUNT$STATUS$I ($PROCEEDING$CODE)
+ 
+call WHERE_LAND (ALZ$POINTER,       # Send two poin-
+         UNT$POINTER,               #              ters;
+         Wlat,                      # Receive Position Where-
+         WLON  )                    #                    To-Land
+ 
+if (unt$type$i == $air$code)
+   {
+    acc$pointer = Xunt$accPntr$i
+    unt$OrderedSpeed$f = Xacc$CruiseSpeed$I    # See PUT, below..
+    maxSpeed = Xacc$MaxSpeed$i
+    if (Xunt$MarshallStatus$i == $Recovering$Code)
+       {
+        PUTunt$MarshallStatus$i ($inflight$code) # ????
+       }
+   }
+else
+   {
+    unt$OrderedSpeed$f = Xunt$Speed$I * 0.66            # jb    3/30/89
+    shc$Pointer    = xUNT$ShcPntr$I             ## get units max speed
+    MaxSpeed = xshc$MaxSpeed$I
+   }
+ 
+ 
+# Override default speed, by using speed in order
+if (nargs > 3)
+{
+    if (args[3] == $lex$SPEED$)
+    {
+        unt$OrderedSpeed$f = args[4]
+        unt$OrderedSpeed$f = min(unt$OrderedSpeed$f, float(MaxSpeed))
+    }
+}
+ 
+PUTunt$OrderedSpeed$f                                    # jb    3/30/89
+ 
+PUTUNT$ORDEREDLATITUDE$F  (Wlat)
+PUTUNT$ORDEREDLONGITUDE$F (WLON)
+ 
+unt$ALZindx$i = ALZ$Pointer$index       #  this is where we are going to land
+PUTunt$ALZindx$i
+ 
+PUTord$phase$i (1)                      # save the order 'till we arrive,
+PUTunt$LaunchOrdId$i (id)               # so we can find the EQ to pull out
+ 
+putUNT$Mission$i ($AMPHIB$Code)         # For 3 new ASTABS (in case Player
+return                                  #  has neglected to set Mission)
+end
+
+ 
+subroutine Do_Amphib (unt$pointer)
+ 
+###################################################################
+#$%
+#$% Purpose:    Do_Amphib is called by motion when the craft arrives at
+#$%             the specified location and is ready to land or withdraw
+#$%             forces from the zone.  This routine is called when the
+#$%             UNT$ALZINDX$I is non-zero and the UNT$STATUS is changing
+#$%             from proceding-to-a-position to on-station-at-position.
+#$%       a.  If the Random draw against ALZ$ProbLandOK fails -> a LOSS;
+#$%       b.  else If UNT$LaunchOrdId$i is Zero, we are LANDing;
+#$%       c.  else this is a withdrawal of forces specified in the order.
+#$%
+#$% Called By:  MANUVR_LL (in WGMDMOT.rat)
+#$%
+#$% Calls:     FNDORD    get_DEQ_entry    Shrink_DEQ_Chain
+#$%                                    (also, SEND, smov..,echo..)
+#$%
+#$% Tables:    ALZ      UNT     ORD
+#$%
+#$% Date:      30 Nov 89
+#$%
+#$% Author:    Joe Bryant / Dane Wills
+#$%
+#$% Modified:  James Allen - 12/97 (E1370)
+#$%            Clear the LastManeuverOrderCode since the
+#$%            maneuver is complete.
+#$%
+####################################################################
+ 
+BBcommon
+ 
+integer     ord_id, msglen
+character   msg[100]
+ 
+define ($maxNames,8)    # Maximum number of GND names in the order
+ 
+integer iquan[$maxNames]      # WITHDRAW: Receptacles in which  12/6/89
+LITERAL GUnam[$maxNames]      # to place ord$WRD values--and,   12/6/89
+integer kkDEQslot[$maxNames]  #  corresponding DEQ slot, if any 12/6/89
+ 
+integer iDEQslot[GND$SLOTS] # WITHDRAW: Receptacles in which to identify
+LITERAL GDnam[GND$SLOTS] # unit's DEQ slots containing GND stuff 12/6/89
+ 
+integer ICALL_SHRINK,IGROUND_INDX,IMATCHFLAG,litcmp,
+        IDX,I,NDEQS,MARGS,NN,K,KK,J,ICNT,
+        ALZ$Pointer, ALZ$VU$Index,
+        ALZ$GU$Index, ALZ$GU$indx$I,
+        ALZ$GU$quantity$I,
+        UNT$Pointer, UNT$View$I,
+        DEQ$Pointer, DEQ$Remaining$I,
+        DEQ$Nextdeq$I, DEQ$Pntr$I,
+        DEQ$Ident$I,
+        ORD$Pointer, ORD$Phase$I,
+        ORD$WRD$Index, do_land,
+        GND$Pointer                     # MJC 5/2/2000 (E2145)
+real    X,RANDOM                        # MJC 5/2/2000 (E2145)
+literal UNT$Name$C,
+        CSTRIP8,
+        ALZ$Name$C,
+        DEQ$Type$C,
+        GND$Name$C                      # MJC 5/4/2000 (E2145)
+ 
+ALZ$pointer$to xUNT$ALZindx$i
+putUNT$ALZindx$i (0)                    # clear the value so we don't come back
+ 
+putUNT$LastManeuverOrderCode$I (NO$order)   # Remove maneuver restrictions - joa 12/97 (E1370)
+ 
+ord_id = Xunt$LaunchOrdId$i
+PUTunt$LaunchOrdId$i (0)                # clear this also
+ 
+Call FNDORD (ord_id,ord$pointer) # find order # id
+ 
+if (ord$pointer == 0)
+{
+    call echor
+    call echov ("<Do_Amphib> LAND/WITHDRAW order lost at arrival. Id=")
+    call echoi (ord_id)
+    return
+}
+ 
+ord$phase$i = Xord$phase$i
+if (ord$phase$i != 1)
+{
+    call echor
+    call echov ("<Do_Amphib> LAND/WITHDRAW order phase is mixed up. Id=")
+    call echoi (ord_id)
+    return
+}
+ 
+unt$view$i = Xunt$view$i
+unt$name$C = Xunt$name$C
+alz$name$C = Xalz$name$C
+ 
+msglen = 0                              # build an initial error message
+call smovhn(unt$name$c,$$MaxLit,msg,msglen)
+call smovv(" has arrived at landing zone ",msg,msglen)
+call smovhn(alz$name$c,$$MaxLit,msg,msglen)
+ 
+ALZ$Vu$index = unt$view$i           # Moved up from IF        12/6/89
+PUTalz$Vu$BeenHere$I ($YES)         # now we know we were here
+ 
+putord$phase$i (2)    # Meaning: Motion Model has already called DO_Amphib
+ 
+do_land = $no
+IF (Xord$NbrArgs$i == 2)
+    do_land = $yes
+else if (Xord$W03$C == $lex$SPEED$)
+    do_land = $yes
+ 
+IF (do_land == $yes) # this is a LANDing
+    {
+    if ( RANDOM (X) > xALZ$ProbLandOK$F ) # Lost with all hands??
+        {
+        call smovv(" BUT has been LOST with all hands!!",msg,msglen)
+        call Lander_LOST (unt$Pointer) # Set Status etc. as needed
+        }
+    else    # Landing Vehicle was NOT lost.. need to loop thru the
+            # Ground EQ onboard, and offload...
+        {
+        icall_shrink = $NO    # Initlz flag to call Shrink_DEQ_Chain
+        for_DEQ_chain
+            {
+            if(xDEQ$ident$i != $GND$Code)   NEXT
+ 
+            DEQ$Remaining$i = xDEQ$Remaining$i
+            DEQ$Type$C = xDEQ$Type$C
+ 
+            GND$Pointer = xDEQ$Pntr$i
+            iground_indx = GND$Pointer$Index
+ 
+            iMATCHflag = $NO    # Initlz flag to NO MATCH (ALZ type to DEQ type
+            idx = 0    # Initlz potential GU indx to 0
+            for(ALZ$GU$Index=1;ALZ$GU$Index<=ALZ$GU$Slots;
+                                                ALZ$GU$Index=ALZ$GU$Index+1)
+                {
+                ALZ$GU$indx$i = xALZ$GU$indx$i
+ 
+                #If we haven't saved the first available ALZ$GU slot index
+                if ( idx == 0 & ALZ$GU$indx$i == 0 )
+                    {
+                    idx = ALZ$GU$Index # Save for use if no initial match
+                    NEXT
+                    }
+ 
+                 # If this GU slot has something in it
+                else if (ALZ$GU$indx$i != 0 )
+                    {
+                    GND$Pointer$TO (xALZ$GU$indx$i)
+                    if(litcmp(xGND$NAME$C, DEQ$Type$C) == 0)
+                        {
+                        iMATCHflag =   $YES
+                        icall_Shrink = $YES
+                        ALZ$GU$Quantity$I =xALZ$GU$Quantity$I +DEQ$Remaining$i
+                        putALZ$GU$Quantity$I
+                        BREAK
+                        }
+                    }
+                }    # End of search thru GU subtable for match
+ 
+ 
+            #$% if new slot needed and was available
+            if( iMATCHflag == $NO & idx !=0 )
+                {
+                ALZ$GU$Index= idx
+                PUTALZ$GU$Indx$i ( iground_indx )
+                iMATCHflag = $YES
+                icall_Shrink = $YES
+                ALZ$GU$Quantity$I = xALZ$GU$Quantity$I + DEQ$Remaining$i
+                putALZ$GU$Quantity$I
+                }
+ 
+            if( iMATCHflag == $YES )
+                {
+                 DEQ$NextDEQ$i = xDEQ$NextDEQ$i
+                 DEQ$ZERO                  # jb            12/11/89
+                 putDEQ$NextDEQ$i
+                }
+            }    # End of loop thru DEQ table
+ 
+        if ( icall_Shrink == $YES )
+            { call Shrink_DEQ_Chain ( UNT$Pointer ) }
+ 
+           # send the user a message when we are loaded
+        call smovv(". Forces have been landed.",msg,msglen)
+        }    # END if this a LANDing of Ground Units
+    }    # END if this is NOT a WITHDRAWAL [if (ord_id == 0)]
+ 
+    ## -------------------------------------------------------
+ 
+ELSE    # This is a WITHDRAWal of forces (NOT a LANDing attempt)
+    {
+    #$% Initialize 5 arrays:
+    for (i=1; i < GND$SLOTS; i = i +1)
+        {
+        kk = 0; call smovv ("        ", GDnam[i], kk)
+        iDEQslot[i] = 0
+        }
+    for (i=1; i <= $maxNames; i = i +1)
+        {
+        iquan[i] = 0
+        kk = 0; call smovv ("        ", GUnam[i], kk)
+        kkdeqslot[i] = 0
+        }
+    #-----------------------------------------------
+ 
+    #$% To improve readability, use first 2 of 5 added arrays to hold
+    #$% DEQ SlotNumbers and Type names, if any slots have GND stuff..
+ 
+    ndeqs = 0
+    for_DEQ_chain    # Populate GDnam and iDEQslot arrays, IF there
+        {         # are any GND types already on the unit:
+        if(xDEQ$ident$i != $GND$Code)
+            {
+            NEXT
+            }
+        ndeqs = ndeqs +1
+        GDnam[ndeqs] = xDEQ$TYPE$C
+        iDEQslot[ndeqs] = DEQ$Pointer$Index
+        }
+    #--------------------------------------------
+    #$%  Next, use the other three arrays to consolidate the ORDER's
+    #$% quantities and names (in iquan and GUnam); and then to
+    #$% relate those arrays applicable existing DEQ slots, should
+    #$% there be any, by means of non-zero entries in the parallel
+    #$% kkDEQslot array.
+ 
+    margs =Xord$nbrargs$i #Ordered GND types/quantities to GUnam,iquan arrays
+    nn = 2
+    for(ord$WRD$index=3; ord$WRD$index<=margs; ord$WRD$index=ord$WRD$index +1)
+        {
+        if ( MOD(ord$WRD$index,2) == 0 )
+            {
+            nn = nn +1
+            GUnam[ord$WRD$index-nn]=xord$WRD$$C
+            }
+        else
+            iquan[ord$WRD$index-nn]=xord$WRD$$C
+        }
+ 
+    for(k=1; k <= ord$wrd$SLOTS -2; k = k +1)
+        {
+        for (j=1; j <= ndeqs; j = j +1) #Pop.kkDEQslot with DEQ slot numbers
+                # containing TYPEs corresponding to GUnam from ORD table
+            {
+            if ( GDnam[j] != GUnam[k] )
+                { NEXT }
+            kkDEQslot[k] = iDEQslot[j]
+            }
+        }
+    #-----------------------------------------------------
+    #$%  Finally, we're ready (1) To find out if the ALZ holds any of the items
+    #$%  ordered to be withdrawn: (2) To use applicable DEQ slots, if any, to
+    #$%  transfer those items to; otherwise to get a slot via a call to get_DEQ_
+    #$%  entry: (3) To make the transfer, updating 3 fields in DEQ and either
+    #$%  1 or 2 fields in ALZ$GU.
+ 
+    DEQ$Pointer = 0    # Initialize to NOT VALID put
+    for(ALZ$GU$Index=1;ALZ$GU$Index<=ALZ$GU$SLOTS;
+                                    ALZ$GU$Index=ALZ$GU$Index+1)
+        {
+        ALZ$GU$Indx$I = xALZ$GU$Indx$I
+        if ( ALZ$GU$Indx$I < 1 )
+            { NEXT }
+        GND$Pointer$TO (xALZ$GU$Indx$I)
+        GND$Name$C = xGND$Name$C
+ 
+        icnt = -1 + margs/2
+        for(i =1; i <=icnt; i = i +1) # Find if this GND type ordered out:
+            {
+            if ( GND$Name$C != GUnam[i] ) # Are we ready to transfer?
+                { NEXT }
+            if ( kkDEQslot[i] > 0 & kkDEQslot[i] <= DEQ$Slots )
+                {
+                DEQ$Pointer$TO ( kkDEQslot[i] )
+                }
+            else    # Get a new DEQ slot.  Note that get_DEQ_entry in-
+                {    # inserts the slot into the unit's DEQ chain.
+                call get_DEQ_entry (unt$pointer,deq$pointer)
+                }
+ 
+            if ( ! DEQ$Pointer$VALID )
+                {
+        ##                call WGOERR.....            <<<>>> send msg
+                }
+            else    # TRANSFER FROM ALZ to DEQ...
+                {
+                DEQ$Pntr$i  = GND$Pointer
+                DEQ$Ident$i = $GND$Code
+                DEQ$Remaining$i = xDEQ$Remaining$i + iquan[i]
+                putDEQ$Pntr$i
+                putDEQ$Ident$i
+                putDEQ$Remaining$i
+                PUTdeq$Logistical$i ($YES)          # flag this as traceable
+ 
+                # ...and adjust ALZ$GU.
+                ALZ$GU$Quantity$i = xALZ$GU$Quantity$i - iquan[i]
+                if (ALZ$GU$Quantity$i <= 0)
+                    {
+                    ALZ$GU$Quantity$i = 0
+                    putALZ$GU$Indx$i   (0)
+                    }
+                putALZ$GU$Quantity$i
+                }    # End of TRANSFER from ALZ to DEQ
+            }    # End of list of GU ordered to be withdrawn
+        }    # End of search thru ALZ$GU subtable for matching names
+ 
+    # send the user a message when we are loaded
+    call smovv(". Forces are loaded and ready to withdraw.",msg,msglen)
+    }    # End of WITHDRAW processing
+ 
+call send (unt$view$i,0,msglen,msg)  # display LOST/LANDED/LOADED message
+ 
+end        # End of Subroutine Do_AMPHIB
+ 
+
+subroutine Lander_LOST( UNT$POINTER )
+###################################################################
+#$%
+#$% Purpose: When Do_Amphib processes a LANDing order and finds that
+#$%         RANDOM (X) > xALZ$ProbLandOK$F, it calls Lander_LOST to
+#$%         set Status of Ship/Boat/Aircraft; and in case of Ship/Boat,
+#$%         to specify the time when the lander will be SUNK.
+#$%
+#$% Called By: Do_Amphib
+#$%
+#$% Calls:     None
+#$%
+#$% Tables:    UNT
+#$%
+#$% Date:      December 1989
+#$%
+#$% Author:    Joe Bryant
+#$%
+####################################################################
+ 
+BBcommon
+ 
+integer UNT$Pointer,
+        UNT$Amlindx$I,
+        AML$Nextindx$I,
+        AML$Pointer             # MJC 5/2/2000 (E-2145)
+ 
+if ( xUNT$Type$i == $AIR$Code )
+    {
+    unt$AMLIndx$i  = Xunt$AMLIndx$i
+    aml$NextIndx$i =  unt$AMLIndx$i        # Follow chain in AMLog
+ 
+    while (aml$NextIndx$i != 0)
+        {
+        AML$pointer$To AML$NextIndx$i
+        AML$NextIndx$i = xAML$NextIndx$i
+        putAML$Status$I ($Destroyed$code)
+        }
+    putUNT$Status$i ( $BeingDeleted$Code )
+    }
+else        # This is a Small Boat, or a NON-Small-Boat SHIP
+    {
+    putUNT$Status$I ($Sinking$Code)
+    putunt$TimeSunk$f (Game$Time + 3.)   # sink 3 minuts from now
+    }
+ 
+return
+end
+
+subroutine WHERE_LAND (ALZ$POINTER,
+            UNT$POINTER,
+            Wlat,        # Return Position Where-
+            WLON  )      #                    To-Land
+###################################################################
+#$%
+#$% Purpose:   WHERE_LAND is called (when a landing-vehicle receives
+#$%            a LAND command) to compute the LAT/LONG where the
+#$%            vehicle will land.
+#$%        A vehicle lands immediately if already within the LZN
+#$%            perimeter, OR within  HALF$Surfwidth of LZN center.
+#$%        Waterborne vehicles land upon reaching the LZN perimeter;
+#$%        Airborne vehicles continue from that point for a distance
+#$%            of one-quarter of the remaining range to the LZN center.
+#$%
+#$% Called By: oLAND
+#$%
+#$% Calls:     None
+#$%
+#$% Tables:    ALZ      UNT
+#$%
+#$% Date:      29 Nov 89
+#$%
+#$% Author:    Joe Bryant
+#$%
+####################################################################
+BBcommon
+ 
+integer NVERT,
+        INSIDE,
+        UNT$Pointer,
+        ALZ$Pointer,
+        ALZ$BND$Index           # MJC 5/2/2000 (E2145)
+real    DINNER,DELTA,
+        DCENT,RELBRG,
+        FLON1,FLONL,
+        FLATL,WLAT,
+        WLON,RANGE,
+        BRNG,DOUTER             # MJC 5/2/2000 (E2145)
+real    COS,COSLAT              # MJC 5/4/2000 (E2145)
+real    FLAT1                   # MJC 5/9/2000 (E2145)
+ 
+Real CSLAT1, CSLATL
+Real  x[ALZ$bnd$SLOTS], y[ALZ$bnd$SLOTS]    # For ALZ vertices
+ 
+FLAT1 = xALZ$CenterLatitude$F
+FLON1 = xALZ$CenterLongitude$F
+CSLAT1 = cos(FLAT1)
+ 
+FLATL = xUNT$TrueLatitude$F
+FLONL = xUNT$TrueLongitude$F
+CSLATL = cos(FLATL)
+ 
+Wlat = FLATL    # Initl'z where_land latitude to Lander's latitude
+Wlon = FLONL    #    (Likewise with Longitude)
+ 
+## Find RANGE & BRNG from ALZ to the Lander:
+Call RLL2RB( _                #Rhumb line Lat/Lon to Range/Bearing
+                   FLAT1,            #latitude   of ALZ center
+                   FLON1,            #longitude  of ALZ center
+                   CSLAT1,           #cos of lat of ALZ center
+                   FLATL,            #latitude   of Lander
+                   FLONL,            #longitude  of Lander
+                   CSLATL,           #cos of lat of Lander
+                   RANGE,            # RETURNED
+                   BRNG)             # RETURNED
+ 
+ 
+if ( RANGE <=  HALF$SurfWidth )    # Drop load right here!
+   {
+    return
+   }
+ 
+Nvert  = xALZ$Nvert$i        # Number of vertices in ALZ perimeter
+for (ALZ$BND$index=1;ALZ$BND$index<= Nvert;ALZ$BND$index=ALZ$BND$index +1)
+   { # Put Lat/Lon of all vertices into arrays y and x, for INOUT tests
+    y[ALZ$BND$index] = xALZ$BND$Latitude$F
+    x[ALZ$BND$index] = xALZ$BND$Longitude$F
+   }
+ 
+Douter = xALZ$RADIUS$F       # Initial'z outer limit for binary search
+ 
+If (Range < Douter) # Check if Lander is already in position to unload..
+   {
+    Call INOUT (FLONL,FLATL,  # Position of Lander
+                Nvert,        # Num.Vertices in ALZ perimeter
+                x,y,          # Longitudes,Latitudes of vertices
+                inside)       # Get back: $YES or $NO
+ 
+    If (inside == $YES)        # Drop Load Right Here!
+       {
+        RETURN
+       }
+    Else  Douter = RANGE # Reduce the initial outer search-limit
+   }
+ 
+# These three, plus Douter, are variables for the binary search:
+Dinner = HALF$SurfWidth    # Init'lz inner search limit
+delta = Douter/2.0     # Initialize delta (the binary increment/decrement)
+Dcent  = delta    # Init'lz Dcent = dist. frm center to current test-posit
+ 
+RELBRG = 0.0               #  This won't change
+COSLAT = cos(FLAT1)        #  Won't change (refers to ALZ center posit)
+ 
+while ( delta > HALF$SurfWidth )  # Do binary search for landing posit
+   {
+    wLAT = FLAT1        # In RRB2LL call, always start from
+    wLON = FLON1        #     the ALZ's center position
+ 
+    Call RRB2LL( _            #Rhumb line Range/Bearing to Lat/Lon
+                   wLAT,     #lat of ALZ center; back comes test LAT
+                   wLON,     #lon of ALZ center; back comes test LON
+                   Dcent,    #range from center (WILL change in loop)
+                   RELBRG,   #relative bearing (input)
+                   BRNG,     # Brng from ALZ center to Lander
+                   COSLAT)   #cosine of latitude (input & output)
+ 
+    Call INOUT (wLON,wLAT,    # Test-Position for landing
+                Nvert,        # Num.Vertices in ALZ perimeter
+                x,y,          # Longitudes,Latitudes of vertices
+                inside)       # Get back: $YES or $NO
+ 
+    if (inside == $YES)    # Dcent will now be moved OUTward..
+       {
+        Dinner = Dcent           # Inner search-limit grows;
+        Dcent = (Dcent + Douter) / 2.0  # Test-position moves OUT;
+        delta = (Dcent - Dinner) # WHILE's test-value shrinks.
+       }
+    ELSE             # Test-position is OUTside of ALZ perimeter;
+       {                # Dcent will now move INward.
+        Douter = Dcent           # Outer search-limit shrinks;
+        Dcent = (Dcent + Dinner) / 2.0    # Position moves IN;
+        delta = (Douter - Dcent) # WHILE's test-value shrinks.
+       }
+ 
+   }    # End of WHILE
+ 
+if (xUNT$Type$i == $AIR$Code)   # Send AIRBORNE landers farther in..
+   {
+    Dcent = Dcent -(Dinner/4.0) # Shrink range of landing from center
+    wLAT = FLAT1        # In RRB2LL call, always start from
+    wLON = FLON1        #     the ALZ's center position
+ 
+    Call RRB2LL( _            #Rhumb line Range/Bearing to Lat/Lon
+                   wLAT,     #lat of ALZ center; back comes final LAT
+                   wLON,     #lon of ALZ center; back comes final LON
+                   Dcent,    #range from center, adjusted IN for a/c
+                   RELBRG,   #relative bearing (input)
+                   BRNG,     # Brng from ALZ center to Lander
+                   COSLAT)   #cosine of latitude (input & output)
+   }
+ 
+return
+end

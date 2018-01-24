@@ -1,0 +1,2350 @@
+# WGDEBUG_QUAL.RAT   -   Process Wargame-Debug Quality requests
+#------------------------------------------------------------
+ 
+define $rat$f90         # turn on FORTRAN-90 code generation
+ 
+include "bbctl.inc"
+include "bbcode.inc"
+include "ascii.inc"
+include "bbunt.inc"
+include "bbdeq.inc"
+include "bbbml.inc"
+include "bbown.inc"
+include "bbinv.inc"
+include "bbcor.inc"
+include "bbaml.inc"
+include "bblcl.inc"
+
+define (BBImplicit,Implicit None)
+ 
+subroutine dquality
+ 
+########################################################
+#$%
+#$% Purpose:   DQUALITY will check assorted tables for quality assurance
+#$%
+#$% Called By: Ddebug
+#$%
+#$% Calls:
+#$%
+#$% Tables:
+#$%
+#$% Date:      APR 90
+#$%
+#$% Author:    Dane Wills
+#$%
+########################################################
+ 
+BBCommon
+integer*4   ichar, imodel_code
+ 
+repeat
+   {
+    repeat
+       {
+        #$% get character entered by user
+        call get_ch (ichar,0)
+ 
+        #$% if character is a null, delay 1sec otherwise break
+        if (ichar != $null) break
+        call delay (1000)
+       }
+ 
+    #$% capitalize all letters
+    if (ichar >= $LiTa & ichar <= $LiTz) ichar = ichar - $space
+ 
+    imodel_code = ichar
+ 
+    #$% if the character is ^K
+    if (ichar == $cntlK)
+       {
+        #$% display message to user
+        call echov ("^K  cancel")
+        call echor
+ 
+        #$% set flags and break
+        break
+       }
+    #$% else if character is a ? (help)
+    else if (ichar == $quest)
+       {
+        #$% display message to user
+        call echov ("?  Enter a code for the QA check, one of:")
+ 
+        call echor; call echov ("  AML entries")
+        call echor; call echov ("  BML entries")
+        call echor; call echov ("  COR entries")
+        call echor; call echov ("  DEQ entries")
+        call echor; call echov ("  INV entries")
+        call echor; call echov ("  LCL entries")
+        call echor; call echov ("  Own INV & COR lists")
+        call echor; call echov ("  Unit DEQ lists")
+        call echor
+ 
+        break
+       }
+    else if ( ichar == $letD )          # Free deq list
+        {
+        call echov ("DEQ entries")
+        call echor
+ 
+        call quality_deq_free
+ 
+        break
+        }
+    else if ( ichar == $letI )          # Free INV list
+        {
+        call echov ("INV entries")
+        call echor
+ 
+        call quality_INV_free
+ 
+        break
+        }
+    else if ( ichar == $letC )          # Free COR list
+        {
+        call echov ("COR entries")
+        call echor
+ 
+        call quality_COR_free
+ 
+        break
+        }
+    else if ( ichar == $letU  )          # Unit DEQ lists
+        {
+        call echov ("Unit DEQ lists")
+        call echor
+ 
+        call quality_unit_deq_list
+ 
+        break
+        }
+    else if ( ichar == $letO  )          # Own INV lists
+        {
+        call echov ("Own INV & COR lists")
+        call echor
+ 
+        call quality_own_inv_list
+        call quality_own_cor_list
+ 
+        break
+        }
+    else if ( ichar == $letL  )          # LCL lists
+        {
+        call echov ("LCL track lists")
+        call echor
+ 
+        call quality_LCL_list
+ 
+        break
+        }
+    else if ( ichar == $letB  )          # BML lists
+        {
+        call echov ("BML entries")
+        call echor
+ 
+        call quality_BML_list
+ 
+        break
+        }
+    else if ( ichar == $letA  )          # AML lists
+        {
+        call echov ("AML entries")
+        call echor
+ 
+        call quality_AML_list
+ 
+        break
+        }
+    else
+        {
+        call echo ($bell)
+        break
+        }
+    }
+ 
+end
+
+subroutine quality_BML_list
+ 
+# This routine needs to check the BML and locate any loop-backs
+#
+# Method:
+#   2)  Smarter (?)
+#       * Init an array of size of BML$Slots to Zip
+#       * loop through each valid entry (1 .. N)
+#       * Keep track of where each comes from
+#       * Error if one is never pointed to, or pointed to twice
+#
+ 
+BBcommon
+ 
+integer*4   num_bml, err_count
+logical*4   fix_it
+integer*4	bml_base[arith(BML$SLOTS,*,BML$ENTRY)]
+common /scratch$pad/ bml_base
+ 
+num_bml = BML$SLOTS * BML$ENTRY
+ 
+fix_it = .false.
+call QA_BML_Lists (bml_base, num_BML, err_count, fix_it )
+return
+end
+ 
+
+subroutine QA_BML_Lists (work, num_BML, err_count, fix_it)
+ 
+# This routine needs to check the BML and locate any loop-backs
+#
+# Method:
+#       * Init an array of size of BML$Slots to Zip
+#       * loop through each valid entry (1 .. N)
+#       * Keep track of where each comes from
+#       * Error if one is never pointed to, or pointed to twice
+#
+ 
+BBcommon
+ 
+integer*4   num_BML, err_count, num_destroy
+integer*4   work[num_BML]
+logical*4   fix_it
+literal     cstrip8
+ 
+integer*4   num_UNT, a_BML, BML$pointer, next_BML
+ 
+integer*4   UNT$pointer, unt$supertype$i, unt$BmlIndx$i
+ 
+integer*4   num_term, num_bytes, pnt
+integer*2   num_zero
+ 
+err_count = 0
+num_term  = 0
+ 
+#------------------------------------------------------------
+# erase the work area to binary zero
+ 
+num_bytes = num_BML * 4
+pnt       = 1
+ 
+WHILE (num_bytes > 0)
+    {
+    num_zero = min (32000, num_bytes)
+ 
+    call Lib$MovC5 (0,0,0, num_zero , work[ pnt ] )
+ 
+    num_bytes = num_bytes - num_zero
+    pnt = pnt + (num_zero/4)
+    }
+ 
+#------------------------------------------------------------
+# look at each non-boat UNT that has a BML index and record ...
+ 
+for (unt$pointer$first; unt$pointer$ok; unt$pointer$next)
+    {
+    unt$SuperType$I = Xunt$SuperType$I
+    unt$BmlIndx$i   = Xunt$BmlIndx$i
+    next_bml        = unt$BmlIndx$i
+ 
+    a_bml = unt$pointer$index * 10000
+ 
+    if ( UNT$SuperType$i == $SmallBoat$SuperCode ) next
+    if ( next_bml        == 0                    ) next
+ 
+    if ( next_bml  > num_BML)
+        {
+        call echov ("UNT #")
+        call echoib (a_bml/10000,6)
+        call echov (" points to BML #")
+        call echoib (next_BML,6)
+        call echov (" (out of bounds)")
+        call echor
+ 
+        err_count = err_count + 1
+        }
+ 
+    else if ( work[next_bml] != 0)
+        {
+        # we have two units for the same BML
+ 
+        call echov ("Entry #")
+        call echoib (next_BML,6)
+        call echov (" is pointed to by UNT #")
+        call echoib (work[next_BML]/10000,6)
+        call echov (" ")
+        call echohn (xunt$name$c,$$MaxLit)
+        call echov (" (first)")
+        call echor
+ 
+        call echov ("      #")
+        call echoib (next_BML,6)
+        call echov (" is pointed to by UNT #")
+        call echoib (a_BML/10000,6)
+        call echov (" ")
+        call echohn (xunt$name$c,$$MaxLit)
+        call echov (" (second, non-boat)")
+        call echor
+ 
+        if (xUNT$GhostedUnit$I      != $no |
+            xUNT$GhostedDISUnit$I   != $no  )
+            {
+            call echov (" [it is a Ghost]")
+            }
+        else
+            {
+            err_count = err_count + 1
+            }
+        }
+    else
+        {
+        work[next_bml] = a_bml      # who points here....
+        }
+    }
+ 
+#------------------------------------------------------------
+# look at each boat UNT and record ...
+ 
+for (unt$pointer$first; unt$pointer$ok; unt$pointer$next)
+    {
+    if (xunt$Status$i == $beingdeleted$code) next
+ 
+    unt$SuperType$I = Xunt$SuperType$I
+    unt$BmlIndx$i   = Xunt$BmlIndx$i
+    next_bml        = unt$BmlIndx$i
+ 
+    a_bml = unt$pointer$index * 10000
+ 
+    if ( UNT$SuperType$i != $SmallBoat$SuperCode) next
+    if ( next_bml        == 0 )
+        {
+        call echov ("UNT   #")
+        call echoib (unt$pointer$index,6)
+        call echov (" ")
+        call echohn (xunt$name$c,$$MaxLit)
+        call echov (" (a small boat) has no BML index.")
+        call echor
+ 
+        err_count = err_count + 1
+        next
+        }
+ 
+    if ( work[next_bml] != 0)
+        {
+        # we have two units for the same BML
+ 
+        call echov ("Entry #")
+        call echoib (next_BML,6)
+        call echov (" is pointed to by UNT #")
+        call echoib (work[next_BML]/10000,6)
+        call echov (" ")
+        call echohn(xunt$name$c,$$MaxLit)
+        call echov (" (first)")
+        call say_if_boat ( work[next_bml] )
+        call echor
+ 
+        call echov ("      #")
+        call echoib (next_BML,6)
+        call echov (" is pointed to by UNT #")
+        call echoib (a_BML/10000,6)
+        call echov (" ")
+        call echohn(xunt$name$c,$$MaxLit)
+        call echov (" (second)")
+        call say_if_boat ( a_bml )
+        call echor
+ 
+        work [ next_BML ] = -(a_BML)
+        err_count = err_count + 1
+        }
+    else
+        {
+        work[next_bml] = a_bml      # who points here....
+        }
+    }
+ 
+#------------------------------------------------------------
+# look at each BML and record ...
+ 
+do a_BML = 1, num_BML
+    {
+    BML$pointer$to a_BML
+ 
+    Next_BML = XBML$NextBML$i
+ 
+    if ( next_BML == 0)                 # check for end of list
+        {
+        num_term = num_term + 1
+        }
+    else if ( work[next_BML] == 0)      # check for multiple sources
+        {
+        work [ next_BML ] = a_BML
+        }
+    else if ( work[next_BML] > 0)       # check for first duplicate
+        {
+        call echov ("Entry #")
+        call echoib (next_BML,6)
+        call echov (" is pointed to by #")
+        call echoib (work[next_BML],9)
+        call echov (" (first)")
+        call say_if_boat ( work[next_bml] )
+        call echor
+ 
+        call echov ("      #")
+        call echoib (next_BML,6)
+        call echov (" is pointed to by #")
+        call echoib (a_BML,9)
+        call echov (" ")
+        call echohn(xbml$name$c,$$MaxLit)
+        call echov (" (second)")
+        call echor
+ 
+        work [ next_BML ] = -(a_BML)
+        err_count = err_count + 1
+        }
+    else                                   # this is a triplicate (or more)
+        {
+        call echov ("Entry #")
+        call echoib (next_BML,6)
+        call echov (" is pointed to by #")
+        call echoib (a_BML,9)
+        call echov (" ")
+        call echohn(xbml$name$c,$$MaxLit)
+        call echov (" (third...)")
+        call echor
+ 
+        work [ next_BML ] = -(a_BML)
+        err_count = err_count + 1
+        }
+    }
+ 
+#------------------------------------------------------------
+# Now check for every one being pointed to...
+ 
+num_destroy = 0
+do a_BML = 1, num_BML
+    {
+    if ( work [ a_BML ] == 0)
+        {
+        bml$pointer$to a_bml
+ 
+        # If status is destroyed, ignore Not-In-List            # dew 1/01
+        if (xBML$status$i == $Destroyed$code)                   # dew 1/01
+            {
+            num_destroy = num_destroy + 1
+            next
+            }
+ 
+        call echov ("Entry #")
+        call echoib (a_BML,6)
+        call echov (" ")
+        call echohn(xbml$name$c,$$MaxLit)
+        call echov (" is not in any BML list")
+        call echor
+        err_count = err_count + 1
+        }
+    }
+ 
+#------------------------------------------------------------
+# Report results
+ 
+if (err_count != 0)
+    {
+    call echor
+ 
+    call echov ("CAUTION:  The BML table is corrupt.")
+    call echor
+ 
+    call echov ("          There are ")
+    call echoi (err_count)
+    call echov (" errors among the ")
+    call echoi (num_BML)
+    call echov (" BML entries.")
+    call echor
+    }
+else
+    {
+    call echov ("  All ")
+    call echoi (num_BML)
+    call echov (" BML entries are OK.")
+    call echor
+    }
+ 
+if (num_destroy != 0)                                    # dew 1/01
+    {
+    call echov ("  Note: There are ")
+    call echoi (num_destroy)
+    call echov (" destroyed BML entries that are not on any list")
+    call echor
+    }
+ 
+ 
+end
+ 
+
+subroutine say_if_boat (index)
+ 
+BBcommon
+ 
+integer*4   index
+ 
+integer*4   UNT$pointer, unt$supertype$i, unt$BmlIndx$i
+ 
+integer*4   pnt
+ 
+pnt = abs(index)
+ 
+if (pnt < 10000) return
+ 
+if (mod (pnt,10000) != 0) return
+ 
+unt$pointer$to (pnt/10000)
+ 
+unt$SuperType$I = Xunt$SuperType$I
+unt$BmlIndx$i   = Xunt$BmlIndx$i
+ 
+if ( UNT$SuperType$i == $SmallBoat$SuperCode )  call echov (" a small boat")
+else                                            call echov (" a base")
+ 
+end
+ 
+
+subroutine quality_AML_list
+ 
+# This routine needs to check the AML and locate any loop-backs
+#
+# Method:
+#   2)  Smarter (?)
+#       * Init an array of size of AML$Slots to Zip
+#       * loop through each valid entry (1 .. N)
+#       * Keep track of where each comes from
+#       * Error if one is never pointed to, or pointed to twice
+#
+ 
+BBcommon
+ 
+integer*4   num_aml, err_count
+logical*4   fix_it
+integer*4	aml_base[arith(AML$SLOTS,*,AML$ENTRY)]
+common /scratch$pad/ aml_base
+ 
+num_aml = AML$SLOTS * AML$ENTRY
+ 
+fix_it = .false.
+call QA_AML_Lists (aml_base, num_AML, err_count, fix_it )
+return
+end
+ 
+ 
+
+subroutine QA_AML_Lists (work, num_AML, err_count, fix_it)
+ 
+# This routine needs to check the AML and locate any loop-backs
+#
+# Method:
+#       * Init an array of size of AML$Slots to Zip
+#       * loop through each valid entry (1 .. N)
+#       * Keep track of where each comes from
+#       * Error if one is never pointed to, or pointed to twice
+#
+ 
+BBcommon
+ 
+integer*4   num_AML, err_count
+integer*4   work[num_AML]
+logical*4   fix_it
+literal     cstrip8
+ 
+integer*4   a_AML, AML$pointer, next_AML, AML$status$i
+ 
+integer*4   UNT$pointer, unt$type$i, unt$AMLIndx$i
+ 
+integer*4   num_term, num_bytes, pnt, num_dest_nzero
+integer*2   num_zero
+ 
+err_count = 0
+num_term  = 0
+num_dest_nzero = 0
+ 
+#------------------------------------------------------------
+# erase the work area to binary zero
+ 
+num_bytes = num_AML * 4
+pnt       = 1
+ 
+while (num_bytes > 0)
+    {
+    num_zero = min (32000, num_bytes)
+ 
+    call Lib$MovC5 (0,0,0, num_zero , work[ pnt ] )
+ 
+    num_bytes = num_bytes - num_zero
+    pnt = pnt + (num_zero/4)
+    }
+ 
+#------------------------------------------------------------
+# look at each non-aircraft UNT that has a AML index and record ...
+ 
+for (unt$pointer$first; unt$pointer$ok; unt$pointer$next)
+    {
+    unt$Type$I      = Xunt$Type$I
+    unt$AMLIndx$i   = Xunt$AMLIndx$i
+    next_AML        = unt$AMLIndx$i
+ 
+    a_AML = unt$pointer$index * 10000
+ 
+    if ( UNT$Type$i == $Air$Code ) next
+    if ( next_AML   == 0         ) next
+ 
+    if ( next_AML  > num_AML)
+        {
+        call echov ("UNT #")
+        call echoib (a_AML/10000,6)
+        call echov (" points to AML #")
+        call echoib (next_AML,6)
+        call echov (" (out of bounds)")
+        call echor
+ 
+        err_count = err_count + 1
+        }
+ 
+    else if ( work[next_AML] != 0)
+        {
+        # we have two units for the same AML
+ 
+        call echov ("Entry #")
+        call echoib (next_AML,6)
+        call echov (" is pointed to by UNT #")
+        call echoib (work[next_AML]/10000,6)
+        call echov (" ")
+        call echohn(xunt$name$c,$$MaxLit)
+        call echov (" (first)")
+        call echor
+ 
+        call echov ("      #")
+        call echoib (next_AML,6)
+        call echov (" is pointed to by UNT #")
+        call echoib (a_AML/10000,6)
+        call echov (" ")
+        call echohn(xunt$name$c,$$MaxLit)
+        call echov (" (second)")
+        call echor
+ 
+        err_count = err_count + 1
+        }
+    else
+        {
+        work[next_AML] = a_AML      # who points here....
+        }
+    }
+ 
+#------------------------------------------------------------
+# look at each Aircraft UNT and record ...
+ 
+for (unt$pointer$first; unt$pointer$ok; unt$pointer$next)
+    {
+    if (xunt$Status$i == $beingdeleted$code) next
+ 
+    if (xUNT$GhostedUnit$I      != $no |
+        xUNT$GhostedDISUnit$I   != $no  ) next
+ 
+    unt$Type$I      = Xunt$Type$I
+    unt$AMLIndx$i   = Xunt$AMLIndx$i
+    next_AML        = unt$AMLIndx$i
+ 
+    a_AML = unt$pointer$index * 10000
+ 
+    if ( UNT$Type$i != $Air$Code) next
+    if ( next_AML   == 0 )
+        {
+        call echov ("UNT   #")
+        call echoib (unt$pointer$index,6)
+        call echov (" ")
+        call echohn(xunt$name$c,$$MaxLit)
+        call echov (" (an Aircraft) has no AML index.")
+ 
+        if (xUNT$GhostedUnit$I      != $no |
+            xUNT$GhostedDISUnit$I   != $no  )
+            {
+            call echov (" [it is a Ghost]")
+            }
+        else
+            {
+            err_count = err_count + 1
+            }
+ 
+        call echor
+        next
+        }
+ 
+    if ( work[next_AML] != 0)
+        {
+        # we have two units for the same AML
+ 
+        call echov ("Entry #")
+        call echoib (next_AML,6)
+        call echov (" is pointed to by UNT #")
+        call echoib (work[next_AML]/10000,6)
+        call echov (" ")
+        call echohn(xunt$name$c,$$MaxLit)
+        call echov (" (first)")
+        call echor
+ 
+        call echov ("      #")
+        call echoib (next_AML,6)
+        call echov (" is pointed to by UNT #")
+        call echoib (a_AML/10000,6)
+        call echov (" ")
+        call echohn(xunt$name$c,$$MaxLit)
+        call echov (" (second)")
+        call echor
+ 
+        work [ next_AML ] = -(a_AML)
+        err_count = err_count + 1
+        }
+    else
+        {
+        work[next_AML] = a_AML      # who points here....
+        }
+    }
+ 
+#------------------------------------------------------------
+# look at each AML and record ...
+ 
+do a_AML = 1, num_AML
+    {
+    AML$pointer$to a_AML
+ 
+    Next_AML = XAML$NextIndx$i
+ 
+    # If status is destroyed, ignore NextIndx               # dew 1/01
+    # the Indx should be Zero, but was not always cleared   # dew 1/01
+    if (xAML$status$i == $Destroyed$code)                   # dew 1/01
+        {
+        if (Next_AML != 0)                                  # dew 1/01
+            num_dest_nzero = num_dest_nzero + 1
+ 
+        Next_AML = 0                                        # dew 1/01
+        }
+ 
+    if ( next_AML == 0)                     # check for end of list
+        {
+        num_term = num_term + 1
+        }
+    else if ( work[next_AML] == 0)          # check for multiple sources
+        {
+        work [ next_AML ] = a_AML
+        }
+    else if ( work[next_AML] > 0)           # check for first duplicate
+        {
+        call echov ("Entry #")
+        call echoib (next_AML,6)
+        call echov (" is pointed to by #")
+        call echoib (work[next_AML],9)
+        call echov (" (first)")
+        call echor
+ 
+        call echov ("      #")
+        call echoib (next_AML,6)
+        call echov (" is pointed to by #")
+        call echoib (a_AML,9)
+        call echov (" ")
+        call echohn(xAML$SideNumber$c,$$MaxLit)
+        call echov (" (second)")
+        call echor
+ 
+        work [ next_AML ] = -(a_AML)
+        err_count = err_count + 1
+        }
+    else                                    # this is a triplicate (or more)
+        {
+        call echov ("Entry #")
+        call echoib (next_AML,6)
+        call echov (" is pointed to by #")
+        call echoib (a_AML,9)
+        call echov (" ")
+        call echohn(xAML$SideNumber$c,$$MaxLit)
+        call echov (" (third...)")
+        call echor
+ 
+        work [ next_AML ] = -(a_AML)
+        err_count = err_count + 1
+        }
+    }
+ 
+#------------------------------------------------------------
+# Now check for every one being pointed to...
+ 
+do a_AML = 1, num_AML
+    {
+    AML$pointer$to a_AML
+ 
+    AML$status$i = xAML$status$i
+ 
+    if (AML$status$i != $Destroyed$code &
+        AML$status$i != $OnDeck$code     )
+        {
+        if ( work [ a_AML ] == 0)
+            {
+            call echov ("Entry #")
+            call echoib (a_AML,6)
+            call echov (" ")
+            call echohn(xAML$SideNumber$c,$$MaxLit)
+            call echov (" is not in any AML list")
+            call echor
+            err_count = err_count + 1
+            }
+        }
+    else
+        {
+        if ( work [ a_AML ] != 0)
+            {
+            call echov ("Entry #")
+            call echoib (a_AML,6)
+            call echov (" ")
+            call echohn(xAML$SideNumber$c,$$MaxLit)
+            call echov (" is in an AML list (and should not be)")
+            call echor
+            err_count = err_count + 1
+            }
+        }
+ 
+    }
+ 
+#------------------------------------------------------------
+# Report results
+ 
+if (err_count != 0)
+    {
+    call echor
+ 
+    call echov ("CAUTION:  The AML table is corrupt.")
+    call echor
+ 
+    call echov ("          There are ")
+    call echoi (err_count)
+    call echov (" errors among the ")
+    call echoi (num_AML)
+    call echov (" AML entries.")
+    call echor
+    }
+else
+    {
+    call echov ("  All ")
+    call echoi (num_AML)
+    call echov (" AML entries are OK.")
+    call echor
+    }
+ 
+if (num_dest_nzero != 0)                                    # dew 1/01
+    {
+    call echov ("  Note: There are ")
+    call echoi (num_dest_nzero)
+    call echov (" destroyed AML entries with Non-Zero NextIndx's")
+    call echor
+    }
+ 
+end
+ 
+
+subroutine quality_deq_free
+ 
+# This routine needs to check the DEQ free list and locate any loop-backs
+#
+# Method:
+#   2)  Smarter (?)
+#       * Init an array of size of DEQ$Slots to Zip
+#       * loop through each valid entry (1 .. N)
+#       * Keep track of where each comes from
+#       * Error if one is never pointed to, or pointed to twice
+#       * Error if wrong number of list terminators
+#
+ 
+BBcommon
+ 
+integer*4   num_deq, err_count
+logical*4   fix_it
+integer*4	deq_base[arith(DEQ$SLOTS,*,DEQ$ENTRY)]
+common /scratch$pad/ deq_base
+ 
+num_deq = DEQ$SLOTS * DEQ$ENTRY
+ 
+fix_it = .false.
+call QA_DEQ_Lists (deq_base, num_DEQ, err_count, fix_it)
+ 
+return
+end
+ 
+ 
+
+subroutine QA_DEQ_Lists (work, num_DEQ, err_count, fix_it)
+ 
+# This routine needs to check the DEQ free list and locate any loop-backs
+#
+# Method:
+#       * Init an array of size of DEQ$Slots to Zip
+#       * loop through each valid entry (1 .. N)
+#       * Keep track of where each comes from
+#       * Error if one is never pointed to, or pointed to twice
+#       * Error if wrong number of list terminators
+#
+ 
+BBcommon
+ 
+integer*4   num_DEQ, err_count
+integer*4   work[num_DEQ]
+logical*4   fix_it
+ 
+integer*4   num_UNT, a_deq, deq$pointer, next_deq
+integer*4   num_term, num_bytes, pnt
+integer*2   num_zero
+ 
+err_count = 0
+num_term  = 0
+ 
+#------------------------------------------------------------
+# erase the work area to binary zero
+ 
+num_bytes = num_deq * 4
+pnt       = 1
+ 
+WHILE (num_bytes > 0)
+    {
+    num_zero = min (32000, num_bytes)
+ 
+    call Lib$MovC5 (0,0,0, num_zero , work[ pnt ] )
+ 
+    num_bytes = num_bytes - num_zero
+    pnt = pnt + (num_zero/4)
+    }
+ 
+#------------------------------------------------------------
+# fill in the default DEQ entries (First Free, Each UNT)
+ 
+work [ DEQ$First$free ] = 999999        # flag for start of the DEQ Free chain
+ 
+num_UNT = UNT$size / UNT$entry
+do a_deq = 1, num_UNT
+    {
+    work [ a_deq ] = a_deq      # entry #N is pointed to by UNT #N
+    }
+ 
+#------------------------------------------------------------
+# look at each DEQ and record ...
+ 
+do a_deq = 1, num_DEQ
+    {
+    deq$pointer$to a_deq
+ 
+    Next_deq = Xdeq$NextDEQ$i
+ 
+    if ( next_deq == 0)                 # check for end of list
+        {
+        num_term = num_term + 1
+        }
+    else if ( next_deq > num_DEQ)       # check for out of bounds
+        {
+        call echov ("Entry #")
+        call echoib (a_deq,6)
+        call echov (" points to #")
+        call echoib (next_deq,6)
+        call echov (" (out of bounds)")
+        call echor
+ 
+        err_count = err_count + 1
+        }
+    else if ( work[next_deq] == 0)      # check for multiple sources
+        {
+        work [ next_deq ] = a_deq
+        }
+    else if ( work[next_deq] > 0)       # check for first duplicate
+        {
+        call echov ("Entry #")
+        call echoib (next_deq,6)
+        call echov (" is pointed to by #")
+        call echoib (work[next_deq],6)
+        call echov (" (first)")
+        call echor
+ 
+        call echov ("Entry #")
+        call echoib (next_deq,6)
+        call echov (" is pointed to by #")
+        call echoib (a_deq,6)
+        call echov (" (second)")
+        call echor
+ 
+        work [ next_deq ] = -(a_deq)
+        err_count = err_count + 1
+        }
+    else                                    # this is a triplicate (or more)
+        {
+        call echov ("Entry #")
+        call echoib (next_deq,6)
+        call echov (" is pointed to by #")
+        call echoib (a_deq,6)
+        call echov (" (third...)")
+        call echor
+ 
+        work [ next_deq ] = -(a_deq)
+        err_count = err_count + 1
+        }
+    }
+ 
+#------------------------------------------------------------
+# Now check for every one being pointed to...
+ 
+do a_deq = 1, num_DEQ
+    {
+    if ( work [ a_deq ] == 0)
+        {
+        call echov ("Entry #")
+        call echoib (a_deq,6)
+        call echov (" is not in any DEQ list")
+        call echor
+        err_count = err_count + 1
+        }
+    }
+ 
+#------------------------------------------------------------
+# Check Chain Count
+ 
+if (num_term != (Num_UNT + 1) )         # Too many chains terminated?
+    {
+    call echor
+    call echov ("There should be ")
+    call echoi (Num_Unt+1)
+    call echov (" DEQ chains (each UNT + 1 Free)")
+    call echor
+ 
+    call echov ("But there were ")
+    call echoi (num_term)
+    call echov (" terminations.")
+    call echor
+ 
+    err_count = err_count + 1
+    }
+ 
+#------------------------------------------------------------
+# Report results
+ 
+if (err_count != 0)
+    {
+    call echor
+ 
+    call echov ("CAUTION:  The DEQ table is corrupt.")
+    call echor
+ 
+    call echov ("          There are ")
+    call echoi (err_count)
+    call echov (" errors among the ")
+    call echoi (num_deq)
+    call echov (" DEQ entries.")
+    call echor
+ 
+    call echov ("          Try Quality Unit check to isolate the unit(s).")
+    call echor
+    }
+else
+    {
+    call echov ("  All ")
+    call echoi (num_deq)
+    call echov (" DEQ entries are OK.")
+    call echor
+    }
+ 
+end
+ 
+
+subroutine quality_unit_deq_list
+ 
+# This routine needs to check the DEQ list for every UNT and find duplicate use
+#
+# Method:
+#       * Init an array of size of DEQ$Slots to Zip
+#       * loop through each UNT, follow DEQ
+#       * Keep track of where each is used
+#       * Error if one is used by another UNT
+#
+ 
+BBcommon
+ 
+integer*4   num_deq, err_count
+logical*4   fix_it
+integer*4	deq_base[arith(DEQ$SLOTS,*,DEQ$ENTRY)]
+common /scratch$pad/ deq_base
+ 
+num_deq = DEQ$SLOTS * DEQ$ENTRY
+ 
+fix_it = .false.
+call QA_UNT_DEQ_Lists (deq_base, num_DEQ, err_count, fix_it)
+return
+end
+ 
+
+subroutine QA_UNT_DEQ_Lists (work, num_DEQ, err_count, fix_it)
+ 
+# This routine needs to check the DEQ list for every UNT and find duplicate use
+#
+# Method:
+#       * Init an array of size of DEQ$Slots to Zip
+#       * loop through each UNT, follow DEQ
+#       * Keep track of where each is used
+#       * Error if one is used by another UNT
+#
+ 
+BBcommon
+ 
+integer*4   num_DEQ, err_count
+integer*4   work[num_DEQ]
+logical*4   fix_it
+ 
+integer*4   num_UNT, a_deq, deq$pointer
+integer*4   num_term, num_bytes, pnt
+integer*4   a_unt, unt$pointer, unt_reference
+integer*2   num_zero
+literal     cstrip8
+integer     deq_sum[2,10], deq_max, deq_free, deq_cnt, kk
+integer     deq_lim[10] / 2,5,10,25,50,75,100,200,deq$slots,0/
+real        avg
+ 
+err_count = 0
+num_term  = 0
+ 
+#------------------------------------------------------------
+# erase the work area to binary zero
+ 
+num_bytes = num_deq * 4
+pnt       = 1
+ 
+while (num_bytes > 0)
+    {
+    num_zero = min (32000, num_bytes)
+ 
+    call Lib$MovC5 (0,0,0, num_zero , work[ pnt ] )
+ 
+    num_bytes = num_bytes - num_zero
+    pnt = pnt + (num_zero/4)
+    }
+ 
+#----------------------------------------
+# erase the DEQ summary counters
+ 
+num_zero = 2 * 10 * 4           # Bytes
+call Lib$MovC5 (0,0,0, num_zero , deq_sum)
+ 
+deq_max  = 0
+deq_free = 0
+ 
+#------------------------------------------------------------
+# search all DEQ lists (#0 is the Free list)
+ 
+num_UNT = UNT$size / UNT$entry
+ 
+FOR (a_unt = 0; a_unt <= num_UNT ; a_unt = a_unt + 1)
+    {
+    if (a_unt == 0)
+        {
+        a_deq = DEQ$first$free
+        unt_reference = 9999
+        }
+    else
+        {
+        a_deq = a_unt
+        unt_reference = a_unt
+        }
+ 
+    deq_cnt = 0
+ 
+    while (a_deq != 0)
+        {
+        deq_cnt = deq_cnt + 1
+ 
+        if ( work [ a_deq ] == 0 )                  # this is Good
+            {
+            work [ a_deq ] = unt_reference  # entry #N belongs to UNT_ref
+ 
+            deq$pointer$to a_deq
+            a_deq = Xdeq$NextDeq$i
+            }
+        else                                        # We have a problem
+            {
+            call echov ("Entry #")
+            call echoib (a_deq,6)
+            call echov (" belongs to UNT #")
+            call echoib (work[a_deq],6)
+            call echov (" (first)  ")
+ 
+            unt$pointer$to work[a_deq]
+            if (unt$pointer$valid) call echohn (Xunt$name$c,$$MaxLit)
+            else                   call echov  ("Free list")
+            call echor
+ 
+            call echov ("Entry #")
+            call echoib (a_deq,6)
+            call echov (" belongs to UNT #")
+            call echoib (unt_reference,6)
+            call echov (" (second) ")
+ 
+            unt$pointer$to unt_reference
+            if (unt$pointer$valid) call echohn (Xunt$name$c,$$MaxLit)
+            else                   call echov  ("Free list")
+            call echor
+ 
+            err_count = err_count + 1
+ 
+            break                   # DEQ loop
+            }
+        } # End of While DEQ
+ 
+    if (A_unt == 0)
+        {
+        deq_free = deq_cnt
+        next                        # UNT loop
+        }
+ 
+    deq_max  = max(deq_max, deq_cnt)
+ 
+    for (kk = 1; kk <= 10; kk=kk+1)
+        {
+        if (deq_cnt <= deq_lim[kk])
+            {
+            deq_sum[1,kk] = deq_sum[1,kk] + 1
+            deq_sum[2,kk] = deq_sum[2,kk] + deq_cnt
+            break
+            }
+        }
+ 
+    } # end of FOR UNT
+ 
+ 
+#------------------------------------------------------------
+# Report results
+ 
+if (err_count != 0)
+    {
+    call echor
+ 
+    call echov ("CAUTION:  The DEQ table is corrupt.")
+    call echor
+ 
+    call echov ("          There are ")
+    call echoi (err_count)
+    call echov (" errors among the ")
+    call echoi (num_Unt + 1)
+    call echov (" DEQ lists.")
+    call echor
+    }
+else
+    {
+    call echov ("  All ")
+    call echoi (num_Unt + 1)
+    call echov (" DEQ lists are OK.")
+    call echor
+    call echor
+    }
+ 
+#------------------------------------------------------------
+# Report statistics
+ 
+deq_cnt = 1
+for (kk = 1; kk <= 10; kk=kk+1)
+    {
+    if (deq_sum[1,kk] != 0)
+        {
+        call echoib (deq_sum[1,kk],10)
+        call echov (" lists (")
+            avg = 100.0 * deq_sum[1,kk] / num_UNT
+        call echof (avg,502)
+        call echov ("%) had ")
+        call echoi (deq_cnt)
+        call echov ("-")
+        call echoi (deq_lim[kk])
+        call echov (" entries (")
+            avg = 1.0 * deq_sum[2,kk] / deq_sum[1,kk]
+        call echof (avg,2)
+        call echov ("), ")
+            avg = 100.0 * deq_sum[2,kk] / num_DEQ
+        call echof (avg,2)
+        call echov ("% of DEQ")
+        call echor
+        }
+ 
+    deq_cnt = deq_lim[kk] + 1
+    }
+ 
+call echor
+call echoib (deq_max,10)
+call echov (" entries in the longest list.")
+call echor
+ 
+call echoib (deq_free,10)
+call echov (" entries in the FREE list (")
+    avg = 100.0 * DEQ_free / num_DEQ
+call echof (avg,2)
+call echov (" %)")
+call echor
+ 
+end
+ 
+
+subroutine quality_INV_free
+ 
+# This routine needs to check the INV free list and locate any loop-backs
+#
+# Method:
+#   2)  Smarter (?)
+#       * Init an array of size of INV$Slots to Zip
+#       * loop through each valid entry (1 .. N)
+#       * Keep track of where each comes from
+#       * Error if one is never pointed to, or pointed to twice
+#       * Error if wrong number of list terminators
+#
+ 
+BBcommon
+ 
+integer*4   num_inv, err_count
+logical*4   fix_it
+integer*4	inv_base[arith(INV$SLOTS,*,INV$ENTRY)]
+common /scratch$pad/ inv_base
+ 
+num_inv = INV$SLOTS * INV$ENTRY
+ 
+fix_it = .false.
+call QA_INV_Lists (inv_base, num_INV, err_count, fix_it )
+return
+end
+ 
+
+subroutine QA_INV_Lists (work, num_INV, err_count, fix_it)
+ 
+# This routine needs to check the INV free list and locate any loop-backs
+#
+# Method:
+#       * Init an array of size of INV$Slots to Zip
+#       * loop through each valid entry (1 .. N)
+#       * Keep track of where each comes from
+#       * Error if one is never pointed to, or pointed to twice
+#       * Error if wrong number of list terminators
+#
+ 
+BBcommon
+ 
+integer*4   num_INV, err_count
+integer*4   work[num_INV]
+logical*4   fix_it
+ 
+integer*4   num_OWN, a_INV, A_OWN, INV$pointer, next_INV, own$pointer
+integer*4   num_term, num_bytes, pnt, act_own
+integer*2   num_zero
+ 
+err_count = 0
+num_term  = 0
+ 
+#------------------------------------------------------------
+# erase the work area to binary zero
+ 
+num_bytes = num_INV * 4
+pnt       = 1
+ 
+while (num_bytes > 0)
+    {
+    num_zero = min (32000, num_bytes)
+ 
+    call Lib$MovC5 (0,0,0, num_zero , work[ pnt ] )
+ 
+    num_bytes = num_bytes - num_zero
+    pnt = pnt + (num_zero/4)
+    }
+ 
+#------------------------------------------------------------
+# fill in the default INV entries (First Free, Each OWN)
+ 
+work [ Inventory$First$free ] = 999999   # flag for start of the INV Free chain
+ 
+act_own = 0
+num_OWN = OWN$size / OWN$entry
+do a_OWN = 1, num_OWN
+    {
+    own$pointer$to A_own
+    a_inv = Xown$FirstInvIndx$i
+ 
+ 
+    if (a_inv > num_INV)        # what if index is out of bounds??
+        {
+        call echov ("OWN Entry #")
+        call echoib (a_own,6)
+        call echov (" points to INV #")
+        call echoib (a_INV,6)
+        call echov (", out of bounds.")
+        call echor
+ 
+        err_count = err_count + 1
+        }
+ 
+    else if (a_inv != 0)
+        {
+        work [ a_INV ] = 20000 + a_OWN      # entry #N is pointed to by OWN #N
+        act_own = act_own + 1
+ 
+        if (Xown$Unit$i == 0 )
+            {
+            call echov ("OWN Entry #")
+            call echoib (a_own,6)
+            call echov (" points to INV #")
+            call echoib (a_INV,6)
+            call echov (" but has no Unit Index")
+            call echor
+ 
+            err_count = err_count + 1
+            }
+        }
+    }
+ 
+#------------------------------------------------------------
+# look at each INV and record ...
+ 
+do a_INV = 1, num_INV
+    {
+    INV$pointer$to a_INV
+ 
+    Next_INV = XINV$NextIndx$i
+ 
+    if ( next_INV == 0)                     # check for end of list
+        {
+        num_term = num_term + 1
+        }
+    else if ( work[next_INV] == 0)          # check for multiple sources
+        {
+        work [ next_INV ] = a_INV
+        }
+    else if ( work[next_INV] > 0)           # check for first duplicate
+        {
+        call echov ("Entry #")
+        call echoib (next_INV,6)
+        call echov (" is pointed to by #")
+        call echoib (work[next_INV],6)
+        call echov (" (first)")
+        call echor
+ 
+        call echov ("Entry #")
+        call echoib (next_INV,6)
+        call echov (" is pointed to by #")
+        call echoib (a_INV,6)
+        call echov (" (second)")
+        call echor
+ 
+        work [ next_INV ] = -(a_INV)
+        err_count = err_count + 1
+        }
+    else                                        # this is a triplicate (or more)
+        {
+        call echov ("Entry #")
+        call echoib (next_INV,6)
+        call echov (" is pointed to by #")
+        call echoib (a_INV,6)
+        call echov (" (third...)")
+        call echor
+ 
+        work [ next_INV ] = -(a_INV)
+        err_count = err_count + 1
+        }
+    }
+ 
+#------------------------------------------------------------
+# Now check for every one being pointed to...
+ 
+do a_INV = 1, num_INV
+    {
+    if ( work [ a_INV ] == 0)
+        {
+        call echov ("Entry #")
+        call echoib (a_INV,6)
+        call echov (" is not in any INV list")
+        call echor
+        err_count = err_count + 1
+        }
+    }
+ 
+#------------------------------------------------------------
+# Check Chain Count
+ 
+if (num_term != (Act_OWN + 1) )             # Too many chains terminated?
+    {
+    call echor
+    call echov ("There should be ")
+    call echoi (act_OWN+1)
+    call echov (" INV chains (each Active OWN + 1 Free)")
+    call echor
+ 
+    call echov ("But there were ")
+    call echoi (num_term)
+    call echov (" terminations.")
+    call echor
+ 
+    err_count = err_count + 1
+    }
+ 
+#------------------------------------------------------------
+# Report results
+ 
+if (err_count != 0)
+    {
+    call echor
+ 
+    call echov ("CAUTION:  The INV table is corrupt.")
+    call echor
+ 
+    call echov ("          There are ")
+    call echoi (err_count)
+    call echov (" errors among the ")
+    call echoi (num_INV)
+    call echov (" INV entries.")
+    call echor
+ 
+    call echov ("          Try Quality Unit check to isolate the unit(s).")
+    call echor
+    }
+else
+    {
+    call echov ("  All ")
+    call echoi (num_INV)
+    call echov (" INV entries are OK.")
+    call echor
+    }
+ 
+end
+ 
+
+subroutine quality_COR_free
+ 
+# This routine needs to check the COR free list and locate any loop-backs
+#
+# Method:
+#   2)  Smarter (?)
+#       * Init an array of size of COR$Slots to Zip
+#       * loop through each valid entry (1 .. N)
+#       * Keep track of where each comes from
+#       * Error if one is never pointed to, or pointed to twice
+#       * Error if wrong number of list terminators
+#
+ 
+BBcommon
+ 
+integer*4   num_cor, err_count
+logical*4   fix_it
+integer*4	cor_base[arith(COR$SLOTS,*,COR$ENTRY)]
+common /scratch$pad/ cor_base
+ 
+num_cor = COR$SLOTS * COR$ENTRY
+ 
+ 
+fix_it = .false.
+call QA_COR_Lists (cor_base, num_COR, err_count, fix_it )
+return
+end
+ 
+
+subroutine QA_COR_Lists (work, num_COR, err_count, fix_it)
+ 
+# This routine needs to check the COR free list and locate any loop-backs
+#
+# Method:
+#       * Init an array of size of COR$Slots to Zip
+#       * loop through each valid entry (1 .. N)
+#       * Keep track of where each comes from
+#       * Error if one is never pointed to, or pointed to twice
+#       * Error if wrong number of list terminators
+#
+ 
+BBcommon
+ 
+integer*4   num_COR, err_count
+integer*4   work[num_COR]
+logical*4   fix_it
+ 
+integer*4   num_OWN, a_COR, A_OWN, COR$pointer, next_COR, own$pointer
+integer*4   num_term, num_bytes, pnt, act_own
+integer*2   num_zero
+ 
+err_count = 0
+num_term  = 0
+ 
+#------------------------------------------------------------
+# erase the work area to binary zero
+ 
+num_bytes = num_COR * 4
+pnt       = 1
+ 
+while (num_bytes > 0)
+    {
+    num_zero = min (32000, num_bytes)
+ 
+    call Lib$MovC5 (0,0,0, num_zero , work[ pnt ] )
+ 
+    num_bytes = num_bytes - num_zero
+    pnt = pnt + (num_zero/4)
+    }
+ 
+#------------------------------------------------------------
+# fill in the default COR entries (First Free, Each OWN)
+ 
+work [ Corner$First$free ] = 999999   # flag for start of the COR Free chain
+ 
+act_own = 0
+num_OWN = OWN$size / OWN$entry
+do a_OWN = 1, num_OWN
+    {
+    own$pointer$to A_own
+    a_COR = Xown$FirstCorIndx$i
+ 
+    if (a_COR > num_COR)        # what if index is out of bounds??
+        {
+        call echov ("OWN Entry #")
+        call echoib (a_own,6)
+        call echov (" points to COR #")
+        call echoib (a_COR,6)
+        call echov (", out of bounds.")
+        call echor
+ 
+        err_count = err_count + 1
+        }
+ 
+    else if (a_COR != 0)
+        {
+        work [ a_COR ] = 20000 + a_OWN      # entry #N is pointed to by OWN #N
+        act_own = act_own + 1
+ 
+        if (Xown$Unit$i == 0 )
+            {
+            call echov ("OWN Entry #")
+            call echoib (a_own,6)
+            call echov (" points to COR #")
+            call echoib (a_COR,6)
+            call echov (" but has no Unit Index")
+            call echor
+ 
+            err_count = err_count + 1
+            }
+        }
+    }
+ 
+#------------------------------------------------------------
+# look at each COR and record ...
+ 
+do a_COR = 1, num_COR
+    {
+    COR$pointer$to a_COR
+ 
+    Next_COR = XCOR$NextIndx$i
+ 
+    if ( next_COR == 0)                     # check for end of list
+        {
+        num_term = num_term + 1
+        }
+    else if ( work[next_COR] == 0)          # check for multiple sources
+        {
+        work [ next_COR ] = a_COR
+        }
+    else if ( work[next_COR] > 0)           # check for first duplicate
+        {
+        call echov ("Entry #")
+        call echoib (next_COR,6)
+        call echov (" is pointed to by #")
+        call echoib (work[next_COR],6)
+        call echov (" (first)")
+        call echor
+ 
+        call echov ("Entry #")
+        call echoib (next_COR,6)
+        call echov (" is pointed to by #")
+        call echoib (a_COR,6)
+        call echov (" (second)")
+        call echor
+ 
+        work [ next_COR ] = -(a_COR)
+        err_count = err_count + 1
+        }
+    else                                    # this is a triplicate (or more)
+        {
+        call echov ("Entry #")
+        call echoib (next_COR,6)
+        call echov (" is pointed to by #")
+        call echoib (a_COR,6)
+        call echov (" (third...)")
+        call echor
+ 
+        work [ next_COR ] = -(a_COR)
+        err_count = err_count + 1
+        }
+    }
+ 
+#------------------------------------------------------------
+# Now check for every one being pointed to...
+ 
+do a_COR = 1, num_COR
+    {
+    if ( work [ a_COR ] == 0)
+        {
+        call echov ("Entry #")
+        call echoib (a_COR,6)
+        call echov (" is not in any COR list")
+        call echor
+        err_count = err_count + 1
+        }
+    }
+ 
+#------------------------------------------------------------
+# Check Chain Count
+ 
+if (num_term != (Act_OWN + 1) )         # Too many chains terminated?
+    {
+    call echor
+    call echov ("There should be ")
+    call echoi (act_OWN+1)
+    call echov (" COR chains (each Active OWN + 1 Free)")
+    call echor
+ 
+    call echov ("But there were ")
+    call echoi (num_term)
+    call echov (" terminations.")
+    call echor
+ 
+    err_count = err_count + 1
+    }
+ 
+#------------------------------------------------------------
+# Report results
+ 
+if (err_count != 0)
+    {
+    call echor
+ 
+    call echov ("CAUTION:  The COR table is corrupt.")
+    call echor
+ 
+    call echov ("          There are ")
+    call echoi (err_count)
+    call echov (" errors among the ")
+    call echoi (num_COR)
+    call echov (" COR entries.")
+    call echor
+ 
+    call echov ("          Try Quality Unit check to isolate the unit(s).")
+    call echor
+    }
+else
+    {
+    call echov ("  All ")
+    call echoi (num_COR)
+    call echov (" COR entries are OK.")
+    call echor
+    }
+ 
+end
+ 
+
+subroutine quality_own_inv_list
+ 
+# This routine needs to check the INV list for every OWN and find duplicate use
+#
+# Method:
+#       * Init an array of size of INV$Slots to Zip
+#       * loop through each OWN, follow INV
+#       * Keep track of where each is used
+#       * Error if one is used by another OWN
+#
+ 
+BBcommon
+ 
+integer*4   err_count
+integer*4   num_inv, rc
+logical*4   fix_it
+integer*4 	vm_base[arith(INV$SLOTS,*,INV$ENTRY)]
+common /scratch$pad/ vm_base
+ 
+num_inv = INV$SLOTS * INV$ENTRY
+fix_it = .false.
+call QA_OWN_INV_Lists (vm_base, num_INV, err_count, fix_it)
+ 
+return
+end
+ 
+
+subroutine QA_OWN_INV_Lists (work, num_INV, err_count, fix_it)
+ 
+# This routine needs to check the INV list for every OWN and find duplicate use
+#
+# Method:
+#       * Init an array of size of INV$Slots to Zip
+#       * loop through each OWN, follow INV
+#       * Keep track of where each is used
+#       * Error if one is used by another OWN
+#
+ 
+BBcommon
+ 
+integer*4   num_INV, err_count
+integer*4   work[num_INV]
+logical*4   fix_it
+ 
+integer*4   num_OWN, a_INV, INV$pointer
+integer*4   num_term, num_bytes, pnt, act_own
+integer*4   a_OWN, OWN$pointer, unt$pointer, OWN_reference
+integer*2   num_zero
+literal     cstrip8
+ 
+err_count = 0
+num_term  = 0
+ 
+#------------------------------------------------------------
+# erase the work area to binary zero
+ 
+num_bytes = num_INV * 4
+pnt       = 1
+ 
+while (num_bytes > 0)
+    {
+    num_zero = min (32000, num_bytes)
+ 
+    call Lib$MovC5 (0,0,0, num_zero , work[ pnt ] )
+ 
+    num_bytes = num_bytes - num_zero
+    pnt = pnt + (num_zero/4)
+    }
+ 
+#------------------------------------------------------------
+# search all INV lists (#0 is the Free list)
+ 
+num_OWN = OWN$size / OWN$entry
+act_own = 0
+ 
+FOR (a_OWN = 0; a_OWN <= num_OWN ; a_OWN = a_OWN + 1)
+    {
+    if (a_OWN == 0)
+        {
+        a_INV = Inventory$first$free
+        OWN_reference = 9999
+        }
+    else
+        {
+        own$pointer$to a_own
+        a_inv = Xown$FirstInvIndx$i
+ 
+        if (Xown$Unit$i == 0) next
+ 
+        act_own = act_own + 1
+        OWN_reference = a_OWN
+        }
+ 
+    while (a_INV > 0 & a_inv <= num_INV)
+        {
+        if ( work [ a_INV ] == 0 )                  # this is Good
+            {
+            work [ a_INV ] = OWN_reference  # entry #N belongs to OWN_ref
+ 
+            INV$pointer$to a_INV
+            a_INV = XINV$NextIndx$i
+            }
+        else                                        # We have a problem
+            {
+            call echov ("Entry #")
+            call echoib (a_INV,6)
+            call echov (" belongs to OWN #")
+            call echoib (work[a_INV],6)
+            call echov (" (first)  ")
+ 
+            OWN$pointer$to work[a_INV]
+            unt$pointer$to xOwn$Unit$i
+            if (OWN$pointer$valid) call echohn (XUNT$name$c,$$MaxLit)
+            else                   call echov  ("Free list")
+            call echor
+ 
+            call echov ("Entry #")
+            call echoib (a_INV,6)
+            call echov (" belongs to OWN #")
+            call echoib (OWN_reference,6)
+            call echov (" (second) ")
+ 
+            OWN$pointer$to OWN_reference
+            unt$pointer$to xOwn$Unit$i
+            if (OWN$pointer$valid) call echohn (XUnt$name$c,$$MaxLit)
+            else                   call echov  ("Free list")
+            call echor
+ 
+            err_count = err_count + 1
+ 
+            next 2                  # next OWN list
+            }
+        }
+    }
+ 
+ 
+#------------------------------------------------------------
+# Report results
+ 
+if (err_count != 0)
+    {
+    call echor
+ 
+    call echov ("CAUTION:  The INV table is corrupt.")
+    call echor
+ 
+    call echov ("          There are ")
+    call echoi (err_count)
+    call echov (" errors among the ")
+    call echoi (act_OWN + 1)
+    call echov (" INV lists.")
+    call echor
+    }
+else
+    {
+    call echov ("  All ")
+    call echoi (act_OWN + 1)
+    call echov (" INV lists are OK.")
+    call echor
+    }
+ 
+end
+ 
+
+subroutine quality_own_COR_list
+ 
+# This routine needs to check the COR list for every OWN and find duplicate use
+#
+# Method:
+#       * Init an array of size of COR$Slots to Zip
+#       * loop through each OWN, follow COR
+#       * Keep track of where each is used
+#       * Error if one is used by another OWN
+#
+ 
+BBcommon
+ 
+integer*4   num_COR, err_count
+logical*4   fix_it
+integer*4	cor_base[arith(COR$SLOTS,*,COR$ENTRY)]
+common /scratch$pad/ cor_base
+ 
+num_COR = COR$SLOTS * COR$ENTRY
+ 
+ 
+fix_it = .false.
+call QA_OWN_COR_Lists (cor_base, num_COR, err_count, fix_it)
+ 
+return
+end
+ 
+
+subroutine QA_OWN_COR_Lists (work, num_COR, err_count, fix_it)
+ 
+# This routine needs to check the COR list for every OWN and find duplicate use
+#
+# Method:
+#       * Init an array of size of COR$Slots to Zip
+#       * loop through each OWN, follow COR
+#       * Keep track of where each is used
+#       * Error if one is used by another OWN
+#
+ 
+BBcommon
+ 
+integer*4   num_COR, err_count
+integer*4   work[num_COR]
+logical*4   fix_it
+ 
+integer*4   num_OWN, a_COR, COR$pointer
+integer*4   num_term, num_bytes, pnt, act_own
+integer*4   a_OWN, OWN$pointer, unt$pointer, OWN_reference
+integer*2   num_zero
+literal     cstrip8
+ 
+err_count = 0
+num_term  = 0
+ 
+#------------------------------------------------------------
+# erase the work area to binary zero
+ 
+num_bytes = num_COR * 4
+pnt       = 1
+ 
+while (num_bytes > 0)
+    {
+    num_zero = min (32000, num_bytes)
+ 
+    call Lib$MovC5 (0,0,0, num_zero , work[ pnt ] )
+ 
+    num_bytes = num_bytes - num_zero
+    pnt = pnt + (num_zero/4)
+    }
+ 
+#------------------------------------------------------------
+# search all COR lists (#0 is the Free list)
+ 
+num_OWN = OWN$size / OWN$entry
+act_own = 0
+ 
+FOR (a_OWN = 0; a_OWN <= num_OWN ; a_OWN = a_OWN + 1)
+    {
+    if (a_OWN == 0)
+        {
+        a_COR = Corner$first$free
+        OWN_reference = 9999
+        }
+    else
+        {
+        own$pointer$to a_own
+        a_COR = Xown$FirstCORIndx$i
+ 
+        if (Xown$Unit$i == 0) next
+ 
+        act_own = act_own + 1
+        OWN_reference = a_OWN
+        }
+ 
+    while (a_COR > 0 & a_COR <= num_COR)
+        {
+        if ( work [ a_COR ] == 0 )                  # this is Good
+            {
+            work [ a_COR ] = OWN_reference  # entry #N belongs to OWN_ref
+ 
+            COR$pointer$to a_COR
+            a_COR = XCOR$NextIndx$i
+            }
+        else                                        # We have a problem
+            {
+            call echov ("Entry #")
+            call echoib (a_COR,6)
+            call echov (" belongs to OWN #")
+            call echoib (work[a_COR],6)
+            call echov (" (first)  ")
+ 
+            OWN$pointer$to work[a_COR]
+            unt$pointer$to xOwn$Unit$i
+            if (OWN$pointer$valid) call echohn (XUNT$name$c,$$MaxLit)
+            else                   call echov  ("Free list")
+            call echor
+ 
+            call echov ("Entry #")
+            call echoib (a_COR,6)
+            call echov (" belongs to OWN #")
+            call echoib (OWN_reference,6)
+            call echov (" (second) ")
+ 
+            OWN$pointer$to OWN_reference
+            unt$pointer$to xOwn$Unit$i
+            if (OWN$pointer$valid) call echohn (XUnt$name$c,$$MaxLit)
+            else                   call echov  ("Free list")
+            call echor
+ 
+            err_count = err_count + 1
+ 
+            next 2      # next OWN list
+            }
+        }
+    }
+ 
+ 
+#------------------------------------------------------------
+# Report results
+ 
+if (err_count != 0)
+    {
+    call echor
+ 
+    call echov ("CAUTION:  The COR table is corrupt.")
+    call echor
+ 
+    call echov ("          There are ")
+    call echoi (err_count)
+    call echov (" errors among the ")
+    call echoi (act_OWN + 1)
+    call echov (" COR lists.")
+    call echor
+    }
+else
+    {
+    call echov ("  All ")
+    call echoi (act_OWN + 1)
+    call echov (" COR lists are OK.")
+    call echor
+    }
+ 
+end
+ 
+
+subroutine quality_LCL_list
+ 
+# This routine needs to check the LCL and locate any loop-backs
+#
+# Method:
+#   2)  Smarter (?)
+#       * Init an array of size of allocated LCL$Slots to Zip
+#       * loop through each valid entry (1 .. N)
+#       * Keep track of where each comes from
+#       * Error if one is never pointed to, or pointed to twice
+#
+ 
+BBcommon
+ 
+integer*4   num_lcl, err_count
+logical*4   fix_it
+integer*4	lcl_base[arith(LCL$SLOTS,*,LCL$ENTRY)]
+common /scratch$pad/ lcl_base
+ 
+num_lcl = LCL$SLOTS * LCL$ENTRY
+ 
+ 
+fix_it = .false.
+call QA_UNT_LCL_Lists (lcl_base, num_LCL, err_count, fix_it)
+ 
+return
+end
+ 
+
+subroutine QA_UNT_LCL_Lists (work, num_LCL, err_count, fix_it)
+ 
+# This routine needs to check the LCL list for every UNT and find duplicate use
+#
+# Method:
+#       * Init an array of size of LCL$Slots to Zip
+#       * loop through each UNT, follow LCL
+#       * Keep track of where each is used
+#       * Error if one is used by another UNT
+#
+ 
+BBcommon
+ 
+integer*4   num_LCL, err_count
+integer*4   work[num_LCL]
+logical*4   fix_it
+ 
+integer*4   num_UNT, a_LCL, LCL$pointer
+integer*4   num_term, num_bytes, pnt, act_UNT
+integer*4   a_UNT, unt$pointer, UNT_reference
+integer*2   num_zero
+literal     cstrip8
+integer     lcl_sum[2,10], lcl_max, lcl_free, lcl_cnt, kk, LCL_bl, LCL_or, LCL_Used
+integer     lcl_lim[10] / 0,10,25,50,75,100,200,500,1000,lcl$slots/
+real        avg
+ 
+err_count = 0
+num_term  = 0
+ 
+#------------------------------------------------------------
+# erase the work area to binary zero
+ 
+num_bytes = num_LCL * 4
+pnt       = 1
+ 
+while (num_bytes > 0)
+    {
+    num_zero = min (32000, num_bytes)
+ 
+    call Lib$MovC5 (0,0,0, num_zero , work[ pnt ] )
+ 
+    num_bytes = num_bytes - num_zero
+    pnt = pnt + (num_zero/4)
+    }
+ 
+#----------------------------------------
+# erase the LCL summary counters
+ 
+num_zero =  2 * 10 * 4      # sizeof(LCL_sum) in bytes
+call Lib$MovC5 (0,0,0, num_zero , LCL_sum)
+ 
+LCL_max  = 0
+LCL_free = 0
+LCL_used = 0
+LCL_Bl   = 0
+LCL_Or   = 0
+ 
+#------------------------------------------------------------
+# search all LCL lists (#0 is the Free list)
+ 
+num_UNT = UNT$size / UNT$entry
+act_UNT = 0
+ 
+FOR (a_UNT = 0; a_UNT <= num_UNT ; a_UNT = a_UNT + 1)
+    {
+    if (a_UNT == 0)
+        {
+        a_LCL = Local$first$free
+        UNT_reference = 999999
+        }
+    else
+        {
+        UNT$pointer$to a_UNT
+ 
+        if (xUNT$InUse$i == 0) next
+ 
+        a_LCL = XUNT$FirstLCLIndx$i
+ 
+        act_UNT = act_UNT + 1
+        UNT_reference = a_UNT
+        }
+ 
+    LCL_cnt = 0
+ 
+    while (a_LCL > 0 & a_LCL <= num_LCL)
+        {
+        LCL_cnt = LCL_cnt + 1
+ 
+        if ( work [ a_LCL ] == 0 )                  # this is Good
+            {
+            work [ a_LCL ] = UNT_reference  # entry #N belongs to UNT_ref
+ 
+            LCL$pointer$to a_LCL
+            a_LCL = XLCL$NextIndx$i
+            }
+        else                                        # We have a problem
+            {
+            call echov ("Entry #")
+            call echoib (a_LCL,6)
+            call echov (" belongs to UNT #")
+            call echoib (work[a_LCL],6)
+            call echov (" (first)  ")
+ 
+            UNT$pointer$to work[a_LCL]
+            if (UNT$pointer$valid) call echohn (XUNT$name$c,$$MaxLit)
+            else                   call echov  ("Free list")
+            call echor
+ 
+            call echov ("Entry #")
+            call echoib (a_LCL,6)
+            call echov (" belongs to UNT #")
+            call echoib (UNT_reference,6)
+            call echov (" (second) ")
+ 
+            UNT$pointer$to UNT_reference
+            if (UNT$pointer$valid) call echohn (XUnt$name$c,$$MaxLit)
+            else                   call echov  ("Free list")
+            call echor
+ 
+            err_count = err_count + 1
+ 
+            next 2                  # next UNT list (this skips STATS)
+            }
+        } # end While LCL loop
+ 
+    #------------------------------
+    # Keep stats
+ 
+    if (A_unt == 0)
+        {
+        LCL_free = LCL_cnt
+        next                        # UNT loop
+        }
+    else
+        {
+        LCL_used = LCL_used + LCL_cnt
+ 
+        if (xUNT$View$i > $LastBlue$View) LCL_Or = LCL_Or + LCL_cnt
+        else                              LCL_BL = LCL_BL + LCL_cnt
+        }
+ 
+    LCL_max  = max(LCL_max, LCL_cnt)
+ 
+    for (kk = 1; kk <= 10; kk=kk+1)
+        {
+        if (LCL_cnt <= LCL_lim[kk])
+            {
+            LCL_sum[1,kk] = LCL_sum[1,kk] + 1
+            LCL_sum[2,kk] = LCL_sum[2,kk] + LCL_cnt
+            break
+            }
+        }
+ 
+    } # end of For UNT Loop
+ 
+#------------------------------------------------------------
+# Report results
+ 
+if (err_count != 0)
+    {
+    call echor
+ 
+    call echov ("CAUTION:  The LCL table is corrupt.")
+    call echor
+ 
+    call echov ("          There are ")
+    call echoi (err_count)
+    call echov (" errors among the ")
+    call echoi (act_UNT + 1)
+    call echov (" LCL lists.")
+    call echor
+    }
+else
+    {
+    call echov ("  All ")
+    call echoi (act_UNT + 1)
+    call echov (" LCL lists are OK.")
+    call echor
+    }
+ 
+#------------------------------------------------------------
+# Report statistics
+ 
+LCL_cnt = 0
+for (kk = 1; kk <= 10; kk=kk+1)
+    {
+    if (LCL_sum[1,kk] != 0)
+        {
+        call echoib (LCL_sum[1,kk],10)
+        call echov (" lists had ")
+        call echoi (LCL_cnt)
+        if (lcl_Cnt != LCL_lim[kk])
+            {
+            call echov ("-")
+            call echoi (LCL_lim[kk])
+            }
+        call echov (" entries (")
+ 
+        avg = 1.0 * LCL_sum[2,kk] / LCL_sum[1,kk]
+        call echof (avg,2)
+        call echov (")")
+        call echor
+        }
+ 
+    LCL_cnt = LCL_lim[kk] + 1
+    }
+ 
+call echoib (LCL_max,10)
+call echov (" entries in the longest list.")
+call echor
+call echor
+ 
+call echoib (LCL_Bl,10)
+call echov (" entries used by Blue views (")
+avg = 100.0 * LCL_Bl / num_LCL
+call echof (avg,2)
+call echov (" %)")
+call echor
+ 
+call echoib (LCL_Or,10)
+call echov (" entries used by Orange views (")
+avg = 100.0 * LCL_Or / num_LCL
+call echof (avg,2)
+call echov (" %)")
+call echor
+ 
+call echoib (LCL_Used,10)
+call echov (" entries used (")
+avg = 100.0 * LCL_Used / num_LCL
+call echof (avg,2)
+call echov (" %)")
+call echor
+ 
+call echoib (LCL_free,10)
+call echov (" entries in the FREE list (")
+avg = 100.0 * LCL_Free / num_LCL
+call echof (avg,2)
+call echov (" %)")
+call echor
+call echor
+ 
+call echoib (LCL_Free + LCL_Used ,10)
+call echov (" entries accounted for.")
+call echor
+ 
+call echoib (num_LCL - (LCL_Free + LCL_Used),10)
+call echov (" entries un-accounted for.")
+call echor
+ 
+end

@@ -1,0 +1,1281 @@
+include "wgmdrej.inc"               # REJ specific definitions... # DEW 9/4/90
+ 
+include "parallel.inc"
+include "bbctl.inc"                 # Control Section
+include "bbcode.inc"                # Variables and Constants
+include "bbacc.inc"                 # Aircraft Characteristics
+include "bbbar.inc"                 # Barrier Table
+include "bbboy.inc"                 # Buoy Table
+include "bbchf.inc"                 # jb Chaff Characteristics    7/31/90
+include "bbcjc.inc"                 # Comms Jammer Characteristics GGG 4/18/88
+include "bbcmc.inc"                 # Cruise Missle Characteristics
+include "bbdeq.inc"                 # Dynamic Equipment Table REH 3/89
+include "bbesm.inc"                 # ESM Table
+include "bbsui.inc"                 # SUI Table
+include "bbjam.inc"                 # Radar Jammer Characteristics
+include "bbrad.inc"                 # Radar Table
+include "bbrel.inc"                 # Recognized Emitter List Table
+include "bbshc.inc"                 # Ship Characteristics
+include "bbunt.inc"                 # Unit Table
+include "bbwet.inc"                 # Weather Table 4/21/83
+include "bbjew.inc"            # jecewsi - JFR 8/31/94
+include "ascii.inc"
+ 
+define (BBimplicit, Implicit None)
+ 
+define($Par$Debug,# )
+define($Par$Random,#)
+ 
+
+Subroutine rejdet                       #radar/esm/jamming detection
+ 
+#######################################################
+#$%
+#$% Purpose:   REJDET provides executive control
+#$%            for the radar, ESM, and jamming
+#$%            detection processing.
+#$%
+#$% Called By: REJMOD
+#$%
+#$% Calls:     GETREJ     JAMLST     CHFLST
+#$%            AIRTGT     SURTGT     ESMTGT
+#$%
+#$% Tables:    UNT        RAD
+#$%            ESM
+#$%
+#$% Date:      JAN 81
+#$%
+#$% Author:    Ron Williams
+#$%
+#$% Modified:  Susan Miller - 9/6/95 (E1454)
+#$%            Ghosted units are skipped with the exception of
+#$%            "shared" aircraft with an AEW mission (AEW Sharing).
+#$%
+#######################################################
+ 
+BBcommon
+$Par$Debug Parallel$common                 # this contains the LOCK variables
+RMcommon
+ 
+#Integer*4       ACR$Pointer
+Integer*4       Dummy_PID
+Integer*4       DEQ$Pointer,ESM_EquipPtr
+Integer*4       Sensor_Index
+Integer*4       ESM$Pointer
+Real*4          ESMHGT
+Integer*4       RAD$Pointer
+Integer*4       Unit_Index
+$par$private    Unit_index
+Real*4          RADHGT
+Integer*4       UNT$Pointer
+Integer*4       UNT$Type$i
+Integer*4       UNT$VAXCPU$i
+$Par$Debug $par$private_all
+ 
+integer*4               K_Last_Unit, K_chunk, K_pieces
+$Par$Debug $par$context_shared     K_Last_Unit, K_chunk #, K_pieces
+ 
+#$% This is the last active unit (high water)
+k_last_unit = Current_Max_Units
+ 
+#$% default to run all iterations on single CPU
+k_chunk = K_last_unit
+ 
+ 
+#$% for current units
+#for (Unit_Index=1; Unit_Index<=Current_Max_Units; Unit_Index=Unit_Index+1)
+ 
+$Par$Debug $par$do_parallel  k_chunk
+$for Unit_Index = 1, k_last_unit  $do
+  #  call ttjunk (Unit_index)
+  repeat  # (dummy repeat to allow NEXT within DO loop)
+    {
+    #$% set unit pointer
+    UNT$pointer = Unit_Pointer[Unit_Index]
+ 
+    if (! unt$pointer$ok) next
+ 
+    # skip any ALSP ghosted units as detecting units - smm 6/6/92
+    # with the exception of AEW mission aircraft - smm 9/6/95 (E1454)
+    if ( (xUNT$GhostedUnit$I == $YES) & (xUNT$ALSPId$I != 0) )
+        {
+ 
+            if ( !(xUNT$ALSPShared$I == $Yes))
+              next
+        }
+ 
+    call get_Parallel_info( UNT$VAXCPU$i, Dummy_PID )
+ 
+    putUNT$VAXCPU$i
+ 
+    #$% for all sensor equips on a unit
+    FOR ( Sensor_Index = Unit_First_Sensor_Index [ Unit_Index ];
+          (Sensor_Index <= Unit_Last_Sensor_Index [ Unit_Index ] &
+           Sensor_Index > 0 );
+          Sensor_Index = Sensor_Index + 1)
+        {
+        # if other than radar or esm
+        if ( Device_Type [ Sensor_Index ] != $$$AirRadar &
+             Device_Type [ Sensor_Index ] != $$$SurfaceRadar &
+             Device_Type [ Sensor_Index ] != $$$ESM )
+            {
+            NEXT
+            }
+ 
+        if (xUNT$view$i == $Neutral$view) next    #skip if neutral
+ 
+        #$% get unit type
+        UNT$type$i = xUNT$type$i
+ 
+        if (UNT$type$i == $cruisemissile$code) next   #skip if cruise missile
+ 
+        #$% if the unit is a Hide Site, then get next one
+        if (xUNT$type$I == $Site$Code & xUNT$SubType$I == $HideSite$SubCode) #khc 7/92
+           NEXT
+ 
+        if (Device_Type[ Sensor_Index] == $$$AirRadar &       #if air srch radar and
+            Unit_InChaff[Unit_Index] != $ActuallyInChaff$code)# tgt not in chaff cloud
+            {
+            RAD$Pointer = Device_Equip_Pointer[ Sensor_Index]
+            radhgt = Device_SQRT_AntHeight[ Sensor_Index]
+            DEQ$Pointer = Device_DEQ_Pointer[ Sensor_Index]
+ 
+            #$% update data for jammed radar
+            call jamlst(Sensor_Index,           # in
+                        UNT$pointer,            # in
+                        RAD$pointer,            # in
+                        radhgt)                 # in
+            if (kjammr >= 0)  # If EMI is ON; or no jammer right on top
+                {
+                #list nearby chaff barriers
+                call chflst(UNT$pointer,   # 3/89 reh pass UNT$pointer
+                            RAD$pointer,
+                            radhgt)
+ 
+                #$% process air search radar targets
+                call airtgt(UNT$pointer,
+                            RAD$pointer,
+                            radhgt,
+                            Device_ANT_Pointer [ Sensor_Index ],
+                            Sensor_Index)
+                }
+            }
+ 
+        if (Device_Type[ Sensor_Index] == $$$SurfaceRadar &     #if surf srch radar &
+            Unit_InChaff[Unit_Index] != $ActuallyInChaff$code)  # tgt not in chaff cloud
+            {
+            RAD$Pointer = Device_Equip_Pointer[ Sensor_Index]
+            radhgt = Device_SQRT_AntHeight[ Sensor_Index]
+            DEQ$Pointer = Device_DEQ_Pointer[ Sensor_Index]
+ 
+            call jamlst(Sensor_Index, # EMI OFF; list effective jammers
+                        UNT$pointer, # jb  /\  (else)            9/12/89
+                        RAD$pointer,
+                        radhgt)
+            if (kjammr >= 0) # If EMI is ON; or no jammer right on top
+                {
+                call surtgt(UNT$pointer,          #process potential surf tgts
+                            RAD$pointer,
+                            radhgt,
+                            Device_ANT_Pointer [ Sensor_Index ],
+                            Sensor_Index)
+                }
+            }
+ 
+        #$% if device is ESM
+        if (Device_Type[ Sensor_Index ] == $$$ESM)
+            {
+            ESM$Pointer = Device_Equip_Pointer[ Sensor_Index]
+            esmhgt = Device_SQRT_AntHeight[ Sensor_Index]
+            DEQ$Pointer = Device_DEQ_Pointer[ Sensor_Index]
+ 
+            ESM_EquipPtr = DEQ$Pointer  # item will be passed to esmdet
+ 
+ 
+            call esmtgt(UNT$pointer,           #process potential esm tgts
+                        esm$pointer,
+                        esmhgt,
+                        Device_ANT_Pointer [ Sensor_Index ],
+                        ESM_EquipPtr)
+            }
+        }
+    } until (.true.) # end repeat
+$enddo
+ 
+return
+end                                            #end rejdet
+ 
+
+ Subroutine surtgt(UNT$pointer,         #surf srch radar tgt processing
+                   RAD$pointer,
+                   radhgt,              # SQUARE-ROOT!!
+                   ACR$Pointer,         # 8/20/90
+                   Sensor_Index)
+ 
+ #######################################################
+ #$%
+ #$% Purpose:   SURTGT processes surface search
+ #$%            radar targets.
+ #$%
+ #$% Called By: REJDET
+ #$%
+ #$% Calls:     PREPRX_M  PROXIM_M  QSQRT   RADDET
+ #$%
+ #$% Tables:    UNT        RAD
+ #$%
+ #$% Date:      JAN 81
+ #$%
+ #$% Author:    Ron Williams
+ #$%
+ #######################################################
+ 
+ BBcommon
+ RMcommon
+$Par$Debug Parallel$common                 # this contains the LOCK variables
+ 
+Integer*4       ACR$Pointer
+Integer*4       Sensor_Index
+Integer*2       itATmastdpth    # flag if at Scope/Mast depth  9/25/85
+Integer*4       Unit_Index
+Integer*4       NODUCT
+Integer*4       RAD$Pointer
+Real*4          RADHGT
+Real*4          RANDOM, temp
+Real*4          RNGMAX
+Integer*4       SHC$Pointer
+Real*4          TGTBRG
+Real*4          TGTHGT
+Real*4          TGTRNG
+Integer*4       UNT$Pointer
+Integer*4       UNT2$Pointer
+Integer*4       UNT2$Truealtdepth$i
+Integer*4       UNT2$Type$i
+Real*4          X
+ 
+Real*4          orientation             # JFR 9/8/94
+Real*4          sector                  # JFR 1/27/94
+Real*4          scanrate                # JFR 1/27/94
+Integer*4       FOV_ok                  # JFR 1/27/94
+Integer*4       nsweep                  # JFR 1/27/94
+Real*4          vts_sweeps              # JFR 1/27/94
+Literal         CSTRIP8
+Integer*4       RAD$CH$INDEX
+ 
+$Par$Debug $par$private_all
+ 
+ 
+ call preprx_M (UNT$Pointer$Index,    # jb                     8/29/89
+             xUNT$truelatitude$f,     # prep-PROXIM  routine:  send de-
+             xUNT$truelongitude$f,                # tector position
+             xUNT$costruelat$f,                   #send cos detector lat
+             float(xRAD$maxrange$i))              #send maximum range
+ 
+for (Unit_Index=1;Unit_Index<=Current_Max_Units ;Unit_Index=Unit_Index+1)                      #for each entry in rej list
+    {
+    itATmastdpth = $NO   # Initlz. flag NOT at Scope/Mast depth  9/25/85
+ 
+    unt2$pointer = Unit_Pointer[Unit_Index]            #$% get tgt pointer
+
+	if (! unt2$pointer$ok) next			  # Make sure unt2 is valid SMM 8/19/15
+ 
+    if (unt2$pointer == UNT$pointer) NEXT #$% Skip if tgt same as detector
+ 
+    #$% PER # H1039  9/24/92 SMM
+    #$% Skip radar detection of units in same view
+    if (xUNT2$View$I == xUNT$View$I) NEXT
+ 
+    #$% if unit is hiding, get next one
+    if (xunt2$HideStatus$I == $CurrentlyHiding) next           #KHC 6/92
+ 
+    unt2$type$i = xunt2$type$i                         #$% get unit type
+ 
+    #$% if unit is a Hide Site, get next one
+    if (UNT2$type$I == $Site$code & xUNT2$SubType$I == $HideSite$SubCode)
+       NEXT                                                    #khc 6/92
+ 
+    unt2$truealtdepth$i = xunt2$truealtdepth$i         #       4/21/83
+    if (unt2$truealtdepth$i > 300)      NEXT  # skip if tgt not < 300'
+ 
+    if (unt2$type$i == $shorebase$code) NEXT  #skip if tgt is shorebase
+ 
+    if (Xunt2$SUPERtype$i == $submarine$SUPERcode) # tgt is sub,\X 9/11/91
+        { # Note: subr. PREREJ (above) eliminates deep-submerged boats..
+        SHC$Pointer = xunt2$SHCpntr$i    #          target is
+ 
+        if(unt2$truealtdepth$i > Xshc$KeelDepth$i) #Not Surfaced? 10/1/85
+            {       # 2 lines moved here from PREREJ                 8/18/86
+             if(unt2$truealtdepth$i > Mast$Depth$Max)    NEXT # jb   9/10/91
+$Par$Random  $par$lockon par_lock_Random     # lock protect random
+            temp = random (x)
+$Par$Random  $par$lockoff par_lock_Random    # unlock random
+ 
+            # see routine timeupperiscope in wgmdmot.rat for explanation
+            # of following branching code (has to do with model recurrences)
+            # JFR 1/14/94 (1st half of if says if scope not up)
+            # see also wgmdvis.rat to see scope is up code line.
+            if (xUNT$TimeUpPeriscope$f + model$interval > game$time | # Scope up @ 6 min. 8/18/86 - JFR 1/13/94 for VTS
+                temp < 0.5) NEXT #if UP, half-chance 8/18/86
+            itATmastdpth = $YES    # Flag AT 'Scope/Mast Depth      9/25/85
+            }
+        }
+ 
+    call proxim_M (unt2$Pointer$Index,          # jb            8/29/89
+                   xunt2$truelatitude$f,           #get rng/brg to target
+                   xunt2$truelongitude$f,
+                   xunt2$costruelat$f,
+                   tgtrng,
+                   tgtbrg)
+ 
+    if (tgtrng < 0)  NEXT      # skip if obviously too far away
+ 
+    if (ducting$strength == 0 |                  #if DUCTING DOES NOT
+        xUNT$truealtdepth$i > 300)               #       APPLY:
+        {
+        if (unt2$type$i == $Surface$Code       | # If
+#            unt2$type$i == $SurfaceWithAC$Code | #     NOT airborne
+            unt2$type$i == $Sub$Code           )          #    4/25/83
+            {
+            if( iTatMastdpth != $NO)   # A sub at 'Scope/Mast? 9/25/85
+                tgthgt = 1.3            #'Scope/Mast:sqrt(1.69) 10/1/85
+            else                       #                       10/1/85
+                { # sq root of 80% of antenna hgt:
+                tgthgt = 0.8 * FLOAT( xunt2$AntennaHeight$i ) #  4/14/83
+                tgthgt = SQRT( tgthgt ) #                      4/19/83
+                }
+            }
+        else
+            {   # sq root of AIRBORNE target altitude:
+            tgthgt = float(xunt2$truealtdepth$i)       #       4/19/83
+            tgthgt = SQRT( tgthgt )
+            }
+ 
+        rngmax = (radhgt + tgthgt) * 1.23        #compute line of sight range
+        if (tgtrng >  rngmax)  NEXT              #SKIP IF BEYOND LINE OF SIGHT
+ 
+        noduct = $YES                            #indicate ducting not apprpt
+        }
+    else                                         # ELSE if DUCTING DOES APPLY,
+        noduct = $NO                             #   simply negate NODUCT
+ 
+    # check to see if radar FOV calculation is necessary for VTS - JFR 1/27/94
+    # check to see if radar FOV calculation is necessary for JECEWSI- JFR 11/27/94
+    # get index of active channel for radar # reh 5/3/89
+    call find_active_channel (UNT$Pointer, # (used for VTS - JFR 1/27/94)
+                              $radar$code,
+                              xRAD$Type$c,
+                              RAD$CH$Index)
+    # now get the number of sweeps per minute for the channel - JFR 1/27/94
+    nsweep = xRAD$CH$Scanwidth$I * xRAD$CH$Scanrate$I # JFR 1/27/94
+    VTS_sweeps = float(nsweep) * model$interval # num of sweeps since model last executed - JFR 1/27/94
+    FOV_ok = $yes # flag in field of view - JFR 1/27/94
+    if (VTS_sweeps < 1.0 |     # if < 1 sweep completed in this cycle
+        jecewsi$game == $yes ) # or if jecewsi scan sectors enabled - JFR 8/15/94
+       {
+        # for VTS, find out if in radar field of view - JFR 1/27/94
+        scanrate = float(xRAD$CH$Scanrate$I) * $deg2rad
+        sector = float(xRAD$CH$Scanwidth$I) * $deg2rad
+        orientation = $TWOPI + 0.5 # flag as oriented about course - JFR 9/8/94
+        call RADFOV(UNT$Pointer,  # agressor
+                    UNT2$Pointer, # victim
+                    Sensor_index, # radar to check (not used for Jecewsi)
+                    sector,       # width of swept sector
+                    scanrate,     # scan rate scans per minute (not used for Jecewsi)
+                    orientation,  # orientation of jecewsi equip.
+                    FOV_ok)       # Is it in this equipments FOV?
+ 
+        if (trace$jecewsi == $yes |   # JFR 11/27/94
+            trace$radar == $yes)
+          {
+           call echor
+           call echov  ("Target ")
+           call echohn (xUNT2$Name$C, $$MaxLit)
+           if (FOV_ok == $yes)
+             call echov (" is in radar FOV of unit ")
+           else
+             call echov (" is in radar FOV of unit ")
+           call echohn (xUNT$Name$C, $$MaxLit)
+           call echov  (" for this cycle")
+           call echor
+          }   # end of trace
+       }
+ 
+    if (FOV_ok == $no)                   # JFR 1/27/94
+      next
+ 
+    call raddet(UNT$pointer,                     #test for detection
+                unt2$pointer,
+                unt2$type$i,
+                RAD$pointer,
+                radhgt,                          # joa 11/95 (E1422)
+                noduct,
+                tgtrng,
+                tgtbrg,
+                tgthgt,                          # joa 11/95 (E1422)
+                Sensor_Index)
+ 
+    }
+ 
+ return
+ end                                            #end surtgt
+ 
+
+# radar detection
+ Subroutine raddet(UNT$pointer,               # detectOR
+                   itarg_unt,     # detectEE POINTER (not index)
+                   itarg_type,
+                   RAD$pointer,
+                   radhgt,              # SQRT of detectir height (feet)   # joa 11/95 (E1422)
+                   noduct,
+                   tgtrng,
+                   tgtbrg,
+                   tgthgt,              # SQRT of target height (feet)     # joa 11/95 (E1422)
+                   Sensor_Index)
+ 
+ #######################################################
+ #$%
+ #$% Purpose:   RADDET processes radar detections
+ #$%            of aircraft, cruise missiles, and
+ #$%            ships.
+ #$%
+ #$% Called By: AIRTGT     SURTGT
+ #$%
+ #$% Calls:     QDB        ANGPI      QPOWER
+ #$%            NLTEST     REPRAD     FNDWET            4/21/83
+ #$%
+ #$% Tables:    UNT        RAD        DEQ
+ #$%            SHC
+ #$%            ACC        CMC        WET               4/21/83
+ #$%
+ #$% Date:      JAN 81
+ #$%
+ #$% Author:    Ron Williams
+ #$%
+ #$% Important Note: If a change in the radar detection model
+ #$%            is made in this routine, a corresponding change
+ #$%            to the qt_draw_EMI_areas routine may be required !!
+ #$%
+ #$% Modifications:
+ #$%    1/18/91  trs  added variable cross sections for cruise missiles
+ #$%
+ #$%             Jim Allen - 11/95 (E1422)
+ #$%             Added radar and target height to the parameter list
+ #$%             for los computations.  Added los computations.
+ #$%
+ #######################################################
+ 
+ BBcommon
+ RMcommon
+$Par$Debug Parallel$common                 # this contains the LOCK variables
+ 
+Integer*4       los_test                            # Terrain blocking los function (E1422)
+ 
+Real*4          radhgt
+Real*4          tgthgt
+ 
+Real*4          tcs                                 # 5/4/84
+Integer*4       tcsxx                               # 3/27/91
+Real*4          DCBLS                               # jb; for decibels 8/22/88
+Real*4          Intra_Degradation
+Integer*4       Detect_With_Intra
+Logical*1       Burned_Out
+REAL*4          maxpwr                              # 5/4/89 reh
+ 
+Integer*4       ACC$CRS$INDEX
+Integer*4       ACC$Pointer
+Integer*4       ACC$Vrblxs$i
+Real*4          BRG
+Integer*4       CJC$Pointer
+Integer*4       CMC$Pointer
+Integer*4       CMC$Vrblxs$i           # added for variable cruise xsect
+Integer*4       CMC$ASP$INDEX          #                 1/18/91 trs
+Literal         CSTRIP8
+Real*4          DBFIG
+Real*4          DBNOIS
+Integer*4       DEQ$Ident$i
+Integer*4       DEQ$Pntr$i
+Integer*4       DEQ$Pointer
+Integer*4       DEQ2$Pointer            # added for intra-ship EMI 9/90
+Integer*4       DEQ3$Emiinterest$i
+Integer*4       DEQ3$Pointer
+Real*4          deq3$TimeWhenUse$f
+Integer*4       Sensor_Index
+Real*4          DIFF
+Real*4          DUCTFC
+Real*4          HDG
+Integer*4       IDUMMY
+Integer*4       IFLAG
+Integer*4       IFLAG1
+Integer*4       IFLAG2
+Integer*4       INDEXX
+Integer*4       INDEXX_MAX
+Integer*4       INDXCRS
+Integer*4       IndxASP
+Integer*4       INTERFERENCE
+Integer*4       INTERFERENCE_DBM
+Integer*4       INTERFERENCE_MAX
+Integer*4       INTERFERENCE_MODULATION
+Integer*4       ITARG_TYPE
+Integer*4       ITARG_UNT,iUPI
+Integer*4       I_SWITCH_1
+Integer*4       I_TO_N_RATIO
+Integer*4       JAM$Pointer
+Integer*4       Jammer_Index
+Integer*4       MAXINDX
+Integer*4       N
+Integer*4       NLTEST
+Integer*4       NLTEST2
+Integer*4       NODUCT
+REAL*4          prob1
+REAL*4          prob2
+Real*4          R
+Integer*4       RAD$Burnout$i
+Integer*4       RAD$CH$INDEX
+Integer*4       RAD$CH$ModulationCode$i
+Integer*4       RAD$Pointer
+Integer*4       RAD2$CH$INDEX
+Integer*4       RAD2$Pointer
+Real*4          RELBRG
+Real*4          SE
+Real*4          SE2
+Integer*4       SHC$Pointer
+Integer*4       SUI$CH$INDEX
+Integer*4       SUI$Pointer
+Real*4          TGTBRG
+Real*4          TGTRNG
+Integer*4       UNT$Pointer
+Integer*4       UNT$View$i
+Integer*4       UNT2$Pointer
+Integer*4       UNT2$Type$i
+Integer*4       UNT2$View$i
+Integer*4       UNT3$Pointer
+Real*4          VMU
+Real*4          WAVES
+Integer*4       WET$Pointer
+Real*4          Z
+ 
+$Par$Debug $par$private_all
+ 
+ unt2$pointer = itarg_unt
+ unt2$type$i  = itarg_type
+ tcs = 0.0                                      # initialize    5/4/84
+ tcsxx = 0                                      # initialize    3/27/91
+ Burned_Out = .false.
+ 
+ if (unt2$type$i == $air$code)                    #if target = aircraft
+    {
+     if (Xunt2$ASMDactive$i == 1)       # ASMD added  jms 4/20/93
+        {
+        iUPI = unt2$pointer$index
+        for_deq_chain (iUPI)
+           {
+           if (Xdeq$ident$i == $ASMD$code) tcs = xDEQ$CrossSect$i
+           }
+        }
+     else
+        {
+        acc$pointer = xunt2$accpntr$i                 #get ptr into char table
+ 
+       #$% -----------------------------------------------------------------
+       #$% Changes @2/5/90 for a/c with variable cross-section    jb     2/05/90
+   #     if (Xacc$MaxAlt$i == 149999) {tcs = -90.}  #  jb flag invisible 3/11/87
+   #     else {tcs = xacc$crosssect$i}      #get target cross section 5/4/84
+ 
+        acc$VrblXS$i = Xacc$VrblXS$i
+        if(acc$VrblXS$i == $YES) # Compute index if Cross-Sect is variable:
+           {
+           HDG = Xunt2$TrueCourse$F        # Heading of target aircraft
+           BRG = tgtbrg + $PI              # brg from target a/c to radar
+           if(BRG > $TWOPI) BRG = BRG - $TWOPI # adjust <= 360
+ 
+           RelBrg = BRG - HDG    # Rel. Brg. from a/c to radar
+           $ANGPI(RelBrg)        # Adjust so from -PI to +PI; THEN,
+           if(RelBrg < 0.0) RelBrg = -1.0 * RelBrg    # 0 to +PI
+ 
+           indxCRS = 1.5 + (6.* RelBrg/$PI)    # (same as equation above)
+           acc$crs$index = min(indxCRS,acc$crs$slots)    # Over-cautious!
+           tcsxx = acc$crs$index
+           }
+        else
+           {
+           acc$crs$index = 1  # jb (Index for NON-variable cross-section)
+           }
+ 
+        tcs = Xacc$CRS$sect$i
+ 
+        }    # End of insert for a/c variable cross-section        2/05/90
+    #$% -----------------------------------------------------------------
+    }
+ else if (unt2$type$i == $cruisemissile$code)     #if tgt is cruise missile
+    {
+    CMC$Pointer = xUNT2$cmcpntr$i                #get ptr into cr miss char
+ 
+    CMC$VrblXS$i = xCMC$VrblXS$i
+    if(CMC$VrblXS$i == $YES) # Compute index if Cross-Sect is variable:
+        {
+        HDG = Xunt2$TrueCourse$F        # Heading of target aircraft
+        BRG = tgtbrg + $PI              # brg from target a/c to radar
+        if(BRG > $TWOPI) BRG = BRG - $TWOPI # adjust <= 360
+ 
+        RelBrg = BRG - HDG    # Rel. Brg. from a/c to radar
+        $ANGPI(RelBrg)        # Adjust so from -PI to +PI; THEN,
+        if(RelBrg < 0.0) RelBrg = -1.0 * RelBrg    # 0 to +PI
+ 
+        IndxASP = 1.5 + (6.* RelBrg/$PI)    # (same as equation above)
+        CMC$ASP$index = min(IndxASP,CMC$ASP$slots)    # Over-cautious!
+		tcs = xCMC$ASP$CrossSect$i
+        tcsxx = cmc$asp$index
+        }
+    else # not variable cross section
+        {
+        tcs = Xcmc$CrossSect$f
+        }
+ 
+    }    # End of insert for cruise variable cross-section    1/18/91 trs
+    #$% -----------------------------------------------------------------
+ 
+ else if (unt2$type$i == $surface$code |              #if target = submarine
+          unt2$type$i == $sub$code)     #       or = ship with ac
+    {
+     shc$pointer = xunt2$shcpntr$i                 #get ptr into char table
+     tcs = xshc$crosssect$i                       #get target cross section
+ 
+     if(Xunt2$SUPERtype$i == $submarine$SUPERcode) #  jb    X   9/11/91
+      {
+        if (Xunt2$OrderedAltDepth$i >= Xshc$KeelDepth$i) # Keel 9/25/85
+                tcs = Scope$DBM                         #       9/25/85
+        # Note: depths > shc$ScopeDepth$i or Mast depth elim-
+        #               inated in calling subroutine, SURTGT
+      }
+    }
+ 
+ if (noduct == $yes)                              #if ducting not applicable
+    {
+     ductfc = 1.0                                 #set ducting factor to 1
+    }
+ else                                             #otherwise
+    {
+     ductfc = ducting$factor                      #get duct factor
+    }
+### r = 4.0 * ductfc * qkdb(tgtrng)   # jb - OLD way (range term) 9/6/88
+ 
+ if(tgtrng < 1.0) tgtrng = 1.0     # jb (protect LOG10, below)    9/1/88
+ DCBLS = 10 * log10(tgtrng)        #jb -         replace QKDB     8/22/88
+ r = 4.0 * ductfc * DCBLS          #compute intermediate term     8/22/88
+ 
+ dbnois = xRAD$noisefigure$i                      #get radar noise figure
+ dbfig  = dbnois                # Save noisefigure for comparison  6/28/83
+ maxpwr  = 0.0    #reh 0.0      # Init max. effective jammer power 6/28/83
+ maxindx = 0                    # Init index of max jammor         6/28/83
+ 
+ 
+If ( EMI$Analysis == No ) # jb Jammer noise thus IF EMI is OFF: 9/12/89
+    {
+    for (Jammer_Index=1;Jammer_Index<=kjammr;Jammer_Index=Jammer_Index+1)                        #for each jamming signal
+        {                                             #  impinging on this radar
+        diff = tgtbrg - brgjam[Jammer_Index]
+        $angpi(diff)                             #compare bearing with tgt
+ 
+        if (abs(diff) <= $pi/18.)                    #if jamming within 10 degs
+            {
+ 
+##           dbnois = qkdb(qkpowr(dbnois) + pwrjam[Jammer_Index]) # jb-OLD incr. noise 9/6/88
+ 
+            dbnois = 10 **(dbnois/10.) + pwrjam[Jammer_Index]         #        8/24/88
+            if(dbnois < 1.0) dbnois = 0.0        #jb (Protect       9/1/88
+            ELSE dbnois = 10 * log10(dbnois)     # LOG10 function)  9/1/88
+ 
+            if (pwrjam[Jammer_Index] > maxpwr) # If strongest jammer yet  6/28/83
+                {
+                maxindx = Jammer_Index                # Set strong-jammer index  6/28/83
+                maxpwr = pwrjam[Jammer_Index]         #  and reset max. power    6/28/83
+                }
+            }
+        }    # End For all jammers which may impact this radar
+    }    # End If ( EMI$Analysis == No )
+ 
+# 11/21/90, no sea clutter for air radar
+if ( xRAD$RadarType$i != $air$code )
+    {
+    call fndwet (xUNT$truelatitude$f,              #               4/21/83
+                 xUNT$truelongitude$f,
+                 wet$pointer)                      # Set WET ptr   4/21/83
+ 
+    waves = float(xWET$WaveHeight$I) / 4.0         # Compute CLUT- 4/21/83
+    waves = float(clutter$factor) * sqrt(waves)    #      TER term 4/21/83
+    }
+else # else surface clutter is not a consideration
+    {
+    waves = 0.0                                    # assume no surface clutter
+    }
+ 
+# get index of active channel for radar        # reh 5/3/89
+ call find_active_channel (UNT$Pointer,
+                          $radar$code,
+                          xRAD$Type$c,
+                          RAD$CH$Index)
+ 
+ # this the old time-tested equation
+ se = XRAD$CH$PerformanceFactor$i + tcs - waves -
+               r - dbnois                             #signal excess<< 4/21/83
+ 
+ # SE now contains the NON-EMI value for signal excess
+ 
+DEQ3$Pointer = Device_DEQ_Pointer [ Sensor_Index ]
+ 
+deq3$EMIinterest$i = Xdeq3$EMIinterest$i
+ 
+indexx = 0                           # added 11/91,reh
+ 
+$Par$Random $par$lockon par_lock_Random     # lock protect random
+ 
+iflag1 = nltest(xRAD$CH$signalexcessmean$f,7.0,se)   #set detection flag<<
+ 
+$Par$Random  $par$lockoff par_lock_Random    # unlock protect random
+ 
+iflag2 = iflag1
+ 
+se2    = se         # set up values to correspond to EMI method
+ 
+if (los_test(   # Uses GP terrain grid to determine LOS
+            Xunt$TrueLatitude$f,    # Detector latitude: real: in: rad
+            Xunt$TrueLongitude$f,   # Detector longitude: real: in: rad
+            Xunt$CosTrueLat$f,      # Cosine of detector latitude: real: in:rad
+            radhgt,                 # Sqrt Detector altitude: real: in: ft
+            Xunt2$TrueLatitude$f,   # Target latitude: real: in: rad
+            Xunt2$TrueLongitude$f,  # Target longitude: real: in: rad
+            Xunt2$CosTrueLat$f,     # Cosine of target latitude: real: in:rad
+            tgthgt) == $NO)         # Sqrt Target altitude: real: in: ft
+{
+    iflag1 = $NO                        # Reset detection flag
+}
+ 
+iflag = iflag1  # iflag is the overall result (which may be changed due to EMI)
+ 
+ 
+#======================================================================
+ 
+#======================================================================
+ 
+Unt$view$i  = Xunt$view$i
+Unt2$view$i = Xunt2$view$i
+ 
+ 
+#======================================================================
+ 
+if (trace$radar$rad != NO)
+    {
+    vmu = XRAD$CH$SignalExcessMean$f
+    Z  = (se - vMu) / 7.0
+ 
+    call echor
+    call echov (" from #")
+    call echoi (UNT$pointer$index)
+    call echov (" ")
+    call echohn(XUNT$Name$c,$$MaxLit)
+    call echov ("/")
+    call echohn(XDEQ3$Type$c,$$MaxLit)
+    call echov (" tgt #")
+    call echoi (unt2$pointer$index)
+    call echov (" ")
+    call echohn(Xunt2$Name$c,$$MaxLit)
+    call echov (" se=")
+    call echof (se,2)
+    call echov (" se2=")
+    call echof (se2,2)
+    call echov (" mu=")
+    call echof (vmu,3)
+    call echov (" z=")
+    call echof (z,3)
+ 
+    if (tcsxx == 0)
+        {
+        call echov (" tcs=")
+        }
+    else
+        {
+        call echov (" tcs[")
+        call echoi (tcsxx)
+        call echov ("]=")
+        }
+    call echof (tcs,1)
+ 
+    if (iflag == $yes) call echov (" Detected !")
+ 
+    } # end if trace radar
+ 
+ #----------------------------------------------------------------------
+ # Major milestone here, we have a detection.... and it must be reported
+ 
+ if (iflag == $yes)                               #if detection successful
+    {
+    $Par$Debug $par$lockon par_lock_table[$$lcl]        # lock LCL table here
+    #$% lock the LCL table as well as DEQ, DTX, and Random number generation
+ 
+    call reprad(UNT$pointer,                     #report radar detection
+                unt2$pointer,
+                unt2$type$i,
+                tgtrng,
+                tgtbrg)
+    $Par$Debug $par$lockoff par_lock_table[$$lcl]       # unlock LCL table here
+    }
+ else if ( dbnois > dbfig + 1.0  & # Jamming prevented detection 6/28/83
+          maxindx > 0 )
+    {
+     unt2$Pointer$to Unit_With_Jammer[maxindx]
+     deq$pointer = jammer_DEQ[maxindx]  # 3/89 reh
+     jam$pointer  = Xdeq$Pntr$i
+ 
+     unt2$type$i  = Xunt2$type$i
+ 
+     call repesm(UNT$pointer,
+                 unt2$Pointer,          # pointer to TARGET unit
+                 unt2$type$i,
+                 jam$pointer,           # pointer to JAMMER type
+                 brgjam[maxindx],       # Bearing of jammer
+                 RAD$Base        )      # (RADAR-based "esm" track)
+    }
+return
+end                                     #end raddet  RAD$  sui$
+ 
+
+Subroutine esmdet(UNT$pointer,                 #esm detection
+                  Unit_Index,
+                  unt2$pointer,
+                  unt2$type$i,
+                  esm$pointer,
+                  esmhgt,                      # SQUARE-ROOT!!
+                  noduct,
+                  tgtrng,
+                  tgtbrg,
+                  ESM_EquipPtr,
+                  Device_Index,                # in, of emitter type
+                  Emitr_Backlobe_flg)          # in, set if using emitter backlobe
+ 
+ #######################################################
+ #$%
+ #$% Purpose:   ESMDET determines detection of jammers and of
+ #$%            air- and surface- search radars, by ESM.
+ #$%
+ #$% Called By: ESMTGT
+ #$%
+ #$% Calls:     GETREJ     JAMSIG     REPESM
+ #$%            QDB        NLTEST
+ #$%
+ #$% Tables:    UNT        ESM
+ #$%            RAD
+ #$%
+ #$% Date:      JAN 81
+ #$%
+ #$% Author:    Ron Williams
+ #$%                                    rep
+ #$% Modifications:
+ #$%            1/8/91  trs  Modified RAD$CH$Frequency$i (integer) to be
+ #$%                         RAD$CH$Frequency$F (floating point)
+ #$%
+ #$%            Jim Allen - 11/95 (E1422)
+ #$%            Added DTED terrain los computation.
+ #$%
+ #$%
+ #######################################################
+ 
+ BBcommon
+ RMcommon
+$Par$Debug Parallel$common                 # this contains the LOCK variables
+ 
+Integer*4       los_test                            # Terrain blocking los function (E1422)
+ 
+Integer*4       CJC$Pointer
+Literal         CSTRIP8
+Integer*4       DEQ$Pointer
+Integer*4       DEQ2$Pointer,ESM_EquipPtr
+Integer*4       Device_Index
+integer*4       Emitr_Backlobe_flg
+Real*4          DUCTFC
+Real*4          EMTHGT
+Integer*4       ESM$Highfreq$i
+Integer*4       ESM$Lowfreq$i
+Integer*4       ESM$Pointer
+Real*4          ESMHGT
+Integer*4       IEQPNT
+Integer*4       Unit_Index
+Integer*4       NLTEST
+Integer*4       NLTEST2
+REAL*4          prob1
+REAL*4          prob2
+Integer*4       NODUCT
+Real*4          QZ
+Real*4          R
+Real*4          RAD$CH$Frequency$F
+Integer*4       RAD$CH$INDEX
+Integer*4       RAD$Pointer
+Real*4          RANDOM, temp, x
+Real*4          SE
+Real*4          SIGNAL
+Real*4          TGTBRG
+Real*4          TGTRNG
+Integer*4       UNT$Pointer
+Integer*4       UNT2$Pointer
+Integer*4       UNT2$Type$i
+ 
+ 
+Real*4          DCBLS                           # jb; for decibels 8/22/88
+Real*4 Intra_Degradation
+Integer*4 iflag1,iflag2,iflag3,ESMFlag,Intra_Target,Intra_Deq,IntraFlag
+ 
+SAVE  intra_target, intra_deq   # jb  (For portability)  5/22/00
+ 
+$Par$Debug $par$private_all
+ 
+#$% get emitter info
+ieqpnt = Device_Equip_Pointer[ Device_Index]
+emthgt = Device_SQRT_AntHeight[ Device_Index]
+DEQ$Pointer = Device_DEQ_Pointer[ Device_Index]
+ 
+#$% if not ducting present
+if (noduct == $yes)
+    { # Test for 1.8 vice 1.23 allows for ESM reception slightly OTH..
+    if (tgtrng > 1.23 *(esmhgt + emthgt))       # if beyond ESM   5/2/83
+         return                                 # horizon, SKIP
+ 
+    ductfc = 1.0                                #$% set ducting factor
+    }
+else
+    ductfc = ducting$factor                    #$% get ductingfactor
+ 
+### r = 2.0 * qkdb(tgtrng) * ductfc # OLD red. due range & ducting 9/6/88
+if(tgtrng < 1.0) tgtrng = 1.0     #jb (Protect LOG10 function     9/1/88
+DCBLS = 10 * log10(tgtrng)        #jb -         replace QKDB     8/22/88
+r = 2.0 * DCBLS * ductfc          #compute intermediate term     8/22/88
+ 
+esm$HIGHfreq$i = Xesm$HIGHfreq$i               # Freq's for    5/19/83
+esm$LOWfreq$i   = Xesm$LOWfreq$i               #   comparisons 5/19/83
+ 
+#$% if emitter is a jammer
+if (Device_Type [ Device_Index ] == $$$RadarJammer)
+    {
+    call jamsig(unt2$pointer,          #get jammer signal strength
+                unt2$type$i,
+                Device_Index,
+                ieqpnt,                # Jam$Pointer
+                signal,                # return signal strength
+                esm$LOWfreq$i,
+                esm$HIGHfreq$i)
+    IF (signal <= 0.0) RETURN
+    }
+ELSE IF ( Device_Type [ Device_Index ] == $$$CommJammer )
+    {
+    CJC$Pointer = ieqpnt
+ 
+    $Par$Random $par$lockon par_lock_Random     # lock protect random
+    temp = random (x)
+    $Par$Random $par$lockoff par_lock_Random     # lock protect random
+ 
+    IF ( ( xCJC$FrequencyFollower$I == $Yes ) &
+         ( temp > ComJam$DetectProb ) )
+        {
+        RETURN
+        }
+    ELSE
+        {
+        call comjamsig(unt2$pointer,    #get comm-jammer signal strength
+                       unt2$type$i,
+                       Device_Index,
+                       ieqpnt,          # CJC$Pointer
+                       signal,          # return signal strength
+                       esm$LOWfreq$i,
+                       esm$HIGHfreq$i)
+        IF (signal <= 0.0) RETURN
+        }
+    }
+else # else radar
+    {
+     #$% set radar pointer to match equipment
+     RAD$pointer = ieqpnt
+ 
+    # get index of active channel for radar      # reh 5/3/89
+    call find_active_channel (UNT2$Pointer,       # unit being detected
+                              $radar$code,
+                              xRAD$Type$c,
+                              RAD$CH$Index)
+ 
+     RAD$CH$Frequency$F = XRAD$CH$Frequency$F        # Insure        5/89
+     if(RAD$CH$Frequency$F > esm$HIGHfreq$i |        #  Freq. is     5/89
+        RAD$CH$Frequency$F < esm$LOWfreq$i ) RETURN  #  ok           5/89
+ 
+##     RAD$OperatingFreq$i = XRAD$OperatingFreq$i # Insure        5/19/83
+##     if(RAD$OperatingFreq$i > esm$HIGHfreq$i |  #  Freq. is     5/19/83
+##        RAD$OperatingFreq$i < esm$LOWfreq$i   ) RETURN  #  ok   5/19/83
+ 
+    #$% get radar signal strength
+    signal = xRAD$CH$SignalStrength$i
+ 
+    #$% if the radar cannot radiate manbeam at ESM 10/91, reh
+    if (Emitr_Backlobe_flg != $no)
+        {
+        #$% correct for backlobe radiation, 10/91
+        signal = signal - (xRAD$AntennaGain$i - xRAD$OffBeamGain$i)
+        }
+    }
+                              # where r = SE-reduction due to range & ducting,
+ se = xesm$performfactor$i + signal - r     # rrrrrrr compute signal excess
+ 
+ $Par$Random $par$lockon par_lock_Random     # lock protect random
+ esmflag = nltest(0.0,6.0,SE)       # detect. flag
+ $Par$Random $par$lockoff par_lock_Random    # unlock protect random
+ 
+if (los_test(   # Uses GP terrain grid to determine LOS
+            Xunt$TrueLatitude$f,    # Detector latitude: real: in: rad
+            Xunt$TrueLongitude$f,   # Detector longitude: real: in: rad
+            Xunt$CosTrueLat$f,      # Cosine of detector latitude: real: in:rad
+            esmhgt,                 # Sqrt Detector altitude: real: in: ft
+            Xunt2$TrueLatitude$f,   # Target latitude: real: in: rad
+            Xunt2$TrueLongitude$f,  # Target longitude: real: in: rad
+            Xunt2$CosTrueLat$f,     # Cosine of target latitude: real: in:rad
+            emthgt) == $NO)         # Sqrt Target altitude: real: in: ft
+{
+    ESMFlag = 0                        # Reset detection flag
+}
+ 
+IF  (ESMFlag != 0)
+    {
+    if ( trace$radar$esm != $no )              #               4/13/83
+        {
+        call echor                             #       (71)    4/19/83
+        call echov (" ESM Detector= ")         # 15
+        call echohn (XUNT$NAME$C,$$MaxLit)     # 5
+        call echov ("; Target= ")              # 10
+        call echohn (XUNT2$NAME$C,$$MaxLit)    # 5
+        call echov ("; EMIT= ")                # 8             4/19/83
+        if ( isit == 1 )                       #               4/22/83
+          call echov ("AIR")                   # 3             4/19/83
+        else if (isit == 2)                    #               4/22/83
+          call echov ("SUR")                   # (3)           4/19/83
+        else if (isit == 3)                    #               4/22/83
+          call echov ("JAM")                   # (3)           4/19/83
+        else if ( isit == $$$CommJammer )      # GGG 4/18/88
+            CALL echov ( "COMMJAM")            # GGG 4/18/88
+        call echov ("; SE= ")                  # 5
+        call echof (SE,2)                      # 7?
+        call echov (" ; Z= ")                  # 6
+        qz = SE / 6.0                          #               4/13/83
+        call echof (qz,2)                      # 7?
+        }
+ 
+    #$% load esm detection data into table
+    $Par$Debug $par$lockon par_lock_table[$$LCL]        # lock protect LCL
+    call repesm(UNT$pointer,
+                unt2$pointer,
+                unt2$type$i,
+                ieqpnt,
+                tgtbrg,
+                ESM$pointer)        #               10/23/85
+    $Par$Debug $par$lockoff par_lock_table[$$LCL]    # unlock protect LCL
+    }
+ return
+ end                                            #end esmdet qk
+ 
+
+subroutine ttjunk (Unit_index)
+Integer*4   Unit_index
+ 
+print 9000,Unit_Index
+9000 format ("+",I4,$ )
+return
+end
+ 
+
+subroutine clear_Unit_CPU
+BBCommon
+ 
+Integer*4       UNT$Pointer
+Integer*4       UNT$VAXCPU$i
+ 
+FOR (UNT$Pointer$First; UNT$Pointer$OK; UNT$Pointer$Next)
+    {
+    UNT$VAXCPU$i = 0
+    putUNT$VAXCPU$i
+    }
+return
+end
+ 
+
+ 
+# radar FOV calculation - JFR 1/27/94
+subroutine radfov(UNT$Pointer,  # evil scumbag agressor         (in)
+                  UNT2$Pointer, # helpless victim               (in)
+                  Sensor_index, # radar to check                (in)
+                  sector,       # width of swept sector         (in)
+                  scanrate,     # scan rate scans per minute    (in)
+                  orient,       # orientation center of FOV     (in)
+                  FOV_ok)       # Is it in this equipments FOV? (out)
+#######################################################
+#$%
+#$% Purpose:   RADFOV finds out if a target is in
+#$%            the radar Field Of View (FOV)
+#$%
+#$% Called By: SURTGT        AIRTGT
+#$%
+#$% Calls:     NONE
+#$%
+#$% Tables:    UNT        RAD       DEQ
+#$%
+#$% Date:      JAN 1994
+#$%
+#$% Author:    John Richardson (JFR)
+#$%
+#$% Modified:  John Richardson - 8/94
+#$%            JECEWSI Interface via ALSP
+#$%
+#######################################################
+ 
+BBcommon
+$Par$Debug Parallel$common                 # this contains the LOCK variables
+RMcommon
+ 
+real*4  Center
+real*4  RightAng
+real*4  LeftAng
+real*4  RELbrg
+real*4  RNG
+real*4  brg
+real*4  UNTCOS
+real*4  UNT$TrueLatitude$F
+real*4  UNT$TrueLongitude$F
+real*4  sector
+real*4  scanrate
+real*4  orient
+real*4  wraparoundANG             # jecewsi - JFR 9/7/94
+Integer*4 UNT$Pointer
+Integer*4 UNT2$Pointer
+Integer*4 FOV_ok
+Integer*4 Sensor_index
+Integer*4 DEQ$Pointer
+Integer*4 DEQ$LastRadarPosition$I
+ 
+FOV_ok = $yes # flag inside radar Field Of View
+ 
+UNT$TrueLatitude$F  = xUNT$TrueLatitude$F
+UNT$TrueLongitude$F = xUNT$TrueLongitude$F
+UNTCOS = COS(UNT$TrueLatitude$F)
+Call RLL2RB(_              #Rhumb line Lat/Lon to Range/Bearing
+            UNT$TrueLatitude$F,        #latitude of 1st pt (input)
+            UNT$TrueLongitude$F,       #longitude of 1st pt (input)
+            UNTCOS,                    #cos of lat of 1st pt (input)
+            xUNT2$TrueLatitude$F,      #latitude of 2nd pt (input
+            xUNT2$TrueLongitude$F,     #longitude of 2nd pt (input)
+            COS(xUNT2$TrueLatitude$F), #cos of lat of 2nd pt (input)
+            RNG, BRG )                 #range, bearing (output)
+ 
+if (jecewsi$game == $yes) # - JFR 8/15/94
+   {
+    if (orient > $TWOPI) # oriented about course (radars in jecewsi)
+      RELbrg = Abs(BRG - xUNT$TrueCourse$F) # relative bearing between target and detector
+    else # jammer oriented about bearing or position for jecewsi
+      RELbrg = Abs(BRG - orient) # relative bearing between target and detector orientation
+ 
+     # center the FOV around the detector's course for JECEWSI - JFR 8/15/94
+     # then find out if the target is in fixed directional radar FOV - JFR 8/15/94
+     # Note: not allowing radar to be oriented for Jecewsi - JFR 8/15/94
+    if (sector < $TWOPI) # only check if scanning sector less than 360 - JFR 9/7/94
+       {
+        wraparoundANG = $TWOPI - 0.5 * sector # check for wraparound - JFR 9/7/94
+        if ((RELbrg > 0.5*sector) & (RELbrg < wraparoundANG))  # JFR 8/15/94
+           {
+            FOV_ok = $no # flag outside radar Field Of View - JFR 8/15/94
+           }
+       }
+   }
+else   # use previous algorithms
+   {
+    RELbrg = BRG - xUNT$TrueCourse$F
+    $angPI(RELbrg)
+ 
+    # now find out the center position where the radar stoped at end of last cycle
+    deq$pointer = Device_Deq_pointer[Sensor_index]
+    # right edge of FOV is center position + 1/2 * sweep sector (center is in tenths of degrees)
+    DEQ$LastRadarPosition$I = xDEQ$LastRadarPosition$I
+    RightAng = (float(DEQ$LastRadarPosition$I)/10.0) * $deg2rad + .5 * sector
+    $angPI(RightAng)
+    # left edge of FOV is center position - 1/2 * sweep sector (= right edge - sector)
+    LeftAng  = RightAng - sector
+    $angPI(LeftAng)
+    # update the right edge of sector after the radar has completed motion this cycle
+    RightAng = RightAng + scanrate
+    if (RELbrg > RightAng | RELbrg < LeftAng)
+       {
+        FOV_ok = $no # flag outside radar Field Of View
+       }
+ 
+    # lastly, update the center position of the radar
+    Center = (RightAng - .5 * sector)
+    $angPI(Center)
+    Center = Center * $rad2deg
+    Center = Center * 10.0 # remember, it's in tenths of degrees
+    deq$LastRadarPosition$I = int(Center)
+   }
+ 
+end
+
+ 
+subroutine FindJAMOrient(UNT2$POINTER,  # Unit with Jammer aboard       (in)
+                         OR_Index,     # helpless victim               (in)
+                         orient)       # orientation center of FOV     (out)
+#######################################################
+#$%
+#$% Purpose:   FindJAMOrient finds out the orientation
+#$%            of a jammer on a unit
+#$%
+#$% Called By: JAMLST        ESMTGT
+#$%
+#$% Calls:     NONE
+#$%
+#$% Tables:    UNT        RAD       DEQ
+#$%
+#$% Date:      SEP 1994
+#$%
+#$% Author:    John Richardson (JFR)
+#$%
+#######################################################
+ 
+BBcommon
+$Par$Debug Parallel$common                 # this contains the LOCK variables
+RMcommon
+ 
+Integer*4   UNT2$POINTER
+Integer*4   JEW$POINTER
+Integer*4   JEW$BLL$Flags$I
+Integer*4   JEW$OR$INDEX
+Integer*4   JEW$BLL$INDEX
+Integer*4   OR_Index
+Real*4      orient
+Real*4      RNG
+Real*4      BRG
+ 
+orient = $TWOPI + 0.5 # flag default orientation about course
+ 
+JEW$POINTER$TO (unt2$POINTER$INDEX) # JEW table and unit table are 1-1
+ 
+JEW$OR$INDEX = OR_Index   # emmiter index from deq table (via device array)
+JEW$BLL$INDEX = OR_Index  # flag wether oriented about bearing or Latlong
+ 
+JEW$BLL$Flags$I = xJEW$BLL$Flags$I
+if (JEW$BLL$Flags$I == $yes )
+   { # oriented about position so find  bearing from unit to position
+    Call RLL2RB(_                           #Rhumb line Lat/Lon to Range/Bearing
+                xUNT2$TrueLatitude$F,       #latitude of 1st pt (input)
+                xUNT2$TrueLongitude$F,      #longitude of 1st pt (input)
+                COS(xUNT2$TrueLatitude$F),   #cos of lat of 1st pt (input)
+                xJEW$OR$Lat$F,              #latitude of 2nd pt (input
+                xJEW$OR$Long$F,             #longitude of 2nd pt (input)
+                COS(xJEW$OR$Lat$F),         #cos of lat of 2nd pt (input)
+                RNG, BRG )                  #range, bearing (output)
+    orient = BRG
+   }
+else
+   { # oriented about bearing
+    orient = xJEW$OR$Bearing$f
+   }
+ 
+ 
+return
+end

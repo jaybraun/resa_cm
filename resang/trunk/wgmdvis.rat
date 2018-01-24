@@ -1,0 +1,549 @@
+ 
+#####                   File WGMDVIS.rat
+#####   version 3.1  dated-  7apr81
+ 
+###
+### mod to version 3.0          dated 6-jan-1981
+###
+### smn prog    module  comments
+### === ====    ======  =================================================
+### 002 rjw     vismod  interchanged first 2 arguments in call to lclvis
+###                     so that all lcl___ routines have detector as 1st
+###                     and detectee as 2nd arguments; fixed bug so that
+###                     subs below periscope depth will not see
+###
+ 
+###
+### mod to version 3.0          dated 6-jan-1981
+###
+### smn prog    module  comments
+### === ====    ======  =================================================
+### 002 sfc             changed routine to call LCLVIS to enter visual
+###                     detection data in the local detection table;
+###
+ 
+ 
+#####   version 3.0     dated 22-dec-1980
+ 
+#
+ 
+#$%     MODULE                      UTILITIES                   DATA
+#$%   SUBROUTINES                                             TABLES
+#$%   ===========                  ===========                ======
+#$%
+#$%     VISMOD                       $ANG2PI                    UNT
+#$%     DAYTST                       COS                        WET
+#$%     FNDWET <WCOMMN>              APPLL                      ACC
+#$%     LCLVIS <DETECT>              SIN                        SHC
+#$%                                  PREPRX_M
+#$%                                  PROXIM_M
+#$%
+#$%   NOTES
+#$%   =====
+#$%
+#$%   1.  <FILENAME> INDICATES FILE WHERE SUBROUTINE IS LOCATED.
+#$%
+#$%   2.  UTILITY SUBROUTINES ARE NOT SHOWN ON FLOWCHART.
+#$%
+#$%   3.  * INDICATES NO OTHER SUBROUTINES CALLED.
+#$%
+#$%
+#$%   FLOWCHART FOR VISMOD
+#$%   ====================
+#$%
+#$%   VISMOD - FNDWET*
+#$%          - PREPRX_M*
+#$%          - PROXIM_M*
+#$%          - LCLVIS*
+ 
+
+ 
+include "parallel.inc"
+include "bbcode.inc"
+include "bbctl.inc"
+include "bbunt.inc"
+include "bbacc.inc"
+include "bbshc.inc"
+include "bbwet.inc"
+include "macros.inc"
+ 
+define (BBImplicit, Implicit None)
+ 
+define $rat$indent yes
+define $rat$space  yes
+ 
+Subroutine vismod                       #models visual detections
+ 
+########################################################
+#$%
+#$% Purpose:   VISMOD provides executive control
+#$%            for the Visual Detection Module.
+#$%
+#$% Called By: WARCYC
+#$%
+#$% Calls:     FNDWET     PREPRX_M    PROXIM_M
+#$%            APPLL      LCLVIS
+#$%
+#$% Invokes:   $ANG2PI
+#$%
+#$% Tables:    UNT
+#$%            ACC        SHC        WET
+#$%
+#$% Date:      JAN 81
+#$%
+#$% Author:    Ron Williams
+#$%
+########################################################
+BBcommon
+#Parallel$common                 # this contains the LOCK variables
+ 
+integer*4       char_ptr
+Real*4          max_detect_range, max_class_range
+integer*4       unt$Pointer, unt$Type$i, unt$SuperType$i
+integer*4       unt$TrueAltDepth$i, unt$Status$i, unt$HideStatus$I
+integer*4       ACC$Pointer, SHC$Pointer, shc$SCOPEdepth$I
+integer*4       i_unt
+ 
+$par$private_all
+ 
+integer*4               K_Last_Unit, K_chunk, K_pieces
+$par$context_shared     K_Last_Unit, K_chunk, K_pieces
+ 
+ 
+K_last_unit  = unt$used / unt$entry  # This is the last active unit (high water)
+k_chunk = K_last_unit
+ 
+#
+#  Now we know the size and number of chunks to break the outer UNT
+#  loop into for Parallel Processing.  Let's do it.....
+#
+ 
+#for (unt$pointer$first; unt$pointer$ok; unt$pointer$next)
+$par$do_parallel  k_chunk
+$for I_unt = 1, k_last_unit  $do
+  unt$pointer$to i_unt
+ 
+  repeat  # (dummy repeat to allow NEXT within DO loop)
+   {                                    #loop thru potential TARGETS
+    if (Xunt$NeverDetect$i == YES) next # JOA 3/05 per_never
+    unt$status$i = xunt$status$i        #$% get unit status
+    unt$supertype$i = Xunt$supertype$i
+ 
+    if (unt$status$i == $AwaitingLaunch$code |  #$% if awaiting launch,
+        unt$status$i == $beingdeleted$code   | # ) #$% or being deleted,
+        UNT$SuperType$i ==$FalseContact$SuperCode) # jb   2/12/91
+            NEXT                                        # SKIP
+ 
+    #$% if the unit is Hiding, then it can not be detected
+    unt$HideStatus$I = Xunt$HideStatus$I
+    if (UNT$HideStatus$I == $CurrentlyHiding) NEXT       #KHC 6/92
+ 
+    unt$type$i = Xunt$type$i
+    unt$truealtdepth$i = xunt$truealtdepth$i    #$% get true alt/depth #  3/89
+ 
+    if ( unt$supertype$i == $submarine$supercode )  # if detectEE is sub, 4/7/83
+        {
+        SHC$Pointer = xunt$SHCpntr$i
+        shc$SCOPEdepth$I = Xshc$SCOPEdepth$I      #detectee may be    9/24/85
+ 
+        if (unt$truealtdepth$i > shc$SCOPEdepth$I & #     ex-   9/24/85
+            unt$truealtdepth$i > Mast$Depth$Max ) #    posed??  9/25/85
+                NEXT                            # If not, SKIP..
+ 
+        char_ptr = shc$pointer     #4/26/83
+        max_detect_range = xshc$detectrange$i
+        max_class_range = xshc$classrange$i
+        if(unt$truealtdepth$i > Xshc$KeelDepth$i) #Not Surfaced? 9/24/85
+            {# Periscope detections every 6 minutes
+            if ( Xunt$TimeUpPeriscope$f + model$interval < game$time) NEXT
+            max_detect_range = 1
+            max_class_range = 0
+            }
+        }
+ 
+    else if (unt$type$i == $air$code)           #$% if aircraft
+        {
+        acc$pointer = xunt$accpntr$i              #$% get ACC pointer
+        char_ptr = acc$pointer                     #       4/26/83
+        max_detect_range = xacc$detectrange$i                #$% max detect. rng
+        max_class_range = xacc$classrange$i         #$% max classif. rng
+        }
+ 
+    else if (unt$type$i == $surface$code )
+        {
+        shc$pointer = xunt$shcpntr$i
+        char_ptr = shc$pointer                     #       4/26/83
+        max_detect_range = xshc$detectrange$i
+        max_class_range = xshc$classrange$i
+        }
+ 
+    else next        #not detecting these type units. da 2/28/90
+                     # 1. $shorebase$code
+                     # 2. $cruisemissile$code
+                     # 3. $PIM$code
+                     # 4. $null$code
+                     # 5. $site$code          # khc 7/92,   Can't detect a Hide Site
+ 
+ 
+    if (max_detect_range < 1)  max_detect_range = 0.000002
+    if (max_class_range  < 1)  max_class_range  = 0.000001
+ 
+    call vis_detectors (unt$pointer,    # The potential Target
+                        unt$type$i,     # Type of Target
+                        char_ptr,       # Characteristics Pointer of target
+                        max_detect_range,
+                        max_class_range)
+ 
+    } until (.true.) # End of dummy REPEAT loop thru detectEEs
+ 
+$enddo
+Within$Parallel$Mode = $NO               # let all know we are done running ||
+ 
+end
+ 
+#  max_detect_range, max_class_range
+ 
+undefine $rat$indent
+undefine $rat$space
+ 
+
+ 
+subroutine vis_detectors (unt$pointer,    # The potential Target
+                          unt$type$i,     # Type of Target
+                          char_ptr,       # Characteristics Pointer of target
+                          max_detect_range,
+                          max_class_range)
+ 
+#$% Modified:  Jim Allen - 11/95 (E1422)
+#$%            Added in a terrain line-of-sight check.
+ 
+BBcommon
+#parallel$common
+ 
+integer*4       unt$pointer
+integer*4       unt$type$i
+integer*4       char_ptr
+real*4          max_detect_range
+real*4          max_class_range
+ 
+integer*4       los_test      # function to check terrain line-of-sight (E1422)
+ 
+integer*4       unt$Indaylight$i
+integer*4       unt$TrueAltDepth$i
+integer*4       unt2$pointer
+integer*4       unt2$type$i
+integer*4       unt2$status$i
+integer*4       unt2$view$i
+integer*4       unt2$supertype$i
+integer*4       unt2$truealtdepth$i
+real*4          unt2$truelatitude$f
+real*4          unt2$truelongitude$f
+ 
+integer*4       acc$pointer
+integer*4       ACC$VisZoom$i
+integer*4       shc$pointer
+integer*4       shc$scopedepth$i
+ 
+integer*4       wet$pointer
+integer*4       wet$visibility$i
+integer*4       wet$cloudcover$i
+integer*4       wet$ceiling$i
+integer*4       wet$clouddepth$i
+integer*4       wet$category$i
+ 
+real*4          detect_range, class_range
+logical*4       detecTEE_above, detecTOR_above, idetf
+integer*4       N_FIRST, N_NEXT, N_LAST, N_INDX, IDAY
+integer*4       itops, IACTOP, LPTR, LBEAR, LRNGE
+real*4          RANGE, BEAR, HRANGE, DELALT, HDOR, DEE, HDEE, X, RCC
+real*4          RALAT, RALON, random
+ 
+real*4          sqrt_hdor
+real*4          sqrt_hdee
+data x/0.0/		# Get next random number in sequence
+ 
+unt$indaylight$i   = xunt$indaylight$i
+unt$truealtdepth$i = xunt$truealtdepth$i
+ 
+call fndwet (xunt$truelatitude$f,    #$% Find weather REGION,
+             xunt$truelongitude$f,
+             wet$pointer)
+ 
+wet$visibility$i = xwet$visibility$i           # and vis. & cloud data
+wet$cloudcover$i = xwet$cloudcover$i
+wet$ceiling$i    = xwet$ceiling$i
+wet$clouddepth$i = xwet$clouddepth$i
+wet$category$i   = xwet$category$i  #da 2/28/90
+ 
+detecTEE_above = .TRUE. #initialize target above clouds. da 2/28/90
+ 
+if (wet$category$i != $clear$code) #if not clear weather in area
+    {
+    detect_range = min (float(wet$visibility$i),      # range with given vsblty
+                        max_detect_range        )
+ 
+    class_range = min   (max_class_range,       # range with given vsblty
+                         max_class_range*wet$visibility$i/max_detect_range)
+ 
+    itops  = wet$ceiling$i + wet$clouddepth$i      #7/22/86
+ 
+    detecTEE_above = ( unt$truealtdepth$i  > itops     &
+                       unt$type$i         == $AIR$code  )
+        #if target is a/c above clouds, detecTEE_above = TRUE,
+        #otherwise detecTEE_above = FALSE                   #da 2/28/90
+    }
+else
+    {
+    detect_range = max_detect_range
+    class_range = max_class_range
+    }
+ 
+call preprx_m (unt$Pointer$Index,        # initialize range/bearing routines
+               xunt$truelatitude$f,
+               xunt$truelongitude$f,
+               xunt$costruelat$f,
+               detect_range)
+ 
+#----------------------------------------------------------------------
+#   The addition of "levels" to the Visual model, is implemented by
+#   using the pseudo "level" to indicate the frequency of "looks".
+#   If the sum of UNT$POINTER$INDEX + UNT2$POINTER$INDEX + GAME$MINUTE is
+#   evenly divisible by LEVEL$VISUAL, then we will check if we can
+#   see this cycle.
+#----------------------------------------------------------------------
+ 
+n_first = 1                     # normally look every unit every time
+n_next  = 1
+n_last  = unt$used / unt$entry  # This is the last active unit (high water)
+ 
+#$% Per Dan Bacon and Mr. Steve Sctockwell level$visual was intended to relieve the cpu burden
+#$% which can now be done through the cycle recurrence thing. So, the DEFINE LEVEL for visual command
+#$% which sets the level$visual variable will no longer have an effect here.  Alex V. 12/93
+#$% This means that every detectee will look every detector each time the model is executed
+ 
+#if (level$visual > 1)           # Alternate Level ?
+#    {
+#    n_next  = level$visual      # check every N'th unit, starting at...
+#    n_first = n_next - mod(unt$pointer$index + game$minute, n_next) # Now in seconds JFR 11/30/93
+#    }
+ 
+for (n_indx = n_first; n_indx <= n_last ; n_indx = n_indx + n_next)
+    {                                # loop thru potential DETECTORS
+    unt2$pointer$to n_indx
+ 
+    if (unt$pointer == unt2$pointer) NEXT   #$% Skip if TARGET (self)..
+ 
+    unt2$view$i = xunt2$view$i              #$% Skip if CONTROL..
+    if (unt2$view$i == $neutral$view) NEXT
+ 
+    #$% PER # H1039  9/8/92 SMM
+    #$% Skip visual detection of units in same view
+    if (UNT2$View$I == xUNT$View$I) NEXT
+ 
+    #$% if the unit is a Hide Site, then it can not be detector
+    if (xUNT2$subtype$I == $HideSite$Subcode) next    #khc 7/92
+ 
+    unt2$status$i = xunt2$status$i  # Skip if disappearing..
+ 
+    if (unt2$status$i == $AwaitingLaunch$code |
+        unt2$status$i == $beingdeleted$code    ) NEXT
+ 
+    unt2$supertype$i = xunt2$supertype$i
+    unt2$type$i = xunt2$type$i      #$% Skip Cruise-Missiles..
+    if(unt2$type$i      == $cruisemissile$code     |
+       unt2$supertype$i == $FALSEcontact$SUPERcode | # jb 2/12/91
+       unt2$type$i      == $PIM$code               |   # jb                8/9/89
+       UNT2$Type$I      == $SAMissile$Code)          # don't process SAM as detector SMM 5/94
+           NEXT
+    # Allow ghosted units with shared track capability to make visual detection
+    if ((xUNT2$GhostedUnit$I == $YES) & (xUNT2$ALSPId$i != 0))
+    {
+	if (!(xUNT2$ALSPShared$i == $YES))
+           NEXT
+    }
+ 
+    UNT2$truealtdepth$i = xUNT2$truealtdepth$i #$% Detector's ALTit.
+ 
+    #--------------------------------------------------------- da 2/28/90
+ 
+    detecTOR_above = .TRUE. #initialize detector above clouds
+ 
+    if (wet$category$i != $clear$code) #if not clear weather in area
+        {
+        if (detecTEE_above) #target a/c above clouds
+            {
+            detecTOR_above =(unt2$truealtdepth$i >  itops    &
+                             unt2$type$i         == $AIR$code )
+ 
+            #if detector is a/c above clouds, detecTOR_above = TRUE,
+            #otherwise detecTOR_above = FALSE
+            }
+       }
+    #------------------------------------------------------------
+    if (unt2$type$i == $Sub$Code)    # jb (Distinguish subs from
+       {                             #  torpedoes/countermeasures      9/5/91
+        if (unt2$supertype$i == $submarine$supercode )  # detectOR sub, 4/7/83
+           {
+            SHC$Pointer = xunt2$SHCpntr$i                #   BELOW peri-
+            shc$SCOPEDEPTH$i = Xshc$SCOPEDEPTH$i #
+            if (UNT2$truealtdepth$i > shc$SCOPEDEPTH$i) #   scope depth
+                NEXT                            # If so, SKIP..
+            else if(UNT2$truealtdepth$i == shc$SCOPEDEPTH$i) #   4/25/83
+                UNT2$truealtdepth$i = 2         # Set 'height' 2 ft
+            else UNT2$truealtdepth$i = xUNT2$AntennaHeight$i #   4/25/83
+           }
+        else    # Else this is a torpedo or countermeasure; SKIP IT
+           {
+            NEXT                                            # jb 9/5/91
+           }
+       }
+    ## Logic added 4/83 to simulate FLIR detections by allowing night-
+    ## time detections by a/c so equipped:
+ 
+    iDAY = unt$indaylight$i #  TARGET in daylight?          4/14/83
+ 
+    if ( unt2$TYPE$i == $AIR$code ) # DetectOR an AIRCRAFT:
+        {
+        ACC$Pointer =  xUNT2$ACCpntr$i       #  the detectOR a/c
+ 
+        if (Xacc$UavFlag$i == $YES) next     # Exclude UAV's from making
+                                             # visual detections 3/20/90
+ 
+        if (Xacc$FLIRcapable$i == $YES)      #   has FLIR
+            {
+            iDay = $YES   #Situation is either Daylight OR FLIR 4/14/83
+            }
+        ACC$VisZoom$i = XACC$VisZoom$i       # jb            5/27/87
+        }
+    else
+        {
+        ACC$VisZoom$i = 1       # non - Aircraft
+        }
+ 
+    if ( iDAY != $YES )  NEXT  # May 'see' only if detectEE 4/14/83
+                               #  in daylight, OR if situation is FLIR
+ 
+    UNT2$truelatitude$f = xUNT2$truelatitude$f  #$% Detector Lat. &
+    UNT2$truelongitude$f = xUNT2$truelongitude$f #   Longitude    # 3/89
+ 
+    if (unt2$type$i != $sub$code )  # if detectOR NOT sub,  4/25/83
+        UNT2$truealtdepth$i = max(63,UNT2$truealtdepth$i) #   4/25/83
+ 
+    #-------------------------------------------------------------- da 2/26/90
+ 
+    # get horizontal range and bearing
+ 
+    call proxim_m (unt2$Pointer$Index,
+                   unt2$truelatitude$f,
+                   unt2$truelongitude$f,
+                   xunt2$costruelat$f,
+                   range,
+                   bear)
+ 
+    hrange = range
+ 
+    #range stands for slant range
+    #hrange stands for horizontal range
+ 
+    if (hrange >= 0)   #if horizontal range > 0, calculate slant range
+        {
+        delalt = ABS((unt2$truealtdepth$i - unt$truealtdepth$i ) / $feet$Per$Nmi)
+        range = SQRT( delalt * delalt + hrange * hrange )  #slant range
+        }
+ 
+    if (!detecTEE_above | !detecTOR_above)
+        {
+                                #if either detecTEE or detecTOR not
+                                #above clouds, check if computed
+                                #slr using max_detect_range is out of range
+ 
+        if (range > detect_range) range = -1  # out of range
+        }
+ 
+    if (range < 0)  next          #if out of range, SKIP
+ 
+    #----------------------------------------------------------------------
+    hdor = float(unt2$truealtdepth$i) #detectOR 'hgt': STET! 4/25/83
+    dee  = float(unt$truealtdepth$i)  #                      4/12/83
+    hdee = max(56.0,dee)              # detectee 'height'    4/12/83
+ 
+    sqrt_hdor = sqrt(hdor)
+    sqrt_hdee = sqrt(hdee)
+ 
+    if (range > 1.2*(sqrt_hdor+sqrt_hdee)) # Approx. LOS    4/12/83
+        NEXT     # Near or beyond max. LOSight   4/12/83
+ 
+    idetf = .false.
+    iactop = wet$ceiling$i + wet$clouddepth$i
+    if      (wet$cloudcover$i    == 0               ) idetf = .true.  # no clouds
+    else if (UNT$truealtdepth$i  >= iactop        &
+             UNT2$truealtdepth$i >= iactop          ) idetf = .true.  # both above
+    else if (UNT$truealtdepth$i  <= wet$ceiling$i  &
+             UNT2$truealtdepth$i <= wet$ceiling$i   ) idetf = .true.  # both below
+ 
+    #$% else if detector is aircraft and target is surface
+    #$% ship or ship with aircraft or submarine
+    else if (unt2$type$i == $air$code  &
+             (unt$type$i == $surface$code |
+              unt$type$i == $sub$code) &
+              random(x) <= 1.-wet$cloudcover$i*.01     ) idetf = .true.
+ 
+    if (los_test (                   # Uses GP terrain grid to determine LOS  (E1422)
+            Xunt2$TrueLatitude$f,    # Detector latitude: real: in: rad
+            Xunt2$TrueLongitude$f,   # Detector longitude: real: in: rad
+            Xunt2$CosTrueLat$f,      # Cosine of detector latitude: real: in:rad
+            sqrt_hdor,               # Sqrt Detector altitude: real: in: ft
+            Xunt$TrueLatitude$f,     # Target latitude: real: in: rad
+            Xunt$TrueLongitude$f,    # Target longitude: real: in: rad
+            Xunt$CosTrueLat$f,       # Cosine of target latitude: real: in:rad
+            sqrt_hdee) == $NO)       # Sqrt Target altitude: real: in: ft
+      {
+        idetf = .false.                        # Reset detection flag
+      }
+ 
+    if (idetf)                              # if target detected
+        {
+        #if both a/c above clouds or clear weather. da 2/28/90
+ 
+        if (detecTEE_above & detecTOR_above) rcc = max_class_range
+        else                                 rcc = class_range
+ 
+        rcc = rcc * ACC$VisZoom$i   # jb                    5/27/87
+ 
+        if (range > rcc)            # if rng greater than classif. rng
+            lptr = 0                # zero local pointer
+ 
+        else                        # else set local pointer
+            lptr = char_ptr         # to characteristics       4/26/83
+ 
+        bear = bear + $pi                   #$% calculate brg
+        $ang2pi(bear)
+ 
+        lbear  = bear * (180.0/$pi) + .5    #$% set brg and rng
+        lrnge  = hrange + .5
+ 
+        call appll(xUNT2$assumedlatitude$f, #$% calculate tar-
+                   xUNT2$assumedlongitude$f,#   get position
+                   hrange,
+                   bear,
+                   ralat,
+                   ralon)
+ 
+        $par$lockon par_lock_lcl        # lock LCL table here
+ 
+        call LCLVIS (unt2$pointer,      #$% process visual detection
+                     unt$pointer,
+                     lbear,
+                     ralat,
+                     ralon,
+                     lrnge,
+                     lptr,
+                     unt$type$i)
+ 
+        $par$lockoff par_lock_lcl       # unlock LCL table here
+ 
+        }    # End if target DETECTED...
+    }   # End of loop thru detectORS
+ 
+return
+end

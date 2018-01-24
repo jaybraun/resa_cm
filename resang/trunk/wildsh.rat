@@ -1,0 +1,2359 @@
+##      FILE:   WILDSH.rat
+ 
+ 
+#####   version 3.1  dated-  7apr81
+ 
+ 
+###
+### mod to version 3.0          dated 13-jan-1981
+###
+### smn prog    module  comments
+### === ====    ======  =================================================
+### 002 dew     naverr  moved code to wcommn.rat
+###             wglshp  added processing for TRKS field
+###                     added pointers to BOM table for RBOC,WBUOY & WIRES
+###
+###
+###
+ 
+ 
+#####   version 3.0  dated- 22dec80
+ 
+ 
+# 
+ 
+#$%      MODULE                       UTILITY                     DATA
+#$%    SUBROUTINES                  SUBROUTINES                  TABLES
+#$%    ===========                  ===========                  ======
+#$%
+#$%      WGLSHP                       ECHOH                       ACC
+#$%      WGLSHR                       ECHOR                       BOM
+#$%      DEPLTA                       NAVERR                      RAD
+#$%      GSLOTM <WGLOAD>              RRB2LL                      ESM
+#$%      EQFIND <WGLOAD>              UNTFND                      JAM
+#$%      BADFLD <WGLOAD>                                          NAV
+#$%                                                               SOB
+#$%                                                               COB
+#$%                                                               CMC
+#$%                                                               MC
+#$%                                                               TOR
+#$%                                                               SHC
+#$%                                                               DYN
+#$%                                                               SUI
+#$%                                                               SON
+#$%                                                               UNT
+#$%                                                               POS
+#$%                                                               BOY
+#$%
+#$%
+#$%
+#$%    NOTES
+#$%    =====
+#$%
+#$%    1.  <FILENAME> INDICATES WHERE SUBROUTINE IS LOCATED.
+#$%
+#$%    2.  UTILITY SUBROUTINES NOT SHOWN ON FLOWCHART.
+#$%
+#$%    3.  * INDICATES NO OTHER SUBROUTINES CALLED.
+#$%
+#$%
+#$%
+#$%    FLOWCHART FOR FILE WGLSH
+#$%    ========================
+#$%
+#$%    START0 <WARGAM> - WGLOAD - WGLSH - GSLOTM*
+#$%                                     - EQFIND*
+#$%                                     - BADFLD*
+#$%                                     - DEPLTA*
+#$%                                     - WGLSHR*
+ 
+
+ 
+define(DEBUG,#)
+define(Default$Strength,16)             # default target strength 10/25/90 trs
+define(FALSE$Strength,40)               #jb Max. FALSE tgt strngth 1/14/91
+include "bbctl.inc"
+include "bbcode.inc"
+include "bbacc.inc"
+include "bbbom.inc"
+include "bbboy.inc"
+include "bbchf.inc"                     # jb  7/9/90
+include "bbctm.inc"                     # SMM 4/19/90
+include "bbesm.inc"
+include "bbcjc.inc"                     # REH 04/88
+include "bbgnd.inc"                     # REH 12/89
+include "bbjam.inc"
+include "bbnav.inc"
+include "bbrad.inc"
+include "bbsob.inc"
+include "bbcob.inc"
+include "bbcmc.inc"
+include "bbmc.inc"
+include "bbshc.inc"
+include "bbsui.inc"
+include "bbson.inc"
+include "bbtor.inc"
+include "bbtrp.inc"                     # SMM 4/19/90
+include "bbunt.inc"
+include "bbuvp.inc"                     # jb    2/21/90
+include "bbiff.inc"                     # cml  3/7/91
+include "ascii.inc"
+include "wimain_eq.inc"                 # MJC 4/28/2000
+ 
+define(BBImplicit, Implicit None)       # MJC 4/28/2000
+
+ Subroutine DEPLTA(_                 #DEPLoy Towed Array
+                   UNT$POINTER,      #unit pointer for owner (input)
+                   SON$POINTER)      #sonar characteristics pointer (input)
+ 
+ ######################################################
+ #$%
+ #$% Purpose:   DEPLTA deploys a towed array from
+ #$%            the SON table toward the ship.
+ #$%
+ #$% Called By: WGLSHP
+ #$%
+ #$% Calls:     ECHOH      ECHOR
+ #$%
+ #$% Tables:    BOY        UNT        SON
+ #$%            POS
+ #$%
+ #$% Date:      OCT 80
+ #$%
+ #$% Author:    Ron Williams, Dana Wills
+ #$%
+ ######################################################
+ 
+ BBcommon
+ 
+ character  msg[80]
+ 
+ integer KK,
+         UNT$Pointer,
+         SON$Pointer,
+         BOY$Pointer,
+         BOY$Ownerindx$I                    # MJC 4/28/2000
+ real    BOY$Cablelength$F,
+         BOY$Truelatitude$F,
+         BOY$Truelongitude$F,
+         BOY$Costruelat$F,
+         BOY$Assumedlatitude$F,
+         BOY$Assumedlongitude$F,
+         BOY$Trueheading$F,
+         BOY$Headingerror$F,
+         BOY$Assumedheading$F               # MJC 4/28/2000
+ literal CSTRIP8                            # MJC 4/28/2000
+ 
+for (BOY$POINTER$FIRST;BOY$POINTER$OK; _   #for each BOY table entry
+      BOY$POINTER$NEXT)
+    {
+     if (XBOY$OWNERINDX$I == UNT$POINTER$INDEX)#if this platform already has
+         return                             #  a towed array deployed, quit
+ 
+     if (XBOY$TYPE$I == $NULL$CODE)  break  #stop at first available slot
+    }
+ 
+ if (!BOY$POINTER$VALID)                    #if no empty slot
+    {
+     kk = 0
+     call smovv  ("Buoy table full --- ", msg, kk)
+     Call smovhn (XUNT$NAME$C,$$MaxLit,msg,kk)
+     call smovv  (" cannot deploy towed array ", msg, kk)
+     Call smovhn (xson$type$c,$$MaxLit,msg,kk)
+     call echoh  (msg,kk)
+     call echor
+ 
+     return
+    }
+ 
+ BOY$OWNERINDX$I = UNT$POINTER$INDEX    #store owner pointer
+ PUTBOY$OWNERINDX$I
+ 
+ PUTBOY$EQPNTR$I (SON$POINTER)          #store eq char pointer
+ 
+ PUTBOY$TYPE$I ($towedarray$code)       #store type
+ 
+ call assign_unique_boy_name (boy$pointer)  # needs owner and type set
+ 
+ BOY$CABLELENGTH$F = _              #convert cable length
+    FLOAT(XSON$CABLELENGTH$I) * _
+    ($PI/(180.*60.*2000.))          #    to radians
+ PUTBOY$CABLELENGTH$F               #        and store
+ 
+ PUTboy$TrueDepth$i     (XUNT$Truealtdepth$i +300)      #       1/19/84
+ 
+ BOY$TRUELATITUDE$F = _             #start array at ship
+         XUNT$TRUELATITUDE$F
+ PUTBOY$TRUELATITUDE$F              #store latitude
+ 
+ BOY$TRUELONGITUDE$F = _            #start array at ship
+         XUNT$TRUELONGITUDE$F
+ PUTBOY$TRUELONGITUDE$F             #store longitude
+ 
+ BOY$COSTRUELAT$F = _
+         XUNT$COSTRUELAT$F
+ PUTBOY$COSTRUELAT$F
+ 
+ #$% get indicated position of active sonobuoys barriers/towed arrays & save
+ BOY$ASSUMEDLATITUDE$F = _
+         XUNT$ASSUMEDLATITUDE$F
+ PUTBOY$ASSUMEDLATITUDE$F
+ 
+ BOY$ASSUMEDLONGITUDE$F = _
+         XUNT$ASSUMEDLONGITUDE$F
+ PUTBOY$ASSUMEDLONGITUDE$F
+ 
+ BOY$TRUEHEADING$F = _              #point array in same
+         XUNT$TRUECOURSE$F          #   direction as ship
+ PUTBOY$TRUEHEADING$F               #store heading
+ 
+ BOY$HEADINGERROR$F = _             #(for now) give array same
+         XUNT$HEADINGERROR$F        #   heading error as ship
+ PUTBOY$HEADINGERROR$F              #store heading error
+ 
+ BOY$ASSUMEDHEADING$F = _                    #compute assumed
+    BOY$TRUEHEADING$F + XBOY$HEADINGERROR$F  #   heading of array
+ PUTBOY$ASSUMEDHEADING$F
+ 
+ if (!BOY$POINTER$OK)               #if added to table past last non-zero
+    {                               #   entry
+     BOY$POINTER$NEXT               #increase pointer to
+     BOY$LAST$TO BOY$POINTER - 1    #   end of non-zero entries
+    }
+ 
+ return
+ end
+ 
+ 
+ 
+
+ 
+subroutine wglshipc   (  reccnt, recsz, rec)
+ 
+# Modified:  Susan Miller 5/97 (E1635)
+#            Increased the amount of default aviation fuel if there are
+#            aircraft loaded at/on this unit.  Increased the amount of
+#            default aviation and ship fuel at shore bases.  Added default
+#            hoses and fuel transfer rate to shore bases.  Any values
+#            entered into build will override the defaults.
+ 
+BBcommon
+ 
+EqErr$Common                                                # MJC 4/28/2000
+ 
+literal rec[1500]
+LitCharEquiv(CfindFUEL)
+LitCharEquiv(CfindBIAS)
+LitCharEquiv(old_flds,100)
+integer   record_count
+integer reccnt, recsz,pnt,loop
+integer iFALSE    # jb FLAG; if 0, create FALSE SHC entry    2/14/91
+integer old_size[100], SAMorCIWSCapable
+real    GetShipCruiseSpeed                                  # joa 2/96 (E1467)
+ 
+integer ISTAT,LEN,KK,MAXHGT,
+        SUI$Pointer, TRP$Pointer, IFF$Pointer,
+        JAM$Pointer, JAM$Category$I,
+        GND$Pointer, CJC$Pointer, MC$Pointer,
+        CMC$Pointer, CMC$Cat$I, ESM$Pointer,
+        NAV$Pointer, RAD$Pointer, SON$Pointer,
+        TOR$Pointer, UVP$Pointer, ACC$Pointer,
+        BOM$Pointer, SOB$Pointer, COB$Pointer,
+        CTM$Pointer, CHF$Pointer,
+        SHC$Pointer, SHC$Nbreqitems$I,
+        SHC$EQ$Index, SHC$ASP$Index,
+        SHC$ASP$tgtstrength$I, SHC$Cruisespeed$I,
+        SHC$TNK$Index, SHC$ALT$Index,
+        SHC$BRN$Index, SHC$Category$I,
+        SHC$Classrange$I, SHC$EQ$antheight$I,
+        SHC$Diveclimbrate$I, SHC$Detectrange$I,
+        SHC$Ceccapable$I, SHC$Domain$I,
+        SHC$Jtidscapable$I, SHC$Keeldepth$I,
+        SHC$Launchdelay$I, SHC$Scopedepth$I,
+        SHC$Endurance$I, SHC$EQ$limit$I,
+        SHC$Uvpindx$I, SHC$JTMD_IUGS_unit$I,
+        SHC$Maxspeed$I, SHC$Wavethreshold$I,
+        SHC$Crosssect$I, SHC$Vrblts$I,
+        SHC$Damageclass$I, SHC$Width$I,
+        SHC$Height$I, SHC$EQ$ident$I, SHC$EQ$pntr$I,
+        SHC$EQ$remaining$I, SHC$Turnaround$I,
+        SHC$JTMD_SOF_unit$I, SHC$JTMD_JSOF_unit$I,
+        SHC$Minesweeper$I, SHC$Tracklimit$I,
+        SHC$MaxDepth$I, SHC$SuicideSubFlag$I
+real    SHC$Lethalareaac$F, SHC$Lethalareacomm$F,
+        SHC$Probsink$F, SHC$Lethalareasamsites$F,
+        SHC$Lethalareasensor$F, SHC$Lethalareamaxspeed$F,
+        SHC$Lethalareastores$F, SHC$Lethalareaweapons$F,
+        SHC$Launchrate$F, SHC$Pbpropfail$F,
+        SHC$TNK$capacity$F, SHC$Recoverrate$F               # MJC 4/28/2000
+literal SHC$Type$C                                          # MJC 4/28/2000
+real*4  PCTFUELRESERVE                                      # MJC 5/3/2000
+real*4  BOATFUEL                                            # MJC 4/25/2000
+real    SHC$Fuelrate$F,                                     # MJC 4/25/2000
+        SHC$Onepctfuel$F                                    # MJC 4/25/2000
+BBdeclare (SHC$FullName$V)      # jb  E2209     11/30/00
+ 
+data    iFALSE/0/                                           # jb 2/14/91
+data CfindBIASC  / "BIAS    " /
+data CfindFUELC  / "FUEL    " /
+ 
+data    old_fldsC/_
+"BBN01", "BBN02", "BBN03", "BBN04", "BBN05", "BBN06", "BBN07", "BBN08",
+"BBN09", "BBN10", "BBN11", "BBN12", "BBN13", "BBN14", "BBN15", "BBN16",
+"BBN17", "BBN18", "BBN19", "BBN20", "BBN21", "BBN22", "BBN23", "BBN24",
+"BBN25", "BBN26", "BBN27", "BBN28", "BBN29", "BBN30", "BBN31", "BBN32",
+"BBN33",
+"BBD01", "BBD02", "BBD03", "BBD04", "BBD05", "BBD06", "BBD07", "BBD08",
+"BBD09", "BBD10", "BBD11", "BBD12", "BBD13", "BBD14", "BBD15", "BBD16",
+"BBD17", "BBD18", "BBD19", "BBD20", "BBD21", "BBD22", "BBD23", "BBD24",
+"BBD25", "BBD26", "BBD27", "BBD28", "BBD29", "BBD30", "BBD31", "BBD32",
+"BBD33",
+34*" "/
+ 
+data    old_size/66*7, 12*3, 22*1/
+ 
+SAMorCIWSCapable = $no
+ 
+if (reccnt <= 1)
+    {
+    call echov("Ship file empty.")
+    call echor
+    return
+    }
+ 
+record_count = 0
+ 
+if ( iFALSE < 1 ) # jb Set SHC slot for FALSE sub       2/14/91
+   {
+    iFALSE = 1
+    call gslotm(shc$pointer,$$shc,SHC$MaxEntry,istat) # 2/14/91
+    if (istat != $no)                            # jb   2/14/91
+       {
+        call False_Submarine (SHC$Pointer)       # jb   2/14/91
+        record_count = record_count + 1
+        SHC$Last$To SHC$Pointer + SHC$Entry - 1  # jb   2/14/91
+       }
+   }
+ 
+PctFuelReserve = 1.0      # Default % ship fuel reserve - joa 2/96 (E1467)
+ 
+goto 10                   # skip over the subroutine entries - joa 2/96 (E1467)
+entry wglshrc (reccnt, recsz, rec)
+ 
+if (reccnt <= 1)
+    {
+    call echov("Shore file empty.")
+    call echor
+    return
+    }
+ 
+entry wglsite (reccnt, recsz, rec)            # KHC 6/8/92
+ 
+if (reccnt <= 1)
+    {
+    call echov("Site file empty.")
+    call echor
+    return
+    }
+PctFuelReserve = 0.0        # Shorebase % fuel reserve - joa 2/96 (E1467)
+ 
+10      continue            # Label for ship entries to skip to - joa 2/96 (E1467)
+ 
+#$% for each record entry
+for (loop = 2; loop <= reccnt; )
+    {
+    #$% get scenerio data and set len
+    call getsr(loop,recsz,rec)
+    len = rec[1]
+ 
+    #$% look for ship/shorebase class (shorebase class same as name)
+    cflg = $no                          # eqfind will not output error msg
+    call eqfind($$SHC,0,rec[3],SHC$POINTER)
+    if (shc$pointer != 0)
+        {
+        #$% display error message to user
+        call echov("Item ")
+        call echohn(rec[3],$$MaxLit)
+        call echov(" already exists as shorebase or ship/boat class.")
+        call echor
+        next
+        }
+ 
+    #$% call for ship/shore slot entries
+    call gslotm(shc$pointer,$$shc,SHC$MaxEntry,istat)
+ 
+    #$% if shc table is full
+    if (istat == $no)
+        {
+        #$% display warning message to user
+        call echov("Items from ")
+        call echohn(rec[3],$$MaxLit)
+        call echov(" and on are not loaded.")
+        call echor
+        return
+        }
+ 
+    record_count = record_count + 1
+ 
+    PUTSHC$NbrEqItems$i (SHC$MaxSub) # jb    moved down    2/14/91
+ 
+    SHC$Type$c = rec[ 3 ]
+ 
+    PUTSHC$Type$c
+ 
+    SHC$NbrEqItems$I = 0
+    SHC$Eq$Index = 1
+ 
+    SHC$ASP$Index = 1                                        #10/25/90 trs
+    SHC$ASP$TgtStrength$i = Default$Strength                 #10/25/90 trs
+    PUTSHC$ASP$TgtStrength$i                                 #10/25/90 trs
+ 
+    putSHC$Domain$I       ($AmphibOp$Code)   # joa 11/95 (E1422)
+    putSHC$JTIDSCapable$I ($no)              # clk 11/95 (E1469)
+ 
+    # joa 2/96 (E1467):
+    # Inititalize data fields for ship fuel consumption model
+    putSHC$PctShipFuelReserve$F (PctFuelReserve)
+    putSHC$FuelHoses$I          ( 0 )
+    SHC$CruiseSpeed$I = 0               # Can be set reset by VCRU or burn rate
+    putSHC$FuelTransferRate$I   ( 0 )
+    putSHC$AlertLevelCount$I    ( 3 )
+ 
+    SHC$TNK$Index = AviationFuelTank$Index
+    putSHC$TNK$Ident$I          ( AviationFuelTank$code )
+    putSHC$TNK$FillTubes$I      ( 4 )
+    putSHC$TNK$LethalArea$F     ( 0.0 )
+    putSHC$TNK$Capacity$F       ( 9999999. )
+ 
+    SHC$TNK$Index = ShipFuelTank$Index
+    putSHC$TNK$Ident$I          ( ShipFuelTank$code )
+    putSHC$TNK$FillTubes$I      ( 4 )
+    putSHC$TNK$LethalArea$F     ( 0.0 )
+    putSHC$TNK$Capacity$F       ( 9999999. )
+ 
+    SHC$ALT$Index = 1
+    putSHC$ALT$PctFuelRemaining$I ( 50 )
+ 
+    SHC$ALT$Index = 2
+    putSHC$ALT$PctFuelRemaining$I ( 25 )
+ 
+    SHC$ALT$Index = 3
+    putSHC$ALT$PctFuelRemaining$I ( 10 )
+ 
+    for (SHC$BRN$Index = 1; SHC$BRN$Index <= SHC$BRN$Slots;
+         SHC$BRN$Index = SHC$BRN$Index + 1)
+      {
+       putSHC$BRN$Rate$F ( 0.0 )
+      }
+    #-------- end of fuel consumption model initialization ---------
+ 
+    putSHC$JTMD_SOF_Unit$I ($no)             # clk 3/96 (E1561)
+    putSHC$JTMD_JSOF_Unit$I ($no)            # clk 4/97 (E1765)
+    putSHC$JTMD_UGS_Unit$I ($no)             # clk 3/96 (E1561)
+    putSHC$JTMD_IUGS_Unit$I ($no)            # clk 4/97 (E1764)
+ 
+    putSHC$CECCapable$I ($no)                # clk 10/97 (E1695)
+ 
+    putSHC$StandoffRange$f (0.0)             # joa 2/05 per_sdoff
+ 
+    for (pnt = 4; pnt <= len; )
+        {
+        If (rec[pnt] == 'CAT')
+            {
+             If (rec[pnt+1] == 'SURF')
+                {
+                 SHC$Category$I = $SURFACE$CODE  # set to 3
+                }
+             Else if (rec[pnt+1] == 'NSUB')
+                {
+                 SHC$Category$I = $SUB$CODE  # set to 2
+                 putSHC$NuclearPowered$I ($yes)
+                }
+             Else if (rec[pnt+1] == 'DSUB') # else it's a diesel sub
+                {
+                 SHC$Category$I = $SUB$CODE  # set to 2
+                 putSHC$NuclearPowered$I ($no) # diesel not nuclear
+                }
+             Else if (rec[pnt+1] == 'BOAT')
+                {
+                 SHC$Category$I = $SmallBoat$Subcode # set to 1
+                }
+             Else if (rec[pnt+1] == 'HIDE')                # KHC 6/11/92
+                {
+                 SHC$Category$I = $HideSite$SubCode  # set to 4
+                }
+             putSHC$Category$I
+             # increment the pointer
+             pnt = pnt + 2
+             next
+            }
+ 
+        if     (rec[pnt] == 'BBN24') rec[pnt] = 'BBN'
+        ELSE if(rec[pnt] == 'BBD24') rec[pnt] = 'BBD'
+        ELSE
+            {
+            for (kk = 1; kk <= 100; kk=kk+1)
+                {
+                if (rec[pnt] != old_flds[kk]) next
+ 
+                pnt = pnt + old_size[kk]
+                next 2
+                }
+            }
+ 
+ 
+        #$% if array word is air
+        if(rec[pnt] == 'AIR')
+           {
+            #$% look for aircraft on ship
+            call eqfind($$acc,0,rec[pnt+1],acc$pointer)
+ 
+            #$% if found
+            if(acc$pointer != 0)
+                {
+                #$% get aircraft data and save
+                SHC$EQ$Ident$I = $AIRCRAFT$CODE
+                PUTSHC$EQ$Ident$I
+                SHC$EQ$Pntr$I = ACC$Pointer
+                PUTSHC$EQ$Pntr$I
+#                SHC$EQ$REMAINING$I = rec[pnt+2] # modified for AML reqmts
+                SHC$EQ$Remaining$I = 1000
+                PUTSHC$EQ$Remaining$I
+ 
+                # increment number of equipment types for later table trimming
+                SHC$NbrEqItems$I = SHC$NbrEqItems$I + 1
+ 
+                # increment index into Equipment subtable
+                SHC$Eq$Index = SHC$Eq$Index + 1
+ 
+                # Increase the amount of default fuel since their are
+                # aircraft on board.  This value will be superceeded by any
+                # user entered amount.  SMM 5/97 (E1635)
+                SHC$TNK$Index = AviationFuelTank$Index
+                SHC$TNK$Capacity$F = 999999999.
+                putSHC$TNK$Capacity$F
+                }
+ 
+            #$% increment pointer
+            pnt = pnt + 3
+            next
+           }
+ 
+        ELSE if(rec[pnt] == 'SFUEL')    # joa 2/96 (E1467)
+          {
+            SHC$TNK$Index = ShipFuelTank$Index
+            putSHC$TNK$Capacity$F ( rec[pnt+1] )
+            pnt = pnt + 2
+          }
+        ELSE if(rec[pnt] == 'AFUEL')    # joa 2/96 (E1467)
+          {
+            SHC$TNK$Index = AviationFuelTank$Index
+            putSHC$TNK$Capacity$F ( rec[pnt+1] )
+            pnt = pnt + 2
+          }
+        ELSE if(rec[pnt] == 'LASF')    # joa 2/96 (E1467)
+          {
+            SHC$TNK$Index = ShipFuelTank$Index
+            putSHC$TNK$LethalArea$F ( rec[pnt+1]/100. )
+            pnt = pnt + 2
+          }
+        ELSE if(rec[pnt] == 'LAAF')    # joa 2/96 (E1467)
+          {
+            SHC$TNK$Index = AviationFuelTank$Index
+            putSHC$TNK$LethalArea$F ( rec[pnt+1]/100. )
+            pnt = pnt + 2
+          }
+        ELSE if(rec[pnt] == 'SFC')    # joa 2/96 (E1467)
+          {
+            for (SHC$BRN$Index = 1; SHC$BRN$Index <= SHC$BRN$Slots;
+                 SHC$BRN$Index = SHC$BRN$Index + 1)
+              {
+                putSHC$BRN$Rate$F ( rec[pnt+shc$BRN$index] )
+              }
+            if (shc$CruiseSpeed$i == 0) # Could have been set by vcru
+              {                         # joa 3/96 (E1467)
+               SHC$CruiseSpeed$I = INT (GetShipCruiseSpeed (SHC$Pointer))
+               putSHC$CruiseSpeed$I
+              }
+ 
+            pnt = pnt + 8
+          }
+        ELSE if(rec[pnt] == 'SFRES')    # joa 2/96 (E1467)
+          {
+            putSHC$PCTShipFuelReserve$F (rec[pnt+1]/100.)
+            pnt = pnt + 2
+          }
+        ELSE if(rec[pnt] == 'UNREP')    # Hoses determines capability    # joa 2/96 (E1467)
+          {
+            pnt = pnt + 2
+          }
+        ELSE if(rec[pnt] == 'FHOSE')    # joa 2/96 (E1467)
+          {
+            putSHC$FuelHoses$I ( int(rec[pnt+1]) )
+            putSHC$FuelTransferRate$I ( int(rec[pnt+2]) )
+            pnt = pnt + 3
+          }
+        ELSE if(rec[pnt] == 'FUSTA')    # Ship refuel stations
+          {                             # joa 3/96 (E1467)
+           SHC$TNK$Index = ShipFuelTank$Index
+           putSHC$TNK$FillTubes$I ( int(rec[pnt+1]) )
+           pnt = pnt + 2
+          }
+        ELSE if(rec[pnt] == 'JPSTA')    # Ship aviation refuel stations
+          {                             # joa 3/96 (E1467)
+           SHC$TNK$Index = AviationFuelTank$Index
+           putSHC$TNK$FillTubes$I ( int(rec[pnt+1]) )
+           pnt = pnt + 2
+          }
+ 
+        #$% ELSE if array word is BBD
+        ELSE if(rec[pnt] == 'BBD')
+            {
+            pnt = pnt + 7
+            }
+        #$% ELSE if array word is BBN
+        ELSE if (rec[pnt] == 'BBN')
+            {
+            #$% increment pointer by number of acoustic noise positions
+            pnt = pnt + 7
+            }
+        #$% ELSE if array word is Horizontal Antenna coverage, handle later
+        ELSE if (rec[pnt] == 'ANT-H')
+            {
+            #$% increment pointer by number of acoustic noise positions
+            pnt = pnt + 4
+            }
+        #$% if array word is BLIP
+        ELSE if(rec[pnt] == 'BLIP')
+            {
+            #$% if next word is YES
+            if(rec[pnt+1] == 'YES')
+                {
+                #$% look for blip equipment in bomb array table
+                call eqfind($$BOM,BOM$ENTRY,rec[pnt],BOM$POINTER)
+ 
+                #$% if found
+                if (BOM$POINTER != 0)
+                    {
+                    #$% set equipment pointer in SHC to bomb pointer & save
+                    SHC$EQ$PNTR$I = BOM$POINTER
+                    PUTSHC$EQ$PNTR$I
+                    }
+ 
+                #$% set equipment ID as BLIP and save
+                SHC$Eq$Ident$I = $BLIP$CODE
+                PUTSHC$Eq$Ident$I
+ 
+                #$% set REMAINING field for BLIP capabilities
+                putSHC$Eq$Remaining$I(1)
+ 
+                # increment number of equipment types for later table trimming
+                SHC$NbrEqItems$I = SHC$NbrEqItems$I + 1
+ 
+                # increment index into Equipment subtable
+                SHC$Eq$Index = SHC$Eq$Index + 1
+                }
+ 
+            #$% increment pointer
+            pnt = pnt + 2
+            next
+            }
+ 
+        #$% ELSE if first array word is BUOY
+        ELSE if(rec[pnt] == 'BUOY')
+            {
+            #$% if third array word is SONO
+            if(rec[pnt+2] == 'SONO')
+                {
+                #$% look for sonobuoy equipment
+                call eqfind($$sob,sob$entry,rec[pnt+1],sob$pointer)
+ 
+                #$% if found
+                if (sob$pointer != 0)
+                    {
+                    #$% get sonobuoy characteristics and save
+                    SHC$Eq$Ident$I = $SONOBUOY$CODE
+                    PUTSHC$Eq$Ident$I
+                    SHC$Eq$Pntr$I = SOB$POINTER
+                    PUTSHC$Eq$Pntr$I
+                    SHC$Eq$Remaining$I = rec[pnt+3]
+                    PUTSHC$Eq$Remaining$I
+ 
+                    # increment number of eq for later table trimming
+                    SHC$NbrEqItems$I = SHC$NbrEqItems$I + 1
+ 
+                    # increment index into Equipment subtable
+                    SHC$Eq$Index = SHC$Eq$Index + 1
+                    }
+                }
+ 
+            #$% else if commbuoy
+            else if(rec[pnt+2] == 'COMM')
+                {
+                call eqfind($$cob,cob$entry,rec[pnt+1],cob$pointer)
+ 
+                #$% if found
+                if(cob$pointer != 0)
+                    {
+                    #$% get commbuoy data
+                    SHC$Eq$Ident$I = $COMMBUOY$CODE
+                    PUTSHC$Eq$Ident$I
+                    SHC$Eq$Pntr$I = COB$POINTER
+                    PUTSHC$Eq$Pntr$I
+                    SHC$Eq$Remaining$I = rec[pnt+3]
+                    PUTSHC$Eq$Remaining$I
+ 
+                    # increment number of eq for later table trimming
+                    SHC$NbrEqItems$I = SHC$NbrEqItems$I + 1
+ 
+                    # increment index into Equipment subtable
+                    SHC$Eq$Index = SHC$Eq$Index + 1
+                    }
+                }
+            #$% else if countermeasure
+            else if(rec[pnt+2] == 'CM')
+                {
+                call eqfind($$ctm,ctm$entry,rec[pnt+1],ctm$pointer)
+ 
+                #$% if found
+                if(ctm$pointer != 0)
+                    {
+                    #$% get commbuoy data
+                    SHC$Eq$Ident$I = $COUNTERMEASURE$CODE
+                    PUTSHC$Eq$Ident$I
+                    SHC$Eq$Pntr$I = CTM$POINTER
+                    PUTSHC$Eq$Pntr$I
+                    SHC$Eq$Remaining$I = rec[pnt+3]
+                    PUTSHC$Eq$Remaining$I
+ 
+                    # increment number of eq for later table trimming
+                    SHC$NbrEqItems$I = SHC$NbrEqItems$I + 1
+ 
+                    # increment index into Equipment subtable
+                    SHC$Eq$Index = SHC$Eq$Index + 1
+                    }
+                }    #end if countermeasure..
+ 
+            #$% increment pointer
+            pnt = pnt + 4
+            next
+            }   #end if BUOY
+ 
+        #$% else if array word is CBUOY (countermeasure)
+        else if(rec[pnt] == 'CBUOY')
+            {
+            call eqfind($$ctm,ctm$entry,rec[pnt+1],ctm$pointer)
+ 
+            #$% if found
+            if(ctm$pointer != 0)
+                {
+                #$% put data
+                SHC$Eq$Ident$I = $COUNTERMEASURE$CODE
+                PUTSHC$Eq$Ident$I
+                SHC$Eq$Pntr$I = CTM$POINTER
+                PUTSHC$Eq$Pntr$I
+                SHC$Eq$Remaining$I = rec[pnt+2]
+                PUTSHC$Eq$Remaining$I
+ 
+                #$%increment number of eq for later table trimming
+                SHC$NbrEqItems$I = SHC$NbrEqItems$I + 1
+ 
+                # increment index into Equipment subtable
+                SHC$Eq$Index = SHC$Eq$Index + 1
+                }
+ 
+            #$% increment pointer
+            pnt = pnt + 3
+            next
+            }
+ 
+            #$% else if CHAFF
+        ELSE if(rec[pnt] == 'CHAFF')            # jb 7/12/90
+            {
+            call eqfind($$chf,chf$entry,rec[pnt+1],chf$pointer)
+ 
+            #$% if found
+            if(chf$pointer != 0)
+                {
+                #$% CHAFF data
+                SHC$Eq$Ident$I = $CHAFF$CODE
+                PUTSHC$Eq$Ident$I
+                SHC$Eq$Pntr$I = CHF$POINTER
+                PUTSHC$Eq$Pntr$I
+                SHC$Eq$Remaining$I = rec[pnt+2]    # jb    7/16/90
+                PUTSHC$Eq$Remaining$I
+ 
+                # increment number of eq for later table trimming
+                SHC$NbrEqItems$I = SHC$NbrEqItems$I + 1
+ 
+                # increment index into Equipment subtable
+                SHC$Eq$Index = SHC$Eq$Index + 1
+                }
+            #$% increment pointer
+            pnt = pnt + 3
+            next
+            }    # End if (rec[pnt] == 'CHAFF')
+ 
+         #$% ELSE if array word is CLRNG
+        ELSE if(rec[pnt] == 'CLRNG')
+            {
+            SHC$CLASSRANGE$I = rec[pnt+1]
+            PUTSHC$CLASSRANGE$I
+ 
+            #$% increment pointer
+            pnt = pnt + 2
+            next
+            }
+ 
+        #$% ELSE if array word is COMMS
+        ELSE if(rec[pnt] == 'COMMS')
+            {
+            #$% look for communications suite
+            call eqfind($$sui,sui$entry,rec[pnt+1],sui$pointer)
+ 
+            #$% if found
+            if(sui$pointer != 0)
+                {
+                #$% get communications suite data and save
+                SHC$Eq$Ident$I = $COMMSUITE$CODE
+                PUTSHC$Eq$Ident$I
+                SHC$Eq$Pntr$I = SUI$POINTER
+                PUTSHC$Eq$Pntr$I
+                SHC$Eq$AntHeight$I = rec[pnt+2]
+                PUTSHC$Eq$AntHeight$I
+ 
+                IF (SHC$Eq$AntHeight$i > maxhgt) maxhgt = SHC$Eq$AntHeight$i
+ 
+#XXX                SHC$OkToSend$I = $yes
+#XXX                PUTSHC$OkToSend$I
+ 
+                # increment number of equipment types for later table trimming
+                SHC$NbrEqItems$I = SHC$NbrEqItems$I + 1
+ 
+                # increment index into Equipment subtable
+                SHC$Eq$Index = SHC$Eq$Index + 1
+ 
+                } #$% increment pointer
+                pnt = pnt + 3
+                next
+            }
+ 
+        #$% ELSE if equipment type is Improved torpedo
+        ELSE if(rec[pnt] == 'TRPDO')
+            {
+            #$% look for new torpedo characteristics
+            call eqfind($$TRP,trp$entry,rec[pnt+1],trp$pointer)
+ 
+            #$% if torpedo characteristics found
+            if(trp$pointer != 0)
+                {
+                #$% get pertinent info and save
+                SHC$Eq$Ident$I = $SmartTorpedo$Code
+                PUTSHC$Eq$Ident$I
+                SHC$Eq$Pntr$I = trp$Pointer
+                PUTSHC$Eq$Pntr$I
+                SHC$Eq$Remaining$I = rec[pnt+2]
+                PUTSHC$Eq$Remaining$I
+ 
+                # increment number of equipment types for later table trimming
+                SHC$NbrEqItems$I = SHC$NbrEqItems$I + 1
+ 
+                # increment index into Equipment subtable
+                SHC$Eq$Index = SHC$Eq$Index + 1
+                }
+ 
+            #$% increment pointer
+            pnt = pnt + 3
+            next
+            } # end if improved torpedo characteristics
+ 
+        #$% ELSE if array word is HFDF
+        ELSE if(rec[pnt] == 'HFDF')
+            {
+            #$% look for HFDF equipment in bomb array table
+            call eqfind($$BOM,BOM$ENTRY,rec[pnt],BOM$POINTER)
+ 
+            #$% if found
+            if (BOM$POINTER != 0)
+                {
+                #$% set dyn equipment pointer to bomb table pointer & save
+                SHC$Eq$Pntr$I = BOM$POINTER
+                PUTSHC$Eq$Pntr$I
+                }
+ 
+            #$% set dyn equipment ID to HFDF and save
+            SHC$Eq$Ident$I = $HFDF$CODE
+            PUTSHC$Eq$Ident$I
+ 
+            # increment number of equipment types for later table trimming
+            SHC$NbrEqItems$I = SHC$NbrEqItems$I + 1
+ 
+            # increment index into Equipment subtable
+            SHC$Eq$Index = SHC$Eq$Index + 1
+ 
+ 
+            #$% increment pointer
+            pnt = pnt + 2
+            next
+            }
+ 
+        #$% ELSE if array word is DRATE
+        ELSE if(rec[pnt] == 'DRATE')
+            {
+            #$% get dive/climb rate (for submarines) & save
+            SHC$DIVECLIMBRATE$I = rec[pnt+1]
+            PUTSHC$DIVECLIMBRATE$I
+            #$% increment pointer
+            pnt = pnt + 2
+            next
+            }
+ 
+        #$% ELSE if array word is DEPTH
+        ELSE if(rec[pnt] == 'DEPTH')
+            {
+            #$% get max dive depth (for submarines) & save
+            SHC$MaxDepth$I = rec[pnt+1]
+            PUTSHC$MaxDepth$I
+            #$% increment pointer
+            pnt = pnt + 2
+            next
+            }
+ 
+        #$% ELSE if array word is DTRNG
+        ELSE if(rec[pnt] == 'DTRNG')
+            {
+            #$% get visual detection range and save
+            SHC$DETECTRANGE$I = rec[pnt+1]
+            PUTSHC$DETECTRANGE$I
+            #$% increment pointer
+            pnt = pnt + 2
+            next
+            }
+ 
+        #$% ELSE if array word is DECM
+        ELSE if(rec[pnt] == 'DECM')
+            {
+            #$% if next array word is YES
+            if(rec[pnt+1] == 'YES')
+                {
+                #$% look for DECM equipment in bomb table
+                call eqfind($$BOM,BOM$ENTRY,rec[pnt],BOM$POINTER)
+ 
+                #$% if found
+                if (BOM$POINTER != 0)
+                    {
+                    #$% set dyn equipment pointer to bomb pointer & save
+                    SHC$Eq$Pntr$I = BOM$POINTER
+                    PUTSHC$Eq$Pntr$I
+                    }
+ 
+                #$% set dyn equipment ID to DECM and save
+                SHC$Eq$Ident$I = $DECM$CODE
+                PUTSHC$Eq$Ident$I
+ 
+                #$% set REMAINING field for DECM capabilities
+                putSHC$Eq$Remaining$I(1)
+ 
+                # increment number of equipment types for later table trimming
+                SHC$NbrEqItems$I = SHC$NbrEqItems$I + 1
+ 
+                # increment index into Equipment subtable
+                SHC$Eq$Index = SHC$Eq$Index + 1
+                }
+ 
+            #$% increment pointer
+            pnt = pnt + 2
+            next
+            }
+ 
+        #$% ELSE if word in array is JAMMR
+        ELSE if(rec[pnt] == 'JAMMR')
+            {
+            #$% look for jammer equipment
+            call eqfind($$jam,jam$entry,rec[pnt+1],jam$pointer)
+ 
+            #$% if found
+            if(jam$pointer != 0)
+                {
+                #$% get jammer equipment data
+                if (jecewsi$game != $yes)
+                   SHC$Eq$Ident$I = $JAMMER$CODE # RESA game so just a jammer - JFR 8/8/94
+                else # it's a jecewsi game - JFR 8/8/94
+                   {
+                    jam$category$I = xjam$category$i # get category - JFR 8/8/94
+                    # jecewsi initialization output message
+                    if (trace$jecewsi == $yes) call echov("Jammer of category ") # JFR 8/26/94
+                    if (jam$category$i == $radarjammer$code)  # JFR 8/8/94 (jecewsi)
+                        {
+                         SHC$Eq$Ident$I = $radarjammer$code   # JFR 8/8/94 (jecewsi)
+                         if (trace$jecewsi == $yes)
+                            call echov(" Radar Jammer ")      # JFR 8/26/94
+                        }
+                    if (jam$category$i == $communicationjammer$code) # JFR 8/8/94 (jecewsi)
+                        {
+                         SHC$Eq$Ident$I = $communicationjammer$code  # JFR 8/8/94 (jecewsi)
+                         if (trace$jecewsi == $yes)
+                            call echov(" Communications Jammer ")# JFR 8/26/94
+                        }
+                    if (jam$category$i == $RadComjammer$code) # JFR 8/8/94 (jecewsi)
+                        {
+                         SHC$Eq$Ident$I = $RadComjammer$code  # JFR 8/8/94 (jecewsi)
+                         if (trace$jecewsi == $yes)
+                            call echov(" Radar and Communications Jammer ") # JFR 8/8/94 (jecewsi)
+                        }
+                    if (trace$jecewsi == $yes)
+                       {
+                        call echov(" added to ship class ")   # JFR 8/26/94
+                        call echoh(shc$type$c,5)              # JFR 8/26/94
+                        call echor                            # JFR 8/26/94
+                       }
+                   }
+                PUTSHC$Eq$Ident$I
+                SHC$Eq$AntHeight$I = rec[pnt+2]
+                PUTSHC$Eq$AntHeight$I
+                if (SHC$Eq$AntHeight$i > maxhgt) maxhgt = SHC$Eq$AntHeight$i
+                SHC$Eq$Pntr$I = JAM$POINTER
+                PUTSHC$Eq$Pntr$I
+ 
+                # increment number of equipment types for later table trimming
+                SHC$NbrEqItems$I = SHC$NbrEqItems$I + 1
+ 
+                # increment index into Equipment subtable
+                SHC$Eq$Index = SHC$Eq$Index + 1
+ 
+                }
+ 
+            #$% increment pointer
+            pnt = pnt + 3
+            next
+            }
+        #$% ELSE if word in array is IFF
+        ELSE if(rec[pnt] == 'IFF')
+            {
+            #$% look for iff equipment
+            call eqfind($$iff,iff$entry,rec[pnt+1],iff$pointer)
+ 
+            #$% if found
+            if(iff$pointer != 0)
+                {
+                #$% get iff equipment data
+                SHC$Eq$Ident$I = $IFF$CODE
+                PUTSHC$Eq$Ident$I
+                SHC$Eq$AntHeight$I = rec[pnt+2]
+                PUTSHC$Eq$AntHeight$I
+                if (SHC$Eq$AntHeight$i > maxhgt) maxhgt = SHC$Eq$AntHeight$i
+                SHC$Eq$Pntr$I = IFF$POINTER
+                PUTSHC$Eq$Pntr$I
+ 
+                # increment number of equipment types for later table trimming
+                SHC$NbrEqItems$I = SHC$NbrEqItems$I + 1
+ 
+                # increment index into Equipment subtable
+                SHC$Eq$Index = SHC$Eq$Index + 1
+ 
+                }
+ 
+            #$% increment pointer
+            pnt = pnt + 3
+            next
+            }
+ 
+        #$% ELSE if word in array is Ground Unit   reh 12/89
+        ELSE if(rec[pnt] == 'GRND')
+            {
+            #$% look for gnd unit equipment
+            call eqfind($$gnd,gnd$entry,rec[pnt+1],gnd$pointer)
+ 
+            #$% if found
+            if(gnd$pointer != 0)
+                {
+                #$% get ground unit data
+                SHC$Eq$Ident$I = $GND$CODE
+                PUTSHC$Eq$Ident$I
+ 
+                # number of ground units
+                SHC$Eq$Remaining$i = rec [ pnt + 2 ]
+                PUTSHC$Eq$Remaining$i
+ 
+                SHC$Eq$Pntr$I = GND$POINTER
+                PUTSHC$Eq$Pntr$I
+ 
+                # increment number of equipment types for later table trimming
+                SHC$NbrEqItems$I = SHC$NbrEqItems$I + 1
+ 
+                # increment index into Equipment subtable
+                SHC$Eq$Index = SHC$Eq$Index + 1
+ 
+                }
+ 
+            #$% increment pointer
+            pnt = pnt + 3
+            next
+            }
+ 
+        #$% ELSE if word in array is CJAMR  # REH 04/88
+        ELSE if(rec[pnt] == 'CJAMR')
+            {
+            #$% look for jammer equipment
+            call eqfind($$cjc,cjc$entry,rec[pnt+1],cjc$pointer)
+ 
+            #$% if found
+            if(cjc$pointer != 0)
+                {
+                #$% get Commjammer equipment data
+                SHC$Eq$Ident$I = $COMMUNICATIONJAMMER$CODE
+                PUTSHC$Eq$Ident$I
+                SHC$Eq$AntHeight$I = rec[pnt+2]
+                PUTSHC$Eq$AntHeight$I
+                if (SHC$Eq$AntHeight$i > maxhgt) maxhgt = SHC$Eq$AntHeight$i
+                SHC$Eq$Pntr$I = CJC$POINTER
+                PUTSHC$Eq$Pntr$I
+ 
+                # increment number of equipment types for later table trimming
+                SHC$NbrEqItems$I = SHC$NbrEqItems$I + 1
+ 
+                # increment index into Equipment subtable
+                SHC$Eq$Index = SHC$Eq$Index + 1
+ 
+                }
+ 
+            #$% increment pointer
+            pnt = pnt + 3
+            next
+            }
+ 
+        #$% if array word is JP or FUEL
+        ELSE if(rec[pnt] == 'JP' |
+                rec[pnt] == 'FUEL'  )
+            {
+            #$% look for `Fuel' equipment in bomb array table
+#            call eqfind($$BOM,BOM$ENTRY,"FUEL    ",BOM$POINTER)
+            call eqfind($$BOM,BOM$ENTRY,CfindFUEL,BOM$POINTER) # jb E2144 8/8/00
+ 
+            #$% if found
+            if (BOM$POINTER != 0)
+                {
+                #$% set equipment pointer in SHC to bomb pointer & save
+                SHC$EQ$PNTR$I = BOM$POINTER
+                PUTSHC$EQ$PNTR$I
+ 
+                #$% set equipment ID as FUEL and save
+                SHC$Eq$Ident$I = $FUEL$CODE
+                PUTSHC$Eq$Ident$I
+ 
+                SHC$Eq$Remaining$I = rec[pnt+1]
+                putSHC$Eq$Remaining$I
+ 
+                boatfuel = shc$eq$remaining$i       # used below
+ 
+                # increment number of equipment types for later table trimming
+                SHC$NbrEqItems$I = SHC$NbrEqItems$I + 1
+ 
+                if (rec[pnt] == 'JP') shc$tnk$index = AviationFuelTank$index  # joa 2/96 (E1467)
+                else                  shc$tnk$index = ShipFuelTank$index      # joa 2/96 (E1467)
+                putSHC$TNK$Capacity$F (float(SHC$EQ$Remaining$I))
+ 
+                # increment index into Equipment subtable
+                SHC$Eq$Index = SHC$Eq$Index + 1
+                }
+ 
+            #$% increment pointer
+            pnt = pnt + 2
+            next
+            }
+ 
+        else if (rec[pnt] == 'CEC')              # clk 10/96 (E1695)
+          {
+           if (rec[pnt+1] == 'YES')
+             SHC$CECCapable$I = $yes
+           else
+             SHC$CECCapable$I = $no
+           putSHC$CECCapable$I
+           pnt = pnt + 2
+           next
+          }
+ 
+        ELSE if (rec[pnt] == 'DOMAI')    # joa 11/95 (E1422)
+          {
+           if (rec[pnt+1]      == 'LAND')
+             SHC$Domain$I = $LandOp$code
+           else if (rec[pnt+1] == 'AMPHI')
+             SHC$Domain$I = $AmphibOp$code
+           else if (rec[pnt+1] == 'WATER')
+             SHC$Domain$I = $WaterOp$code
+           putSHC$Domain$I
+ 
+           pnt = pnt + 2
+           next
+          }
+ 
+        else if (rec[pnt] == 'JTIDS')            # clk 11/95 (E1469)
+          {
+           if (rec[pnt+1] == 'YES')
+             SHC$JTIDSCapable$I = $yes
+           else
+             SHC$JTIDSCapable$I = $no
+           putSHC$JTIDSCapable$I
+           pnt = pnt + 2
+           next
+          }
+ 
+        ELSE if(rec[pnt] == 'KEEL')            # ELSE if array word is KEEL
+            {
+            #$% get keel depth and save
+            SHC$KEELDEPTH$I = rec[pnt+1]
+            PUTSHC$KEELDEPTH$I
+            #$% increment pointer
+            pnt = pnt + 2
+            next
+            }
+ 
+        #$% ELSE if array word is LAAIR
+        ELSE if(rec[pnt] == 'LAAIR')
+            {
+            #$% get lethel area of parked aircraft and save
+            SHC$LETHALAREAAC$F = rec[pnt+1]/100.
+            PUTSHC$LETHALAREAAC$F
+            #$% increment pointer
+            pnt = pnt + 2
+            next
+            }
+ 
+        #$% if array word is LACOM
+        ELSE if(rec[pnt] == 'LACOM')
+            {
+            #$% get lethel area of comm equipment and save
+            SHC$LETHALAREACOMM$F = rec[pnt+1]/100.
+            PUTSHC$LETHALAREACOMM$F
+            #$% increment pointer
+            pnt = pnt + 2
+            next
+            }
+ 
+        #$% ELSE if array word is LAFLD
+        ELSE if(rec[pnt] == 'LAFLD')
+            {
+            #$% get lethel area of flooding and save
+            SHC$PROBSINK$F = rec[pnt+1]/100.
+            PUTSHC$PROBSINK$F
+            #$% increment pointer
+            pnt = pnt + 2
+            next
+            }
+ 
+        #$% ELSE if array word is LAJP
+        ELSE if(rec[pnt] == 'LAJP')
+            {
+            #$% get lethel area of fuel and save
+            #$% separate tanks replace general LeathalAreaFuel
+            SHC$TNK$Index = AviationFuelTank$Index        # joa 2/96 (E1467)
+            putSHC$TNK$LethalArea$F ( rec[pnt+1]/100. )
+ 
+            #$% increment pointer
+            pnt = pnt + 2
+            next
+            }
+ 
+        #$% ELSE if array word is LASAM
+        ELSE if(rec[pnt] == 'LASAM')
+            {
+            #$% get lethel area of installed SAM sites and save
+            SHC$LETHALAREASAMSITES$F = rec[pnt+1]/100.
+            PUTSHC$LETHALAREASAMSITES$F
+            #$% increment pointer
+            pnt = pnt + 2
+            next
+            }
+ 
+        #$% ELSE if array word is LASEN
+        ELSE if(rec[pnt] == 'LASEN')
+            {
+            #$% get sensor lethel area and save
+            SHC$LETHALAREASENSOR$F = rec[pnt+1]/100.
+            PUTSHC$LETHALAREASENSOR$F
+            #$% increment pointer
+            pnt = pnt + 2
+            next
+            }
+ 
+        #$% ELSE if array word is LASPD
+        ELSE if(rec[pnt] == 'LASPD')
+            {
+            #$% get ships maximum speed capability and save
+            SHC$LETHALAREAMAXSPEED$F = rec[pnt+1]/100.
+            PUTSHC$LETHALAREAMAXSPEED$F
+            #$% increment pointer
+            pnt = pnt + 2
+            next
+            }
+ 
+        #$% ELSE if array is LASTO
+        ELSE if(rec[pnt] == 'LASTO')
+            {
+            #$% get lethal area of stores and save
+            SHC$LETHALAREASTORES$F = rec[pnt+1]/100.
+            PUTSHC$LETHALAREASTORES$F
+            #$% increment pointer
+            pnt = pnt + 2
+            next
+            }
+ 
+        #$% ELSE if array word is LAT
+        ELSE if(rec[pnt] == 'LAT')
+            {
+             if (pnt == 4)
+                {
+                 SHC$Category$I = $Shorebase$Code # set to 7
+                 putSHC$Category$I
+ 
+                 putSHC$ALSPSharedBase$I  ($no)       # default values for base ownership
+                 putSHC$ALSPOwnedBase$I   ($yes)      # when doing ALSP - clk 9/95 (E1455)
+ 
+                 # Increase the amount of default fuel since this is a shore
+                 # base and set a default number of fuel hoses and a default
+                 # fuel transfer rate.
+                 # This value will be superceeded by any user entered amount.
+                 # SMM 5/97 (E1635)
+                 SHC$TNK$Index = AviationFuelTank$Index
+                 SHC$TNK$Capacity$F = 999999999.
+                 putSHC$TNK$Capacity$F
+ 
+                 SHC$TNK$Index = ShipFuelTank$Index
+                 SHC$TNK$Capacity$F = 999999999.
+                 putSHC$TNK$Capacity$F
+ 
+                 putSHC$FuelHoses$I (8)
+                 putSHC$FuelTransferRate$I (99000)
+                }
+            #$% increment pointer
+            pnt = pnt + 2
+            next
+            }
+ 
+        #$% ELSE if array word is LAWPN
+        ELSE if(rec[pnt] == 'LAWPN')
+            {
+            #$% get lethal area of weapons and save
+            SHC$LETHALAREAWEAPONS$F = rec[pnt+1]/100.
+            PUTSHC$LETHALAREAWEAPONS$F
+            #$% increment pointer
+            pnt = pnt + 2
+            next
+            }
+ 
+        #$% ELSE if array word is LCHRT
+        ELSE if(rec[pnt] == 'LCHRT')
+            {
+            #$% get launch rate and save
+            SHC$LAUNCHRATE$F = rec[pnt+1]
+            PUTSHC$LAUNCHRATE$F
+            #$% increment pointer
+            pnt = pnt + 2
+            next
+            }
+ 
+        #$% ELSE if array word is LDELY
+        ELSE if(rec[pnt] == 'LDELY')        # Sm.Boat    5/10/89
+            {
+            #$% get boat's nominal delay before launch
+            SHC$LAUNCHDELAY$I = rec[pnt+1]
+            PUTSHC$LAUNCHDELAY$I
+            PUTSHC$SmallBoat$I    ($YES)    # jb     5/10/89
+            #$% increment pointer
+            pnt = pnt + 2
+            next
+            }
+ 
+ 
+        #$% ELSE if array word is LONG
+        ELSE if(rec[pnt] == 'LONG')
+            {
+            #$% increment pointer
+            pnt = pnt + 2
+            next
+            }
+ 
+        #$% ELSE if array word is MISS
+        ELSE if(rec[pnt] == 'MISS')
+            {
+            #$% look for missiles in equipment
+            call eqfind($$cmc,cmc$entry,rec[pnt+1],cmc$pointer)
+ 
+            #$% if found
+            if(cmc$pointer != 0)
+                {
+                #$% get missile data and save
+                CMC$Cat$I = xCMC$Cat$I  # SMM 11/93  SAM added to CMC table
+                if (CMC$Cat$I == $NewSAM$Code)
+                    {
+                     SHC$EQ$IDENT$I = $AdvancedSAM$Code
+                     putSHC$AdvancedSAMsLoaded$I ($yes)
+                    }
+                else
+                    SHC$EQ$IDENT$I = $CRUISEMISSILE$CODE
+                PUTSHC$Eq$Ident$I
+ 
+                SHC$Eq$Pntr$I      = CMC$POINTER
+                PUTSHC$Eq$Pntr$I
+ 
+                SHC$Eq$Remaining$I = rec[pnt+3]
+                PUTSHC$Eq$Remaining$I
+ 
+                # increment number of equipment types for later table trimming
+                SHC$NbrEqItems$I = SHC$NbrEqItems$I + 1
+ 
+                # increment index into Equipment subtable
+                SHC$Eq$Index = SHC$Eq$Index + 1
+ 
+                }
+ 
+            #$% increment pointer
+            pnt = pnt + 4
+            next
+            }
+ 
+        else if(rec[pnt] == 'NOMEN')  # jb E2209  11/29/00
+           {
+           SHC$Fullname$V = ""
+           kk = 0
+           call vmovh (rec[pnt+1], 24, SHC$Fullname$V, kk)
+           putSHC$Fullname$V
+           pnt = pnt + 4
+           }
+        else if(rec[pnt] == 'UDB')  # jb E2209  11/29/00
+           {
+           if      (rec[pnt+1] == 'YES') putSHC$UDB$i ($YES)
+           else if (rec[pnt+1] != 'NO')  putSHC$UDB$i (!$NO)
+           pnt = pnt + 2
+           }
+ 
+        #$% ELSE if array word is one of the following
+        ELSE if(rec[pnt] == 'NAV' |
+                rec[pnt] == 'DR' |
+                rec[pnt] == 'HDG' |
+                rec[pnt] == 'OMEGA' |
+                rec[pnt] == 'SPD' |
+                rec[pnt] == 'TRANS')
+            {
+            #$% look for navigation equipment
+            call eqfind($$NAV,NAV$ENTRY,rec[pnt+1],NAV$POINTER)
+ 
+            #$% if found
+            if(NAV$POINTER != 0)
+                {
+                #$% set NAV sensor and store equipment ID
+                SHC$EQ$IDENT$I = $NAVSENSOR$CODE
+                PUTSHC$EQ$IDENT$I
+ 
+                #$% set NAV pointer and store equipment pointer
+                SHC$EQ$PNTR$I = NAV$POINTER
+                PUTSHC$EQ$PNTR$I
+ 
+                #$% increment number of equipment items
+                SHC$NBREQITEMS$I = SHC$NBREQITEMS$I + 1
+ 
+                #$% increment equipment index
+                SHC$EQ$INDEX = SHC$EQ$INDEX + 1
+                }
+ 
+            #$% increment pointer
+            pnt = pnt + 2
+            next
+            }
+ 
+        #$% ELSE if array word is NBUOY
+        ELSE if(rec[pnt] == 'NBUOY')
+            {
+            #$% look for equipment in commbuoy table
+            call eqfind($$COB,COB$ENTRY,rec[pnt+1],COB$POINTER)
+ 
+            #$% if found
+            if(COB$POINTER != 0)
+                {
+                #$% get commbuoy data
+                SHC$Eq$Ident$I = $COMMBUOY$CODE
+                PUTSHC$Eq$Ident$I
+                SHC$Eq$Pntr$I = COB$POINTER
+                PUTSHC$Eq$Pntr$I
+                SHC$Eq$Remaining$I = rec[pnt+2]
+                PUTSHC$Eq$Remaining$I
+ 
+                # increment number of equipment types for later table trimming
+                SHC$NbrEqItems$I = SHC$NbrEqItems$I + 1
+ 
+                # increment index into Equipment subtable
+                SHC$Eq$Index = SHC$Eq$Index + 1
+                }
+            #$% increment pointer
+            pnt = pnt + 3
+            next
+            }
+ 
+        #$% ELSE if array word is PBFAL            # Sm.Boat    5/10/89
+        ELSE if(rec[pnt] == 'PBFAL')
+            {
+            #$% get boat's PROPULSION failure Prob.
+            SHC$PBPROPFAIL$F = rec[pnt+1]/100.0
+            PUTSHC$PBPROPFAIL$F
+            #$% increment pointer
+            pnt = pnt + 2
+            next
+            }
+ 
+        ELSE if(rec[pnt] == 'PSCOP')            # ELSE if array word is PSCOP
+            {
+            #$% get keel depth and save
+            SHC$ScopeDepth$I = rec[pnt+1]
+            PUTSHC$ScopeDepth$I
+            #$% increment pointer
+            pnt = pnt + 2
+            next
+            }
+ 
+        #$% ELSE if array word is RANGE        # Sm.Boat            5/10/89
+        ELSE if(rec[pnt] == 'RANGE')
+            {
+            #$% get boat's nominal endurance (n.miles)
+            SHC$ENDURANCE$I = rec[pnt+1]
+            PUTSHC$ENDURANCE$I
+            #$% increment pointer
+            pnt = pnt + 2
+            next
+            }
+ 
+        #$% ELSE if array word is RBOC and next word is zero
+        ELSE if(rec[pnt] == 'RBOC')
+            {
+ 
+            if (rec[pnt+1] == 0)                                # CLF 1/23/86
+                {
+                pnt = pnt + 3                           # CLF 1/23/86
+                next                                    # CLF 1/23/86
+                }
+ 
+            #$% look for RBOC equipment in bomb table
+            call eqfind($$BOM,BOM$ENTRY,rec[pnt],BOM$POINTER)
+ 
+            #$% if found
+            if (BOM$POINTER != 0)
+                {
+                #$% get RBOC data
+                SHC$Eq$Ident$I = $RBOC$CODE
+                PUTSHC$Eq$Ident$I
+                SHC$Eq$Pntr$I = BOM$POINTER
+                PUTSHC$Eq$Pntr$I
+                SHC$Eq$Limit$I = rec[pnt+1]
+                PUTSHC$Eq$Limit$I
+                SHC$Eq$RemainING$I = rec[pnt+2]
+                PUTSHC$Eq$RemainING$I
+ 
+                # increment number of equipment types for later table trimming
+                SHC$NbrEqItems$I = SHC$NbrEqItems$I + 1
+ 
+                # increment index into Equipment subtable
+                SHC$Eq$Index = SHC$Eq$Index + 1
+                }
+ 
+            pnt = pnt + 3
+            next
+            }
+ 
+        #$% ELSE if array word is RDESM
+        ELSE if(rec[pnt] == 'RDESM')
+            {
+            #$% reset flag
+            cflg = $no
+ 
+            #$% look for radar equipment if radar table
+            call eqfind($$rad,rad$entry,rec[pnt+1],rad$pointer)
+ 
+            #$% if found
+            if(rad$pointer != 0)
+                {
+                #$% get radar data and save
+                SHC$Eq$Ident$I = $RADAR$CODE
+                PUTSHC$Eq$Ident$I
+                SHC$Eq$Pntr$I = RAD$POINTER
+                PUTSHC$Eq$Pntr$I
+                SHC$Eq$AntHeight$I = rec[pnt+2]
+                PUTSHC$Eq$AntHeight$I
+                if (SHC$Eq$AntHeight$i > maxhgt) maxhgt = SHC$Eq$AntHeight$i
+                # increment number of equipment types for later table trimming
+                SHC$NbrEqItems$I = SHC$NbrEqItems$I + 1
+ 
+                # increment index into Equipment subtable
+                SHC$Eq$Index = SHC$Eq$Index + 1
+                }
+            #$% else if not radar
+            else
+                {
+                #$% look for esm equipment in esm table
+                call eqfind($$esm,esm$entry,rec[pnt+1],esm$pointer)
+                if(esm$pointer != 0)
+                    {
+                    #$% get esm data and save
+                    SHC$Eq$Ident$I = $ESM$CODE
+                    PUTSHC$Eq$Ident$I
+                    SHC$Eq$Pntr$I = ESM$POINTER
+                    PUTSHC$Eq$Pntr$I
+                    SHC$Eq$AntHeight$I = rec[pnt+2]
+                    PUTSHC$Eq$AntHeight$I
+                    if (SHC$Eq$AntHeight$i > maxhgt) maxhgt = SHC$Eq$AntHeight$i
+ 
+#XXX                    SHC$ON$I = $default$ESM$setting    #default to esm on/off
+#XXX                    PUTSHC$ON$I
+                    # increment number of equipment types for later table trimming
+                    SHC$NbrEqItems$I = SHC$NbrEqItems$I + 1
+ 
+                    # increment index into Equipment subtable
+                    SHC$Eq$Index = SHC$Eq$Index + 1
+                    }
+                }
+ 
+            #$% increment pointer
+            pnt = pnt + 3
+            next
+            }
+ 
+        #$% ELSE if array word is RECRT
+        ELSE if(rec[pnt] == 'RECRT')
+           {
+            #$% get flight deck recovery rate and save
+            SHC$RECOVERRATE$F = rec[pnt+1]
+            PUTSHC$RECOVERRATE$F
+            #$% increment pointer
+            pnt = pnt + 2
+            next
+           }
+ 
+        #$% ELSE if array word is RPDLY            # Sm.Boat    5/10/89
+        ELSE if(rec[pnt] == 'RPDLY')
+            {
+            #$% get boat's nominal replenishment delay
+            SHC$TURNAROUND$I = rec[pnt+1]
+            PUTSHC$TURNAROUND$I
+            #$% increment pointer
+            pnt = pnt + 2
+            next
+            }
+ 
+        else if (rec[pnt] == 'SOF')            # clk 3/96 (E1561)
+          {
+           if (rec[pnt+1] == 'YES')
+             SHC$JTMD_SOF_Unit$I = $yes
+           else
+             SHC$JTMD_SOF_Unit$I = $no
+           putSHC$JTMD_SOF_Unit$I
+           pnt = pnt + 2
+           next
+          }
+        else if (rec[pnt] == 'SUICIDE')
+          {
+           if (rec[pnt+1] == 'YES')
+             SHC$SuicideSubFlag$I = $yes
+           else
+             SHC$SuicideSubFlag$I = $no
+           putSHC$SuicideSubFlag$i
+           pnt = pnt + 2
+           next
+          }
+        else if (rec[pnt] == 'JSOF')           # clk 4/97 (E1765)
+          {
+           if (rec[pnt+1] == 'YES')
+             SHC$JTMD_JSOF_Unit$I = $yes
+           else
+             SHC$JTMD_JSOF_Unit$I = $no
+           putSHC$JTMD_JSOF_Unit$I
+           pnt = pnt + 2
+           next
+          }
+ 
+        #$% ELSE if array word is SONAR
+        ELSE if(rec[pnt] == 'SONAR')
+           {
+            #$% look for sonar equipment in sonar table
+            call eqfind($$SON,SON$ENTRY,rec[pnt+1],SON$POINTER)
+ 
+            #$% if found
+            if(SON$POINTER != 0)
+                {
+                #$% get sonar data and save
+                SHC$Eq$Ident$I = $PASSONAR$CODE
+                if(XSON$ACTIVESONAR$I == $YES) SHC$Eq$Ident$I = $SONAR$CODE
+                if(XSON$ACOUSTICCOM$I == $YES) SHC$Eq$Ident$I = $ACOUSTICCOMM$CODE
+                PUTSHC$Eq$Ident$I
+                SHC$Eq$Pntr$I = SON$POINTER
+                PUTSHC$Eq$Pntr$I
+ 
+                #$% if passive sonar
+                if (SHC$Eq$Ident$I == $PASSONAR$CODE)
+                    {
+                    #$% indicate equipment is on and save
+#XXX                    deq$on$i = $default$psonar$setting
+#XXX                    putdeq$on$i
+                    }
+                #$% else if acoustic communications
+                else if (SHC$Eq$Ident$I == $AcousticComm$CODE)
+                    {
+                    #$% indicate ok to send messages and save
+#XXX                    deq$OkToSend$i = $yes
+#XXX                putdeq$OkToSend$i
+                    }
+ 
+                #$% ifsonar is an active LFA transmitter
+                if (xSON$ActiveLFA$I == $yes)
+                  putSHC$LFAEquipped$I ($yes)
+ 
+                #$% if sonar is a towed array  SEE WGLTOWED, in wildfrc
+####            if (xson$towedarray$i == $yes) # Removed 8/7/90!!?
+                    #$% set up dynamics for towed array
+#XXX                    call deplta(unt$pointer,son$pointer)
+ 
+                # increment number of equipment types for later table trimming
+                SHC$NbrEqItems$I = SHC$NbrEqItems$I + 1
+ 
+                # increment index into Equipment subtable
+                SHC$Eq$Index = SHC$Eq$Index + 1
+                }
+ 
+            #$% increment pointer
+            pnt = pnt + 2
+            next
+           }
+ 
+        #$% else if this ship/boat could perform mine SWEEP'ing
+        else if(rec[pnt] == 'SWEEP')
+           {
+            if (REC[pnt+1] == 'YES')
+                {
+                SHC$MineSweeper$I = $yes
+                PUTSHC$MineSweeper$I
+                }
+            #$% increment pointer
+            pnt = pnt + 2
+            next
+           }
+        #$% ELSE if array word is TORP
+        ELSE if(rec[pnt] == 'TORP')
+           {
+ 
+            #$% look for torpedo type in torpedo table
+            call eqfind($$tor,tor$entry,rec[pnt+1],tor$pointer)
+ 
+            #$% if found
+            if(tor$pointer != 0)
+                {
+                #$% get torpedo data
+                SHC$Eq$Ident$I = $TORPEDO$CODE
+                PUTSHC$Eq$Ident$I
+                SHC$Eq$Pntr$I = TOR$POINTER
+                PUTSHC$Eq$Pntr$I
+                SHC$Eq$RemainING$I = rec[pnt+2]
+                PUTSHC$Eq$RemainING$I
+ 
+                # increment number of equipment types for later table trimming
+                SHC$NbrEqItems$I = SHC$NbrEqItems$I + 1
+ 
+                # increment index into Equipment subtable
+                SHC$Eq$Index = SHC$Eq$Index + 1
+                }
+ 
+            #$% increment pointer
+            pnt = pnt + 3
+            next
+           }
+ 
+        #$% ELSE if array word is TRKS
+        ELSE if(rec[pnt] == 'TRKS')
+           {
+            #$% get allocated track space (min of 4) and save
+            shc$TrackLimit$i = max0 (int(rec[pnt+1]),4)
+            PUTshc$TrackLimit$i
+            #$% increment pointer
+            pnt = pnt + 2
+            next
+           }
+ 
+        #$% ELSE if array word is TYPE
+        ELSE if(rec[pnt] == 'TYPE')
+           {
+            if (rec[pnt+1] == 'AEGIS')
+                 putSHC$AEGISType$I ($yes)
+ 
+            #$% increment pointer
+            pnt = pnt + 2
+            next
+           }
+ 
+        #$% else if "index type" into probability table
+        else if(rec[pnt] == 'UAVTG' )             # jb 2/21/90
+            {
+            #$% search the EO/IR detection probability table
+            FOR (UVP$Pointer$First; UVP$Pointer$Ok; UVP$Pointer$Next)
+                {
+                #$% if UAV target type index equal index in UVP entry
+                if ( rec [ pnt+1 ] == xUVP$TargetIndex$i )
+                    {
+                    #$% update the index in SHC
+                    SHC$UVPIndx$i = UVP$Pointer$Index
+                    PUTSHC$UVPIndx$i
+                    }
+                }
+            #$% increment pointer
+            pnt = pnt + 2
+            next
+            }
+ 
+        else if (rec[pnt] == 'UGS')            # clk 3/96 (E1561)
+          {                                    # changed to allow multiple
+           putSHC$JTMD_UGS_Unit$I ($yes)       # sensors - clk 2/97 (E1760)
+ 
+           if (rec[pnt+1] == 'ACOUS')
+             putSHC$JTMD_UGS_Acoustic$I ($yes)
+           else if (rec[pnt+1] == 'IR')
+             putSHC$JTMD_UGS_IR$I ($yes)
+           else if (rec[pnt+1] == 'MAGNT')
+             putSHC$JTMD_UGS_Magnetic$I ($yes)
+           else if (rec[pnt+1] == 'SEISM')
+             putSHC$JTMD_UGS_Seismic$I ($yes)
+           else
+             putSHC$JTMD_UGS_Unit$I ($no)
+ 
+           pnt = pnt + 2
+           next
+          }
+        else if (rec[pnt] == 'IUGS')           # clk 4/97 (E1764)
+          {
+           if (rec[pnt+1] == 'YES')
+             SHC$JTMD_IUGS_Unit$I = $yes
+           else
+             SHC$JTMD_IUGS_Unit$I = $no
+           putSHC$JTMD_IUGS_Unit$I
+           pnt = pnt + 2
+           next
+          }
+ 
+        #$% ELSE if array word is VMAX
+        ELSE if (rec[pnt] == 'VMAX')
+           {
+            #$% get maximum speed and save
+            SHC$MAXSPEED$I = rec[pnt+1]
+            PUTSHC$MAXSPEED$I
+            #$% increment pointer
+            pnt = pnt + 2
+            next
+           }
+ 
+        #$% ELSE if array word is VCRU
+        ELSE if(rec[pnt] == 'VCRU')                # Sm.Boat    5/10/89
+            {
+            #$% get boat or ship's 'economical' cruise speed
+            SHC$CRUISESPEED$I = rec[pnt+1]
+            PUTSHC$CRUISESPEED$I
+            #$% increment pointer
+            pnt = pnt + 2
+            next
+            }
+ 
+        #$% ELSE if array word is WAVE
+        ELSE if(rec[pnt] == 'WAVE')
+           {
+            #$% get wave heigth threshold and save
+            SHC$WAVETHRESHOLD$I = rec[pnt+1]
+            PUTSHC$WAVETHRESHOLD$I
+            #$% increment pointer
+            pnt = pnt + 2
+            next
+           }
+ 
+        #$% if array word is WBUOY
+        ELSE if(rec[pnt] == 'WBUOY')
+            {
+            #$% look for wbuoy equipment in bomb table
+#            call eqfind($$bom,bom$entry,"BIAS    ",bom$pointer)
+            call eqfind($$bom,bom$entry,CfindBIAS,bom$pointer) # jb E2144 8/8/00
+ 
+            #$% if found
+            if(bom$pointer != 0)
+                {
+                #$% get wbouy data and save
+                SHC$Eq$Ident$I = $WBUOY$CODE
+                PUTSHC$Eq$Ident$I
+                SHC$Eq$Pntr$I = BOM$POINTER
+                PUTSHC$Eq$Pntr$I
+                SHC$Eq$RemainING$I = rec[pnt+2]
+                PUTSHC$Eq$RemainING$I
+ 
+                # increment number of equipment types for later table trimming
+                SHC$NbrEqItems$I = SHC$NbrEqItems$I + 1
+ 
+                # increment index into Equipment subtable
+                SHC$Eq$Index = SHC$Eq$Index + 1
+                }
+ 
+            #$% increment pointer
+            pnt = pnt + 3
+            next
+            }
+ 
+        #$% ELSE if array word is WEAP
+        ELSE if(rec[pnt] == 'WEAP')
+            {
+            #$% if third word is one of the following
+            if(rec[pnt+2] == 'AAM' | rec[pnt+2] == 'ASM' |
+               rec[pnt+2] == 'SAM' | rec[pnt+2] == 'CIWS')
+                {
+                #$% look for weapon in missile table
+                call eqfind($$mc,mc$entry,rec[pnt+1],mc$pointer)
+ 
+                #$% if found
+                if(mc$pointer != 0)
+                    {
+                    #$% get type of weapon and save
+                    if(rec[pnt+2] == 'AAM') SHC$Eq$Ident$I = $AAM$CODE
+                    else if(rec[pnt+2] == 'ASM') SHC$Eq$Ident$I = $ASM$CODE
+                    else if(rec[pnt+2] == 'SAM')
+                        {
+                         SHC$Eq$Ident$I = $SAM$CODE
+                         SAMorCIWSCapable = $YES  # SMM 7/6/94 PER #E1311
+                        }
+                    else if(rec[pnt+2] == 'CIWS')
+                        {
+                         SHC$Eq$Ident$I = $CIWS$CODE
+                         SAMorCIWSCapable = $YES  # SMM 7/6/94 PER #E1311
+                        }
+ 
+                    PUTSHC$Eq$Ident$I
+                    SHC$Eq$Pntr$I = MC$POINTER
+                    PUTSHC$Eq$Pntr$I
+                    SHC$Eq$RemainING$I = rec[pnt+3]
+                    PUTSHC$Eq$RemainING$I
+ 
+                    # increment number of eq types for later table trimming
+                    SHC$NbrEqItems$I = SHC$NbrEqItems$I + 1
+ 
+                    # increment index into Equipment subtable
+                    SHC$Eq$Index = SHC$Eq$Index + 1
+                    }
+ 
+                #$% increment counter
+                pnt = pnt + 4
+                next
+                }
+            else if(rec[pnt+2] == 'GUN')               # 'GUN'
+                {
+                #$% look for Gun type in torpedo table
+                call eqfind($$tor,tor$entry,rec[pnt+1],tor$pointer)
+ 
+                #$% if found
+                if(tor$pointer != 0)
+                    {
+                    PUTSHC$Eq$Ident$i ($GUN$code)               # store GUN data
+ 
+                    PUTSHC$Eq$Pntr$i  (tor$pointer)
+ 
+                    SHC$Eq$Remaining$i = rec[pnt+3]
+                    putSHC$Eq$Remaining$i
+ 
+                    # increment number of eq types for later table trimming
+                    SHC$NbrEqItems$I = SHC$NbrEqItems$I + 1
+ 
+                    # increment index into Equipment subtable
+                    SHC$Eq$Index = SHC$Eq$Index + 1
+                    }
+                #$% increment counter
+                pnt = pnt + 4
+                next
+                }
+            #$% else if array word is TORP
+            else if(rec[pnt+2] == 'TORP')
+                {
+                #$% look for torpedo type in torpedo table
+                call eqfind($$tor,tor$entry,rec[pnt+1],tor$pointer)
+ 
+                #$% if found
+                if(tor$pointer != 0)
+                    {
+                    #$% get torpedo data
+                    SHC$Eq$Ident$I = $TORPEDO$CODE
+                    PUTSHC$Eq$Ident$I
+                    SHC$Eq$Pntr$I = TOR$POINTER
+                    PUTSHC$Eq$Pntr$I
+                    SHC$Eq$RemainING$I = rec[pnt+3]
+                    PUTSHC$Eq$RemainING$I
+ 
+                    # increment number of eq types for later table trimming
+                    SHC$NbrEqItems$I = SHC$NbrEqItems$I + 1
+ 
+                    # increment index into Equipment subtable
+                    SHC$Eq$Index = SHC$Eq$Index + 1
+                    }
+                #$% increment counter
+                pnt = pnt + 4
+                next
+                }
+            #$% else if array word is BOMB or MINE
+            else if(rec[pnt+2] == 'BOMB' | rec[pnt+2] == 'MINE')
+                {
+                #$% look for bomb/mine in the bomb table
+                call eqfind($$bom,bom$entry,rec[pnt+1],bom$pointer)
+ 
+                #$% if found
+                if(bom$pointer != 0)
+                    {
+                    #$% get bomb/mine data
+                    SHC$Eq$Ident$I = $BOMB$CODE
+                    if(rec[pnt+2] == 'MINE') SHC$Eq$Ident$I = $MINE$CODE
+                    PUTSHC$Eq$Ident$I
+                    SHC$Eq$Pntr$I = BOM$POINTER
+                    PUTSHC$Eq$Pntr$I
+                    SHC$Eq$RemainING$I = rec[pnt+3]
+                    PUTSHC$Eq$RemainING$I
+ 
+                    # increment number of eq types for later table trimming
+                    SHC$NbrEqItems$I = SHC$NbrEqItems$I + 1
+ 
+                    # increment index into Equipment subtable
+                    SHC$Eq$Index = SHC$Eq$Index + 1
+                    }
+ 
+                #$% increment pointer
+                pnt = pnt + 4
+                next
+                }
+            else # anything else                            # dew 4-DEC-91
+                {
+                #$% increment pointer
+                pnt = pnt + 4
+                next
+                }
+            }
+ 
+        #$% ELSE if array word is WIRES
+        ELSE if(rec[pnt] == 'WIRES')
+            {
+            #$% look for communication antenna wire in bobm table
+            call eqfind($$bom,bom$entry,rec[pnt],bom$pointer)
+ 
+            #$% if not zero quantity of wires & found in the bomb table
+            if(rec[pnt+1] != 0 & bom$pointer != 0)
+                {
+                #$% get wire data
+                PutSHC$Eq$Ident$I ($WIRE$CODE)
+                PutSHC$Eq$Pntr$I (BOM$POINTER)
+                SHC$Eq$RemainING$I = rec[pnt+1]
+                PUTSHC$Eq$RemainING$I
+ 
+                # increment number of eq types for later table trimming
+                SHC$NbrEqItems$I = SHC$NbrEqItems$I + 1
+ 
+                # increment index into Equipment subtable
+                SHC$Eq$Index = SHC$Eq$Index + 1
+                }
+ 
+            #$% increment pointer
+            pnt = pnt + 2
+            next
+            }
+ 
+        #$% ELSE if array word is XSECT
+        ELSE if(rec[pnt] == 'XSECT')
+           {
+            #$% get unit radar cross section and save
+            SHC$CROSSSECT$I = rec[pnt+1]
+            PutSHC$CROSSSECT$I
+            #$% increment pointer
+            pnt = pnt + 2
+            next
+           }
+ 
+        #$% else if variable cross section (in dB//meter sq.)
+        else if(rec[pnt] == 'TGSTR')           # trs 10/25/90
+            {
+            SHC$VrblTS$i = $yes
+            PUTSHC$VrblTS$i
+ 
+            FOR (SHC$ASP$Index = 1;
+                 SHC$ASP$Index$Ok;
+                 SHC$ASP$Index = SHC$ASP$Index + 1)
+                {
+                SHC$ASP$TgtStrength$i = rec[pnt+SHC$ASP$Index]
+                PUTSHC$ASP$TgtStrength$i
+                }
+            #$% we unconditionally add 2 to pnt at top of loop
+            pnt = pnt + 8                        # jb    10/25/90
+            }
+ 
+        #$% else if first array word is NBN__ or NBD__
+        else if(rec[pnt] == 'NBN05' |
+                rec[pnt] == 'NBN10' |
+                rec[pnt] == 'NBN15' |
+                rec[pnt] == 'NBN20' |
+                rec[pnt] == 'NBN25' |
+                rec[pnt] == 'NBN30' |
+                rec[pnt] == 'NBN' |
+                rec[pnt] == 'NBD05' |
+                rec[pnt] == 'NBD10' |
+                rec[pnt] == 'NBD15' |
+                rec[pnt] == 'NBD20' |
+                rec[pnt] == 'NBD25' |
+                rec[pnt] == 'NBD30' |
+                rec[pnt] == 'NBD' )
+            {
+            #$% increment pointer
+            pnt = pnt + 3
+            next
+            }
+ 
+    #   Nuclear damage class added 4/3/85
+        ELSE if(rec[pnt] == 'NDCLS')
+           {
+            SHC$DamageClass$I = REC[pnt+1]
+            putSHC$DamageClass$I
+            pnt = pnt + 2
+            next
+           }
+ 
+    #   Width of platform added 11/17/92
+        ELSE if(rec[pnt] == 'WIDTH')
+           {
+            SHC$Width$I = REC[pnt+1]
+            putSHC$Width$I
+            pnt = pnt + 2
+            next
+           }
+ 
+    #   Height of platform added 11/17/92
+        ELSE if(rec[pnt] == 'HGT')
+           {
+            SHC$Height$I = REC[pnt+1]
+            putSHC$Height$I
+            pnt = pnt + 2
+            next
+           }
+ 
+        else if (rec[pnt] == 'SHARE')         # clk 9/95 (E1455)
+           {
+            if (rec[pnt+1] == 'YES')
+                 putSHC$ALSPSharedBase$I  ($yes)
+            else
+                 putSHC$ALSPSharedBase$I  ($no)
+            pnt = pnt + 2
+            next
+           }
+        else if (rec[pnt] == 'OWNED')         # clk 9/95 (E1455)
+           {
+            if (rec[pnt+1] == 'YES')
+                 putSHC$ALSPOwnedBase$I  ($yes)
+            else
+                 putSHC$ALSPOWNedBase$I  ($no)
+            pnt = pnt + 2
+ 
+            if (xSHC$ALSPSharedBase$I == $no)
+              {
+               call echov ("  Warning:  Record ")
+               call echohn (rec[3], $$Maxlit)
+               call echov (" is not SHAREd - no ALSP messages will be")
+               call echov (" sent when this base is attacked.")
+               call echor
+              }
+            next
+           }
+ 
+        #   Weapon Standoff Range  joa 2/05 per_sdoff
+        ELSE if(rec[pnt] == 'SDOFF')
+           {
+            putSHC$StandoffRange$F (REC[pnt+1])
+            pnt = pnt + 2
+            next
+           }
+ 
+        #$% ELSE if array word is none of the above
+        ELSE
+           {
+            #$% display to user that field is invalid
+            call badfld('SHIP      ',rec[3],rec[pnt])
+            #$% increment pointer
+            pnt = pnt + 1
+           }
+ 
+        } # for (pnt = 6; pnt <= len; )
+ 
+     # Set default cruise speed in no vcru or fuel consumptation table
+     if (shc$CruiseSpeed$i == 0)
+     {
+         if (SHC$Category$I == $SmallBoat$Subcode)
+            shc$CruiseSpeed$i = min(30, shc$MaxSpeed$i) # staspd joa 2/1/05
+         else if(SHC$Category$I == $Surface$code)
+            shc$CruiseSpeed$i = min(20, shc$MaxSpeed$i) # staspd joa 2/1/05
+         else if(SHC$Category$I == $Sub$code)
+            shc$CruiseSpeed$i = min(14, shc$MaxSpeed$i) # Nuc sub joa UFL05
+ 
+         PUTshc$CruiseSpeed$i
+     }
+ 
+     # if ship is an AEGIS type and there are no advanced SAMS loaded, send warning
+     if ((xSHC$AEGISType$I == $yes) & (xSHC$AdvancedSAMsLoaded$I != $yes))
+        {
+         #$% display message to user
+         call echov ("  Warning:  Record ")
+         call echohn (rec[3],$$Maxlit)
+         call echov (" is an AEGIS type and no advanced SAMs were loaded.  ")
+         call echor
+        }
+    # if ship is not an AEGIS and there are advanced SAMS loaded, send warning
+    if ((xSHC$AEGISType$I != $yes) & (xSHC$AdvancedSAMsLoaded$I == $yes))
+        {
+         #$% display message to user
+         call echov ("  Warning:  Record ")
+         call echohn (rec[3],$$Maxlit)
+         call echov (" is not an AEGIS type and advanced SAMs were loaded.  ")
+         call echor
+        }
+ 
+    if (Xshc$SmallBoat$i == $yes)
+    {
+        SHC$OnePctFuel$f = Max(0.1, boatfuel * 0.01)
+        putSHC$OnePctFuel$F
+        SHC$Endurance$i = xSHC$Endurance$i          #  5/4/89
+        SHC$FuelRate$F = BOATFUEL *
+        xSHC$CruiseSpeed$i / (60.0 * float(SHC$Endurance$i))
+        if(SHC$FuelRate$F < 0.1)    SHC$FuelRate$F = 0.1 # jb 5/12/89
+        putSHC$FuelRate$F  # /\ 5/11/89
+    }
+ 
+    SHC$NbrEqItems$I = SHC$Eq$Index - 1
+ 
+    if (SHC$NbrEqItems$I > SHC$MaxSub)    # clk & smm 7/27/94 (E1317)
+      {
+         #$% display message to user
+         call echor
+         call echov  ("  ERROR:  Record ")
+         call echohn (rec[3], $$Maxlit)
+         call echov  (" exceeds the maximum number of equipment items.")
+         call echor
+         call echov  ("          Equipment items ")
+         call echoi  (SHC$MaxSub+1)
+         call echov  (" through ")
+         call echoi  (SHC$NbrEqItems$I)
+         call echov  (" not loaded.")
+         call echor
+         call echor
+ 
+         SHC$NbrEqItems$I = SHC$MaxSub
+      }
+ 
+    PUTSHC$NbrEqItems$I
+ 
+    putSHC$SAMorCIWSCapable$I (SAMorCIWSCapable)  # SMM 7/6/94 PER #E1311
+ 
+    SHC$Last$To SHC$Pointer + SHC$Entry - 1
+ 
+    }  # for (loop = 2; loop <= reccnt; loop=loop+1)
+ 
+end # wglshipc
+
+ Subroutine FALSE_Submarine (SHC$POINTER)
+ 
+ ######################################################
+ #$%
+ #$% Purpose:  False_Submarine defines submarine charac-
+ #$%           teristics for false Active-Sonar detections
+ #$%
+ #$% Called By: WGLSHIPC
+ #$%
+ #$% Calls:
+ #$%
+ #$% Tables:    SHC
+ #$%
+ #$% Date:      FEB 1991
+ #$%
+ #$% Author:    Joe Bryant
+ #$%
+ ######################################################
+ 
+BBcommon
+ 
+integer K,
+        SHC$Pointer,
+        SHC$ASP$Index,
+        SHC$ASP$tgtstrength$I           # MJC 4/28/2000
+ 
+integer*2 iSTR[7]
+ 
+iSTR[1] = (4 + FALSE$Strength) / 8 # Target Strength from
+iSTR[1] = MAX(1,iSTR[1])        #                     dead-ahead
+for (k=1; k<=3; k =k +1)        # This emplaces values in iSTR for
+   {                            # transfer below to the 7 'ASPECT'
+    iSTR[k+1] = iSTR[k] * 2     # slots.  From bow to beam, the values
+    iSTR[8-k] = 1 + iSTR[k]     # are proportionately 1:2:4:8.  Aft of
+   }    # the beam, values are 1 greater than those forward of the beam.
+ 
+FALSE$sub$Pointer = SHC$POINTER
+ 
+putSHC$TYPE$C    ("FALSE   ")
+putSHC$MaxSpeed$I   (21)
+putSHC$KeelDepth$I  (33)
+putSHC$ScopeDepth$I (33)
+putSHC$DamageClass$i ($Submarine$Code)    # jb            2/15/91
+ 
+putSHC$VrblTS$I    ($YES)
+for(SHC$ASP$index =1; SHC$ASP$index < 8;SHC$ASP$index=SHC$ASP$index +1)
+   {
+    SHC$ASP$TgtStrength$i = iSTR[SHC$ASP$index]
+    putSHC$ASP$TgtStrength$i
+   }
+ 
+return
+end
+
+ 
+real function GetShipCruiseSpeed (SHC$Pointer)
+#############################################################
+#$%
+#$% Purpose:   Compute the speed at which the specified ship
+#$%            class can cover the greatest distance.
+#$%
+#$% Called By: wglshipc
+#$%
+#$% Calls:     none
+#$%
+#$% Tables:    SHC
+#$%
+#$% Date:      February 1996
+#$%
+#$% Author:    James Allen
+#$%
+#############################################################
+define (BBImplicit, Implicit None)
+BBcommon
+ 
+integer SHC$Pointer
+ 
+real    BestSpeed
+real    Distance
+integer SHC$BRN$Index
+real    MPG, SHC$BRN$Rate$F
+ 
+  MPG = 0.0
+  BestSpeed = xSHC$MaxSpeed$I
+ 
+  for (SHC$BRN$Index = 2; SHC$BRN$Index <= SHC$BRN$Slots;
+       SHC$BRN$Index = SHC$BRN$Index + 1)
+    {
+     SHC$BRN$Rate$F = xSHC$BRN$Rate$F
+     if (SHC$BRN$Rate$F == 0.0) next        # exclude divide by Zero
+ 
+     Distance = (SHC$BRN$Index - 1) * 5.
+     if (Distance / SHC$BRN$Rate$F >= MPG)
+       {
+        BestSpeed = Distance
+        MPG = Distance / SHC$BRN$Rate$F
+       }
+   }   # end of loop through burn rates
+ 
+  # Don't allow cruise speed to be greater than max speed   # joa 2/96 (E1467)
+  BestSpeed = min(BestSpeed, float(Xshc$MaxSpeed$i))
+ 
+return ( BestSpeed )
+end
