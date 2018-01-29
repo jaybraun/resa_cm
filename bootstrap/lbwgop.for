@@ -26,7 +26,7 @@ cpar$ private / snap_common / ! no FORTRAN global section
 23000 CONTINUE
       STATE_ARG =4
 23001 CONTINUE
-      IF(.NOT.(ARGS(STATE_ARG).EQ.-20407))GOTO 23002
+      IF(.NOT.(ARGS(STATE_ARG).EQ.-20403))GOTO 23002
       STATE =1
       GOTO 23003
 23002 CONTINUE
@@ -38,7 +38,7 @@ cpar$ private / snap_common / ! no FORTRAN global section
       IBB(527)=STATE
       GOTO 23005
 23004 CONTINUE
-      IF(.NOT.(ARGS(3).EQ.-20532))GOTO 23006
+      IF(.NOT.(ARGS(3).EQ.-20528))GOTO 23006
       IBB(525)=STATE
       GOTO 23007
 23006 CONTINUE
@@ -313,6 +313,7 @@ cpar$ private / snap_common / ! no FORTRAN global section
       I_ORD_START=IINP(4)
       IF(.NOT.(I_ORD_START.LT.0))GOTO 23033
       I_ORD_PAT=1
+      I_ORD_DTGSTART=1
       I_ORD_START=ABS(I_ORD_START)
 23033 CONTINUE
       IF(.NOT.(I_ORD_START.GT.9999))GOTO 23035
@@ -469,7 +470,7 @@ cpar$ private / snap_common / ! no FORTRAN global section
       TORPEDO_INDEX =0
       I=1
 23052 IF(.NOT.(I.LE.NARGS))GOTO 23054
-      IF(.NOT.(ILEX(I).EQ.-20437))GOTO 23055
+      IF(.NOT.(ILEX(I).EQ.-20433))GOTO 23055
       PLAN_INDEX =I
       GOTO 23056
 23055 CONTINUE
@@ -478,7 +479,7 @@ cpar$ private / snap_common / ! no FORTRAN global section
       I =I +2
       GOTO 23058
 23057 CONTINUE
-      IF(.NOT.(ILEX(I).EQ.-20401))GOTO 23059
+      IF(.NOT.(ILEX(I).EQ.-20397))GOTO 23059
       NUCLEAR_INDEX =I
       GOTO 23060
 23059 CONTINUE
@@ -496,42 +497,42 @@ cpar$ private / snap_common / ! no FORTRAN global section
       I =I +1
       GOTO 23066
 23065 CONTINUE
-      IF(.NOT.(ILEX(I).EQ.-20460))GOTO 23067
+      IF(.NOT.(ILEX(I).EQ.-20456))GOTO 23067
       RANGE_INDEX =I
       I =I +1
       GOTO 23068
 23067 CONTINUE
-      IF(.NOT.(ILEX(I).EQ.-20523))GOTO 23069
+      IF(.NOT.(ILEX(I).EQ.-20519))GOTO 23069
       SEEKER_INDEX =I
       I =I +1
       GOTO 23070
 23069 CONTINUE
-      IF(.NOT.(ILEX(I).EQ.-20462))GOTO 23071
+      IF(.NOT.(ILEX(I).EQ.-20458))GOTO 23071
       RBL_INDEX =I
-      RBL_SIZE =-20317
-      IF(.NOT.(ILEX(I+1).EQ.-20549.OR.ILEX(I+1).EQ.-20348.OR.ILEX(I+1).E
-     *Q.-20317))GOTO 23073
+      RBL_SIZE =-20313
+      IF(.NOT.(ILEX(I+1).EQ.-20545.OR.ILEX(I+1).EQ.-20344.OR.ILEX(I+1).E
+     *Q.-20313))GOTO 23073
       RBL_SIZE =ILEX(I+1)
       I =I +1
 23073 CONTINUE
       GOTO 23072
 23071 CONTINUE
-      IF(.NOT.(ILEX(I).EQ.-20614))GOTO 23075
+      IF(.NOT.(ILEX(I).EQ.-20611))GOTO 23075
       TRACK_INDEX =I
       I =I +1
       GOTO 23076
 23075 CONTINUE
-      IF(.NOT.(ILEX(I).EQ.-20444))GOTO 23077
+      IF(.NOT.(ILEX(I).EQ.-20440))GOTO 23077
       POSITION_INDEX =I
       I =I +2
       GOTO 23078
 23077 CONTINUE
-      IF(.NOT.(ILEX(I).EQ.-20358))GOTO 23079
+      IF(.NOT.(ILEX(I).EQ.-20354))GOTO 23079
       MISSION_INDEX =I
       I =I +1
       GOTO 23080
 23079 CONTINUE
-      IF(.NOT.(ILEX(I).EQ.-20649))GOTO 23081
+      IF(.NOT.(ILEX(I).EQ.-20646))GOTO 23081
       WAYPOINTS_INDEX =I
       I =I +2
       GOTO 23082
@@ -543,7 +544,7 @@ cpar$ private / snap_common / ! no FORTRAN global section
       AT_INDEX =I
       GOTO 23084
 23083 CONTINUE
-      IF(.NOT.(ILEX(I).EQ.-20589))GOTO 23087
+      IF(.NOT.(ILEX(I).EQ.-20585))GOTO 23087
       TARGET_INDEX =I
       IF(.NOT.(ILEX(I+1).EQ.-20076))GOTO 23089
       BRIDGE_INDEX =I +1
@@ -557,7 +558,7 @@ cpar$ private / snap_common / ! no FORTRAN global section
       I =I +1
       GOTO 23092
 23091 CONTINUE
-      IF(.NOT.(ILEX(I).EQ.-20605))GOTO 23093
+      IF(.NOT.(ILEX(I).EQ.-20602))GOTO 23093
       TIN_INDEX =I
       I =I +1
       GOTO 23094
@@ -568,7 +569,7 @@ cpar$ private / snap_common / ! no FORTRAN global section
       I =I +1
       GOTO 23096
 23095 CONTINUE
-      IF(.NOT.(ILEX(I).EQ.-20611))GOTO 23097
+      IF(.NOT.(ILEX(I).EQ.-20608))GOTO 23097
       TORPEDOES_INDEX =I
       I =I +1
       IF(.NOT.(ILEX(I).EQ.-20063))GOTO 23099
