@@ -229,7 +229,8 @@ void puck_position_request_c (int x_in,int y_in)
  	 //kk = ilen;             // save the position of the slash
          kk = strlen(msg);
 	 smovlls (&rad_long_curr,"EW",&msg,&ilen);
-         smovll  (&rad_long_curr,"EW",&lon_msg,&lon_len);
+         // tmb 03-2017 show seconds of long, not just ddd-mm
+         smovlls (&rad_long_curr,"EW",&lon_msg,&lon_len);
         }
 
      smov    (" ",&msg,&ilen);
