@@ -1,4 +1,4 @@
 RESA
 ====
 
-RESA branch for Intel Fortran on RHEL v6.
+RESA repo for Intel Fortran on RHEL v6.
