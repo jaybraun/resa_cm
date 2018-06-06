@@ -200,14 +200,14 @@ integer  UNT$Pointer, UNT$Mission$I, UNT$Status$I  # SMM 3/00
 integer  UNT$Type$I, UNT$TrueAltDepth$I, UNT$Stratum$i
 integer  I_SWITCH_1, I, length                     # SMM 3/00
 integer  BOY$pointer
-integer  category
+integer  category, mf_side, seq_num, match         # tmb 4/18
 real     UNT$Truelatitude$F, UNT$Costruelat$F, UNT$Truelongitude$F # SMM 3/00 
 real     UNT$Fltsoktime$F, UNT$Timebingo$F, UNT$Truecourse$F       # SMM 3/00
 real     UNT$Orderedlatitude$F, UNT$Orderedlongitude$F             # SMM 3/00
 real     speed, RADTODMS 					   # SMM 3/00
 BBDeclare (mfd$pointer, mfd$name$c, mfd$side$i, mfd$points$i, mfd$ver$index)
 BBDeclare (swp$pointer, swp$name$c, swp$side$i, swp$points$i, swp$ver$index)
-BBDeclare (bom$pointer)
+BBDeclare (bom$pointer, mfd$sequence$i)
 
 equivalence (v_name, c_name)
 equivalence (l_call_sign, c_call_sign)
@@ -366,7 +366,32 @@ equivalence (l_call_sign, c_call_sign)
         call alsp_error_on_create (int_params [$id], $dup_id, 0)
         return
         }
-     call alsp_get_mfd_slot (MFD$Pointer, free_mfd)
+    # assign an available sequence number to enable display in ASTAB. For ease
+    # do this BEFORE getting the MFD pointer that will potentially hold the 
+    # new minefield.  tmb 4/18
+    switch (int_params[$side])
+    {
+        case $blue:      mf_side = $Blue$Code
+        case $red:       mf_side = $Orange$Code
+        case $neutral:   mf_side = $Neutral$Code
+    }
+    # start at 63 and count backwards looking for an available number
+    for ( seq_num = 63; seq_num > 0; seq_num = seq_num - 1 )
+    {
+       match = $no
+       for_all_valid (MFD)
+       {
+           if ( Xmfd$sequence$i == seq_num &
+                Xmfd$side$i == mf_side )
+           {
+               match = $yes
+               break
+            }
+       }
+       if ( match == $no ) break
+    }
+
+    call alsp_get_mfd_slot (MFD$Pointer, free_mfd)
 
     if (free_mfd == $No)   # Check for existence of an empty slot
     {                    # if this is true, then the boy table is full
@@ -379,16 +404,16 @@ equivalence (l_call_sign, c_call_sign)
     call move_str_lit (_
         remove_special_chars(string_params[$name]), MFD$Name$C)
     putMFD$Name$C
-    switch (int_params[$side])
-    {
-        case $blue:      MFD$Side$I = $Blue$Code
-        case $red:       MFD$Side$I = $Orange$Code
-        case $neutral:   MFD$Side$I = $Neutral$Code
-    }
+
+    MFD$Side$I = mf_side
     putMFD$Side$I
 
     putMFD$TargetType$i ($ShipAndSub$code)
     putMFD$Status$i ($operational$code)        
+    # assign sequence number found above   tmb 4/18
+    MFD$sequence$i = seq_num
+    putMFD$Sequence$I
+
     MFD$Points$i = min(mfd$ver$slots, num_of_positions)
     putMFD$Points$i
     for (mfd$ver$index=1; mfd$ver$index <= MFD$Points$i;
@@ -975,7 +1000,7 @@ subroutine alsp_check_duplicate_id (alspid,         # in - alsp id number
 BBcommon
 
 integer  duplicate_id, alspid
-BBDeclare (UNT$Pointer, BOY$Pointer)
+BBDeclare (UNT$Pointer, BOY$Pointer, MFD$Pointer)
 
   duplicate_id = $no
   for (UNT$Pointer$First; UNT$Pointer$OK; UNT$Pointer$Next)
@@ -1003,6 +1028,22 @@ BBDeclare (UNT$Pointer, BOY$Pointer)
            }
         }
     }
+  if (duplicate_id == $no)          # Check for ids in MFD table   tmb 4/18
+    {
+      for (MFD$Pointer$First; MFD$Pointer$OK; MFD$Pointer$Next)
+        {
+         if (xMFD$ALSPid$I == alspid) 
+           {
+            if (xMFD$Status$I != $BeingDeleted$Code)   # if the boy
+              {                                       # is to be deleted
+               duplicate_id = $yes                    # then the id is dead.
+               break
+              }
+           }
+        }
+    }
+
+
 
 return
 end
