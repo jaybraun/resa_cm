@@ -136,17 +136,17 @@ def atomissions(opts, ftpdir, wsn):
 			if ato_exists == 'y':				# Airspace definitions directly sent to station so only need mission file
 				file_list = [mission_file]
 
-			t = open(atoid_dir + 't.cmd', 'w')
-			for myfile in file_list:
-				f = open(myfile, 'r')
-				t.write(f.read())
-				f.close()
-			t.close()
+				t = open(atoid_dir + 't.cmd', 'w')
+				for myfile in file_list:
+					f = open(myfile, 'r')
+					t.write(f.read())
+					f.close()
+				t.close()
 
-   			# Run rat program ato_prescript t.cmd nm.pre <auto replenish input flag>
-			print '~/resang/trunk/ato_prescript.run ' + root_ato + ' ' + atoid + ' ' + atoid_update + ' t.cmd nm.pre ' + opt_replenish
-			os.system('$RESA_TRUNK/ato_prescript.run ' + root_ato + ' ' + atoid + ' ' + atoid_update + ' t.cmd nm.pre ' + opt_replenish)
-			os.remove(atoid_dir + 't.cmd')
+   				# Run rat program ato_prescript t.cmd nm.pre <auto replenish input flag>
+				print '~/resang/trunk/ato_prescript.run ' + root_ato + ' ' + atoid + ' ' + atoid_update + ' t.cmd nm.pre ' + opt_replenish
+				os.system('$RESA_TRUNK/ato_prescript.run ' + root_ato + ' ' + atoid + ' ' + atoid_update + ' t.cmd nm.pre ' + opt_replenish)
+				os.remove(atoid_dir + 't.cmd')
 
 			if opt_prescript == 'yes' and ato_exists == 'y':
 				# Send orders to RESA station
@@ -166,7 +166,7 @@ def atomissions(opts, ftpdir, wsn):
 				print 'End Missing Missions' 
 
 
-			atostats.atostats(root_ato, atoid, atoid_update)
+				atostats.atostats(root_ato, atoid, atoid_update)
 
 			# $! Print summary and error reports
 			#atoprint.atoprint(atoid_dir)
