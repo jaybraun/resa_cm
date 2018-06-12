@@ -210,7 +210,7 @@ define ($update$keys,{
                      })
 define ($at$line,lincnt==)
 define ($at$top,(lincnt==2))
-define ($highest$ascii,8Hzzzzzzzz)
+define ($highest$ascii,'zzzzzzzz')
 define ($lowest$ascii,"2020202020202020"X)
 
 define ($Blue$Designator,$letB)
