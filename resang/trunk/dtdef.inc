@@ -1,2 +1,0 @@
-define(DT$_TTYUNKN,'00000000'X)
-define(DT$_VT52,'00000040'X)
