@@ -3,7 +3,9 @@ include "bbctl.inc"
 include "bbcode.inc" 
 include "bbdeq.inc"          
 include "bbshc.inc"                  
-include "bbunt.inc"         
+include "bbunt.inc" 
+include "bbwet.inc"        #tmb
+include "elevation.inc"    #tmb          
         
 define (err, -3)   # alsp.inc undefines it - who_am_i uses it
 
@@ -11,7 +13,7 @@ define (number_args, 1)
 define (output_unit, 10)
 
 define ($maxweap,300)				# Maximum types of weapons loaded on ships
-define ($shipsOnHeaser,15)			# Number of ships on header line. Atually one more.
+define ($ShipsOnHeader,15)			# Number of ships on header line. Atually one more.
 
 define (Weapon$common,
 	integer    Weapon_index
@@ -86,6 +88,7 @@ program weaponfuelstate
 #$% Date:       Aug 2015
 #$%
 #$% Author:     James O. Allen
+#$%             TMB ... Added terrain usage to define IN and OUT AO 8-18
 #$%
 #########################################################################
 BBcommon
@@ -108,13 +111,17 @@ integer nl
 integer   msg1_len
 character msg1[80]
 vaxcharacter*80  v_msg1
+integer ok_to_write                     # Can write to global section tmb
+
 Equivalence  (msg1, v_msg1)
+
+ok_to_write = 1  #tmb
 
 call initR4
 
 BBmap
 
-
+DTED_MAP  #tmb
   
 call help_pgm(0,
               "pgaweap: Current ship fuel state",
@@ -128,9 +135,14 @@ call help_pgm(0,
 
 call Init_Collection_File
 
-call get_ship_weap_state
+call get_ship_weap_state( $yes )
 
-call write_ship_weap_state
+call write_ship_weap_state( $yes)
+
+call get_ship_weap_state( $no )
+
+call write_ship_weap_state( $no)
+  
   
 close (output_unit)
 
@@ -195,12 +207,14 @@ call echor
 return
 end
 
-Subroutine get_ship_weap_state
+Subroutine get_ship_weap_state(InAO)
 BBcommon
+ElevationCommon             #tmb
 weapon$common
 ship$common
 shipweapon$common
 
+integer InAO
 literal cstrip8, reportcode2text
 vmschar vstrip*ARB
 BBDeclare (unt$pointer, unt$fullname$v, unt$type$i, shc$pointer, wet$pointer)
@@ -220,6 +234,24 @@ character expendables_msg[ARB]
 BBDeclare (deq$remaining$i, deq$ident$i, deq$pointer,
            tbl$pointer,tbl$FullName$v)
 
+real Slat, Nlat,Wlon, Elon  #tmb
+
+#Define the playbox initial values, too big to matter  tmb 8-18
+Slat = -3.2
+Nlat = 3.2
+Wlon = -3.2
+Elon = 3.2
+
+#update the lat and lon boundaries if possible 
+if (RESA$Worldwide$Elevation==$NO
+     & N_elev_regions > 0 )
+{
+   Slat = elevation_region_swlat[1]
+   Wlon = elevation_region_swlon[1]
+   Nlat = Slat + elevation_region_height[1] * $deg2rad
+   Elon = Wlon + elevation_region_width[1] *  $deg2rad
+} 
+
 Ship_index = 0
 for (UNT$Pointer$First; UNT$Pointer$OK; UNT$Pointer$Next)
 {
@@ -234,6 +266,22 @@ for (UNT$Pointer$First; UNT$Pointer$OK; UNT$Pointer$Next)
 	# Logistics needed for subs as well  SMM
 	if (UNT$Type$i != $Surface$code & UNT$Type$i != $SurfaceWithAC$code & UNT$Type$i != $Sub$code) next
 
+        if (InAO == $yes) #populate data for INSIDE the Area of Operations  tmb 8-18
+        {
+           IF (Xunt$Truelatitude$f < Slat) next		# Skip ships outside AO
+           IF (Xunt$Truelatitude$f > Nlat) next		# Skip ships outside AO
+           IF (Xunt$TrueLongitude$f < Wlon) next	# Skip ships outside AO
+           IF (Xunt$TrueLongitude$f > Elon) next	# Skip ships outside AO
+        }
+        else  #populating data for OUTSIDE the Area of Operations
+        {
+           IF (Xunt$truelatitude$f < Slat) goto 8000		# Only ships outside AO   tmb 8-18
+           IF (Xunt$truelatitude$f > Nlat) goto 8000		# Only ships outside AO
+           IF (Xunt$TrueLongitude$f < Wlon) goto 8000		# Only ships outside AO
+           IF (Xunt$TrueLongitude$f > Elon) goto 8000     	# Only ships outside AO
+           NEXT    
+        }
+8000
 	ship_index = ship_index + 1
 	Ship_name[ship_index] = Xunt$name$c
 
@@ -311,24 +359,58 @@ return
 end
 
 
-Subroutine write_ship_weap_state
+Subroutine write_ship_weap_state( InAO )
 BBcommon
 weapon$common
 ship$common
 shipweapon$common
+
+integer InAO
 character msg[200]
 vaxcharacter*200  v_msg
 Equivalence  (msg, v_msg)
 integer msg_len
 integer   Game_DTG    # integer function
 integer start_ship_index, end_ship_index
+integer delta_len  #tmb
 
-msg_len = 0
-call smovv ("Blue Weapon  State at ", msg, msg_len)
-call smoviz(Game_DTG(Game$Time), 6, msg, msg_len)
-call smovv ("Z during exercise ", msg, msg_len)
-call smovhn (Scenario$Name, $$MaxLit, msg, msg_len)
-write (output_unit, fmt=*) v_msg[1:msg_len]
+if (InAO == $yes)
+{ 
+   msg_len = 0
+   call smovv ("Blue Weapon  State at ", msg, msg_len)
+   call smoviz(Game_DTG(Game$Time), 6, msg, msg_len)
+   call smovv ("Z during exercise ", msg, msg_len)
+   call smovhn (Scenario$Name, $$MaxLit, msg, msg_len)
+   write (output_unit, fmt=*) v_msg[1:msg_len]
+
+
+   #Ships inside AO    tmb
+   msg_len = 0
+   call smovv ("      ", msg, msg_len)
+   write (output_unit, fmt=*) v_msg[1:msg_len]
+   msg_len = 0
+   call smovv ("      ", msg, msg_len)
+   write (output_unit, fmt=*) v_msg[1:msg_len]
+   msg_len = 0
+   call smovv ("Ships INSIDE AO", msg, msg_len)
+   write (output_unit, fmt=*) v_msg[1:msg_len]
+
+}
+else  # outside AO
+{
+   #Ships outside AO    tmb
+   msg_len = 0
+   call smovv ("      ", msg, msg_len)
+   write (output_unit, fmt=*) v_msg[1:msg_len]
+   msg_len = 0
+   call smovv ("      ", msg, msg_len)
+   write (output_unit, fmt=*) v_msg[1:msg_len]
+   msg_len = 0
+   call smovv ("Ships OUTSIDE AO", msg, msg_len)
+   write (output_unit, fmt=*) v_msg[1:msg_len]
+
+}
+
 
 # weapon name, unit names(3 letter)
 
@@ -347,17 +429,23 @@ while (1==1)
 	write (output_unit, fmt=*) v_msg[1:msg_len]
 
 	msg_len = 0
+        delta_len = 0
 #                         1         2         3         4         5
 #                12345678901234567890123456789012345678901234567890
 	call smovv ("                                  ", msg, msg_len)
-	end_ship_index = min(start_ship_index + $shipsOnHeaser, ship_count)
+	end_ship_index = min(start_ship_index + $ShipsOnHeader, ship_count)
 	for (ship_index = start_ship_index; ship_index <= end_ship_index; ship_index = ship_index + 1)
 	{
-		call smovv ("  ", msg, msg_len)
+		if ( delta_len == 0 )
+                   call smovv (" ", msg, msg_len)
+                else
+                   call smovv ("  ", msg, msg_len)
+                delta_len = msg_len
 		if (ship_name_c[1,ship_index] == $LETN)
-			call smovhn(ship_name_c[2,ship_index], 3, msg, msg_len)
+			call smovhn(ship_name_c[2,ship_index], 4, msg, msg_len)
 		else
-			call smovhn(ship_name_c[1,ship_index], 3, msg, msg_len)
+			call smovhn(ship_name_c[1,ship_index], 4, msg, msg_len)
+                delta_len = msg_len - delta_len - 4
 
 	}
 	write (output_unit, fmt=*) v_msg[1:msg_len]
@@ -385,7 +473,7 @@ while (1==1)
 		}
 		write (output_unit, fmt=*) v_msg[1:msg_len]
 	}
-	start_ship_index = start_ship_index + $shipsOnHeaser
+	start_ship_index = start_ship_index + $ShipsOnHeader + 1
 	if (start_ship_index > ship_count) break
 }
 
