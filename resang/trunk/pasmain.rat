@@ -1,0 +1,568 @@
+
+include "bbctl.inc"         
+include "bbcode.inc"         
+include "bbshc.inc"         
+include "bbwet.inc"         
+include "bbunt.inc"    
+include "elevation.inc"    #tmb     
+        
+define (err, -3)   # alsp.inc undefines it - who_am_i uses it
+
+define (number_args, 1)
+define (output_unit, 10)
+
+define (BBImplicit, Implicit None)
+
+undefine write   # use the standard fortran write statement
+
+program allshipsstate
+#########################################################################
+#$%
+#$% Purpose:    This program is intended to tap into the RESA blackboard
+#$%             to report all ships.  Includes Ship name, hull number, task id
+#$%             Flag, view number, AO, Category and Class.    Sorted by task id
+#$%             
+#$% Calls:      initr4         <rlib.olb>
+#$%             read_arguments
+#$%             ctoi
+#$%             who_am_i
+#$%             bbmap
+#$%             check_version
+#$%             remark
+#$%             exit
+#$%             Init_Collection_File
+#$%             delay
+#$%             Game_DTG
+#$%             smov..
+#$%             echo..
+#$%             write
+#$%             close
+#$%
+#$% Tables:     global variables
+#$%
+#$% Date:       Aug 2018
+#$%
+#$% Author:     TMB ... Added terrain usage to define IN and OUT AO 8-18
+#$%
+#########################################################################
+BBcommon
+ElevationCommon             #tmb
+
+integer   ctoi        # integer function
+integer   Game_DTG    # integer function
+
+integer          arg_len[number_args], k
+vaxcharacter*80  args[number_args], params
+
+integer   game_number
+character  msg[ARB]
+VMSCHAR*ARB bbname
+integer   error
+integer   next_cycle, delay_time, next_record_interval
+integer nl
+
+integer   msg1_len
+character msg1[80]
+vaxcharacter*80  v_msg1
+Equivalence  (msg1, v_msg1)
+integer ok_to_write                     # Can write to global section tmb
+
+  ok_to_write = 1  #tmb
+
+  call initR4
+
+  call who_am_i (game_number, bbname)
+  BBmap (bbname)
+
+  DTED_MAP  #tmb
+
+  call check_version (error, msg)
+
+  if (msg[1] != EOS)
+    call remark (msg)
+  if (error == YES)
+    call exit
+  
+  call help_pgm(0,
+              "print all ships: Current info on all ships",
+              "pas Tags:ships , blackboard, task id",
+              "Usage: pasmain.run",
+              "",
+              "",
+              "",
+              "",
+              "Example:  $RESA_TRUNK/pasmain.run")
+
+  call Init_Collection_File
+
+  call write_all_ships_state
+
+  close (output_unit)
+
+end
+
+
+
+subroutine who_am_i (igame, bbname)
+###########################################################
+#$%
+#$% Purpose:   WHO_AM_I allows user to start a game using
+#$%            a command line input
+#$%
+###########################################################
+
+character  buf[30]
+integer    k,ic, igame, CTOI, GETARG_  # jb E2145  6/1/00
+VMSCHAR*(*) BBname             # jb E2144  (Re: BBSmap & MAKE_..) 8/3/00
+
+igame = 0
+call make_CSF_bb_name (igame,$$BBNAME,bbname)
+
+end
+
+
+Subroutine Init_Collection_File
+#########################################################################
+#$%
+#$% Purpose:    Init_Collection_File will open the data collection file
+#$%             and write the scenario information.
+#$%
+#$% Called By:  collect_load_stats
+#$%
+#$% Calls:      smov..
+#$%             open
+#$%             echo..
+#$%             exit
+#$%             write
+#$%
+#$% Tables:     global variables
+#$%
+#$% Date:       Aug 2014
+#$%
+#$% Author:     James O. Allen
+#$%
+#########################################################################
+BBcommon
+
+integer  interval    # interval at which data is to be collected
+integer  Game_DTG    # integer function
+integer  record_interval # Interval at which data is to be recorded 
+integer    name_len
+character  file_name[ARB]
+vmschar*ARB file_name_v
+equivalence (file_name, file_name_v)
+integer    return_val, msg_len
+character  msg[80]
+vaxcharacter*80 v_msg
+
+Equivalence  (msg, v_msg)
+
+name_len = 0
+call smovhn (Scenario$Name, $$MaxLit, file_name, name_len)
+call smovv  ("_allships.dat", file_name, name_len)
+call smov   (EOS, file_name, name_len)
+open (unit   = output_unit,  file   = file_name_v, 
+      iostat = return_val, recl = 120*4,   status = 'unknown')
+if (return_val != 0)
+{
+ call echov ("Output file not opened")
+ call echor
+ call exit
+}
+
+call echov ("Output file is ")
+call echohn (file_name, 20)
+call echor
+
+return
+end
+
+Subroutine write_all_ships_state
+BBcommon
+ElevationCommon             #tmb
+
+literal cstrip8, reportcode2text, task_number
+vmschar vstrip*ARB
+BBDeclare (unt$pointer, unt$fullname$v, unt$type$i, shc$pointer, wet$pointer)
+BBDeclare (shc$tnk$index, unt$tnk$index)
+integer Game_dtg
+integer iview
+integer Last_Low_Task, Curr_Low_task, Curr_Low_Unt
+integer msg_len, Curr_taskid
+integer i, kk, inout
+character msg[120]
+vaxcharacter*120  v_msg
+Equivalence  (msg, v_msg)
+real Slat, Nlat,Wlon, Elon  #tmb
+
+#Define the playbox initial values, too big to matter  tmb 7-18
+Slat = -3.2
+Nlat = 3.2
+Wlon = -3.2
+Elon = 3.2
+
+#update the lat and lon boundaries if possible 
+if (RESA$Worldwide$Elevation==$NO
+     & N_elev_regions > 0 )
+{
+   Slat = elevation_region_swlat[1]
+   Wlon = elevation_region_swlon[1]
+   Nlat = Slat + elevation_region_height[1] * $deg2rad
+   Elon = Wlon + elevation_region_width[1] *  $deg2rad
+} 
+
+
+msg_len = 0
+call smovv ("BLUE Ships at ", msg, msg_len)
+call smoviz(Game_DTG(Game$Time), 6, msg, msg_len)
+call smovv ("Z during exercise ", msg, msg_len)
+call smovhn (Scenario$Name, $$MaxLit, msg, msg_len)
+write (output_unit, fmt=*) v_msg[1:msg_len]
+
+msg_len = 0
+call smovv ("  Name         Ship Name          Hull     ", msg, msg_len)
+call smovv ("Task ID  Flag  View  AO  Cat  CLASS", msg, msg_len)
+write (output_unit, fmt=*) v_msg[1:msg_len]
+
+msg_len = 0
+call smovv ("-------- ------------------------ ------  ", msg, msg_len)
+call smovv ("--------- ----  ", msg, msg_len)
+call smovv ("---  ---  ---  ---------", msg, msg_len)
+
+write (output_unit, fmt=*) v_msg[1:msg_len]
+
+Last_Low_Task = 0
+
+# find the lowest  ... really should do a subroutine to print... but not just yet
+
+1000
+Curr_Low_task = 0
+Curr_Low_Unt = 0
+
+for (UNT$Pointer$First; UNT$Pointer$OK; UNT$Pointer$Next)
+{
+	if (Xunt$Status$i == $BeingDeleted$Code) next
+
+	# Select Blue 
+	if (Xunt$View$i < $FirstBlue$View | Xunt$View$i > $LastBlue$View) next
+
+	# Select Ships
+	UNT$Type$i = xUNT$Type$i
+	if (UNT$Type$i != $Surface$code & UNT$Type$i != $SurfaceWithAC$code & 
+            unt$Type$i != $sub$code & unt$type$i != $ShipandSub$code) next
+        curr_taskid = XUNT$HierarchyId$i
+        if (curr_taskid > last_low_task)
+        { if ( Curr_Low_Task == 0 ) 
+             { Curr_Low_Task = curr_taskid
+               Curr_Low_Unt = unt$Pointer
+              }
+           else if ( curr_taskid < Curr_Low_Task )
+              { Curr_Low_Task = curr_taskid
+                Curr_Low_Unt = unt$Pointer
+              }
+         }
+}    
+if (Curr_Low_UNT == 0) go to 2000
+unt$POINTER = Curr_Low_Unt
+Last_Low_Task = Curr_Low_Task
+
+
+        inout = 1
+	IF (Xunt$Truelatitude$f < Slat) inout = 0			# Skip ships outside AO
+        IF (Xunt$Truelatitude$f > Nlat) inout = 0			# Skip ships outside AO
+        IF (Xunt$TrueLongitude$f < Wlon) inout = 0			# Skip ships outside AO
+        IF (Xunt$TrueLongitude$f > Elon) inout = 0			# Skip ships outside AO
+
+	shc$pointer = Xunt$SHCpntr$i
+
+	msg_len = 0
+	call smovh (Xunt$name$c, $$MaxLit, msg, msg_len)
+	call smovv (" ", msg, msg_len)
+	unt$FullName$v = Xunt$FullName$v
+	kk = msg_len
+	call smovv (unt$FullName$v, msg, msg_len)
+	kk = 24 - (msg_len - kk) + 1
+	for (i=1; i<=kk; i=i+1)
+		call smovv (" ", msg, msg_len)
+
+	kk = msg_len
+	if (Xunt$HullNumber$i > 0)
+	{
+		call smovvn (Xunt$HullType$v, msg, msg_len)
+		call smoviz (Xunt$HullNumber$i, 3, msg, msg_len)
+	}
+	kk = 7 - (msg_len - kk) + 1
+	for (i=1; i<=kk; i=i+1)
+		call smovv (" ", msg, msg_len)
+
+	call fgtask ( XUNT$HierarchyId$i, task_number)
+        call smovhn (task_number, $$MaxLit, msg, msg_len )
+	call smovv ("   ", msg, msg_len)
+
+        if (Xunt$Flag$V > " ")
+        {  call smovvt(Xunt$Flag$V, msg, msg_len)
+	  call smovv (" ", msg, msg_len)
+        }
+        else 	  call smovv ("   ", msg, msg_len)
+
+	call smovib ((Xunt$View$i - $FirstBlue$View + 1), 4, msg, msg_len)
+	call smovv ("  ", msg, msg_len)
+
+	call smovib (inout, 3, msg, msg_len)
+	call smovv (" ", msg, msg_len)
+
+	call smovib (UNT$Type$i, 4, msg, msg_len)
+	call smovv ("   ", msg, msg_len)
+
+        call smovhn (xSHC$Type$C, $$MAXname, msg, msg_len)
+
+	write (output_unit, fmt=*) v_msg[1:msg_len]	
+
+go to 1000
+
+2000
+
+
+# ORANGE ships
+msg_len = 0
+call smovv ("      ", msg, msg_len)
+write (output_unit, fmt=*) v_msg[1:msg_len]
+write (output_unit, fmt=*) v_msg[1:msg_len]
+write (output_unit, fmt=*) v_msg[1:msg_len]
+msg_len = 0
+call smovv ("ORANGE Ships at ", msg, msg_len)
+call smoviz(Game_DTG(Game$Time), 6, msg, msg_len)
+call smovv ("Z during exercise ", msg, msg_len)
+call smovhn (Scenario$Name, $$MaxLit, msg, msg_len)
+write (output_unit, fmt=*) v_msg[1:msg_len]
+msg_len = 0
+call smovv ("      ", msg, msg_len)
+write (output_unit, fmt=*) v_msg[1:msg_len]
+
+msg_len = 0
+call smovv ("  Name         Ship Name          Hull     ", msg, msg_len)
+call smovv ("Task ID  Flag  View  AO  Cat  CLASS", msg, msg_len)
+write (output_unit, fmt=*) v_msg[1:msg_len]
+
+msg_len = 0
+call smovv ("-------- ------------------------ ------  ", msg, msg_len)
+call smovv ("--------- ----  ", msg, msg_len)
+call smovv ("---  ---  ---  ---------", msg, msg_len)
+write (output_unit, fmt=*) v_msg[1:msg_len]
+
+Last_Low_Task = 0
+
+# find the lowest  ... really should do a subroutine to print... but not just yet
+
+3000
+Curr_Low_task = 0
+Curr_Low_Unt = 0
+
+
+for (UNT$Pointer$First; UNT$Pointer$OK; UNT$Pointer$Next)
+{
+	if (Xunt$Status$i == $BeingDeleted$Code) next
+
+	# Select Orange
+	if (Xunt$View$i < $FirstOrange$View | Xunt$View$i > $lastorange$View) next
+
+	# Select Ships
+	UNT$Type$i = xUNT$Type$i
+	if (UNT$Type$i != $Surface$code & UNT$Type$i != $SurfaceWithAC$code & 
+            unt$Type$i != $sub$code & unt$type$i != $ShipandSub$code) next
+
+        curr_taskid = XUNT$HierarchyId$i
+        if (curr_taskid > last_low_task)
+        { if ( Curr_Low_Task == 0 ) 
+             { Curr_Low_Task = curr_taskid
+               Curr_Low_Unt = unt$Pointer
+              }
+           else if ( curr_taskid < Curr_Low_Task )
+              { Curr_Low_Task = curr_taskid
+                Curr_Low_Unt = unt$Pointer
+              }
+         }
+}    
+if (Curr_Low_UNT == 0) go to 4000
+unt$POINTER = Curr_Low_Unt
+Last_Low_Task = Curr_Low_Task
+
+        inout = 1
+	IF (Xunt$Truelatitude$f < Slat) inout = 0			# Skip ships outside AO
+        IF (Xunt$Truelatitude$f > Nlat) inout = 0			# Skip ships outside AO
+        IF (Xunt$TrueLongitude$f < Wlon) inout = 0			# Skip ships outside AO
+        IF (Xunt$TrueLongitude$f > Elon) inout = 0			# Skip ships outside AO
+
+	shc$pointer = Xunt$SHCpntr$i
+
+	msg_len = 0
+	call smovh (Xunt$name$c, $$MaxLit, msg, msg_len)
+	call smovv (" ", msg, msg_len)
+	unt$FullName$v = Xunt$FullName$v
+	kk = msg_len
+	call smovv (unt$FullName$v, msg, msg_len)
+	kk = 24 - (msg_len - kk) + 1
+	for (i=1; i<=kk; i=i+1)
+		call smovv (" ", msg, msg_len)
+
+	kk = msg_len
+	if (Xunt$HullNumber$i > 0)
+	{
+		call smovvn (Xunt$HullType$v, msg, msg_len)
+		call smoviz (Xunt$HullNumber$i, 3, msg, msg_len)
+	}
+	kk = 7 - (msg_len - kk) + 1
+	for (i=1; i<=kk; i=i+1)
+		call smovv (" ", msg, msg_len)
+
+
+	call fgtask ( XUNT$HierarchyId$i, task_number)
+        call smovhn (task_number, $$MaxLit, msg, msg_len )
+	call smovv ("   ", msg, msg_len)
+
+        if (Xunt$Flag$V > " ")
+        {  call smovvt(Xunt$Flag$V, msg, msg_len)
+	  call smovv (" ", msg, msg_len)
+        }
+        else 	  call smovv ("   ", msg, msg_len)
+
+	call smovib ((Xunt$View$i - $FirstOrange$View + 1), 4, msg, msg_len)
+	call smovv ("  ", msg, msg_len)
+
+	call smovib (inout, 3, msg, msg_len)
+	call smovv (" ", msg, msg_len)
+
+	call smovib (UNT$Type$i, 4, msg, msg_len)
+	call smovv ("   ", msg, msg_len)
+
+        call smovhn (xSHC$Type$C, $$MAXname, msg, msg_len)
+
+	write (output_unit, fmt=*) v_msg[1:msg_len]
+go to 3000
+
+4000
+
+
+# NEUTRAL ships
+msg_len = 0
+call smovv ("      ", msg, msg_len)
+write (output_unit, fmt=*) v_msg[1:msg_len]
+write (output_unit, fmt=*) v_msg[1:msg_len]
+write (output_unit, fmt=*) v_msg[1:msg_len]
+msg_len = 0
+call smovv ("NEUTRAL Ships at ", msg, msg_len)
+call smoviz(Game_DTG(Game$Time), 6, msg, msg_len)
+call smovv ("Z during exercise ", msg, msg_len)
+call smovhn (Scenario$Name, $$MaxLit, msg, msg_len)
+write (output_unit, fmt=*) v_msg[1:msg_len]
+msg_len = 0
+call smovv ("      ", msg, msg_len)
+write (output_unit, fmt=*) v_msg[1:msg_len]
+
+msg_len = 0
+call smovv ("  Name         Ship Name          Hull     ", msg, msg_len)
+call smovv ("Task ID  Flag  View  AO  Cat  CLASS", msg, msg_len)
+write (output_unit, fmt=*) v_msg[1:msg_len]
+
+msg_len = 0
+call smovv ("-------- ------------------------ ------  ", msg, msg_len)
+call smovv ("--------- ----  ", msg, msg_len)
+call smovv ("---  ---  ---  ---------", msg, msg_len)
+write (output_unit, fmt=*) v_msg[1:msg_len]
+
+Last_Low_Task = 0
+
+# find the lowest  ... really should do a subroutine to print... but not just yet
+
+5000
+Curr_Low_task = 0
+Curr_Low_Unt = 0
+
+
+for (UNT$Pointer$First; UNT$Pointer$OK; UNT$Pointer$Next)
+{
+	if (Xunt$Status$i == $BeingDeleted$Code) next
+
+	# Select Neutral
+	if (Xunt$View$i !=  $Neutral$View ) next
+
+	# Select Ships
+	UNT$Type$i = xUNT$Type$i
+	if (UNT$Type$i != $Surface$code & UNT$Type$i != $SurfaceWithAC$code & 
+            unt$Type$i != $sub$code & unt$type$i != $ShipandSub$code) next
+
+        curr_taskid = XUNT$HierarchyId$i
+        if (curr_taskid > last_low_task)
+        { if ( Curr_Low_Task == 0 ) 
+             { Curr_Low_Task = curr_taskid
+               Curr_Low_Unt = unt$Pointer
+              }
+           else if ( curr_taskid < Curr_Low_Task )
+              { Curr_Low_Task = curr_taskid
+                Curr_Low_Unt = unt$Pointer
+              }
+         }
+}    
+if (Curr_Low_UNT == 0) go to 6000
+unt$POINTER = Curr_Low_Unt
+Last_Low_Task = Curr_Low_Task
+
+        inout = 1
+	IF (Xunt$Truelatitude$f < Slat) inout = 0			# Skip ships outside AO
+        IF (Xunt$Truelatitude$f > Nlat) inout = 0			# Skip ships outside AO
+        IF (Xunt$TrueLongitude$f < Wlon) inout = 0			# Skip ships outside AO
+        IF (Xunt$TrueLongitude$f > Elon) inout = 0			# Skip ships outside AO
+
+	shc$pointer = Xunt$SHCpntr$i
+
+	msg_len = 0
+	call smovh (Xunt$name$c, $$MaxLit, msg, msg_len)
+	call smovv (" ", msg, msg_len)
+	unt$FullName$v = Xunt$FullName$v
+	kk = msg_len
+	call smovv (unt$FullName$v, msg, msg_len)
+	kk = 24 - (msg_len - kk) + 1
+	for (i=1; i<=kk; i=i+1)
+		call smovv (" ", msg, msg_len)
+
+	kk = msg_len
+	if (Xunt$HullNumber$i > 0)
+	{
+		call smovvn (Xunt$HullType$v, msg, msg_len)
+		call smoviz (Xunt$HullNumber$i, 3, msg, msg_len)
+	}
+	kk = 7 - (msg_len - kk) + 1
+	for (i=1; i<=kk; i=i+1)
+		call smovv (" ", msg, msg_len)
+
+
+	call fgtask ( XUNT$HierarchyId$i, task_number)
+        call smovhn (task_number, $$MaxLit, msg, msg_len )
+	call smovv ("   ", msg, msg_len)
+
+        if (Xunt$Flag$V > " ")
+        {  call smovvt(Xunt$Flag$V, msg, msg_len)
+	  call smovv (" ", msg, msg_len)
+        }
+        else 	  call smovv ("   ", msg, msg_len)
+
+	call smovib (1, 4, msg, msg_len)
+	call smovv ("  ", msg, msg_len)
+
+	call smovib (inout, 3, msg, msg_len)
+	call smovv (" ", msg, msg_len)
+
+
+	call smovib (UNT$Type$i, 4, msg, msg_len)
+	call smovv ("   ", msg, msg_len)
+
+        call smovhn (xSHC$Type$C, $$MAXname, msg, msg_len)
+
+	write (output_unit, fmt=*) v_msg[1:msg_len]
+go to 5000
+
+6000
+
+
+return
+end
