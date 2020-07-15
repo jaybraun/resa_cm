@@ -41,12 +41,10 @@ char cr         = 13;
 char lf         = 13;
 
 long hub_base_port, read_port, write_port, log_port;
-long adaptor_base_port, adaptor_port;
 long cmnd_port;
 char *hub_ip;
 char *adaptor_ip;
 
-SOCKET	adaptor_sock   = 0;
 SOCKET	read_sock      = 0;  // program reads Hub data from this socket (hub writes to it)
 SOCKET	write_sock     = 0;  // program writes data going to Hub to this socket  (hub reads from it)
 SOCKET	log_sock       = 0;  // program reads data from Hub and saves to a log file
@@ -54,9 +52,7 @@ SOCKET	log_sock       = 0;  // program reads data from Hub and saves to a log fi
 long create_connection(char *ip, long port, SOCKET *sock, char *name,int limit);
 long connect_to_cbs(char *ip, long read_port, long write_port, long log_port,
                     SOCKET *read_sock, SOCKET *write_socket, SOCKET *log_sock);
-long connect_to_adaptor(char *ip, long port, SOCKET *sock);
 long read_from_cbs(char **msg, long max_msg, SOCKET sock);
-long read_from_adaptor(char *msg, long max_msg, SOCKET sock);
 long read_log_data(char **msg, long max_msg, SOCKET sock);
 long send_to_cbs(char *msg, long msg_len, SOCKET sock);
 long send_to_adaptor(char *msg, long msg_len, SOCKET sock);
@@ -86,9 +82,7 @@ int fishbone(int argc, char **argv)
    {
      save_log_data("\n**** Process stopping\n");
      INFOMSG("**** Missing arguments:\n");
-     INFOMSG("         hub_ip,        hub_base_port, read_offset, write_offset,  log_offset,\n");
-     INFOMSG("         confed_number, actor_numer,   adaptor_ip,  adaptor_base_port,\n");
-     INFOMSG("         debug_flag (optional)\n");
+     // We should indicate correct usage when we can
      exit(0);
    }
 
@@ -103,8 +97,7 @@ int fishbone(int argc, char **argv)
 
    pid = getpid();
 
-   hub_base_port = read_port = write_port = log_port = adaptor_base_port =
-   adaptor_port  = cmnd_port = 0;
+   hub_base_port = read_port = write_port = log_port = cmnd_port = 0;
 
    adaptor_msg[0] = cbs_msg[0] = log_msg[0] = 0;
 
@@ -116,7 +109,7 @@ int fishbone(int argc, char **argv)
    confed_number     = atoi(argv[6]);
    actor_number      = atoi(argv[7]);
    adaptor_ip        = argv[8];
-   adaptor_base_port = atoi(argv[9]);
+   // adaptor base port is not required for a federate
    if ( argc > 10 )
      debug_flag = atoi(argv[10]);
 
@@ -133,11 +126,6 @@ int fishbone(int argc, char **argv)
      log_port     = hub_base_port + log_offset;
      cmnd_port    = (hub_base_port / 100)*100 + 99;
    }
-   if ( adaptor_base_port )
-     adaptor_port = adaptor_base_port + (2*MAX_CONFED_SIZE+1)*(confed_number-1)+
-	                                MAX_CONFED_SIZE + actor_number;
-
-   connect_to_adaptor (adaptor_ip, adaptor_port, &adaptor_sock);
 
    connect_to_cbs (hub_ip, read_port, write_port, log_port, 
                            &read_sock, &write_sock, &log_sock);
@@ -145,13 +133,12 @@ int fishbone(int argc, char **argv)
    for ( ; ; )
    {
      char *temp = cbs_msg;
-//wait_for_data(read_sock, adaptor_sock, log_sock);
      n = read_from_cbs(&temp, MAX_MSG_SIZE, read_sock);
      if ( n > 0 )
      {
        if ( debug_flag )
          write_to_log_file("Received from Hub:\n   (%s)\n",temp);
-       send_to_adaptor(temp, n, adaptor_sock);
+       //send_to_adaptor(temp, n, adaptor_sock);
        ndata += n;
      }
      else if ( n == 0 )
@@ -159,27 +146,6 @@ int fishbone(int argc, char **argv)
        read_sock = 0;
        connect_to_cbs(hub_ip, read_port, write_port, log_port, 
                               &read_sock, &write_sock, &log_sock);
-     }
-
-     if ( adaptor_sock )
-     {
-       if ( !adaptor_msg[0] )
-         n = read_from_adaptor(adaptor_msg, MAX_MSG_SIZE, adaptor_sock);
-       else
-         n = strlen(adaptor_msg);
-       if ( n > 0 )
-       {
-         if ( debug_flag )
-           write_to_log_file("Received from Adaptor:\n   (%s)\n",adaptor_msg);
-         if ( send_to_cbs(adaptor_msg, n, write_sock) )
-           adaptor_msg[0] = 0;
-         ndata += n;
-       }
-       else if ( n == 0 )
-       {
-         adaptor_sock = 0;
-         connect_to_adaptor (adaptor_ip, adaptor_port, &adaptor_sock);
-       }
      }
 
      temp = log_msg;
@@ -308,19 +274,6 @@ long connect_to_cbs(char *ip, long read_port, long write_port, long log_port,
   {
     INFOMSG("Attempting to connect to hub (log) (%s,%d)\n", ip, log_port);
     create_connection (ip, log_port, log_sock, "", 0);
-  }
-  return ( 1 );
-}
-
-//------------------------------------------------------------------------------
-long connect_to_adaptor(char *ip, long port, SOCKET *sock)
-{
-  if ( port )
-  {
-    INFOMSG("%s Disconnecting from ADAPTOR\n", get_current_time());
-    disconnect_socket(sock);
-    INFOMSG("Attempting to connect to adaptor (%s,%d)\n", ip, port);
-    create_connection (ip, port, sock, "", 0);
   }
   return ( 1 );
 }
@@ -487,84 +440,6 @@ long send_to_adaptor(char *msg, long msg_len, SOCKET sock)
 }
 
 //------------------------------------------------------------------------------
-long read_from_adaptor(char *msg, long max_msg, SOCKET sock)
-{
-	long            i, n, end, tmp;
-	unsigned char	j, temp[16];
-    fd_set			rset;
-    struct timeval	t = {0,0};
-
-    if ( !sock )
-      return ( 0 );
-
-	//********** Handle Polling of input **********
-	//*	select = -1		No socket connection
-	//*	select =  0		No data
-	FD_ZERO(&rset);
-	FD_SET(sock,&rset);
-	i = select (sock+1, &rset, NULL, NULL, &t);
-	if (i <= 0)
-		return ( -1 );
-	if ( !sock )
-		return ( 0 );
-
-#ifdef xyz
-    i = tcp2_client_ready_read(sock);
-	if ( !i )
-	  return ( -1 );
-#endif
-
-    *msg = 0;
-	//********** Read into buffer (non-Poll) **********
-	//*	The ACM sends the length of the ALSP message, followed by the
-	//*	message itself.  This integer length is 4 bytes, and can contain
-	//*	the terminating character.
-	end = sizeof(int);		// Remaining length bytes
-    memset(temp,0,sizeof(temp));
-	for (i=0;   end > 0;   i += tmp)
-	{
-		tmp = recv (sock,		    // socket
-					&temp[i],		// where to read-in data
-					end,			// size of data left to read-in
-					0);
-		if (tmp <= 0)
-			return ( tmp );
-
-		end -= tmp;
-		if (tmp < 4)
-			continue;
-	}
-	end = 0;
-	for (j = 0;   j < sizeof(int);   j++)
-		end = end * 256 + temp[j];
-	  if ( end > max_msg )           
-	  {
-		  INFOMSG("Message read from adaptor is too large (%d){%4.4s}\n", end, temp);
-	    return ( -1 );
-	  }
-
-	n = tmp = -1;
-	for ( i=0 ; end > 0 ; i+=tmp )
-	{
-		tmp = recv (sock,		    // socket
-					&msg[i],        // where to read-in data
-					end,			// size of data to read-in
-					0);
-		if (tmp <= 0)
-			break;
-		end   -= tmp;
-		n      = i + tmp;
-		msg[n] = 0;
-	}
-	if ( !tmp )
-	  return ( 0 );
-	else
-        {
-          n = strlen(msg);   // in case there are trailing nulls
-          return ( n );
-        }
-}
-//------------------------------------------------------------------------------
 void write_to_log_file(char *fmt, ...)
 {
   va_list pArgs;
@@ -669,10 +544,6 @@ long process_cmnd( CONN_OBJ_PTR q, char *cmnd_buf, long stat_client,
 {
   char cmnd[500];
   char *msg;
-  static long save_adaptor_port = 0;
-//  static long save_read_port    = 0;
-//  static long save_write_port   = 0;
-//  static long save_log_port     = 0;
 
   sscanf(cmnd_buf,"%s",cmnd);
   msg = strchr(cmnd_buf,' ');
@@ -686,30 +557,7 @@ long process_cmnd( CONN_OBJ_PTR q, char *cmnd_buf, long stat_client,
   {
     if ( q )
     {
-      sprintf(cmnd,"%ld %cHub %cADAPTOR\n", (stat_client)? pid:0, 
-                          (read_sock)? '+':'-', (adaptor_sock)? '+':'-');
       connect_write_record(q,cmnd,strlen(cmnd)); 
-    }
-  }
-  else if ( strstr(cmnd,"CON_ADAPTOR") )
-  {
-    if ( stat_client && !con_flag )
-    {
-      adaptor_port = (!adaptor_port)? save_adaptor_port : adaptor_port;
-      connect_to_adaptor (adaptor_ip, adaptor_port, &adaptor_sock);
-    }
-  }
-  else if ( strstr(cmnd,"DIS_ADAPTOR") )
-  {
-    if ( stat_client && !con_flag )
-    {
-      INFOMSG("%s Disconnecting ADAPTOR\n", get_current_time());
-      disconnect_socket(&adaptor_sock);
-      if ( adaptor_port )
-      {
-        save_adaptor_port = adaptor_port;
-        adaptor_port = 0;
-      }
     }
   }
   else if ( strstr(cmnd,"NEW_LOG") )
