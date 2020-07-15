@@ -5,7 +5,6 @@
 #include <time.h>
 #include <unistd.h>
 
-#ifdef UNIXSYS
 #include <sys/ipc.h>
 #include <sys/sem.h>
 #include <sys/socket.h>
@@ -15,11 +14,6 @@
 #define Sleep(a) usleep(a*1000)
 #define slash      "/" 
 char *Compile_Date=COMPILE_DATE;
-
-#else
-#define slash      "\\"
-char *WIN_VERS = WINDOWS_VERSION;
-#endif
 
 #include "tcp_library.h"
 #include "utils.h"
@@ -89,11 +83,7 @@ int fishbone(int argc, char **argv)
    if ( !check_proc_name(argv[0]) )
      INFOMSG("\n**** WARNING: running %s as %s may cause problems\n",
                                                        wb_name, argv[0]);
-#ifdef UNIXSYS
    INFOMSG("\n%s\n",COMPILE_DATE);
-#else
-   INFOMSG("Compiled - %s %s - %s\n", __DATE__, __TIME__, WIN_VERS);
-#endif
 
    pid = getpid();
 
@@ -698,8 +688,6 @@ long process_running()
   local = ( !strcmp(cur_ip,"127.0.0.1") || !strcmp(cur_ip,host_ip) );
 
 
-#ifdef UNIXSYS
-
   sprintf(cmnd_buf,"pgrep -x %s -d,>.zwb_sys", wb_name);
   system(cmnd_buf);
 
@@ -750,51 +738,6 @@ long process_running()
   }
   return ( 0 );
 
-#else
-
-  sprintf(cmnd_buf,"netstat /b /n >.zwb_sys");
-  system(cmnd_buf);
-
-  if ( fd = fopen(".zwb_sys","r") )
-  {
-    int  id = 0;
-    char buf[1000], temp_buf[1000];
-
-    while ( fgets(buf,sizeof(buf)-1,fd) )
-    {
-      int  i, g_port;
-      char c[500], ip[50], g_host[500];
-      if ( strstr(buf,wb_name) )
-      {
-        sscanf(temp_buf,"%*s%*s%s%*s%d",c,&i);
-		if ( i != pid )
-		{
-          strcpy(g_host,strtok(c,":"));
-          g_port = (atoi(strtok(NULL,":")) / 1000) * 1000;
-          if ( g_port == hub_base_port )
-		  { 
-            get_ip(g_host,ip);
-            if ( (local && 
-                   (!strcmp(ip,"127.0.0.1") || !strcmp(ip,host_ip))) ||
-                      !strcmp(cur_ip,ip) )
-			{
-              id = i;
-			  break;
-			}
-		  }
-		}
-      }
-      else
-        strcpy(temp_buf,buf);
-    }
-	fclose(fd);
-	return ( id);
-  }
-  else
-	INFOMSG("Unable to open zwb_sys. Wishbone may already be running");
-  return ( 0 );
-
-#endif
 }
 
 long check_proc_name(char *name)
