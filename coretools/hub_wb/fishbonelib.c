@@ -23,8 +23,6 @@ char *Compile_Date=COMPILE_DATE;
 #define MAX_MSG_SIZE    1000000
 
 long debug_flag = 0;
-long pid        = 0;
-char *wb_name = "wishbone.exe";
 
 char adaptor_msg[MAX_MSG_SIZE+10];
 char cbs_msg[MAX_MSG_SIZE+10];
@@ -57,12 +55,8 @@ static int sock_ready(SOCKET s,int read);
 long wait_for_data(SOCKET sock1, SOCKET sock2, SOCKET sock3);
 long check_for_command( long con_flag );
 long save_log_data(char *msg);
-long process_running();
-long check_proc_name(char *name);
 long process_cmnd( CONN_OBJ_PTR q, char *cmnd_buf, long stat_client, 
                                                                 long con_flag);
-int getpid();
-
 int fishbone(int argc, char **argv)
 {
    long read_offset;
@@ -80,12 +74,7 @@ int fishbone(int argc, char **argv)
      exit(0);
    }
 
-   if ( !check_proc_name(argv[0]) )
-     INFOMSG("\n**** WARNING: running %s as %s may cause problems\n",
-                                                       wb_name, argv[0]);
    INFOMSG("\n%s\n",COMPILE_DATE);
-
-   pid = getpid();
 
    hub_base_port = read_port = write_port = log_port = cmnd_port = 0;
 
@@ -102,12 +91,6 @@ int fishbone(int argc, char **argv)
    // adaptor base port is not required for a federate
    if ( argc > 10 )
      debug_flag = atoi(argv[10]);
-
-   if ( (n = process_running()) )
-   {
-     INFOMSG("Process is already running (pid = %d)\n",n);
-     exit(0);
-   }
 
    if ( hub_base_port )
    {
@@ -437,7 +420,7 @@ void write_to_log_file(char *fmt, ...)
 
   va_start (pArgs,fmt);
 
-  if ( (fd = fopen("zwb.log","a")) )
+  if ( (fd = fopen("fishbone.log","a")) )
   {
     fprintf(fd,"**** %s\n",get_current_time());
     vfprintf(fd,fmt,pArgs);
@@ -668,85 +651,4 @@ long get_ip(char *name, char *ip)
     tcp2_close_socket(sock);
   }
   return ( 0 );
-}
-
-long process_running()
-{
-  int  local;
-  char host_name[500];
-  char host_ip[50];
-  char cur_ip[50];
-  char cmnd_buf[500];
-  FILE *fd;
-
-  if ( gethostname(host_name,sizeof(host_name)) < 0 )
-    host_name[0] = 0;
-
-  get_ip(host_name, host_ip);
-  get_ip(hub_ip,cur_ip);
-
-  local = ( !strcmp(cur_ip,"127.0.0.1") || !strcmp(cur_ip,host_ip) );
-
-
-  sprintf(cmnd_buf,"pgrep -x %s -d,>.zwb_sys", wb_name);
-  system(cmnd_buf);
-
-  if ( (fd = fopen(".zwb_sys","r")) )
-  {
-    char buf[1000];
-    if ( fgets(buf,sizeof(buf)-1,fd) )
-    {
-      char *c;
-      char *p = buf;
-      fclose(fd);
-      while ( (c = strtok(p,",")) )
-      {
-        int id = atoi(c);
-        p = NULL;
-        if ( id != pid )
-        {
-          char cmnd[100];
-          sprintf(cmnd,"ps -o args --no-heading -p %d > .zwb_sys", id);
-          system(cmnd);
-          if ( (fd = fopen(".zwb_sys","r")) )
-          {
-            char temp_buf[500];
-            while ( fgets(temp_buf,sizeof(temp_buf)-1,fd) )
-            {
-              int  g_port;
-              char g_host[500];
-              if ( sscanf(temp_buf,"%*s %s %d", g_host, &g_port) == 2 )
-              {
-                if ( g_port == hub_base_port )
-                {
-                  char ip[50];
-                  get_ip(g_host,ip);
-                  
-                  if ( local && 
-                         (!strcmp(ip,"127.0.0.1") || !strcmp(ip,host_ip)) )
-                    return ( id );
-                  if ( !strcmp(cur_ip,ip) )
-                    return ( id );
-                }
-              }
-            }
-          }
-          fclose(fd);
-        }
-      }
-    }
-  }
-  return ( 0 );
-
-}
-
-long check_proc_name(char *name)
-{
-  char *c;
-
-  if ( (c = strrchr(name,*slash)) )
-    c++;
-  else
-    c = name;
-  return ( !strcmp(c,wb_name) );
 }
