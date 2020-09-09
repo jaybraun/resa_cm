@@ -1,0 +1,236 @@
+
+include "ascii.inc"         
+include "bbctl.inc"         
+include "bbcode.inc"         
+include "macros.inc"
+include "bbsbi.inc"    
+include "bbsta.inc"
+include "smcode.inc"          
+
+define(BBImplicit, Implicit None)
+undefine read
+undefine write
+
+define($DEBUG,#)
+
+program sm_start
+#######################################################
+#$%
+#$% Purpose:   start given range of workstations
+#$%           
+#$%
+#$% Called By: None
+#$%
+#$% Calls:     None
+#$%
+#$% Tables:    STA
+#$%
+#$% Date:      Aug 20
+#$%
+#$% Author:    James Allen
+#$%
+#######################################################
+
+BBcommon
+status$common
+integer  status, start_stations
+
+
+call initr4                 #$% initialize RATFOR environment
+
+BBmap                       #$% map in the BB global section
+
+call init_script
+call stadef_load
+
+status = start_stations()
+
+# Set exit code for interface using single station
+if      (status == STA$RUNNING)  stop STA$RUNNING
+else if (status == STA$STARTED)  stop STA$STARTED
+else if (status == STA$STOPPED)  stop STA$STOPPED
+else if (status == STA$ABNORMAL) stop STA$ABNORMAL
+else if (status == STA$NOTFOUND) stop STA$NOTFOUND
+else if (status == STA$ERROR)    stop STA$ERROR
+
+end
+
+
+
+integer function start_stations()	# Start defined stations in given range and report action
+bbcommon
+status$common
+integer ista, status, start_workstation_processes
+integer jj, kk
+integer length, game_dtg
+character line[80], status_text[20]
+
+
+for (ista = losta; ista <= hista; ista = ista + 1)
+{
+	if (length(sta_ip[ista]) == 0) next			# Station not defined so skip
+	$DEBUG call echoi(ista)
+	$DEBUG call echov(" station passed defined check")
+	$DEBUG call echor
+
+	status = start_workstation_processes(ista)
+
+	if (status != STA$STARTED) next					# Only display stations started
+	$DEBUG call echoi(ista)
+	$DEBUG call echov(" station passed started check")
+	$DEBUG call echor
+
+	# Covert status code to text
+	jj = 0
+	if      (status == STA$RUNNING)  call smovv("RUNNING",   status_text, jj)
+	else if (status == STA$STARTED)  call smovv("STARTED",   status_text, jj)
+	else if (status == STA$STOPPED)  call smovv("STOPPED",   status_text, jj)
+	else if (status == STA$ABNORMAL) call smovv("ABNORMAL",  status_text, jj)
+	else if (status == STA$NOTFOUND) call smovv("NOT FOUND", status_text, jj)
+	else if (status == STA$ERROR)    call smovv("ERROR",     status_text, jj)
+
+	# Display station status
+	call echoiz(game_dtg(game$time), 6)
+	call echov (" Station ")
+	call echoib (ista, 2)
+	call echov(" ")
+	call echoh (status_text, jj)
+	call echor
+}
+return(status)
+end
+
+
+
+subroutine init_script		# Get command line arguments
+bbcommon
+status$common
+
+integer         open_, ctoi, getarg3
+character       buf[100]
+external        scopy
+
+integer         K, IPOS                  
+BBdeclare      (STA$Pointer)
+
+# Command Line Arguments: <low station #>[|-<high station #>]
+
+ call help_pgm(2,
+              "stastart: start range of workstations",
+              "stastart Tags: workstation",
+              "Usage: stastart <low station #>[|-<high station #>]",
+              "<low station #> Workstation number (1-64)",
+              "<high station #> Workstation number (>low-64)",
+              "stastart.dat is input to define stations.",
+              "stastart.dat format is <stanum> [|R] <side> [|<view>] <ip> <number astabs>",
+              "Example: stastart 1-30")
+
+ k = getarg3(1, buf, 20)                  # Station Number Range is 1st Argument
+ if (buf[1] != EOS) 
+   {
+    ipos = 1
+    losta = ctoi (buf,ipos)
+	hista = losta
+   }
+
+if (buf[ipos] == $minus)
+{
+	ipos = ipos + 1
+    hista = ctoi (buf,ipos)
+}
+
+STA$Pointer$To losta
+if (!STA$Pointer$Valid)
+{
+	 print *, "Invalid Low Station Number."
+     call exit(STA$NOTFOUND)
+}
+
+STA$Pointer$To hista
+if (!STA$Pointer$Valid)
+{
+	 print *, "Invalid High Station Number."
+     call exit(STA$NOTFOUND)
+}
+
+if (hista < losta)
+{
+	 print *, "High station less than Low station."
+     call exit(STA$NOTFOUND)
+}
+
+return
+end
+
+
+
+integer function start_workstation_processes(ista) # Start workstation processes
+ 
+BBcommon
+BBdeclare (sta$pointer, sta$NbrASTABS$i, sta$SBIIndex$i,
+           sta$GeoPid$i, sta$AstabPid$i, sta$IOPid$i,
+		   sbi$pointer, sbi$pid$i)
+Status$Common
+
+integer nsbi
+integer irc
+integer ista
+
+character       command[80]
+integer kk, kkh
+integer equal_HV, length
+
+STA$Pointer$to ista
+
+if (!STA$Pointer$Valid) return(STA$NOTFOUND)
+$DEBUG call echoi(ista)
+$DEBUG call echov(" station passed valid check")
+$DEBUG call echor
+
+if(Xsta$PlayerOn$i == YES) return(STA$RUNNING)
+$DEBUG call echoi(ista)
+$DEBUG call echov(" station passed running check")
+$DEBUG call echor
+
+#$% set display
+kk = 0
+call smovv  ("export DISPLAY=",command,kk)
+call smovh  (sta_ip[ista], ARB, command, kk)
+call smovv  ("; ",          command,kk)
+$DEBUG call echoh(command, kk)
+$DEBUG call echor
+
+# start station
+
+call smovv  ("xterm -e $RESA_TRUNK/wsmain.run ",command,kk)
+
+call smovi  (ista, command, kk)
+call smovv  (" ", command, kk)
+
+if (equal_HV(sta_ro[ista], "R") == YES)
+	call smovv("-r ", command, kk)
+call smovhn (sta_side[ista], 1, command, kk)
+
+if (length(staview[1,ista]) > 0)
+{
+	call smovv  (" ", command, kk)
+	call smovhn(sta_view[ista],1, command,kk)
+}
+call smovv(" as=",               command,kk)
+call smovhn(sta_astabs[ista],1, command,kk)
+
+call smovv(" config=cciox ",     command,kk)
+
+call smovv("&",                  command,kk)
+call smov  (EOS,                 command,kk)
+
+call do_sys_command (command, irc)
+if (irc != 0) return (STA$ERROR)
+$DEBUG call echoh(command, kk)
+$DEBUG call echov(" rc=")
+$DEBUG call echoi(irc)
+$DEBUG call echor
+
+return(STA$STARTED)
+end
+

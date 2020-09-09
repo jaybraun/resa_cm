@@ -1,0 +1,265 @@
+#TODO: Summary Report of current state of stations
+#               State of Stations at <dtg>
+# S 0000001111
+# N 3457890123
+#   ^^^^^^...~
+#Running(^)  00; Stopped(.)  00; Abnormal(~) 00; Total 00        
+
+include "ascii.inc"         
+include "bbctl.inc"         
+include "bbcode.inc"         
+include "macros.inc"
+include "bbsbi.inc"    
+include "bbsta.inc"  
+include "smcode.inc"          
+
+define(BBImplicit, Implicit None)
+undefine read
+undefine write
+
+
+program sm_status
+#######################################################
+#$%
+#$% Purpose:   get status of given range of workstations
+#$%            Use process id (PID) in BB
+#$%
+#$% Called By: None
+#$%
+#$% Calls:     None
+#$%
+#$% Tables:    None
+#$%
+#$% Date:      Aug 20
+#$%
+#$% Author:    James Allen
+#$%
+#######################################################
+
+BBcommon
+status$common
+integer  status, status_stations
+
+
+call initr4                 #$% initialize RATFOR environment
+
+BBmap                       #$% map in the BB global section
+
+call init_script
+call stadef_load
+
+repeat
+{	
+	status = status_stations()				# Display unexpected station status
+
+	call delay(10000)						# Schedule next status update
+
+	if (halt$request == $true) break		# Exercise has ended.
+}
+
+end
+
+
+integer function status_stations()
+bbcommon
+status$common
+integer ista, status, status_workstation_processes
+integer jj, kk, ilen
+integer length, game_dtg, itoc, mod
+character line[80], stanum10[STA$SLOTS], stanum1[STA$SLOTS], stastatus[STA$SLOTS]
+integer ndefined, nrunning, nstopped, nabnormal, nnotfound
+
+ndefined = 0; nrunning = 0; nstopped = 0; nabnormal = 0; nnotfound = 0
+
+for (ista = losta; ista <= hista; ista = ista + 1)
+{
+	if (length(sta_ip[ista]) == 0) next			# Station not defined so skip
+	ndefined = ndefined + 1
+
+	status = status_workstation_processes(ista)
+
+	# Count stations by status
+	if      (status == STA$RUNNING)  nrunning  = nrunning  + 1
+	else if (status == STA$STOPPED)  nstopped  = nstopped  + 1
+	else if (status == STA$ABNORMAL) nabnormal = nabnormal + 1
+	else if (status == STA$NOTFOUND) nnotfound = nnotfound + 1
+
+	# Build station number 10s and unit lines
+	ilen = itoc(ista/10, stanum10[ndefined], 1)
+    ilen = itoc(mod(ista,10), stanum1[ndefined], 1)
+
+	# Covert status code to text
+	kk = ndefined - 1
+	if      (status == STA$RUNNING)  call smovv("^",  stastatus, kk)
+	else if (status == STA$STOPPED)  call smovv(".",  stastatus, kk)
+	else if (status == STA$ABNORMAL) call smovv("~",  stastatus, kk)
+	else                             call smovv("?",  stastatus, kk)	# station definition not validated
+}
+
+#               State of Stations at <dtg>
+# S 0000001111
+# N 3457890123
+#   ^^^^^^...~
+#Running(^)  00; Stopped(.)  00; Abnormal(~) 00; Total 00        
+
+call echov("-----------------------------------------------------------------"); call echor; call echor
+call echov("State of Stations at "); call echoiz(game_dtg(game$time), 6); call echor; call echor
+
+call echoh(stanum10, ndefined); call echor
+call echoh(stanum1, ndefined); call echor
+call echoh(stastatus, ndefined); call echor
+
+# Display station count by status
+call echov("Running(^):");  call echoiz (nrunning,2);  call echov(" ")
+call echov("Stopped(.):");  call echoiz (nstopped,2);  call echov(" ")
+call echov("Abnormal(~):"); call echoiz (nabnormal,2); call echov(" ")
+call echov("Invalid(?):");  call echoiz (nnotfound,2); call echov(" ")          
+call echov("Total:");       call echoiz (nrunning+nstopped+nabnormal+nnotfound,2)
+call echor
+
+return(status)
+end
+
+
+
+subroutine init_script
+bbcommon
+status$common
+
+integer         open_, ctoi, getarg3
+character       buf[100]
+external        scopy
+
+integer         K, IPOS                  
+BBdeclare      (STA$Pointer)
+
+# Command Line Arguments: <low station #>[|-<high station #>]
+
+ call help_pgm(2,
+              "stastatus: status of range of workstations",
+              "statussta Tags: workstation",
+              "Usage: stastatus <low station #>[|-<high station #>]",
+              "<low station #> Workstation number (1-64)",
+              "<high station #> Workstation number (>low-64)",
+              "Reads station definition file stadef.dat",
+              "",
+              "Example: stastatus 1-30")
+
+ k = getarg3(1, buf, 20)                  # Station Number Range is 1st Argument
+ if (buf[1] != EOS) 
+   {
+    ipos = 1
+    losta = ctoi (buf,ipos)
+	hista = losta
+   }
+
+if (buf[ipos] == $minus)
+{
+	ipos = ipos + 1
+    hista = ctoi (buf,ipos)
+}
+
+STA$Pointer$To losta
+if (!STA$Pointer$Valid)
+{
+	 print *, "Invalid Low Station Number."
+     call exit(STA$NOTFOUND)
+}
+
+STA$Pointer$To hista
+if (!STA$Pointer$Valid)
+{
+	 print *, "Invalid High Station Number."
+     call exit(STA$NOTFOUND)
+}
+
+if (hista < losta)
+{
+	 print *, "High station less than Low station."
+     call exit(STA$NOTFOUND)
+}
+
+return
+end
+
+
+
+integer function status_workstation_processes(ista) # Check for existence of workstation processes
+ 
+BBcommon
+BBdeclare (sta$pointer, sta$NbrASTABS$i, sta$SBIIndex$i,
+           sta$GeoPid$i, sta$AstabPid$i, sta$IOPid$i,
+		   sbi$pointer, sbi$pid$i)
+integer nsbi
+integer irc
+integer ista
+
+character       command[80]
+integer kk, kkh
+
+STA$Pointer$to ista
+
+if (!STA$Pointer$Valid) return(STA$NOTFOUND)
+
+if(Xsta$PlayerOn$i == NO) return(STA$STOPPED)
+
+#$% make up string in command array
+kk = 0
+call smovv  ("kill -0 ",command,kk)
+kkh = kk
+
+# Check for existence of workstation processes referenced in BB
+
+sta$GeoPid$i = Xsta$GeoPid$i
+if (sta$GeoPid$i == 0) return (STA$ABNORMAL)		
+kk = kkh
+call smovi (sta$GeoPid$i, command,kk)
+call smov  (EOS,          command,kk)
+call do_sys_command (command, irc)
+if (irc != 0) return (STA$ABNORMAL)
+ 
+sta$AstabPid$i = Xsta$AstabPid$i
+if (sta$AstabPid$i == 0) return (STA$ABNORMAL)
+kk = kkh
+call smovi (sta$AstabPid$i, command,kk)
+call smov  (EOS,            command,kk)
+call do_sys_command (command, irc)
+if (irc != 0) return (STA$ABNORMAL)
+
+sta$NbrASTABS$i = Xsta$NbrASTABS$i      ## get number of ASTABs for view
+sta$SBIIndex$i = Xsta$SBIIndex$i        ## set the index
+
+### TODO:  Individual status boards are created as subprocesses to astab controller process.
+###        These processes go into zombie state when malfunction instead of disappearing.
+###        The code below only checks existence of processes.
+###        Code needs to be added to check for zombie state or any other abnormal state.
+###        Reading ps like output is not an ideal solution.
+ 
+for (nsbi = 1; nsbi <= sta$NbrASTABS$i; nsbi = nsbi + 1)
+{
+    #$% set status board information pointer
+    sbi$pointer$to (sta$SBIIndex$i + nsbi - 1)
+	sbi$pid$i = Xsbi$pid$i
+	if (sbi$pid$i == 0) return (STA$ABNORMAL)
+	kk = kkh
+	call smovi (sbi$Pid$i, command,kk)
+	call do_sys_command (command, irc)
+	if (irc != 0) return (STA$ABNORMAL)
+}
+ 
+sta$IOPid$i = Xsta$IOPid$i
+if (sta$IOPid$i > 0)
+{
+	kk = kkh
+	call smovi (sta$IOPid$i, command,kk)
+	call smov  (EOS,         command,kk)
+	call do_sys_command (command, irc)
+	if (irc != 0) return (STA$ABNORMAL)
+ 
+}
+ 
+return(STA$RUNNING)
+end
+ 
+
+
